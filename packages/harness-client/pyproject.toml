@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = ["harness-protocol==0.1.0", "agent-client-protocol>=0.11,<0.12", "textual>=8.2,<9", "httpx>=0.28,<1", "websockets>=15,<18", "platformdirs>=4", "keyring>=25"]
 
 [project.scripts]
-harness = "harness_client.cli:main"
+hrns = "harness_client.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness_client"]

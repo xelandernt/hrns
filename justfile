@@ -1,7 +1,7 @@
 default:
     @just --list
 
-setup:
+install:
     uv sync --locked --all-packages
 
 test:

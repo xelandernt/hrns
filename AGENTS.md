@@ -1,0 +1,12 @@
+# AGENTS.md
+
+## Documentation
+
+These documentations should be consulted if relevant:
+
+- https://pydantic.dev/docs/llms.txt
+- https://textual.textualize.io/
+- https://pydantic.dev/docs/ai/harness/acp/
+- https://github.com/pydantic/pydantic-ai/blob/main/docs/harness/acp.md
+- https://github.com/vstorm-co/pydantic-deepagents
+
