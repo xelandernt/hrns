@@ -1,7 +1,7 @@
 """Editable developer and research starter definitions.
 
 Both starters are ordinary :class:`~harness_runtime.definitions.AgentDefinition` objects, not
-privileged agent kinds.  They exist to demonstrate the framework with broad-but-honest
+privileged agent kinds.  They exist to illustrate the framework with broad-but-honest
 coverage:
 
 * **Developer** requires an explicit ``workspace`` resource (recommended local binding: the

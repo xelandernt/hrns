@@ -1,0 +1,239 @@
+"""Configured local developer agent served through the existing ACP host."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+from harness_config import LocalSettings
+from harness_protocol import HarnessError
+from pydantic_ai import Agent, DeferredToolRequests
+from pydantic_ai.capabilities import PrepareTools
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.models import Model, infer_model
+from pydantic_ai.providers import infer_provider_class
+
+from .host import (
+    HarnessHostAgent,
+    HostBundle,
+    HostMetadataStore,
+    HostPolicy,
+    _serve_until_closed,
+    build_store,
+)
+from .registry import PluginRegistry
+from .session import SessionManager
+from .starters import developer_definition
+
+#: Frequently used provider ids are shown first in the terminal picker.
+_PROVIDER_PRIORITY = (
+    "deepseek",
+    "openai",
+    "openai-chat",
+    "openai-responses",
+    "anthropic",
+    "google",
+    "google-cloud",
+    "ollama",
+    "bedrock",
+    "azure",
+    "groq",
+    "mistral",
+    "cohere",
+    "xai",
+    "zai",
+)
+
+#: Documented Pydantic AI providers that do not contribute a known-model list.
+#: Their model ids are free-form, so the terminal keeps a custom-model input.
+_EXTRA_PROVIDERS = (
+    "azure-responses",
+    "openai-codex",
+    "openai-decisions",
+    "openrouter",
+    "vercel",
+    "fireworks",
+    "together",
+    "github",
+    "github-copilot",
+    "litellm",
+    "vllm",
+    "nebius",
+    "ovhcloud",
+    "alibaba",
+    "sambanova",
+    "sentence-transformers",
+    "system-one",
+    "voyageai",
+)
+
+
+def _provider_sort_key(name: str) -> tuple[int, int, str]:
+    if name in _PROVIDER_PRIORITY:
+        return (0, _PROVIDER_PRIORITY.index(name), name)
+    if name.startswith("gateway/"):
+        return (2, 0, name)
+    return (1, 0, name)
+
+
+def provider_catalog() -> dict[str, list[dict[str, Any]]]:
+    """Known providers and their model ids, read from Pydantic AI."""
+    from pydantic_ai.models import known_model_names, parse_model_id
+
+    grouped: dict[str, set[str]] = {name: set() for name in _EXTRA_PROVIDERS}
+    for known in known_model_names():
+        provider, model = parse_model_id(known)
+        if provider is None:
+            continue
+        grouped.setdefault(provider, set()).add(model)
+    return {
+        "providers": [
+            {
+                "name": provider,
+                "models": sorted(grouped[provider], key=str.lower),
+            }
+            for provider in sorted(grouped, key=_provider_sort_key)
+        ]
+    }
+
+
+def configured_model(settings: LocalSettings) -> Model:
+    """Delegate provider/model selection to the pinned Pydantic AI registry."""
+    settings.require_model()
+    model_id = f"{settings.provider}:{settings.model}"
+    options = dict(settings.provider_options)
+    if settings.base_url:
+        options["base_url"] = settings.base_url
+    key = settings.resolved_api_key()
+    if key is not None:
+        options["api_key"] = key
+    try:
+        if not options:
+            return infer_model(model_id)
+        if settings.provider.startswith("gateway/"):
+            from pydantic_ai.providers.gateway import gateway_provider
+
+            return infer_model(
+                model_id,
+                provider_factory=lambda name: gateway_provider(
+                    name.removeprefix("gateway/"), **options
+                ),
+            )
+        return infer_model(
+            model_id,
+            provider_factory=lambda name: infer_provider_class(name)(**options),
+        )
+    except ImportError as exc:
+        raise ValueError(
+            f"Install the Pydantic AI provider extra for {settings.provider!r} in the runtime "
+            "environment (DeepSeek/OpenAI-compatible: harness-runtime[openai])."
+        ) from exc
+    except (ValueError, TypeError, UserError) as exc:
+        # Constructor errors can contain configured secrets; only report parameter names.
+        raise ValueError(
+            f"Cannot configure provider {settings.provider!r} / model {settings.model!r}. "
+            "Check the provider name, credentials and supported provider_options. "
+            "For a custom OpenAI-compatible base_url use provider = 'openai-chat'."
+        ) from exc
+
+
+async def _require_tool_approval(_ctx: Any, tools: list[Any]) -> list[Any]:
+    return [replace(tool, kind="unapproved") for tool in tools]
+
+
+def build_local_agent(
+    settings: LocalSettings,
+    *,
+    cwd: Path | None = None,
+    model: Model | None = None,
+) -> HarnessHostAgent:
+    """Bind a model and trusted local workspace; every function tool needs approval."""
+    workspace = (cwd or Path.cwd()).expanduser().resolve(strict=True)
+    if not workspace.is_dir():
+        raise ValueError("The local working directory must be a directory.")
+    model = model if model is not None else configured_model(settings)
+    definition = developer_definition()
+    definition.agent_id = "harness.local"
+    definition.name = f"Local · {settings.provider}:{settings.model}"
+    definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))
+    spec = definition.spec
+
+    def factory(*, model: Any, managed_capabilities: list[Any]) -> Agent:
+        return Agent.from_spec(
+            spec,
+            model=model,
+            model_settings=settings.model_settings,
+            capabilities=managed_capabilities,
+            output_type=[str, DeferredToolRequests],
+        )
+
+    definition.spec = None
+    definition.factory = factory
+    registry = PluginRegistry()
+    registry.discover()
+    store = build_store(settings.store.expanduser())
+    manager = SessionManager(registry, store=store, definitions=[definition])
+    bundle = HostBundle(
+        definition,
+        registry,
+        manager,
+        str(store.path),
+        HostMetadataStore(store.path),
+    )
+    return HarnessHostAgent(
+        bundle,
+        HostPolicy(
+            allowed_cwds=(str(workspace),),
+            default_cwd=str(workspace),
+            resources={"model.default": model},
+        ),
+    )
+
+
+async def _run(settings: LocalSettings) -> None:
+    # Provider HTTP clients are constructed on the same event loop as their requests.
+    await _serve_until_closed(build_local_agent(settings))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run the configured local developer agent over ACP."
+    )
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--config", type=Path, help="Local settings TOML file")
+    source.add_argument("--env-only", action="store_true", help="Use environment settings only")
+    parser.add_argument(
+        "--catalog",
+        action="store_true",
+        help="Print the known provider/model catalog as JSON and exit",
+    )
+    args = parser.parse_args(argv)
+    if args.catalog:
+        print(json.dumps(provider_catalog(), ensure_ascii=False))
+        return 0
+    try:
+        settings = LocalSettings(
+            **(
+                {"config_file": None}
+                if args.env_only
+                else {"config_file": args.config}
+                if args.config
+                else {}
+            )
+        )
+        asyncio.run(_run(settings))
+    except (ValueError, OSError, HarnessError) as exc:
+        print(f"harness-local: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

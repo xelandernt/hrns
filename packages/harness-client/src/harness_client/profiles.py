@@ -279,15 +279,6 @@ class Profiles:
             if others:
                 tui["ignored"] = others
 
-        if include_defaults and not profile_map:
-            demo = Profile(
-                name="demo",
-                transport="stdio",
-                command="harness-host",
-                args=["harness_runtime.examples:demo_definition"],
-                notes="Native demo agent; requires the runtime package installed.",
-            )
-            profile_map["demo"] = demo
         return Profiles(profile_map, tui, sources)
 
     def upsert(self, profile: Profile, *, set_default: bool = False) -> False | None:

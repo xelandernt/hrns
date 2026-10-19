@@ -13,7 +13,6 @@ from typing import Any
 from ._version import __version__
 from .catalog import AgentDeployment
 from .client import HarnessAcpClient
-from .constants import DEMO_COMMAND
 from .errors import HarnessClientError, InteractionRequired, SecretMissing
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
@@ -25,6 +24,7 @@ from .launch import (
     resolve_agent,
     transport_for,
 )
+from .local import local_target
 from .profiles import Profile, Profiles, default_profiles_path
 
 __all__ = ["main", "build_parser"]
@@ -55,12 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     connect = sub.add_parser("connect", help="Open the full-screen terminal")
-    _add_target_flags(connect, enable_stdio=True, enable_demo=True)
+    _add_target_flags(connect, enable_stdio=True)
     connect.add_argument("--session", metavar="SESSION_ID", help="Load this session after connecting")
     connect.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     run = sub.add_parser("run", help="Run one prompt headlessly and print the result")
-    _add_target_flags(run, enable_stdio=True, enable_demo=True)
+    _add_target_flags(run, enable_stdio=True)
     run.add_argument("--json", action="store_true", help="Print one JSON summary object")
     _add_interaction_flags(run)
     run.add_argument("--resume", metavar="SESSION_ID", help="Load and continue an existing session")
@@ -118,11 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_target_flags(parser: argparse.ArgumentParser, *, enable_stdio: bool, enable_demo: bool) -> None:
+def _add_target_flags(parser: argparse.ArgumentParser, *, enable_stdio: bool) -> None:
     if enable_stdio:
         parser.add_argument("--stdio", action="store_true", help="Launch a local ACP agent; put argv after --")
-    if enable_demo:
-        parser.add_argument("--demo", action="store_true", help="Launch the native demo host (harness-host)")
+    parser.add_argument("--local", action="store_true", help="Run the configured local developer agent (default)")
+    parser.add_argument("--local-config", type=Path, metavar="PATH", help="Local model settings TOML (implies --local)")
     parser.add_argument("--server", metavar="PROFILE", help="Use a saved server profile (or a URL)")
     parser.add_argument("--agent", metavar="AGENT", help="Agent deployment id or catalog name")
     parser.add_argument("--profile", metavar="NAME", help="Use a saved profile by name")
@@ -179,7 +179,7 @@ def _profile_from_args(profiles: Profiles, args: argparse.Namespace) -> Profile 
             )
         raise HarnessClientError(
             f"No profile named '{name}'. Saved: {', '.join(profiles.names) or '(none)'}. "
-            "Run `harness profiles list`."
+            "Run `hrns profiles list`."
         )
     if getattr(args, "url", None):
         return Profile(
@@ -208,7 +208,7 @@ def _split_stdio_remainder(
 
 def _stdio_profile(name: str, command: list[str], cwd: str | None) -> Profile:
     if not command:
-        raise HarnessClientError("--stdio needs a command after `--`, e.g. `harness connect --stdio -- my-agent --acp`.")
+        raise HarnessClientError("--stdio needs a command after `--`, e.g. `hrns connect --stdio -- my-agent --acp`.")
     return Profile(
         name=name,
         transport="stdio",
@@ -225,21 +225,38 @@ async def _resolve_target(
     remainder: Sequence[str] = (),
     split_prompt: bool = True,
 ) -> ConnectionTarget:
-    """Apply CLI precedence: explicit stdio > demo > profile/server."""
+    """Apply CLI precedence: explicit stdio > explicit remote > local model."""
     cwd_override = getattr(args, "cwd", None)
+    explicit_remote = any(
+        getattr(args, name, None)
+        for name in ("server", "url", "profile", "agent", "token")
+    )
+    local_requested = bool(
+        getattr(args, "local", False) or getattr(args, "local_config", None)
+    )
+    if local_requested or not (getattr(args, "stdio", False) or explicit_remote):
+        if local_requested and (getattr(args, "stdio", False) or explicit_remote):
+            raise HarnessClientError(
+                "--local/--local-config cannot be combined with another connection target."
+            )
+        command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
+        if command:
+            if local_requested:
+                raise HarnessClientError("Local mode does not accept an agent command.")
+            raise HarnessClientError(
+                "A command was supplied without --stdio. Use `--stdio -- CMD ARGS`."
+            )
+        return local_target(getattr(args, "local_config", None), cwd_override)
     command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
     if getattr(args, "stdio", False):
         profile = _stdio_profile("cli", command, cwd_override)
         return ConnectionTarget(name="cli", kind="local", profile=profile, agent=None, cwd=local_cwd(profile, cwd_override))
-    if getattr(args, "demo", False):
-        profile = _stdio_profile("demo", list(DEMO_COMMAND), cwd_override)
-        return ConnectionTarget(name="demo", kind="local", profile=profile, agent=None, cwd=local_cwd(profile, cwd_override))
     if command:
         raise HarnessClientError("A command was supplied without --stdio. Use `--stdio -- CMD ARGS`.")
     profile = _profile_from_args(profiles, args)
     if profile is None:
         raise HarnessClientError(
-            "No connection target. Use `--stdio -- CMD`, `--server PROFILE --agent AGENT`, or save a profile."
+            "No connection target. Use `--stdio -- CMD`, `--server PROFILE --agent AGENT`, or configure a local model."
         )
     if profile.transport == "stdio":
         if not profile.command:
@@ -289,8 +306,8 @@ async def _command_run(args: argparse.Namespace) -> int:
         command, prompt_words = _split_stdio_remainder(args.remainder)
         target_remainder: list[str] = ["--", *command]
     else:
-        # Demo and remote targets take the remainder as the prompt; only an
-        # explicit stdio launch has a command that needs separating.
+        # Local-model and remote targets take the remainder as the prompt; only
+        # an explicit stdio launch has a command that needs separating.
         prompt_words = list(args.remainder)
         if prompt_words and prompt_words[0] == "--":
             prompt_words.pop(0)
@@ -298,8 +315,8 @@ async def _command_run(args: argparse.Namespace) -> int:
     prompt = " ".join(prompt_words).strip()
     if not prompt:
         raise HarnessClientError(
-            "No prompt supplied. Usage: `harness run --stdio -- CMD ARGS -- \"your prompt\"` or "
-            "`harness run --server team --agent research-assistant \"your prompt\"`."
+            "No prompt supplied. Usage: `hrns run --stdio -- CMD ARGS -- \"your prompt\"` or "
+            "`hrns run --server team --agent research-assistant \"your prompt\"`."
         )
     target = await _resolve_target(profiles, args, remainder=target_remainder)
     policy_name = "allow" if args.allow_all else "deny" if args.deny_all else "required"
@@ -386,7 +403,7 @@ def _command_profiles(args: argparse.Namespace) -> int:
     profiles = _profiles(args)
     if args.profiles_command == "list":
         if not profiles.profiles:
-            print("No profiles saved. `harness profiles add NAME --stdio -- CMD` creates one.")
+            print("No profiles saved. `hrns profiles add NAME --stdio -- CMD` creates one.")
             return EXIT_OK
         for name in sorted(profiles.profiles):
             profile = profiles.profiles[name]
@@ -435,11 +452,27 @@ def _command_connect(args: argparse.Namespace) -> int:
 
     profiles = _profiles(args)
     preselect: ConnectionTarget | None = None
-    if args.stdio or args.demo or args.server or args.url or args.profile:
+    status_message: str | None = None
+    explicit = any(
+        getattr(args, name, None)
+        for name in ("stdio", "server", "url", "profile", "agent", "token", "local_config")
+    ) or getattr(args, "local", False)
+    try:
         preselect = asyncio.run(
             _resolve_target(profiles, args, remainder=args.remainder, split_prompt=False)
         )
-    return run_terminal(profiles, initial_target=preselect, initial_session=args.session)
+    except HarnessClientError as exc:
+        # Local mode is the default. If it is not configured yet, show the picker
+        # with the local-model action selected instead of exiting.
+        if explicit:
+            raise
+        status_message = str(exc)
+    return run_terminal(
+        profiles,
+        initial_target=preselect,
+        initial_session=args.session,
+        status_message=status_message,
+    )
 
 
 # ------------------------------------------------------------------- output
@@ -481,7 +514,8 @@ def main(argv: list[str] | None = None) -> int:
         defaults = argparse.Namespace(
             profiles=args.profiles,
             stdio=False,
-            demo=False,
+            local=False,
+            local_config=None,
             server=None,
             agent=None,
             profile=None,

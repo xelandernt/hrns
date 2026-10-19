@@ -137,7 +137,7 @@ def _field_widget(field: dict[str, Any]) -> Any:
     if kind == "select":
         choices = field.get("choices") or []
         options = [(label, value) for value, label in choices]
-        value = default if any(item[1] == default for item in options) else Select.BLANK
+        value = default if any(item[1] == default for item in options) else Select.NULL
         return Select(options, allow_blank=True, value=value)
     if kind == "multi":
         initial = (
@@ -146,6 +146,8 @@ def _field_widget(field: dict[str, Any]) -> Any:
             else (default or "")
         )
         return Input(str(initial), placeholder="comma-separated values")
+    if kind == "password":
+        return Input("" if default is None else str(default), password=True)
     input_type = "integer" if kind == "integer" else "number" if kind == "number" else "text"
     return Input("" if default is None else str(default), type=input_type)
 
@@ -154,7 +156,7 @@ def _raw_value(widget: Any) -> Any:
     if isinstance(widget, Checkbox):
         return widget.value
     if isinstance(widget, Select):
-        return None if widget.value is Select.BLANK else widget.value
+        return None if widget.value is Select.NULL else widget.value
     return widget.value
 
 

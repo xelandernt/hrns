@@ -4,7 +4,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  verify:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -18,5 +18,4 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-packages
       - run: uv run ruff check .
-      - run: uv run pytest -q
       - run: uv build --all-packages

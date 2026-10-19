@@ -47,8 +47,6 @@ CONFIG_FILE_NAME = "profiles.toml"
 PROJECT_CONFIG_NAME = "harness.toml"
 CONFIG_ENV_OVERRIDE = "HARNESS_PROFILES"
 
-DEMO_COMMAND = ("harness-host", "harness_runtime.examples:demo_definition")
-
 
 def client_info_dict() -> dict[str, str]:
     """Name/title metadata used in the initialize request."""

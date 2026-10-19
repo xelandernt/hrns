@@ -46,7 +46,7 @@ host filesystem. Its working directory is a starting point, not a security bound
 from harness_runtime.workspaces import WorkspaceManager, local_workspace_provider
 
 manager = WorkspaceManager(
-    providers=[local_workspace_provider("/srv/harness/projects/demo")],
+    providers=[local_workspace_provider("/srv/harness/projects/example")],
     record_store={},  # pure in-process manager
 )
 
@@ -54,7 +54,7 @@ lease = await manager.acquire(
     session_id="session-123",
     provider="local",
     mode="persistent",
-    name="demo",
+    name="example",
 )
 # Bind this to the definition's workspace resource:
 workspace = lease.workspace

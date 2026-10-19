@@ -623,7 +623,7 @@ not a second prompt execution API.
 
 Standard ACP stdout framing is newline-delimited UTF-8 JSON: exactly one complete JSON-RPC object
 per line, no batching. Stdout is reserved for protocol messages; diagnostics go to stderr. Local
-profiles launch the host directly without shell interpolation. `harness bridge` preserves ACP
+profiles launch the host directly without shell interpolation. `hrns bridge` preserves ACP
 payloads while translating local newline framing to WebSocket messages and back.
 
 ### 8.2 WebSocket

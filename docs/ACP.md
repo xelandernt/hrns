@@ -214,8 +214,8 @@ harness-host [DEFINITION] [options]
 Examples:
 
 ```bash
-# The bundled deterministic demo (no credentials)
-harness-host harness_runtime.examples:demo_definition --store ~/.local/share/harness/demo.sqlite3
+# The configured local developer agent
+harness-local
 
 # A Python definition from an installed package
 harness-host my_agents.research:definition --store ./sessions.sqlite3 --models openai:gpt-5,openai:gpt-5-mini

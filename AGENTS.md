@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Test
+
+Do not write any tests unless explicity asked to do so.
+
 ## Documentation
 
 These documentations should be consulted if relevant:

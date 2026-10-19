@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from harness_config import LocalSettings
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
@@ -37,6 +38,7 @@ from ..events import (
     UserMessageReplayed,
 )
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
+from ..local import local_target
 from ..profiles import Profile, Profiles
 from .dialogs import (
     ChoiceDialog,
@@ -107,6 +109,7 @@ class ConnectScreen(Screen[None]):
         Binding("escape", "escape_picker", "Back", show=False),
         Binding("r", "refresh", "Refresh catalog", show=False),
         Binding("slash", "filter", "Filter", show=False),
+        Binding("l", "configure_local", "Local model", show=False),
     ]
 
     def __init__(
@@ -115,11 +118,13 @@ class ConnectScreen(Screen[None]):
         *,
         initial_target: ConnectionTarget | None = None,
         auto_connect: bool = False,
+        status_message: str | None = None,
     ) -> None:
         super().__init__()
         self.profiles = profiles
         self.initial_target = initial_target
         self.auto_connect = auto_connect
+        self.status_message = status_message
         self.entries: list[PickEntry] = []
         self._visible: list[PickEntry] = []
         self._browsing: Profile | None = None
@@ -142,7 +147,7 @@ class ConnectScreen(Screen[None]):
                 yield self._detail
         yield self._status
         yield Static(
-            "Enter connects · / filters · r refreshes the catalog · Esc goes back · q quits",
+            "Enter connects · l configures a local model · / filters · r refreshes · q quits",
             markup=False,
             classes="panel-hint",
             id="connect-hint",
@@ -154,10 +159,12 @@ class ConnectScreen(Screen[None]):
         self._list.focus()
         if self.auto_connect and self.initial_target is not None:
             self._connect_worker(self.initial_target)
+        elif self.status_message:
+            self._status.update(self.status_message)
         else:
             self._status.update(
-                "Choose a local agent process or a hosted deployment. "
-                "Profiles live in the client configuration file."
+                "Local model is the default. Press Enter to connect or l to configure it; "
+                "saved remote profiles are listed below."
             )
         self._apply_layout()
         if self.initial_target is not None:
@@ -223,6 +230,19 @@ class ConnectScreen(Screen[None]):
                     )
                 )
         else:
+            settings = self._local_settings()
+            local_ready = bool(settings and settings.model)
+            if not local_ready:
+                self.entries.append(PickEntry(
+                    kind="configure_local", label="Configure local model…",
+                    detail="Choose a cloud or local provider and model, then work in this project.",
+                ))
+            else:
+                self.entries.append(PickEntry(
+                    kind="local_model",
+                    label=f"Local model · {settings.provider}:{settings.model}",
+                    detail="Run the configured provider and model on this project.",
+                ))
             local = [profile for profile in self.profiles.profiles.values() if not profile.is_remote]
             remote = [profile for profile in self.profiles.profiles.values() if profile.is_remote]
             for profile in sorted(local, key=lambda item: item.name):
@@ -243,18 +263,18 @@ class ConnectScreen(Screen[None]):
                         profile=profile,
                     )
                 )
-            if not self.entries:
-                self.entries.append(
-                    PickEntry(
-                        kind="local",
-                        label="No profiles yet",
-                        detail=(
-                            "Run `harness profiles add NAME --stdio -- CMD ARGS` or "
-                            "`harness connect --stdio -- CMD ARGS`."
-                        ),
-                    )
-                )
+            if local_ready:
+                self.entries.append(PickEntry(
+                    kind="configure_local", label="Change local model…",
+                    detail="Choose another cloud or local provider and model.",
+                ))
         self._render_visible(self._filter.value if self.is_mounted else "")
+
+    def _local_settings(self) -> LocalSettings | None:
+        try:
+            return LocalSettings()
+        except (ValueError, OSError):
+            return None
 
     def _render_visible(self, needle: str) -> None:
         needle = (needle or "").strip().lower()
@@ -273,9 +293,15 @@ class ConnectScreen(Screen[None]):
             elif entry.kind == "local":
                 label.append("local  ", style="bold")
                 label.append(entry.label.removeprefix("local · "))
+            elif entry.kind == "local_model":
+                label.append("local  ", style="bold")
+                label.append(entry.label.removeprefix("Local model · "))
             elif entry.kind == "server":
                 label.append("remote ", style="bold")
                 label.append(entry.label.removeprefix("remote · "))
+            elif entry.kind == "configure_local":
+                label.append("setup  ", style="bold")
+                label.append(entry.label)
             else:
                 label.append("agent  ", style="bold")
                 label.append(entry.label)
@@ -353,6 +379,15 @@ class ConnectScreen(Screen[None]):
     def _activate(self, entry: PickEntry) -> None:
         if self._connecting:
             return
+        if entry.kind == "configure_local":
+            self.action_configure_local()
+            return
+        if entry.kind == "local_model":
+            try:
+                self._connect_worker(local_target())
+            except HarnessClientError as exc:
+                self._status.update(f"error · {exc.message}")
+            return
         if entry.kind == "back":
             self._browsing = None
             self._render_entries()
@@ -365,6 +400,34 @@ class ConnectScreen(Screen[None]):
             target = self._target_for(entry)
         except HarnessClientError as exc:
             self._status.update(f"error · {exc.message}")
+            return
+        self._connect_worker(target)
+
+    def action_configure_local(self) -> None:
+        from .local import LocalModelDialog
+
+        if self._connecting:
+            return
+        try:
+            target = self.initial_target
+            args = target.profile.args if target and target.profile.command == "harness-local" else []
+            config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
+            settings = LocalSettings(**({"config_file": config} if config else {}))
+        except (ValueError, OSError) as exc:
+            self._status.update(f"error · {exc}")
+            return
+        self.app.push_screen(LocalModelDialog(settings), self._local_configured)
+
+    def _local_configured(
+        self, result: Path | tuple[Path, str | None] | None
+    ) -> None:
+        if result is None:
+            return
+        path, api_key_ref = result if isinstance(result, tuple) else (result, None)
+        try:
+            target = local_target(path, api_key_ref=api_key_ref)
+        except HarnessClientError as exc:
+            self._status.update(f"Saved configuration · {exc.message}")
             return
         self._connect_worker(target)
 
@@ -520,7 +583,7 @@ class ChatScreen(Screen[None]):
         self._subscribe()
         self._update_chrome()
         hint = (
-            "Ctrl+Enter sends · / commands · Ctrl+K palette · F2 capabilities · F3 sessions "
+            "Enter sends · / commands · Ctrl+K palette · F2 capabilities · F3 sessions "
             "· F4 activity · Esc stops the turn · Ctrl+R reconnects · Ctrl+T transcript"
         )
         self.query_one("#hintbar", HintBar).show(hint)
@@ -1678,8 +1741,8 @@ class ChatScreen(Screen[None]):
 
 | key | action |
 | --- | --- |
-| `Ctrl+Enter` | send the prompt |
-| `Ctrl+Enter` (anywhere) | send the composer from any panel or the transcript |
+| `Enter` | send the prompt |
+| `Ctrl+Enter` | send the prompt (works from any panel or the transcript) |
 | `Ctrl+K` | command palette (local and agent sections) |
 | `F1` | this help |
 | `F2` | capabilities panel |

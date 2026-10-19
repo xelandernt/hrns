@@ -72,7 +72,7 @@ Example worker environment (values illustrative):
 {
   "HARNESS_PRINCIPAL": "alice",
   "HARNESS_DEPLOYMENT_ID": "coder.r1",
-  "HARNESS_ALLOWED_CWDS": ["/srv/workspaces/coder", "/srv/workspaces/demo"],
+  "HARNESS_ALLOWED_CWDS": ["/srv/workspaces/coder", "/srv/workspaces/example"],
   "HARNESS_STORE": "/srv/harness/store/coder.r1.sqlite3",
   "HARNESS_HOSTED": "1",
   "MODEL_API_KEY": "<from server environment>",

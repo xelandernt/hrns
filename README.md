@@ -10,48 +10,52 @@ Requires **Python 3.11+**, macOS or Linux, and [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync --locked --all-packages
-uv run pytest -q
+uv run ruff check .
 ```
 
-The checked-in lockfile pins the tested upstream versions. The offline tests and demo require no model API key.
+The checked-in lockfile pins the tested upstream versions.
 
-## Open the terminal
+## Use a local agent with your model
+
+The local developer agent is the default connection mode. Install the provider
+extra and set the API key for the provider you use:
 
 ```sh
-uv run harness connect --demo
+uv sync --locked --all-packages --extra openai
+export DEEPSEEK_API_KEY='your-key'
+uv run hrns
 ```
 
-The offline agent uses a real Pydantic AI `FunctionModel` and a managed native capability. Open the capability panel to disable its tone instructions; the next turn reports the changed composition. `uv run harness` opens the connection picker, and any independent ACP agent can be launched with:
+Press **l** to configure a provider and model, or create `harness.local.toml`
+in the project:
+
+```toml
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+`uv run hrns` starts a session in the current directory using that model. The agent
+works on files and runs commands with approval prompts. Configuration uses
+pydantic-settings. See [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints,
+local inference, other Pydantic AI providers, and headless execution.
+
+Any independent ACP agent can still be launched explicitly:
 
 ```sh
-uv run harness connect --stdio -- /path/to/agent --acp
+uv run hrns connect --stdio -- /path/to/agent --acp
 ```
 
-Run the Python example to see the same capability enabled, disabled and re-enabled:
-
-```sh
-uv run python -m harness_runtime.examples
-uv run python examples/custom_capability.py
-```
-
-With `just` installed, `just demo` opens the terminal and `just serve-demo` starts a loopback-only hosted demo. In another terminal, connect the independent client through the authenticated WebSocket transport:
-
-```sh
-export HARNESS_DEMO_TOKEN=harness-local-demo
-uv run harness profiles add demo --server http://127.0.0.1:8080 \
-  --agent demo.v1 --token env:HARNESS_DEMO_TOKEN
-uv run harness agents list --server demo
-uv run harness run --server demo --agent demo.v1 "Say hello through the host"
-```
-
-See [client usage](docs/CLIENT_API.md) for headless execution, profiles, approvals and the bridge.
+See [client usage](docs/CLIENT_API.md) for headless execution, profiles, approvals
+and the bridge.
 
 ## Packages
 
 | Distribution | Purpose |
 | --- | --- |
 | `harness-protocol` | Versioned extension schemas and transport contracts |
-| `harness-runtime` | Native agent definitions, plugin management, sessions and `harness-host` |
+| `harness-config` | Shared local settings using pydantic-settings, without AI or UI dependencies |
+| `harness-runtime` | Native agent definitions, plugin management, sessions, `harness-host` and `harness-local` |
 | `harness-client` | Textual terminal, scripted ACP runner and stdio bridge |
 | `harness-server` | Authenticated deployment catalog and WebSocket worker hosting |
 
@@ -84,7 +88,6 @@ The client does not depend on Pydantic AI or installed agent plugins. Local agen
 
 ```sh
 uv run ruff check .
-uv run pytest -q
 uv build --all-packages
 ```
 

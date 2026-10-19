@@ -426,7 +426,7 @@ async with manager.open_session(definition, resources=resources) as session:
 
     snapshot = await session.update_configuration(
         [EnableChange(binding_id="web", enabled=False)],
-        request_id="demo-1",
+        request_id="example-1",
         expected_revision=session.snapshot.selected_revision,
     )
     print(snapshot.application_status, snapshot.selected_revision)

@@ -10,8 +10,8 @@ editable manifests. The script is deterministic and offline; run it with:
 
 Expected output ends with::
 
-    turn 1 (style on):  custom demo: style=punchy
-    turn 2 (style off): custom demo: style=none
+    turn 1 (style on):  custom example: style=punchy
+    turn 2 (style off): custom example: style=none
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def plugin_descriptor() -> PluginDescriptor:
         factory=build_house_style,
         change_mode="next_turn",
         state_mode="run",
-        presentation=["demo.house_style"],
+        presentation=["example.house_style"],
         default_policy=CapabilityPolicy(
             available=True,
             enabled_by_default=True,
@@ -105,20 +105,20 @@ def plugin_descriptor() -> PluginDescriptor:
 
 def scripted_model(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     style = "punchy" if MARKER in (info.instructions or "") else "none"
-    return ModelResponse(parts=[TextPart(f"custom demo: style={style}")])
+    return ModelResponse(parts=[TextPart(f"custom example: style={style}")])
 
 
 async def streamed_model(_messages: list[ModelMessage], info: AgentInfo):
     style = "punchy" if MARKER in (info.instructions or "") else "none"
-    yield f"custom demo: style={style}"
+    yield f"custom example: style={style}"
 
 
 def build_agent(*, managed_capabilities: tuple[object, ...] = ()) -> Agent[None, str]:
     # Fresh agent per turn; managed bindings are bound at construction so the custom
     # capability's instructions reach the model request.
     return Agent(
-        FunctionModel(scripted_model, stream_function=streamed_model, model_name="custom-demo"),
-        name="custom-capability-demo",
+        FunctionModel(scripted_model, stream_function=streamed_model, model_name="custom-example"),
+        name="custom-capability-example",
         capabilities=[*managed_capabilities],
     )
 

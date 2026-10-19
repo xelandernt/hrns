@@ -22,6 +22,7 @@ from ..interactions import (
     PermissionRequest,
 )
 from ..launch import ConnectionTarget, transport_for
+from ..local import local_model_catalog
 from ..profiles import Profiles
 from .dialogs import ElicitationDialog, PermissionDialog
 from .screens import ChatScreen, ConnectScreen
@@ -370,11 +371,13 @@ class HarnessApp(App[int]):
         *,
         initial_target: ConnectionTarget | None = None,
         initial_session: str | None = None,
+        status_message: str | None = None,
     ) -> None:
         super().__init__()
         self.profiles = profiles
         self.initial_target = initial_target
         self.initial_session = initial_session
+        self.status_message = status_message
         self.settings = Settings.from_mapping(profiles.tui)
         self.client: HarnessAcpClient | None = None
         self.session: SessionProxy | None = None
@@ -390,13 +393,20 @@ class HarnessApp(App[int]):
             self.theme = theme
         except Exception:
             self.theme = "harness"
+        self._warm_local_catalog()
         self.push_screen(
             ConnectScreen(
                 self.profiles,
                 initial_target=self.initial_target,
                 auto_connect=self.initial_target is not None,
+                status_message=self.status_message,
             )
         )
+
+    @work(thread=True, group="local-catalog", exclusive=True)
+    def _warm_local_catalog(self) -> None:
+        """Load the Pydantic AI provider/model catalog before the dialog opens."""
+        local_model_catalog()
 
     def make_client(self) -> HarnessAcpClient:
         if self.target is None:
@@ -552,9 +562,15 @@ def run_terminal(
     *,
     initial_target: ConnectionTarget | None = None,
     initial_session: str | None = None,
+    status_message: str | None = None,
 ) -> int:
     """Run the terminal app to completion and always close the agent connection."""
-    app = HarnessApp(profiles, initial_target=initial_target, initial_session=initial_session)
+    app = HarnessApp(
+        profiles,
+        initial_target=initial_target,
+        initial_session=initial_session,
+        status_message=status_message,
+    )
 
     async def _main() -> int:
         try:

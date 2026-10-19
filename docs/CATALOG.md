@@ -74,10 +74,7 @@ constructor is then exercised for the first time on a host that installs the ext
 | **Total** | **107** | **66** | **38** | **3** | **96** |
 
 `92` reviewed capability plugins are registered (the four media stores are deployment *resource*
-factories and are intentionally not offered as toggleable bindings). `build_catalog_registry()`
-additionally registers the bundled `example.tone` demo plugin so the deterministic demo works
-through `harness-host` without a separate install; it is namespaced `example.*` and is not part
-of the reviewed upstream inventory.
+factories and are intentionally not offered as toggleable bindings).
 
 ## Full inventory
 
@@ -371,13 +368,8 @@ configuration against this catalog.
 | `browser` | — | off | Browser Use; needs `[browser-use]` |
 | Runtime capability creation | absent | absent | opt-in feature; disabled by design |
 
-## Demo and examples
+## Examples
 
-- `harness_runtime.examples:demo_definition` — deterministic offline demo: a native
-  `FunctionModel` plus a managed `example.tone` native-instruction capability. Toggling the
-  binding between turns prints `tone=concise` → `tone=none` → `tone=concise`. It runs through
-  `SessionManager`, the ACP host loader (`harness-host harness_runtime.examples:demo_definition`)
-  and `python -m harness_runtime.examples`. No resources, credentials, workspace or network.
 - `examples/custom_capability.py` — a custom `AbstractCapability` subclass with a validated
   config model, descriptor, registry registration and a real configuration transaction.
 - `examples/starters/developer.yaml`, `examples/starters/research.yaml` — editable manifests.
@@ -393,7 +385,6 @@ configuration against this catalog.
 | `tests/test_catalog.py::test_unavailable_entries_are_not_registered` | Restate/Kitaru/Airflow are explicit gaps, not fake plugins. |
 | `tests/test_catalog.py::test_management_config_validation_is_real` | Unknown fields, bad ranges, conflicting triggers and missing required values are rejected. |
 | `tests/test_catalog_factories.py` (17 tests) | Resource refs, exact-store binding, spill modes, detector chains, judge models, spend budgets, media-store resources, schema/descriptor round trips. |
-| `tests/test_catalog_starters_examples.py` (19 tests) | Starter resources/policies, stable binding ids, YAML↔builder parity, manifest rejection paths, offline starter sessions, the on/off/on demo through real transactions, and the host-bundle path. |
 | `tests/test_catalog_docs.py` (5 tests) | This document's inventory rows, import targets, tiers, lifecycle, configuration models and published totals match the executable catalog. |
 
 Integration still required for `install_required` entries: install the named extra, provide

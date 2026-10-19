@@ -1,11 +1,11 @@
 default:
     @just --list
 
-install:
-    uv sync --locked --all-packages
+upgrade:
+    uv lock --upgrade
 
-test:
-    uv run pytest -q
+install:
+    uv sync --locked --all-packages --all-extras
 
 lint:
     uv run ruff check .
@@ -13,10 +13,4 @@ lint:
 build:
     uv build --all-packages
 
-demo:
-    uv run harness connect --demo
-
-serve-demo:
-    uv run python scripts/serve_demo.py
-
-check: lint test build
+check: lint build

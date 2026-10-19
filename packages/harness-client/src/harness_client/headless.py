@@ -1,4 +1,4 @@
-"""Headless (`harness run`) execution.
+"""Headless (`hrns run`) execution.
 
 The runner streams assistant text to stdout, reports tool activity on
 stderr, and prints either a JSON summary (``--json``) or a final status

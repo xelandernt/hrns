@@ -115,7 +115,7 @@ version = "1.2.0"
 description = "Coder agent: filesystem, shell, planning."
 command = ["/opt/harness/envs/coder-1.2.0/bin/harness-host"]
 cwd = "/opt/harness/deployments/coder-1.2.0"
-allowed_cwds = ["/srv/workspaces/coder", "/srv/workspaces/demo"]
+allowed_cwds = ["/srv/workspaces/coder", "/srv/workspaces/example"]
 default_cwd = "/srv/workspaces/coder"
 env_from_environment = ["MODEL_API_KEY"]
 
@@ -259,7 +259,7 @@ principal's `allowed_agent_ids` and ordered as configured.
   "version": "1.2.0",
   "description": "Coder agent: filesystem, shell, planning.",
   "defaultWorkspace": "/srv/workspaces/coder",
-  "allowedWorkspaces": ["/srv/workspaces/coder", "/srv/workspaces/demo"],
+  "allowedWorkspaces": ["/srv/workspaces/coder", "/srv/workspaces/example"],
   "lockfile": {"name": "coder-1.2.0.lock", "sha256": "..."},
   "connection": {
     "url": "/v1/agents/coder.r1/acp",

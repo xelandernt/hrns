@@ -6,6 +6,7 @@ from collections import deque
 from typing import Any
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -78,7 +79,7 @@ class Submitted(Message):
 
 
 class Composer(TextArea):
-    """Multiline prompt editor. Ctrl+Enter (or Ctrl+J) sends; Enter inserts a newline."""
+    """Multiline prompt editor. Enter sends; Ctrl+Enter and Ctrl+J also send."""
 
     BINDINGS = [
         Binding("ctrl+enter", "submit", "Send", show=False, priority=True),
@@ -86,10 +87,15 @@ class Composer(TextArea):
     ]
 
     def __init__(self, **kwargs: Any) -> None:
-        kwargs.setdefault("placeholder", "Ask anything · Ctrl+Enter sends · / for commands")
         super().__init__(**kwargs)
         self.show_line_numbers = False
         self.soft_wrap = True
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            self.action_submit()
 
     def action_submit(self) -> None:
         text = self.text.strip()
@@ -246,11 +252,20 @@ class TranscriptPane(VerticalScroll):
         self._dirty = False
         self.scroll_end(animate=False)
 
+    def _end_agent_stream(self) -> None:
+        """Finish the current assistant block so later text starts below a tool card."""
+        self.flush()
+        if self._stream is not None:
+            self._stream.finish()
+        self._stream = None
+        self._stream_buffer = ""
+
     async def start_tool(self, event: Any) -> None:
         if self._replay:
             existing = self._replay_tool(event.tool_call_id)
             self._replay_entries.append(("tool", merge_tool_event(existing, event)))
             return
+        self._end_agent_stream()
         merged = merge_tool_event(None, event)
         card = self._tool_card(merged)
         self._tools[merged["toolCallId"]] = card
@@ -551,14 +566,15 @@ class SidePanel(TabbedContent):
         self.capabilities = CapabilityPanel(id="capability-panel")
         self.sessions = SessionPanel(id="session-panel")
         self.activity = ActivityPanel(id="activity-panel")
-
-    def compose(self) -> ComposeResult:
-        with TabPane("Capabilities", id="capabilities"):
-            yield self.capabilities
-        with TabPane("Sessions", id="sessions"):
-            yield self.sessions
-        with TabPane("Activity", id="activity"):
-            yield self.activity
+        # TabbedContent.compose() builds its private ContentTabs from this list.
+        # Overriding compose() here would omit ContentTabs entirely.
+        self._tab_content.extend(
+            [
+                TabPane("Capabilities", self.capabilities, id="capabilities"),
+                TabPane("Sessions", self.sessions, id="sessions"),
+                TabPane("Activity", self.activity, id="activity"),
+            ]
+        )
 
 
 class BindingToggleRequested(Message):

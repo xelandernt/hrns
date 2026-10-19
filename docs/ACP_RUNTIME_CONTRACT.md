@@ -39,7 +39,7 @@ HostBundle`; the CLI selects it with `--runtime-module module`. The built-in
 
 Definition sources are `package.module:attribute`, `package.module` (attribute
 `definition`), or a JSON/YAML manifest path. A definition module may expose a
-deployment registry hook — `build_registry()`, `registry`, or `demo_registry` — returning
+deployment registry hook — `build_registry()` or `registry` — returning
 a `PluginRegistry`; the host registers installed `harness.capabilities` entry points on
 top and the runtime's bundled catalog remains resolvable lazily through `lookup()`.
 
@@ -142,7 +142,7 @@ can and is ready to drop the workaround.
    (`deferred_tool_requests` → `session/request_permission` →
    `DeferredToolResults` → resume), but a definition must bake
    `output_type=[str, DeferredToolRequests]` (or the runtime must append it when
-   configured). The demo definition in `tests/test_acp_runtime_double.py` does so.
+   configured). A definition should declare both output types when it uses deferred approvals.
 2. **Approval continuation is a new runtime turn.** The host resumes a paused prompt
    with `Session.stream(None, deferred_tool_results=...)`, which the runtime implements as
    a fresh turn capturing the (unchanged, because the host serializes configuration) active

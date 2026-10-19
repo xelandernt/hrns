@@ -4736,21 +4736,11 @@ def register_catalog(
 
 
 def build_catalog_registry(
-    *, allow_local_binding_creation: bool = False, include_examples: bool = True
+    *, allow_local_binding_creation: bool = False
 ) -> PluginRegistry:
-    """Create a registry with the bundled catalog registered.
-
-    ``include_examples`` adds the bundled ``example.tone`` plugin used by the deterministic
-    demo, so ``harness-host harness_runtime.examples:demo_definition`` works without a
-    separate installation step. It is namespaced ``example.*`` and is not part of the
-    reviewed upstream inventory.
-    """
+    """Create a registry with the bundled catalog registered."""
     registry = PluginRegistry(allow_local_binding_creation=allow_local_binding_creation)
     register_catalog(registry)
-    if include_examples:
-        from .examples import demo_plugin_descriptor  # deferred: avoids an import cycle
-
-        registry.register(demo_plugin_descriptor())
     return registry
 
 

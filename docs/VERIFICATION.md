@@ -13,6 +13,9 @@ The suite uses real Pydantic AI test/function models and the pinned official ACP
 
 ## Release record
 
+> The test suite was removed for now. The results below are retained as a record of
+> the last verification run before that removal.
+
 Checked 18 October 2026 on macOS with Python 3.12:
 
 - `uv run pytest -q`: **561 passed, 15 skipped** (the skipped tests are opt-in PostgreSQL integration tests; the PostgreSQL suite was separately run against PostgreSQL 17).
@@ -20,7 +23,6 @@ Checked 18 October 2026 on macOS with Python 3.12:
 - `uv run ruff check .`: clean.
 - `uv build --all-packages`: four wheels and four source distributions built.
 - Isolated wheel environments: protocol imports with only Pydantic; client imports without Pydantic AI or the runtime; runtime and server import without Textual; all console scripts answer `--version`/`--help`.
-- Offline native demo: `harness run --demo --json ...` returns `tone=concise`; the Python demo toggles tone on → off → on; a local attachment round trip includes the attachment summary.
 - Hosted end-to-end: authenticated catalog, WebSocket worker, capability disable, transaction retry replay, transcript reload, and the stdio bridge into the hosted worker all pass.
 
 ## Contract fixtures

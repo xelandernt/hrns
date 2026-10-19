@@ -430,6 +430,7 @@ class HostedSession:
         prompt: Any = blocks
         deferred_results: DeferredToolResults | None = None
         pending_approvals: list[Mapping[str, Any]] = []
+        text_since_tool = False
         try:
             while True:
                 if self.cancel_requested:
@@ -441,6 +442,13 @@ class HostedSession:
                 approvals: list[Mapping[str, Any]] = []
                 async for event in self._stream(prompt, deferred_results):
                     event_type, data = _event_pair(event)
+                    if event_type == "text_delta":
+                        text = data.get("text", data.get("delta", ""))
+                        thought = bool(data.get("thought")) or data.get("kind") == "thinking"
+                        if isinstance(text, str) and text and not thought:
+                            text_since_tool = True
+                    elif event_type == "tool_call":
+                        text_since_tool = False
                     if event_type == "error":
                         details = dict(data.get("details") or {})
                         if details.get("cancelled"):
@@ -468,6 +476,17 @@ class HostedSession:
                             data.get("stop_reason") or "end_turn"
                         )
                         usage = _usage_total(usage, data.get("usage"))
+                        # Some providers return the final answer only in the run
+                        # result after tool calls instead of streaming it. Forward
+                        # that text so the client does not lose the response.
+                        output = data.get("output")
+                        if (
+                            isinstance(output, str)
+                            and output.strip()
+                            and not text_since_tool
+                        ):
+                            for update in acp_map.text_updates(output):
+                                await self._send(update)
                         deferred = data.get("deferred_tool_requests") or {}
                         if deferred.get("approvals"):
                             approvals = list(deferred["approvals"])
@@ -1666,7 +1685,7 @@ def definition_from_manifest(manifest: DefinitionManifest) -> AgentDefinition:
     )
 
 
-_REGISTRY_HOOK_NAMES = ("build_registry", "registry", "demo_registry")
+_REGISTRY_HOOK_NAMES = ("build_registry", "registry")
 
 
 def _coerce_definition(target: Any, *, source: str) -> AgentDefinition:
@@ -1689,8 +1708,8 @@ def _coerce_definition(target: Any, *, source: str) -> AgentDefinition:
 def _registry_from_module(module: Any) -> PluginRegistry | None:
     """A definition module may expose its deployment's plugin registry.
 
-    Convention: ``build_registry()`` (or ``registry`` / ``demo_registry``) returns or
-    holds a :class:`PluginRegistry` with the plugins that back this deployment's
+    Convention: ``build_registry()`` (or ``registry``) returns or holds a
+    :class:`PluginRegistry` with the plugins that back this deployment's
     bindings. Installed ``harness.capabilities`` entry points are discovered on top.
     """
     for name in _REGISTRY_HOOK_NAMES:

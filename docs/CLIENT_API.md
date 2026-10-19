@@ -4,6 +4,7 @@
 
 - [Terminal](#terminal)
 - [CLI](#cli)
+- [Local developer agent](#local-developer-agent)
 - [Profiles and secrets](#profiles-and-secrets)
 - [Python API](#python-api)
 - [Interactions in headless mode](#interactions-in-headless-mode)
@@ -14,13 +15,13 @@
 ## Terminal
 
 ```sh
-harness                                   # connection picker
-harness connect --demo                    # native offline demo
-harness connect --stdio -- my-agent --acp # any stdio ACP agent
-harness connect --server team --agent research-assistant
+hrns                                      # configured local model (default)
+hrns connect --local-config model.toml    # explicit local settings file
+hrns connect --stdio -- my-agent --acp    # any stdio ACP agent
+hrns connect --server team --agent research-assistant
 ```
 
-The full-screen application has a streaming transcript, multiline composer (`Ctrl+Enter` to submit), session list, capability/configuration panel, activity panel, permission dialog, and structured elicitation dialog. `Ctrl+Q` or `Ctrl+C` quits. Narrow terminals collapse the side panel; preserve the transcript rather than resizing into unreadable columns. Unsupported ACP features are absent, not shown as broken controls.
+The full-screen application has a streaming transcript, multiline composer (`Enter` to submit), session list, capability/configuration panel, activity panel, permission dialog, and structured elicitation dialog. `Ctrl+Q` or `Ctrl+C` quits. Narrow terminals collapse the side panel; preserve the transcript rather than resizing into unreadable columns. Unsupported ACP features are absent, not shown as broken controls.
 
 Stage explicit file attachments with `/attach PATH`; `/attach list` shows staged files and `/attach clear` removes them. They are sent as content with the next message and the transcript labels the attachment names. `/attach` never grants the agent a local filesystem path.
 
@@ -34,28 +35,31 @@ Command palette: `/agents`, `/sessions`, `/capabilities`, `/model`, `/settings`,
 
 ```sh
 # One prompt, human-readable or stable JSON output
-harness run --demo "Summarize your capabilities"
-harness run --stdio -- /path/to/agent -- "Review this repository"
-harness run --server team --agent research-assistant --json "Compare A and B"
+hrns run "Summarize this repository"
+hrns run --stdio -- /path/to/agent -- "Review this repository"
+hrns run --server team --agent research-assistant --json "Compare A and B"
 
 # Attachments are an explicit content upload, never implicit filesystem access
-harness run --demo --attach ./notes.md --attach ./diagram.png "Review these"
+hrns run --attach ./notes.md --attach ./diagram.png "Review these"
 
 # Continue a saved session; never automatically resends an uncertain prompt
-harness run --server team --agent research-assistant --resume ses_123 "Continue"
+hrns run --server team --agent research-assistant --resume ses_123 "Continue"
 
 # Deployment discovery
-harness agents list --server team
-harness agents list --server team --all --json
-harness agents show --server team research-assistant
+hrns agents list --server team
+hrns agents list --server team --all --json
+hrns agents show --server team research-assistant
 
 # Profile management
-harness profiles list
-harness profiles add local --stdio -- /usr/bin/my-agent --acp
-harness profiles add team --server https://agents.example --agent research-assistant --token env:HARNESS_TOKEN
+hrns profiles list
+hrns profiles add local --stdio -- /usr/bin/my-agent --acp
+hrns profiles add team --server https://agents.example --agent research-assistant --token env:HARNESS_TOKEN
 ```
 
-`harness run` accepts multiple text prompt words. An explicit `--stdio` target uses `-- CMD ARGS -- PROMPT`; demo and remote targets treat the remainder as the prompt. Exit codes are `0` success, `1` failure, `2` usage, and `3` interaction required.
+`hrns run` accepts multiple text prompt words. An explicit `--stdio` target uses
+`-- CMD ARGS -- PROMPT`; local-model and remote targets treat the remainder as the
+prompt. Exit codes are `0` success, `1` failure, `2` usage, and `3` interaction
+required.
 
 ## Profiles and secrets
 
@@ -141,9 +145,9 @@ Important behavior:
 A headless agent cannot invent approval. Without an explicit policy, a permission request or structured question produces `InteractionRequired`, retains the session, prints a machine-readable interaction summary, and exits `3`.
 
 ```sh
-harness run --demo --allow-all "Perform the operation"
-harness run --demo --deny-all "Perform the operation"
-harness run --server team --agent form-agent \
+hrns run --allow-all "Perform the operation"
+hrns run --deny-all "Perform the operation"
+hrns run --server team --agent form-agent \
   --answer project=harness --answer dry_run=true "Start"
 ```
 
@@ -160,11 +164,11 @@ Generic ACP activity rendering remains available without any renderer installed.
 
 ## Bridge and SSH
 
-`harness bridge` exposes a hosted agent through local newline-delimited ACP stdio, preserving JSON-RPC payloads:
+`hrns bridge` exposes a hosted agent through local newline-delimited ACP stdio, preserving JSON-RPC payloads:
 
 ```sh
-harness bridge --server team --agent research-assistant
-harness bridge --server team --agent research-assistant --remote-cwd /workspace
+hrns bridge --server team --agent research-assistant
+hrns bridge --server team --agent research-assistant --remote-cwd /workspace
 ```
 
 Launch a bridge-only ACP client against that command. Without `--remote-cwd`, session cwd fields pass through for server validation. With it, `session/new`, `load`, and `resume` cwd fields are replaced by the chosen remote directory. Returned paths remain remote; no local/remote filesystem synchronization is implied.
@@ -187,4 +191,12 @@ The existing SSH configuration and authentication apply. The remote environment 
 - A permission cancellation is an explicit rejection, not a hidden approval.
 - Oversized prompts are rejected before sending. A server-closed `1009` frame limit is reported as an actionable size failure.
 - Unknown extension methods and unsupported optional ACP features degrade to the standard interaction surface.
-- `harness run --json` emits one JSON object with `ok`, `sessionId`, `stopReason`, `text`, `tools`, `usage`, timing, and an error object when applicable.
+- `hrns run --json` emits one JSON object with `ok`, `sessionId`, `stopReason`, `text`, `tools`, `usage`, timing, and an error object when applicable.
+
+## Local developer agent
+
+`hrns connect --local` launches the configured local agent; `hrns run --local`
+uses the same settings for headless execution. Use `--local-config PATH` to select
+a TOML file, or press **l** in the connection picker to configure the provider and
+model. See [local setup](LOCAL.md) for DeepSeek, local model servers, credentials,
+approvals, and configuration precedence.

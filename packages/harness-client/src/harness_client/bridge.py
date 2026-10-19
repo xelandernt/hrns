@@ -1,4 +1,4 @@
-"""Stdio ACP bridge to a hosted agent (``harness bridge``).
+"""Stdio ACP bridge to a hosted agent (``hrns bridge``).
 
 The bridge is a framing adapter: newline-delimited ACP JSON-RPC on stdin and
 stdout, one complete JSON object per WebSocket text message on the remote
