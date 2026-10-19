@@ -20,7 +20,6 @@ __all__ = [
     "config_option_value",
     "format_usage",
     "is_subagent_tool",
-    "local_command_names",
     "merge_tool_event",
     "model_option",
     "option_values",
@@ -33,19 +32,6 @@ __all__ = [
     "tool_status_label",
 ]
 
-LOCAL_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("agents", "Choose a different agent or connection"),
-    ("sessions", "List, load, resume, close or delete sessions"),
-    ("capabilities", "Inspect and change session capabilities"),
-    ("model", "Change the active model or mode"),
-    ("permissions", "Choose how tool approvals are answered"),
-    ("settings", "Terminal preferences"),
-    ("attach", "Stage a local file for the next message"),
-    ("help", "Keyboard map and commands"),
-)
-
-LOCAL_COMMAND_NAMES = frozenset(name for name, _ in LOCAL_COMMANDS)
-
 TOOL_STATUS_LABELS = {
     "pending": "○ pending",
     "in_progress": "◐ running",
@@ -56,7 +42,10 @@ TOOL_STATUS_LABELS = {
 
 
 def local_command_names() -> frozenset[str]:
-    return LOCAL_COMMAND_NAMES
+    """Compatibility hook; commands now live in :mod:`tui.commands`."""
+    from .commands import command_names
+
+    return command_names()
 
 
 def permission_mode_label(mode: str) -> str:

@@ -46,6 +46,8 @@ __all__ = [
     "ApprovalBar",
     "ApprovalDecided",
     "CapabilityPanel",
+    "CommandSuggestionKey",
+    "CommandSuggestions",
     "Composer",
     "HintBar",
     "SidePanel",
@@ -81,8 +83,40 @@ class Submitted(Message):
         self.text = text
 
 
+class CommandSuggestionKey(Message):
+    """A navigation key consumed by the inline command picker."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self.key = key
+
+
+class CommandSuggestions(OptionList):
+    """Compact, non-focusable command list shown above the composer."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("id", "command-suggestions")
+        kwargs.setdefault("markup", False)
+        super().__init__(**kwargs)
+        self.display = False
+
+    def show_entries(self, entries: list[tuple[str, str]], highlighted: int = 0) -> None:
+        self.clear_options()
+        if not entries:
+            self.hide_entries()
+            return
+        for label, option_id in entries:
+            self.add_option(Option(label, id=option_id))
+        self.highlighted = max(0, min(highlighted, len(entries) - 1))
+        self.display = True
+
+    def hide_entries(self) -> None:
+        self.display = False
+        self.clear_options()
+
+
 class Composer(TextArea):
-    """Multiline prompt editor. Enter sends; Ctrl+Enter and Ctrl+J also send."""
+    """Multiline prompt editor with inline command suggestions."""
 
     BINDINGS = [
         Binding("ctrl+enter", "submit", "Send", show=False, priority=True),
@@ -93,12 +127,27 @@ class Composer(TextArea):
         super().__init__(**kwargs)
         self.show_line_numbers = False
         self.soft_wrap = True
+        self.suggestions_open = False
 
-    def on_key(self, event: events.Key) -> None:
+    async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
             event.prevent_default()
             event.stop()
-            self.action_submit()
+            if self.suggestions_open:
+                self.post_message(CommandSuggestionKey("enter"))
+            else:
+                self.action_submit()
+            return
+        if self.suggestions_open and event.key in {"up", "down", "tab", "escape"}:
+            event.prevent_default()
+            event.stop()
+            self.post_message(CommandSuggestionKey(event.key))
+            return
+        # Let TextArea's own ``_on_key`` handle printable input and navigation.
+
+    def on_blur(self) -> None:
+        if self.suggestions_open:
+            self.post_message(CommandSuggestionKey("escape"))
 
     def action_submit(self) -> None:
         text = self.text.strip()
@@ -460,8 +509,8 @@ class ToolCard(Vertical):
     The general layout mirrors the Pydantic Deep Agents terminal: one header
     line carries the status mark or spinner, the tool title, compact arguments,
     elapsed time and a diff badge. Results appear underneath as a dim,
-    indented ``⎿`` preview capped at :data:`TOOL_PREVIEW_LINES` lines. Enter or
-    a click expands the full result in place instead of opening a separate
+    indented ``⎿`` preview capped at :data:`TOOL_PREVIEW_LINES` lines. A click or
+    the expand action shows the full result in place instead of opening a separate
     details panel.
     """
 
@@ -822,7 +871,7 @@ class ApprovalBar(Vertical):
             label = readable_text(label, limit=120)
             self._options.add_option(Option(f"{label}{suffix}", id=str(option.get("optionId") or "")))
         kinds = {str(option.get("kind") or "") for option in request.options}
-        hints = ["↑/↓ choose", "Enter confirm"]
+        hints = ["↑/↓ choose"]
         if "allow_once" in kinds:
             hints.append("y allow once")
         if "allow_always" in kinds:
@@ -934,7 +983,7 @@ class CapabilityPanel(Vertical):
         self._detail = Static("Select a capability to inspect it.", markup=False)
         self._detail.add_class("panel-detail")
         self._hint = Static(
-            "Enter toggles · e edits fields · a adds a local plugin · r refreshes",
+            "space toggles · e edits fields · a adds a local plugin · r refreshes",
             markup=False,
             classes="panel-hint",
         )
@@ -986,9 +1035,9 @@ class CapabilityPanel(Vertical):
             Text(f"{len(bindings)} capabilities · {revision}", style="dim")
         )
         self._hint.update(
-            "Enter inspects · this host does not advertise configuration updates"
+            "select to inspect · this host does not advertise configuration updates"
             if not self.can_write
-            else "Enter toggles · e edits fields · a adds a local plugin · r refreshes"
+            else "space toggles · e edits fields · a adds a local plugin · r refreshes"
         )
         if self._list.option_count:
             self._list.highlighted = 0
@@ -1243,7 +1292,7 @@ class SessionPanel(Vertical):
         self._status = Static("Sessions load when you open this panel.", markup=False, classes="panel-status")
         self._table = DataTable(id="session-table", cursor_type="row", zebra_stripes=False)
         self._hint = Static(
-            "Enter loads · u resumes · d deletes · x closes · n new session · r refreshes",
+            "u resumes · d deletes · x closes · n new session · r refreshes",
             markup=False,
             classes="panel-hint",
         )
@@ -1293,7 +1342,7 @@ class SessionPanel(Vertical):
                 style="dim",
             )
         )
-        actions = ["Enter loads" if can_load else "Enter explains load unavailable"]
+        actions = [] if can_load else ["load unavailable"]
         if can_resume:
             actions.append("u resumes")
         if can_delete:
@@ -1422,6 +1471,19 @@ class ActivityPanel(VerticalScroll):
     def clear_subagents(self) -> None:
         self._subagent_state.clear()
         self._subagents.update("No subagent activity reported.")
+
+    def subagent_lines(self) -> list[str]:
+        """Current delegated-work lines, for the read-only subagent overview."""
+        rendered = []
+        for item in list(self._subagent_state.values())[-20:]:
+            mark = {
+                "pending": "○",
+                "in_progress": "◐",
+                "completed": "●",
+                "failed": "✕",
+            }.get(item["status"], "○")
+            rendered.append(f"{mark} {item['title']}   ({item['status']})")
+        return rendered
 
     def set_commands(self, commands: tuple[dict[str, Any], ...]) -> None:
         if not commands:

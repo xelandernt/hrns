@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from harness_config import LocalSettings
@@ -10,6 +13,17 @@ from textual.widgets import Input, Select
 
 from ..local import local_model_catalog, store_api_key, stored_api_key_ref
 from .dialogs import FormDialog, _collect_fields
+
+
+@dataclass(frozen=True, slots=True)
+class LocalModelResult:
+    """Saved local model settings plus the identity needed by the caller."""
+
+    path: Path
+    provider: str
+    model: str
+    api_key_ref: str | None = None
+    api_key_changed: bool = False
 
 #: Used only when ``harness-local`` is unavailable; the runtime normally supplies
 #: the provider list from the pinned Pydantic AI version.
@@ -58,10 +72,11 @@ def _field(
 class LocalModelDialog(FormDialog):
     """Choose a known provider/model or override either with free text."""
 
-    def __init__(self, settings: LocalSettings) -> None:
+    def __init__(self, settings: LocalSettings, *, accept_label: str = "Save and connect") -> None:
         self.settings = settings
         self.catalog = local_model_catalog()
         self._model_choices: dict[str, tuple[str, ...]] = self.catalog
+        self._current_provider = settings.provider
 
         providers = list(self.catalog) or list(_FALLBACK_PROVIDERS)
         current_provider = settings.provider
@@ -148,7 +163,7 @@ class LocalModelDialog(FormDialog):
             "Local model",
             f"Save to {settings.config_file}",
             fields,
-            accept_label="Save and connect",
+            accept_label=accept_label,
             explanation=(
                 "Runs file tools and commands on this machine, with approval prompts. "
                 "HARNESS_LOCAL_* environment variables override saved settings."
@@ -185,23 +200,32 @@ class LocalModelDialog(FormDialog):
         if event.select is not self._widgets.get("provider"):
             return
         provider = event.value if isinstance(event.value, str) else ""
-        provider_custom = self._widgets.get("provider_custom")
-        if isinstance(provider_custom, Input):
-            provider_custom.value = ""
-        model_custom = self._widgets.get("model_custom")
-        if isinstance(model_custom, Input):
-            model_custom.value = ""
+        if provider == self._current_provider:
+            self._refresh_models(provider)
+            return
+        self._current_provider = provider
+        self._reset_provider_fields()
         self._refresh_models(provider)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input is not self._widgets.get("provider_custom"):
             return
+        self._reset_provider_fields(include_custom=False)
         provider = event.value.strip()
         if not provider:
             selected = self._widgets.get("provider")
             value = selected.value if isinstance(selected, Select) else ""
             provider = value if isinstance(value, str) else ""
         self._refresh_models(provider)
+
+    def _reset_provider_fields(self, *, include_custom: bool = True) -> None:
+        names = ["model_custom", "api_key", "api_key_env", "base_url"]
+        if include_custom:
+            names.append("provider_custom")
+        for name in names:
+            widget = self._widgets.get(name)
+            if isinstance(widget, Input):
+                widget.value = ""
 
     def action_accept_form(self) -> None:
         values, error = _collect_fields(self.fields, self._widgets)
@@ -226,6 +250,14 @@ class LocalModelDialog(FormDialog):
                 "DEEPSEEK_API_KEY, not the key itself. Paste the key into API key."
             )
             return
+        if provider != self.settings.provider and not api_key:
+            from_env = bool(api_key_env and os.environ.get(api_key_env))
+            if not from_env and stored_api_key_ref(provider, api_key_env) is None:
+                self.show_error(
+                    "A new provider needs an API key. Paste it above or name an "
+                    "environment variable that already holds it."
+                )
+                return
         values["provider"] = provider
         values["model"] = model
         values.setdefault("base_url", "")
@@ -248,4 +280,12 @@ class LocalModelDialog(FormDialog):
             api_key_ref = stored_api_key_ref(
                 configured.provider, configured.api_key_env
             )
-        self.dismiss((path, api_key_ref))
+        self.dismiss(
+            LocalModelResult(
+                path=path,
+                provider=configured.provider,
+                model=configured.model,
+                api_key_ref=api_key_ref,
+                api_key_changed=bool(api_key),
+            )
+        )

@@ -102,41 +102,43 @@ def provider_catalog() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def configured_model(settings: LocalSettings) -> Model:
+def configured_model(settings: LocalSettings, model_id: str | None = None) -> Model:
     """Delegate provider/model selection to the pinned Pydantic AI registry."""
     settings.require_model()
-    model_id = f"{settings.provider}:{settings.model}"
-    options = dict(settings.provider_options)
-    if settings.base_url:
+    selected = model_id or f"{settings.provider}:{settings.model}"
+    provider, _, _ = selected.partition(":")
+    same_provider = provider == settings.provider
+    options = dict(settings.provider_options) if same_provider else {}
+    if same_provider and settings.base_url:
         options["base_url"] = settings.base_url
-    key = settings.resolved_api_key()
+    key = settings.resolved_api_key() if same_provider else None
     if key is not None:
         options["api_key"] = key
     try:
         if not options:
-            return infer_model(model_id)
-        if settings.provider.startswith("gateway/"):
+            return infer_model(selected)
+        if provider.startswith("gateway/"):
             from pydantic_ai.providers.gateway import gateway_provider
 
             return infer_model(
-                model_id,
+                selected,
                 provider_factory=lambda name: gateway_provider(
                     name.removeprefix("gateway/"), **options
                 ),
             )
         return infer_model(
-            model_id,
+            selected,
             provider_factory=lambda name: infer_provider_class(name)(**options),
         )
     except ImportError as exc:
         raise ValueError(
-            f"Install the Pydantic AI provider extra for {settings.provider!r} in the runtime "
+            f"Install the Pydantic AI provider extra for {provider!r} in the runtime "
             "environment (DeepSeek/OpenAI-compatible: harness-runtime[openai])."
         ) from exc
     except (ValueError, TypeError, UserError) as exc:
         # Constructor errors can contain configured secrets; only report parameter names.
         raise ValueError(
-            f"Cannot configure provider {settings.provider!r} / model {settings.model!r}. "
+            f"Cannot configure provider {provider!r} / model {selected!r}. "
             "Check the provider name, credentials and supported provider_options. "
             "For a custom OpenAI-compatible base_url use provider = 'openai-chat'."
         ) from exc
@@ -144,6 +146,19 @@ def configured_model(settings: LocalSettings) -> Model:
 
 async def _require_tool_approval(_ctx: Any, tools: list[Any]) -> list[Any]:
     return [replace(tool, kind="unapproved") for tool in tools]
+
+
+def _local_models(settings: LocalSettings) -> tuple[str, ...]:
+    """Known model ids for the configured provider, current model first."""
+    current = f"{settings.provider}:{settings.model}"
+    for entry in provider_catalog().get("providers", []):
+        if entry.get("name") != settings.provider:
+            continue
+        models = [f"{settings.provider}:{model}" for model in entry.get("models", [])]
+        if current not in models:
+            models.insert(0, current)
+        return tuple(dict.fromkeys(models))
+    return (current,)
 
 
 def build_local_agent(
@@ -164,9 +179,14 @@ def build_local_agent(
     spec = definition.spec
 
     def factory(*, model: Any, managed_capabilities: list[Any]) -> Agent:
+        selected = (
+            configured_model(settings, model)
+            if isinstance(model, str)
+            else model
+        )
         return Agent.from_spec(
             spec,
-            model=model,
+            model=selected,
             model_settings=settings.model_settings,
             capabilities=managed_capabilities,
             output_type=[str, DeferredToolRequests],
@@ -190,6 +210,8 @@ def build_local_agent(
         HostPolicy(
             allowed_cwds=(str(workspace),),
             default_cwd=str(workspace),
+            models=_local_models(settings),
+            default_model=f"{settings.provider}:{settings.model}",
             resources={"model.default": model},
         ),
     )

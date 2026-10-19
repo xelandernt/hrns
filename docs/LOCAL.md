@@ -30,15 +30,21 @@ uv run hrns
 Local mode is the default. `uv run hrns connect --local` selects it explicitly, and
 `hrns run "..."` uses the same settings when no other target is given.
 
-For UI setup, run `uv run hrns` and press **l** or choose **Configure local model…**.
-The provider and model fields list the ids known to the installed Pydantic AI
-version; both also have optional override fields for a custom provider or model id.
-Paste an API key into the masked **API key** field to store it in your operating
-system keyring; it is never written to the TOML file. The **API key environment
-variable** field takes a variable *name* such as `DEEPSEEK_API_KEY`, not the key
-itself. Enter an optional base URL too. **Save and connect** persists the non-secret
-configuration and starts a session in the current directory. Use `/agents` to return
-to the connection picker and configure another model for a new session.
+For UI setup, run `uv run hrns` and press **l**, choose **Configure local model…**, or
+type `/models` in a session. The provider and model fields list the ids known to the
+installed Pydantic AI version; both also have optional override fields for a custom
+provider or model id. Paste an API key into the masked **API key** field to store it in
+your operating system keyring; it is never written to the TOML file. The **API key
+environment variable** field takes a variable *name* such as `DEEPSEEK_API_KEY`, not
+the key itself. Enter an optional base URL too. **Save and connect** (or **Save and
+apply** from a session) persists the non-secret configuration; from the connection
+picker it starts a session in the current directory.
+
+If the selected model is already advertised by `harness-local`, `/models` applies it
+to the next message without restarting the agent. Changing provider (or entering a new
+key) saves the configuration and restarts `harness-local`, then reloads the current
+session. Use `/connect` to return to the connection picker, or `/plugins` to toggle
+capability bindings in place.
 
 DeepSeek's native provider uses its OpenAI-compatible Chat Completions API and
 provider-specific model behavior. See the [Pydantic AI DeepSeek documentation](https://pydantic.dev/docs/ai/models/deepseek/).

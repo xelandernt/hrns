@@ -26,8 +26,8 @@ export DEEPSEEK_API_KEY='your-key'
 uv run hrns
 ```
 
-Press **l** to configure a provider and model, or create `harness.local.toml`
-in the project:
+Press **l** to configure a provider and model, type `/models` in a session, or create
+`harness.local.toml` in the project:
 
 ```toml
 provider = "deepseek"
@@ -39,6 +39,11 @@ api_key_env = "DEEPSEEK_API_KEY"
 works on files and runs commands with approval prompts. Configuration uses
 pydantic-settings. See [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints,
 local inference, other Pydantic AI providers, and headless execution.
+
+Useful slash commands include `/connect` (switch or add a target), `/models`
+(configure or select the local model), `/plugins` (toggle capability bindings),
+and `/agents` (inspect subagents). Typing `/` shows an inline filtered list. The
+older `/model` and `/capabilities` names remain aliases.
 
 Any independent ACP agent can still be launched explicitly:
 

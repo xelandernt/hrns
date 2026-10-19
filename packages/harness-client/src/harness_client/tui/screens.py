@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import shlex
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -39,19 +40,22 @@ from ..events import (
 )
 from ..interactions import PERMISSION_MODES, PermissionDecision, PermissionRequest
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
-from ..local import local_target
-from ..profiles import Profile, Profiles
+from ..local import local_model_catalog, local_target
+from ..profiles import Profile, Profiles, default_profiles_path
+from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
 from .dialogs import (
     ChoiceDialog,
     CommandPaletteDialog,
     ConfirmDialog,
     FormDialog,
     HelpDialog,
+    InfoDialog,
     SettingsDialog,
 )
+from .local import LocalModelResult
 from .state import (
-    LOCAL_COMMANDS,
     Settings,
+    binding_summary,
     build_form_fields,
     config_option_value,
     format_usage,
@@ -66,6 +70,8 @@ from .widgets import (
     BindingToggleRequested,
     CapabilityAddRequested,
     CapabilityRefreshRequested,
+    CommandSuggestionKey,
+    CommandSuggestions,
     Composer,
     ConfigOptionRequested,
     HintBar,
@@ -114,6 +120,7 @@ class ConnectScreen(Screen[None]):
         Binding("r", "refresh", "Refresh catalog", show=False),
         Binding("slash", "filter", "Filter", show=False),
         Binding("l", "configure_local", "Local model", show=False),
+        Binding("n", "add_target", "New target", show=False),
     ]
 
     def __init__(
@@ -151,7 +158,7 @@ class ConnectScreen(Screen[None]):
                 yield self._detail
         yield self._status
         yield Static(
-            "Enter connects · l configures a local model · / filters · r refreshes · q quits",
+            "l configures a local model · n adds a target · / filters · r refreshes · q quits",
             markup=False,
             classes="panel-hint",
             id="connect-hint",
@@ -167,12 +174,15 @@ class ConnectScreen(Screen[None]):
             self._status.update(self.status_message)
         else:
             self._status.update(
-                "Local model is the default. Press Enter to connect or l to configure it; "
+                "Local model is the default. Press l to configure it; selecting it connects. "
                 "saved remote profiles are listed below."
             )
         self._apply_layout()
         if self.initial_target is not None:
             self._status.update(f"Ready to connect · {self.initial_target.location_text()}")
+
+    def on_screen_resume(self) -> None:
+        self._render_entries()
 
     def on_resize(self, event: Any) -> None:
         self._apply_layout()
@@ -272,6 +282,11 @@ class ConnectScreen(Screen[None]):
                     kind="configure_local", label="Change local model…",
                     detail="Choose another cloud or local provider and model.",
                 ))
+            self.entries.append(PickEntry(
+                kind="add_target",
+                label="Add remote or ACP target…",
+                detail="Save a server profile or a stdio ACP command, then connect to it.",
+            ))
         self._render_visible(self._filter.value if self.is_mounted else "")
 
     def _local_settings(self) -> LocalSettings | None:
@@ -305,6 +320,9 @@ class ConnectScreen(Screen[None]):
                 label.append(entry.label.removeprefix("remote · "))
             elif entry.kind == "configure_local":
                 label.append("setup  ", style="bold")
+                label.append(entry.label)
+            elif entry.kind == "add_target":
+                label.append("new    ", style="bold")
                 label.append(entry.label)
             else:
                 label.append("agent  ", style="bold")
@@ -342,7 +360,7 @@ class ConnectScreen(Screen[None]):
                     if deployment.default_working_directory:
                         lines.append(f"default workspace: {deployment.default_working_directory}")
                 else:
-                    lines.append("Press Enter to list deployments from this server.")
+                    lines.append("Select it to list deployments from this server.")
             else:
                 lines.append(f"command: {profile.command} {' '.join(profile.args)}".rstrip())
                 if profile.cwd:
@@ -386,6 +404,9 @@ class ConnectScreen(Screen[None]):
         if entry.kind == "configure_local":
             self.action_configure_local()
             return
+        if entry.kind == "add_target":
+            self.action_add_target()
+            return
         if entry.kind == "local_model":
             try:
                 self._connect_worker(local_target())
@@ -422,12 +443,160 @@ class ConnectScreen(Screen[None]):
             return
         self.app.push_screen(LocalModelDialog(settings), self._local_configured)
 
+    def action_add_target(self) -> None:
+        if self._connecting:
+            return
+        fields = [
+            {
+                "name": "name",
+                "title": "Profile name",
+                "description": "A stable name for this connection.",
+                "kind": "text",
+                "required": True,
+            },
+            {
+                "name": "transport",
+                "title": "Transport",
+                "description": "Remote server profiles use the catalog; stdio profiles launch an ACP command.",
+                "kind": "select",
+                "required": True,
+                "choices": [("server", "Remote server"), ("stdio", "ACP command (stdio)")],
+                "default": "server",
+            },
+            {
+                "name": "url",
+                "title": "Server URL",
+                "description": "Remote server base URL, for example https://agents.example.com.",
+                "kind": "text",
+            },
+            {
+                "name": "agent",
+                "title": "Default agent id",
+                "description": "Optional deployment id; an empty value lets you choose from the catalog.",
+                "kind": "text",
+            },
+            {
+                "name": "token",
+                "title": "Token reference",
+                "description": "Use env:NAME or keyring:service/user. A literal value is stored in the profile file.",
+                "kind": "text",
+            },
+            {
+                "name": "remote_cwd",
+                "title": "Remote working directory",
+                "description": "Optional bridge rewrite target for this server.",
+                "kind": "text",
+            },
+            {
+                "name": "command",
+                "title": "ACP command",
+                "description": "Executable launched directly for stdio transport (no shell).",
+                "kind": "text",
+            },
+            {
+                "name": "args",
+                "title": "Command arguments",
+                "description": "Space-separated arguments; use quotes for values containing spaces.",
+                "kind": "text",
+            },
+            {
+                "name": "cwd",
+                "title": "Working directory",
+                "description": "Optional local working directory for a stdio command.",
+                "kind": "text",
+            },
+            {
+                "name": "auth_method",
+                "title": "Auth method id",
+                "description": "Optional agent-advertised authentication method to try automatically.",
+                "kind": "text",
+            },
+            {
+                "name": "notes",
+                "title": "Notes",
+                "description": "Optional reminder shown in the connection picker.",
+                "kind": "text",
+            },
+        ]
+        self.app.push_screen(
+            FormDialog(
+                "Add a connection target",
+                "Saved to the first profiles file. Secrets should be references, not literals.",
+                fields,
+                accept_label="Save and connect",
+            ),
+            self._target_added,
+        )
+
+    def _target_added(self, values: dict[str, Any] | None) -> None:
+        if not values:
+            return
+        try:
+            name = str(values.get("name") or "").strip()
+            transport = str(values.get("transport") or "server")
+            command = str(values.get("command") or "").strip()
+            url = str(values.get("url") or "").strip()
+            if not name:
+                raise ValueError("A profile name is required.")
+            if transport == "server" and not url:
+                raise ValueError("A server URL is required for remote server profiles.")
+            if transport == "stdio" and not command:
+                raise ValueError("An ACP command is required for stdio profiles.")
+            profile = Profile(
+                name=name,
+                transport=transport,
+                command=command,
+                args=shlex.split(str(values.get("args") or "")),
+                cwd=str(values.get("cwd") or "").strip(),
+                url=url,
+                agent=str(values.get("agent") or "").strip(),
+                token=str(values.get("token") or "").strip(),
+                remote_cwd=str(values.get("remote_cwd") or "").strip(),
+                auth_method=str(values.get("auth_method") or "").strip(),
+                notes=str(values.get("notes") or "").strip(),
+            )
+        except ValueError as exc:
+            self._status.update(f"error · {exc}")
+            return
+        self.profiles.upsert(profile)
+        target_path = self.profiles.sources[0] if self.profiles.sources else default_profiles_path()
+        try:
+            self.profiles.save(target_path)
+        except OSError as exc:
+            self._status.update(f"error · could not save profile: {exc}")
+            return
+        if target_path not in self.profiles.sources:
+            self.profiles.sources.append(target_path)
+        self._render_entries()
+        self._status.update(f"Saved {name}. Connecting…")
+        if profile.is_remote:
+            self._browse_profile(profile)
+            return
+        try:
+            target = ConnectionTarget(
+                name=profile.name,
+                kind="local",
+                profile=profile,
+                agent=None,
+                cwd=local_cwd(profile),
+            )
+        except HarnessClientError as exc:
+            self._status.update(f"error · {exc.message}")
+            return
+        self._connect_worker(target)
+
     def _local_configured(
-        self, result: Path | tuple[Path, str | None] | None
+        self, result: LocalModelResult | tuple[Path, str | None] | Path | None
     ) -> None:
         if result is None:
             return
-        path, api_key_ref = result if isinstance(result, tuple) else (result, None)
+        if isinstance(result, LocalModelResult):
+            path = result.path
+            api_key_ref = result.api_key_ref
+        elif isinstance(result, tuple):
+            path, api_key_ref = result
+        else:
+            path, api_key_ref = result, None
         try:
             target = local_target(path, api_key_ref=api_key_ref)
         except HarnessClientError as exc:
@@ -481,7 +650,7 @@ class ConnectScreen(Screen[None]):
         self._render_entries()
         self._list.focus()
         self._status.update(
-            f"{len(agents)} deployments on {profile.url}. Enter connects; Esc returns to profiles."
+            f"{len(agents)} deployments on {profile.url}. Esc returns to profiles."
         )
 
     @work(group="connect", exclusive=True)
@@ -512,7 +681,7 @@ class ConnectScreen(Screen[None]):
             self._browse_profile(self._browsing)
         else:
             self._render_entries()
-            self._status.update("Profiles reloaded from memory. Edit the TOML file to add more.")
+            self._status.update("Profiles reloaded. Press n to add a target or edit the TOML file directly.")
 
     def action_quit_app(self) -> None:
         self.app.action_quit_app()  # type: ignore[attr-defined]
@@ -571,6 +740,9 @@ class ChatScreen(Screen[None]):
         self._session_cursor: str | None = None
         self._approval_future: asyncio.Future[PermissionDecision] | None = None
         self._redirect_after_turn = False
+        self._suggestion_items: list[dict[str, Any]] = []
+        self._suggestion_index = 0
+        self._suggestion_signature: tuple[str, ...] = ()
 
     # --------------------------------------------------------------- structure
 
@@ -580,6 +752,7 @@ class ChatScreen(Screen[None]):
             yield TranscriptPane(id="transcript")
             yield SidePanel()
         yield ApprovalBar(id="approval")
+        yield CommandSuggestions(id="command-suggestions")
         yield Composer(id="composer")
         yield HintBar(id="hintbar")
         yield StatusBar(id="statusbar")
@@ -590,7 +763,7 @@ class ChatScreen(Screen[None]):
         self._subscribe()
         self._update_chrome()
         hint = (
-            "Enter sends · / commands · Ctrl+K palette · F2 capabilities · F3 sessions "
+            "/ commands · Ctrl+K palette · F2 capabilities · F3 sessions "
             "· F4 activity · Esc stops the turn · Ctrl+R reconnects · Ctrl+T transcript"
         )
         self.query_one("#hintbar", HintBar).show(hint)
@@ -886,6 +1059,7 @@ class ChatScreen(Screen[None]):
         if isinstance(event, CommandsUpdated):
             self._commands = event.commands
             self.query_one("#side-panel", SidePanel).activity.set_commands(event.commands)
+            self._sync_command_suggestions()
             return
         if isinstance(event, PlanChanged):
             self._plan = event.entries
@@ -1037,7 +1211,142 @@ class ChatScreen(Screen[None]):
 
     # --------------------------------------------------------------- submitting
 
+    def on_text_area_changed(self, event: Any) -> None:
+        composer = self.query_one("#composer", Composer)
+        if getattr(event, "text_area", None) is composer:
+            self._sync_command_suggestions()
+
+    def _sync_command_suggestions(self) -> None:
+        composer = self.query_one("#composer", Composer)
+        raw = composer.text
+        if not raw.startswith("/") or "\n" in raw:
+            self._hide_command_suggestions()
+            return
+        body = raw[1:]
+        if " " in body or "\t" in body:
+            self._hide_command_suggestions()
+            return
+        needle = body.strip().lower()
+        local = [command for command in LOCAL_COMMANDS if not command.hidden and command.matches(needle)]
+        if needle:
+            local.sort(
+                key=lambda command: 0
+                if needle in {command.name.lower(), *(alias.lower() for alias in command.aliases)}
+                else 1
+            )
+        local_names = {
+            name for command in LOCAL_COMMANDS for name in (command.name, *command.aliases)
+        }
+        agent = [
+            command
+            for command in self._commands
+            if needle in str(command.get("name", "")).lower()
+            or needle in str(command.get("description", "")).lower()
+        ]
+        if needle:
+            agent.sort(
+                key=lambda command: 0
+                if needle == str(command.get("name", "")).lower()
+                else 1
+            )
+
+        items: list[dict[str, Any]] = []
+        for command in local:
+            items.append(
+                {
+                    "kind": "local",
+                    "name": command.name,
+                    "label": command_suggestion_text(command),
+                    "command": command,
+                }
+            )
+        for command in agent[:100]:
+            name = str(command.get("name", ""))
+            if not name:
+                continue
+            description = str(command.get("description", ""))
+            collision = name in local_names
+            label = f"/{name}   {description}".rstrip()
+            if collision:
+                label += "   (agent command; use /agent)"
+            items.append(
+                {
+                    "kind": "agent",
+                    "name": name,
+                    "label": label,
+                    "collision": collision,
+                }
+            )
+        if not items:
+            self._hide_command_suggestions()
+            return
+
+        signature = tuple(f"{item['kind']}:{item['name']}" for item in items)
+        if signature != self._suggestion_signature:
+            self._suggestion_index = 0
+            self._suggestion_signature = signature
+        else:
+            self._suggestion_index = min(self._suggestion_index, len(items) - 1)
+        self._suggestion_items = items
+        self._render_command_suggestions()
+        composer.suggestions_open = True
+
+    def _render_command_suggestions(self) -> None:
+        widget = self.query_one("#command-suggestions", CommandSuggestions)
+        entries = [
+            (str(item["label"]), f"{item['kind']}:{item['name']}")
+            for item in self._suggestion_items
+        ]
+        widget.show_entries(entries, self._suggestion_index)
+        if entries:
+            widget.highlighted = self._suggestion_index
+
+    def _hide_command_suggestions(self) -> None:
+        self._suggestion_items = []
+        self._suggestion_signature = ()
+        self._suggestion_index = 0
+        with contextlib.suppress(Exception):
+            self.query_one("#command-suggestions", CommandSuggestions).hide_entries()
+        with contextlib.suppress(Exception):
+            self.query_one("#composer", Composer).suggestions_open = False
+
+    def on_command_suggestion_key(self, event: CommandSuggestionKey) -> None:
+        if not self._suggestion_items:
+            return
+        key = event.key
+        if key == "escape":
+            self._hide_command_suggestions()
+            return
+        if key in {"up", "down"}:
+            step = -1 if key == "up" else 1
+            self._suggestion_index = (self._suggestion_index + step) % len(self._suggestion_items)
+            self._render_command_suggestions()
+            return
+        if key in {"enter", "tab"}:
+            self._accept_command_suggestion(complete_only=key == "tab")
+
+    def _accept_command_suggestion(self, *, complete_only: bool) -> None:
+        if not (0 <= self._suggestion_index < len(self._suggestion_items)):
+            return
+        item = self._suggestion_items[self._suggestion_index]
+        composer = self.query_one("#composer", Composer)
+        self._hide_command_suggestions()
+        if item["kind"] == "local":
+            command = item["command"]
+            if complete_only or command.takes_argument:
+                composer.load_text(f"/{command.name} ")
+                composer.focus()
+                return
+            composer.clear_composer()
+            composer.focus()
+            asyncio.create_task(self._run_local_command(command.name))
+            return
+        prefix = "/agent " if item.get("collision") else "/"
+        composer.load_text(f"{prefix}{item['name']} ")
+        composer.focus()
+
     async def on_submitted(self, event: Submitted) -> None:
+        self._hide_command_suggestions()
         text = event.text.strip()
         if not text:
             return
@@ -1096,7 +1405,7 @@ class ChatScreen(Screen[None]):
         name, _, rest = body.partition(" ")
         name = name.strip()
         rest = rest.strip()
-        local_names = {item[0] for item in LOCAL_COMMANDS}
+        local = resolve_local_command(name)
         agent_names = {str(command.get("name", "")) for command in self._commands}
         if name == "agent":
             if not rest:
@@ -1105,11 +1414,12 @@ class ChatScreen(Screen[None]):
             agent_name, _, arguments = rest.partition(" ")
             await self._send_agent_command(agent_name, arguments)
             return
-        if name in local_names:
-            await self._run_local_command(name, rest)
-            if name in agent_names:
+        if local is not None:
+            await self._run_local_command(local.name, rest)
+            if local.name in agent_names:
                 await self._notice(
-                    f"Local /{name} ran. Use /agent {name} for the agent's '{name}' command.",
+                    f"Local /{local.name} ran. Use /agent {local.name} for the agent's "
+                    f"'{local.name}' command.",
                     "info",
                 )
             return
@@ -1128,14 +1438,17 @@ class ChatScreen(Screen[None]):
         composer.clear_composer()
         if name == "attach":
             await self._stage_attachment(rest)
+        elif name == "connect":
+            await self.app.choose_agent(self)  # type: ignore[attr-defined]
         elif name == "agents":
-            self.app.choose_agent(self)  # type: ignore[attr-defined]
+            await self._show_subagents()
         elif name == "sessions":
             self.action_show_sessions()
-        elif name == "capabilities":
+        elif name == "plugins":
             self.action_show_capabilities()
-        elif name == "model":
-            await self._show_model_dialog()
+            self.refresh_capabilities()
+        elif name == "models":
+            await self._show_models()
         elif name == "permissions":
             self._show_permissions()
         elif name == "settings":
@@ -1582,7 +1895,7 @@ class ChatScreen(Screen[None]):
         if not self.client.has_session_capability("resume"):
             await self._notice(
                 "This agent does not advertise session/resume and this terminal has no "
-                "verified cache; press Enter to load authoritative history when available.",
+                "verified cache; authoritative history can be loaded when available.",
                 "warning",
             )
             return
@@ -1695,6 +2008,198 @@ class ChatScreen(Screen[None]):
 
     # ------------------------------------------------------------------ models
 
+    def _local_settings(self) -> LocalSettings:
+        target = self.target
+        args = (
+            target.profile.args
+            if target is not None and target.profile.command == "harness-local"
+            else []
+        )
+        config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
+        return LocalSettings(**({"config_file": config} if config else {}))
+
+    async def _show_models(self) -> None:
+        if self.session.client is not self.client:
+            await self._notice(
+                "This session is not attached to the reconnected client. Start a new session first.",
+                "warning",
+            )
+            return
+        if self.target.kind != "local" or self.target.profile.command != "harness-local":
+            await self._show_model_dialog()
+            return
+        try:
+            settings = self._local_settings()
+        except (ValueError, OSError) as exc:
+            await self._notice(f"Local settings are unavailable: {exc}", "error")
+            return
+        models = list(local_model_catalog().get(settings.provider, ()))
+        if not models:
+            self._open_local_model_form(settings)
+            return
+        if settings.model and settings.model not in models:
+            models.insert(0, settings.model)
+        choices = [
+            {
+                "value": model,
+                "name": model,
+                "description": "current" if model == settings.model else "",
+            }
+            for model in models
+        ]
+        choices.append(
+            {
+                "value": "__configure__",
+                "name": "Configure provider or model…",
+                "description": "Add a provider, paste a key, set a base URL or enter a custom model id.",
+            }
+        )
+
+        def apply(value: str | None) -> None:
+            if not value:
+                return
+            if value == "__configure__":
+                self._open_local_model_form(settings)
+                return
+            asyncio.create_task(self._select_local_model(settings, value))
+
+        self.app.push_screen(
+            ChoiceDialog(
+                "Models",
+                f"Provider {settings.provider}. The selection applies to the next message.",
+                choices,
+                current=settings.model,
+            ),
+            apply,
+        )
+
+    def _open_local_model_form(self, settings: LocalSettings) -> None:
+        from .local import LocalModelDialog
+
+        self.app.push_screen(
+            LocalModelDialog(settings, accept_label="Save and apply"),
+            self._models_configured,
+        )
+
+    async def _select_local_model(self, settings: LocalSettings, model: str) -> None:
+        try:
+            configured = settings.model_copy(update={"model": model})
+            path = configured.save(settings.config_file)
+        except (ValueError, OSError) as exc:
+            await self._notice(f"Could not save the model selection: {exc}", "error")
+            return
+        await self._apply_model_settings(
+            LocalModelResult(
+                path=path,
+                provider=settings.provider,
+                model=model,
+                api_key_ref=None,
+                api_key_changed=False,
+            )
+        )
+
+    def _models_configured(self, result: Any) -> None:
+        if result is not None:
+            asyncio.create_task(self._apply_model_settings(result))
+
+    async def _apply_model_settings(self, result: Any) -> None:
+        from .local import LocalModelResult
+
+        if not isinstance(result, LocalModelResult):
+            return
+        try:
+            old = self._local_settings()
+        except (ValueError, OSError):
+            old = None
+        wanted = f"{result.provider}:{result.model}"
+        option = model_option(self.session.config_options)
+        values = {str(item["value"]) for item in option_values(option)} if option else set()
+        restart = (
+            old is None
+            or result.provider != old.provider
+            or result.api_key_changed
+            or option is None
+            or wanted not in values
+        )
+        if not restart:
+            option_id = str(option.get("id") or "model")
+            try:
+                options = await self.session.set_config_option(option_id, wanted)
+            except HarnessClientError as exc:
+                await self._notice(f"Model change failed: {exc.message}", "error")
+                return
+            self.session.remember(options)
+            self._update_chrome()
+            await self._notice(
+                f"Model set to {wanted}; it applies to the next message.",
+                "success",
+            )
+            return
+        try:
+            target = local_target(
+                result.path,
+                api_key_ref=result.api_key_ref,
+                cwd=self.target.cwd,
+            )
+        except HarnessClientError as exc:
+            await self._notice(f"Saved the configuration, but it cannot be used yet: {exc.message}", "error")
+            return
+        self.app.target = target  # type: ignore[attr-defined]
+        self.target = target
+        await self._notice(
+            "Restarting harness-local with the saved provider configuration; "
+            "reloading this session afterwards.",
+            "warning",
+        )
+        await self._reconnect()
+
+    async def _show_subagents(self) -> None:
+        if (
+            self.client.extension.supports("_harness/capabilities/list")
+            and not self._bindings_raw
+        ):
+            await self._refresh_capabilities()
+        lines = ["Read-only overview. Configure subagents from `/plugins`.", ""]
+        summaries = [
+            summary
+            for raw in self._bindings_raw
+            for summary in (binding_summary(raw, None),)
+            if "subagent" in f"{summary['name']} {summary['pluginId']} {summary['description']}".lower()
+        ]
+        if not self.client.extension.supports("_harness/capabilities/list"):
+            lines.append(
+                "This connection does not advertise the capability catalog, "
+                "so configured subagents cannot be inspected."
+            )
+        elif not summaries:
+            lines.append(
+                "No subagent binding is configured for this session. "
+                "Add the Sub-agents plugin from `/plugins`."
+            )
+        else:
+            for summary in summaries:
+                state = "on" if summary["enabled"] else "off"
+                lines.append(f"### {summary['name']} · {state}")
+                lines.append(f"- id: `{summary['bindingId']}`")
+                if summary["pluginId"]:
+                    lines.append(f"- plugin: `{summary['pluginId']}`")
+                lines.append(f"- change: {summary['modeLabel']}")
+                config = summary.get("config") or {}
+                if config:
+                    lines.append("- configuration:")
+                    for key, value in list(config.items())[:12]:
+                        lines.append(f"  - `{key}`: {value}")
+                if summary["requires"]:
+                    lines.append(f"- requires: {', '.join(summary['requires'])}")
+                lines.append("")
+        activity = self.query_one("#side-panel", SidePanel).activity.subagent_lines()
+        lines.append("### Recent delegated activity")
+        if activity:
+            lines.extend(f"- {line}" for line in activity)
+        else:
+            lines.append("No delegated work has been reported in this session.")
+        self.app.push_screen(InfoDialog("Subagents", "\n".join(lines)))
+
     async def _show_model_dialog(self) -> None:
         if self.session.client is not self.client:
             await self._notice(
@@ -1793,7 +2298,11 @@ class ChatScreen(Screen[None]):
 
     def action_command_palette(self) -> None:
         agent_commands = list(self._commands)
-        local_names = {name for name, _ in LOCAL_COMMANDS}
+        local_names = {
+            name
+            for command in LOCAL_COMMANDS
+            for name in (command.name, *command.aliases)
+        }
         agent_names = {str(command.get("name", "")) for command in agent_commands}
         collisions = local_names & agent_names
 
@@ -1801,12 +2310,14 @@ class ChatScreen(Screen[None]):
             if not result:
                 return
             kind, _, name = result.partition(":")
-            if kind == "local" and name == "attach":
+            if kind == "local":
+                command = resolve_local_command(name)
                 composer = self.query_one("#composer", Composer)
-                composer.load_text("/attach ")
-                composer.focus()
-            elif kind == "local":
-                asyncio.create_task(self._run_local_command(name))
+                if command is not None and command.takes_argument:
+                    composer.load_text(f"/{command.name} ")
+                    composer.focus()
+                elif command is not None:
+                    asyncio.create_task(self._run_local_command(command.name))
             elif kind == "agent":
                 composer = self.query_one("#composer", Composer)
                 # Always route through /agent so collisions cannot hijack the
@@ -1824,13 +2335,22 @@ class ChatScreen(Screen[None]):
             "\n".join(f"- `/{command.get('name')}` — {command.get('description', '')}" for command in self._commands)
             or "No agent commands advertised."
         )
+        local_lines = []
+        for command in LOCAL_COMMANDS:
+            if command.hidden:
+                continue
+            aliases = (
+                " (aliases: " + ", ".join(f"/{alias}" for alias in command.aliases) + ")"
+                if command.aliases
+                else ""
+            )
+            local_lines.append(f"- `/{command.name}` — {command.description}{aliases}")
         body = f"""# Harness terminal
 
 ## Keys
 
 | key | action |
 | --- | --- |
-| `Enter` | send the prompt |
 | `Ctrl+Enter` | send the prompt (works from any panel or the transcript) |
 | `Ctrl+K` | command palette (local and agent sections) |
 | `F1` | this help |
@@ -1847,7 +2367,7 @@ class ChatScreen(Screen[None]):
 
 ## Local commands
 
-{chr(10).join(f"- `/{name}` — {help_text}" for name, help_text in LOCAL_COMMANDS)}
+{chr(10).join(local_lines)}
 
 ## Agent commands
 

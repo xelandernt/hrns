@@ -27,6 +27,7 @@ from ..interactions import (
     ElicitationRequest,
     PermissionRequest,
 )
+from .commands import LocalCommand, command_suggestion_text
 from .state import Settings, build_form_fields, coerce_value
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "ElicitationDialog",
     "FormDialog",
     "HelpDialog",
+    "InfoDialog",
     "PermissionDialog",
     "SettingsDialog",
 ]
@@ -97,7 +99,7 @@ class PermissionDialog(_DialogBase):
             yield self._options
             yield self._error
             yield Static(
-                "↑/↓ choose · Enter confirm · 1–9 quick select · Esc cancels",
+                "↑/↓ choose · 1–9 quick select · Esc cancels",
                 markup=False,
                 classes="dialog-hint",
             )
@@ -171,7 +173,7 @@ def _collect_fields(
             value = coerce_value(field, _raw_value(widget))
         except (TypeError, ValueError):
             return None, f"{field['title']} needs a valid {field.get('kind')} value."
-        if field["required"] and (value is None or value == "" or value == []):
+        if field.get("required") and (value is None or value == "" or value == []):
             return None, f"{field['title']} is required."
         if value not in (None, ""):
             values[field["name"]] = value
@@ -218,7 +220,7 @@ class FormDialog(_DialogBase):
                     if field["name"] in self.current:
                         field = {**field, "default": self.current[field["name"]]}
                     yield Label(
-                        field["title"] + (" *" if field["required"] else ""),
+                        field["title"] + (" *" if field.get("required") else ""),
                         classes="field-label",
                         markup=False,
                     )
@@ -286,7 +288,7 @@ class ElicitationDialog(_DialogBase):
                 with VerticalScroll(classes="form-scroll"):
                     for field in self._fields:
                         yield Label(
-                            field["title"] + (" *" if field["required"] else ""),
+                            field["title"] + (" *" if field.get("required") else ""),
                             classes="field-label",
                             markup=False,
                         )
@@ -384,7 +386,7 @@ class ChoiceDialog(_DialogBase):
                 self._list.add_option(Option(text, id=choice.get("value", "")))
             yield self._list
             yield self._error
-            yield Static("Enter selects · Esc closes", markup=False, classes="dialog-hint")
+            yield Static("Esc closes", markup=False, classes="dialog-hint")
 
     def on_mount(self) -> None:
         self._list.focus()
@@ -409,7 +411,7 @@ class CommandPaletteDialog(_DialogBase):
 
     def __init__(
         self,
-        local_commands: list[tuple[str, str]],
+        local_commands: list[LocalCommand],
         agent_commands: list[dict[str, Any]],
         *,
         collision_names: set[str] | None = None,
@@ -427,7 +429,7 @@ class CommandPaletteDialog(_DialogBase):
             yield self._filter
             yield self._list
             yield Static(
-                "Enter runs the highlighted command · ↑/↓ move · /agent NAME for agent collisions",
+                "↑/↓ move · /agent NAME for agent collisions",
                 markup=False,
                 classes="dialog-hint",
             )
@@ -442,11 +444,13 @@ class CommandPaletteDialog(_DialogBase):
     def _rebuild(self, needle: str) -> None:
         needle = needle.strip().lower()
         self._list.clear_options()
-        local = [(name, help_text) for name, help_text in self.local_commands if needle in name.lower() or needle in help_text.lower()]
+        local = [command for command in self.local_commands if not command.hidden and command.matches(needle)]
         if local:
             self._list.add_option(Option("Local commands", id="__local_header", disabled=True))
-            for name, help_text in local:
-                self._list.add_option(Option(f"{name}   {help_text}", id=f"local:{name}"))
+            for command in local:
+                self._list.add_option(
+                    Option(command_suggestion_text(command), id=f"local:{command.name}")
+                )
         agent = [
             command
             for command in self.agent_commands
@@ -478,6 +482,23 @@ class CommandPaletteDialog(_DialogBase):
 
     def action_focus_list(self) -> None:
         self._list.focus()
+
+
+class InfoDialog(_DialogBase):
+    """Read-only Markdown overview with a single close action."""
+
+    def __init__(self, title: str, body: str, subtitle: str = "") -> None:
+        super().__init__(title, subtitle)
+        self.body = body
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog dialog-tall"):
+            yield from self.dialog_header()
+            yield Markdown(self.body)
+            yield Static("Esc closes", markup=False, classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one(Vertical).focus()
 
 
 class HelpDialog(_DialogBase):

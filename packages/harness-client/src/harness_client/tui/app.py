@@ -267,6 +267,18 @@ class HarnessApp(App[int]):
     #composer:focus {
         border: solid $accent;
     }
+    #command-suggestions {
+        dock: bottom;
+        offset: 0 -6;
+        height: auto;
+        max-height: 10;
+        margin: 0 1;
+        padding: 0 1;
+        background: $panel;
+        border: solid $accent 35%;
+        scrollbar-size-vertical: 1;
+    }
+    #command-suggestions:focus { border: solid $accent 35%; }
     #hintbar {
         dock: bottom;
         height: 1;
