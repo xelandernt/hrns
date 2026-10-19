@@ -27,6 +27,7 @@ from ..interactions import (
     ElicitationRequest,
     PermissionRequest,
 )
+from .choice_keys import handle_choice_arrow
 from .commands import LocalCommand, command_suggestion_text
 from .state import Settings, build_form_fields, coerce_value
 
@@ -65,6 +66,11 @@ class _DialogBase(ModalScreen[Any]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def on_key(self, event: Any) -> None:
+        """Left/Right change the focused choice control."""
+        if handle_choice_arrow(self.focused, str(event.key)):
+            event.stop()
 
 
 class PermissionDialog(_DialogBase):
@@ -113,6 +119,9 @@ class PermissionDialog(_DialogBase):
         self.dismiss(event.option_id)
 
     def on_key(self, event: Any) -> None:
+        if handle_choice_arrow(self.focused, str(event.key)):
+            event.stop()
+            return
         if event.key.isdigit() and event.key != "0":
             index = int(event.key) - 1
             if 0 <= index < len(self.request.options):

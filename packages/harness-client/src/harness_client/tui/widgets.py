@@ -31,6 +31,7 @@ from textual.widgets.option_list import Option
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS, UI_MAX_TRANSCRIPT_BLOCKS
 from ..interactions import PermissionRequest
 from ..renderers import RendererRegistry, readable_text
+from .choice_keys import choice_direction
 from .state import (
     binding_summary,
     config_option_value,
@@ -951,6 +952,15 @@ class ConfigOptionRequested(Message):
         self.option_id = option_id
 
 
+class ConfigOptionStepRequested(Message):
+    """Move a standard ACP select option one value in a direction."""
+
+    def __init__(self, option_id: str, direction: int) -> None:
+        super().__init__()
+        self.option_id = option_id
+        self.direction = direction
+
+
 class CapabilityRefreshRequested(Message):
     pass
 
@@ -983,7 +993,7 @@ class CapabilityPanel(Vertical):
         self._detail = Static("Select a capability to inspect it.", markup=False)
         self._detail.add_class("panel-detail")
         self._hint = Static(
-            "space toggles · e edits fields · a adds a local plugin · r refreshes",
+            "space or ←/→ toggles · e edits fields · a adds a local plugin · r refreshes",
             markup=False,
             classes="panel-hint",
         )
@@ -1012,6 +1022,7 @@ class CapabilityPanel(Vertical):
         self.extension_mode = True
         self.can_write = bool(can_write)
         self._snapshot = snapshot
+        previous = self.current_binding_id()
         self._summary = {}
         self._order = []
         self._options = {}
@@ -1037,17 +1048,19 @@ class CapabilityPanel(Vertical):
         self._hint.update(
             "select to inspect · this host does not advertise configuration updates"
             if not self.can_write
-            else "space toggles · e edits fields · a adds a local plugin · r refreshes"
+            else "space or ←/→ toggles · e edits fields · a adds a local plugin · r refreshes"
         )
         if self._list.option_count:
-            self._list.highlighted = 0
-            self._show_detail(self._order[0])
+            index = self._highlight_index(previous)
+            self._list.highlighted = index
+            self._show_detail(self._order[index])
         else:
             self._detail.update("No capabilities offered by this agent.")
 
     def set_standard_options(self, options: list[dict[str, Any]]) -> None:
         self.extension_mode = False
         self.can_write = True
+        previous = self.current_binding_id()
         self._summary = {}
         self._order = []
         self._options = {}
@@ -1060,7 +1073,7 @@ class CapabilityPanel(Vertical):
             self._options[option_id] = option
             name = option.get("name") or option_id
             value = config_option_value(option)
-            self._list.add_option(Option(f"{name}: {value}", id=option_id))
+            self._list.add_option(Option(f"{name}: <{value}>", id=option_id))
         self._status.update(
             Text(
                 "Standard ACP configuration only. This agent does not advertise the richer "
@@ -1068,15 +1081,23 @@ class CapabilityPanel(Vertical):
                 style="dim",
             )
         )
+        self._hint.update("←/→ changes values · Enter opens the full chooser · r refreshes")
         if self._list.option_count:
-            self._list.highlighted = 0
-            self._show_standard_detail(self._order[0])
+            index = self._highlight_index(previous)
+            self._list.highlighted = index
+            self._show_standard_detail(self._order[index])
         else:
             self._detail.update("This agent advertises no configuration options.")
 
+    def _highlight_index(self, previous: str | None) -> int:
+        """Keep the edited row selected instead of jumping back to the top."""
+        if previous and previous in self._order:
+            return self._order.index(previous)
+        return 0
+
     def _row_text(self, summary: dict[str, Any]) -> str:
         enabled = "on" if summary["enabled"] else "off"
-        bits = [f"{summary['name']}   {enabled}"]
+        bits = [f"{summary['name']}   <{enabled}>"]
         if summary["locked"]:
             bits.append("locked")
         elif summary.get("pending"):
@@ -1169,17 +1190,38 @@ class CapabilityPanel(Vertical):
         if not self.extension_mode:
             self.post_message(ConfigOptionRequested(option_id))
             return
-        summary = self._summary.get(option_id)
+        self._toggle_binding(option_id)
+
+    def on_key(self, event: Any) -> None:
+        """Left/Right change the highlighted capability or standard option."""
+        direction = choice_direction(str(event.key))
+        if direction is None or not self._list.has_focus:
+            return
+        binding_id = self.current_binding_id()
+        if not binding_id:
+            return
+        event.stop()
+        if self.extension_mode:
+            self._toggle_binding(binding_id)
+            return
+        option = self._options.get(binding_id) or {}
+        if option.get("type") == "boolean":
+            self.post_message(ConfigOptionRequested(binding_id))
+        else:
+            self.post_message(ConfigOptionStepRequested(binding_id, direction))
+
+    def _toggle_binding(self, binding_id: str) -> None:
+        summary = self._summary.get(binding_id)
         if summary is None:
             return
         if not self.can_write:
-            self._show_detail(option_id)
+            self._show_detail(binding_id)
             self.show_message("This host advertises a read-only capability catalog.")
             return
         if summary["locked"]:
             self.show_message(f"{summary['name']} is locked: {summary['reason'] or 'unavailable'}")
             return
-        self.post_message(BindingToggleRequested(option_id, not summary["enabled"]))
+        self.post_message(BindingToggleRequested(binding_id, not summary["enabled"]))
 
     def action_refresh(self) -> None:
         self.post_message(CapabilityRefreshRequested())
@@ -1213,9 +1255,7 @@ class CapabilityPanel(Vertical):
         if not self.extension_mode:
             self.post_message(ConfigOptionRequested(binding_id))
             return
-        summary = self._summary.get(binding_id)
-        if summary:
-            self.post_message(BindingToggleRequested(binding_id, not summary["enabled"]))
+        self._toggle_binding(binding_id)
 
     def current_binding_id(self) -> str | None:
         index = self._list.highlighted

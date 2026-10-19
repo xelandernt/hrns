@@ -42,6 +42,7 @@ from ..interactions import PERMISSION_MODES, PermissionDecision, PermissionReque
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
 from ..local import local_model_catalog, local_target
 from ..profiles import Profile, Profiles, default_profiles_path
+from .choice_keys import handle_choice_arrow, stepped_value
 from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
 from .dialogs import (
     ChoiceDialog,
@@ -74,6 +75,7 @@ from .widgets import (
     CommandSuggestions,
     Composer,
     ConfigOptionRequested,
+    ConfigOptionStepRequested,
     HintBar,
     SessionCloseRequested,
     SessionDeleteRequested,
@@ -373,6 +375,11 @@ class ConnectScreen(Screen[None]):
             lines.append("")
             lines.append(entry.detail)
         self._detail.update("\n".join(lines))
+
+    def on_key(self, event: Any) -> None:
+        """Left/Right move through the connection list like Up/Down."""
+        if handle_choice_arrow(self.focused, str(event.key)):
+            event.stop()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._render_visible(event.value)
@@ -1181,7 +1188,10 @@ class ChatScreen(Screen[None]):
             self._cancel_turn()
 
     def on_key(self, event: Any) -> None:
-        """Shortcuts work only while the approval prompt owns focus."""
+        """Left/Right change a focused choice control; approval shortcuts need focus."""
+        if handle_choice_arrow(self.focused, str(event.key)):
+            event.stop()
+            return
         if self._approval_future is None:
             return
         bar = self.query_one("#approval", ApprovalBar)
@@ -1527,6 +1537,9 @@ class ChatScreen(Screen[None]):
     def on_config_option_requested(self, event: ConfigOptionRequested) -> None:
         self._change_standard_option(event.option_id)
 
+    def on_config_option_step_requested(self, event: ConfigOptionStepRequested) -> None:
+        self._step_standard_option(event.option_id, event.direction)
+
     @work(group="capability", exclusive=True)
     async def _toggle_binding(self, binding_id: str, enabled: bool) -> None:
         panel = self.query_one("#side-panel", SidePanel).capabilities
@@ -1781,6 +1794,22 @@ class ChatScreen(Screen[None]):
         self._apply_snapshot(snapshot)
         await self._refresh_capabilities()
         panel.show_message(f"Configuration saved for {binding_id}.")
+
+    def _step_standard_option(self, option_id: str, direction: int) -> None:
+        panel = self.query_one("#side-panel", SidePanel).capabilities
+        option = panel.option(option_id) or {}
+        if option.get("type") == "boolean":
+            self._change_standard_option(option_id)
+            return
+        choices = option_values(option)
+        if not choices:
+            panel.show_message(f"{option.get('name', option_id)} has no selectable values.")
+            return
+        values = [choice["value"] for choice in choices]
+        current = option.get("currentValue")
+        value = stepped_value(values, None if current is None else str(current), direction)
+        if value is not None:
+            self._set_standard_value(option_id, value)
 
     @work(group="capability", exclusive=True)
     async def _change_standard_option(self, option_id: str) -> None:
