@@ -1,0 +1,86 @@
+# Editable research starter manifest (DefinitionManifest schema v1).
+#
+# Requires only a model. Search and fetch default on: they need a provider with native web
+# search/fetch, or pydantic-ai-slim[duckduckgo,web-fetch]. The definition needs no workspace:
+# oversized tool output is truncated into an explicit host-local file store.
+# Optional memory/MCP/delegation bindings are present but disabled.
+#
+# Load with:
+#   harness-host --manifest examples/starters/research.yaml
+#   harness_runtime.starters.load_starter_manifest(path, starter="research")
+schema_version: 1
+agent_id: harness.research
+name: Research starter
+description: >-
+  Search, fetch, planning and context controls; optional memory, delegation, MCP and
+  browser capabilities. Runs without a workspace.
+definition_version: 1.0.0
+spec:
+  instructions: |
+    You are a research agent.
+
+    - Search broadly before drawing conclusions, then read the sources that support each claim.
+    - Prefer primary and authoritative sources; cite direct links for factual claims.
+    - Distinguish sourced facts from your own inference.
+    - Plan multi-part questions and keep the plan current.
+    - State clearly when the available tools cannot verify a claim.
+resources:
+  - name: model.default
+    kind: model
+    description: Agent model (provider string or native Model instance).
+    required: true
+  - name: memory.store
+    kind: memory
+    required: false
+  - name: subagents.agents
+    kind: service
+    required: false
+bindings:
+  # Native by default; switch local: true to use the DuckDuckGo fallback extra.
+  - binding_id: search
+    plugin_id: pydantic.web_search
+    config: {native: true}
+    enabled: true
+  - binding_id: fetch
+    plugin_id: pydantic.web_fetch
+    config: {native: true}
+    enabled: true
+  - binding_id: planning
+    plugin_id: harness.planning
+    config: {enable_subtasks: true}
+    enabled: true
+  - binding_id: context_clear_tool_results
+    plugin_id: harness.clear_tool_results
+    config: {max_tokens: 60000, keep_pairs: 4}
+    enabled: true
+  - binding_id: context_tool_output_limits
+    plugin_id: harness.tool_output_limits
+    config:
+      # No workspace: spill/truncate into an explicit host-local store, never silently.
+      store: local_file
+      bands:
+        - over: 30000
+          action: {kind: truncate, strategy: head_tail, max_chars: 8000}
+    enabled: true
+  # Off by default: emits usage events for a UI gauge; no history edits.
+  - binding_id: context_report_usage
+    plugin_id: harness.report_context_usage
+    enabled: false
+  # Off by default; bind memory.store in the deployment to enable.
+  - binding_id: memory
+    plugin_id: harness.memory
+    enabled: false
+  # Off by default; bind subagents.agents to enable (live Python objects).
+  - binding_id: subagents
+    plugin_id: harness.subagents
+    config: {forward_usage: true}
+    enabled: false
+  # Off by default; hosted/local MCP needs pydantic-ai-slim[mcp] and a reachable endpoint.
+  - binding_id: mcp
+    plugin_id: pydantic.mcp
+    config: {url: "https://example.org/mcp"}
+    enabled: false
+  # Off by default; needs pydantic-ai-harness[browser-use] and a browser environment.
+  - binding_id: browser
+    plugin_id: harness.browser_use
+    enabled: false

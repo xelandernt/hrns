@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harness-runtime"
+version = "0.1.0"
+description = "Native Pydantic AI definitions, managed capabilities, sessions and ACP hosting"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["harness-protocol==0.1.0", "pydantic-ai-slim==2.57.0", "pydantic-ai-harness[acp]==0.57.0", "PyYAML>=6,<7", "platformdirs>=4", "packaging>=24"]
+
+[project.optional-dependencies]
+openai = ["pydantic-ai-slim[openai]==2.57.0"]
+anthropic = ["pydantic-ai-slim[anthropic]==2.57.0"]
+postgres = ["psycopg[binary]>=3.2"]
+
+[project.scripts]
+harness-host = "harness_runtime.host:main"
+
+[project.entry-points."harness.agents"]
+demo = "harness_runtime.examples:demo_definition"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harness_runtime"]
+
+[tool.uv.sources]
+harness-protocol = { workspace = true }

@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harness-protocol"
+version = "0.1.0"
+description = "Versioned contracts for programmable Harness agents and ACP transports"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.12,<3"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harness_protocol"]

@@ -1,0 +1,45 @@
+"""Shared contracts. This package deliberately imports neither AI nor UI libraries."""
+
+from .errors import HarnessError
+from .models import (
+    AddChange,
+    BindingChange,
+    BindingDescriptor,
+    BindingId,
+    BindingListResponse,
+    BindingState,
+    CapabilityPolicy,
+    ConfigurationSnapshot,
+    ConfigurationUpdate,
+    ConfigureChange,
+    EnableChange,
+    ExtensionAdvertisement,
+    ListRequest,
+    PluginInfo,
+    PluginListResponse,
+    PresentationPayload,
+    RuntimeEvent,
+    WireModel,
+    changes_adapter,
+)
+from .transport import (
+    EXTENSION_METHODS,
+    EXTENSION_VERSION,
+    MAX_MESSAGE_BYTES,
+    PING_INTERVAL,
+    PING_TIMEOUT,
+    SUBPROTOCOL,
+    canonical_hash,
+    decode_frame,
+    encode_frame,
+    paginate,
+)
+
+__all__ = [
+    "AddChange", "BindingChange", "BindingDescriptor", "BindingId", "BindingListResponse", "BindingState", "CapabilityPolicy",
+    "ConfigurationSnapshot", "ConfigurationUpdate", "ConfigureChange", "EnableChange",
+    "ExtensionAdvertisement", "ListRequest", "PluginInfo", "PluginListResponse", "PresentationPayload", "RuntimeEvent",
+    "WireModel", "changes_adapter", "HarnessError", "EXTENSION_METHODS", "EXTENSION_VERSION",
+    "MAX_MESSAGE_BYTES", "PING_INTERVAL", "PING_TIMEOUT", "SUBPROTOCOL", "canonical_hash",
+    "decode_frame", "encode_frame", "paginate",
+]

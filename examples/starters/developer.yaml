@@ -1,0 +1,114 @@
+# Editable developer starter manifest (DefinitionManifest schema v1).
+#
+# The workspace resource is REQUIRED: bind a sandbox (recommended: Smol) or an explicit
+# LocalWorkspace. Nothing falls back to host execution.
+# Runtime Capability Creation is intentionally absent; a deployment must opt in.
+#
+# Load with:
+#   harness-host --manifest examples/starters/developer.yaml
+#   harness_runtime.starters.load_starter_manifest(path, starter="developer")
+schema_version: 1
+agent_id: harness.developer
+name: Developer starter
+description: >-
+  Filesystem, shell, planning, repository context, skills and context controls in an
+  explicit workspace; optional memory, sub-agents, web, MCP and approvals.
+definition_version: 1.0.0
+spec:
+  instructions: |
+    You are a software engineering agent working in the bound workspace.
+
+    - Read the repository before changing it; follow AGENTS.md / CLAUDE.md guidance.
+    - Plan multi-step work and keep the plan current while you work.
+    - Prefer small, verifiable changes and run the project's tests before reporting success.
+    - Use shell commands deliberately: the workspace is the only execution location.
+    - Never claim a command or test passed unless its output shows it did.
+resources:
+  - name: model.default
+    kind: model
+    description: Agent model (provider string or native Model instance).
+    required: true
+  - name: workspace
+    kind: workspace
+    description: Explicit workspace/service binding; never inferred from the client.
+    required: true
+  - name: memory.store
+    kind: memory
+    required: false
+  - name: subagents.agents
+    kind: service
+    required: false
+  - name: deferred.handler
+    kind: service
+    required: false
+bindings:
+  # Mandatory: the working directory comes from the bound workspace resource.
+  - binding_id: workspace
+    plugin_id: pydantic.local_workspace
+    config: {read_only: false}
+    enabled: true
+  - binding_id: filesystem
+    plugin_id: harness.filesystem
+    config: {read_only: false}
+    enabled: true
+  - binding_id: shell
+    plugin_id: harness.shell
+    config: {default_timeout: 30.0}
+    enabled: true
+  - binding_id: planning
+    plugin_id: harness.planning
+    config: {enable_subtasks: true}
+    enabled: true
+  - binding_id: repo_context
+    plugin_id: harness.repo_context
+    config: {nested_traversal: true}
+    enabled: true
+  - binding_id: skills
+    plugin_id: harness.skills
+    config:
+      directories: [.agents/skills]
+      missing_directories: skip
+    enabled: true
+  - binding_id: context_clear_tool_results
+    plugin_id: harness.clear_tool_results
+    config: {max_tokens: 60000, keep_pairs: 4}
+    enabled: true
+  - binding_id: context_tool_output_limits
+    plugin_id: harness.tool_output_limits
+    config:
+      bands:
+        - over: 20000
+          action: {kind: truncate, max_chars: 4000}
+    enabled: true
+  # Off by default: enabling requires a model-written summary (or a bound model).
+  - binding_id: context_summarize
+    plugin_id: harness.summarizing_compaction
+    config: {max_messages: 120, keep_messages: 30}
+    enabled: false
+  # Off by default and needing a host handler resource.
+  - binding_id: deferred_approvals
+    plugin_id: pydantic.handle_deferred_tool_calls
+    enabled: false
+  # Off by default; bind memory.store in the deployment to enable.
+  - binding_id: memory
+    plugin_id: harness.memory
+    enabled: false
+  # Off by default; bind subagents.agents to enable (live Python objects).
+  - binding_id: subagents
+    plugin_id: harness.subagents
+    config: {forward_usage: true}
+    enabled: false
+  # Off by default; native search needs provider support.
+  - binding_id: web_search
+    plugin_id: pydantic.web_search
+    config: {native: true}
+    enabled: false
+  - binding_id: web_fetch
+    plugin_id: pydantic.web_fetch
+    config: {native: true}
+    enabled: false
+  # Off by default; hosted/local MCP needs pydantic-ai-slim[mcp] and a reachable endpoint.
+  - binding_id: mcp
+    plugin_id: pydantic.mcp
+    config: {url: "https://example.org/mcp"}
+    enabled: false

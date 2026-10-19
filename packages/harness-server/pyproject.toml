@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harness-server"
+version = "0.1.0"
+description = "Authenticated ACP deployment catalog and isolated worker WebSocket hosting"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["harness-protocol==0.1.0", "starlette>=0.47,<2", "uvicorn>=0.35", "websockets>=15,<18"]
+
+[project.scripts]
+harness-server = "harness_server.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harness_server"]
+
+[tool.uv.sources]
+harness-protocol = { workspace = true }
