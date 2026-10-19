@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from harness_config import LocalSettings
@@ -13,8 +14,18 @@ from .errors import HarnessClientError
 from .launch import ConnectionTarget, local_cwd
 from .profiles import Profile
 
+
+@dataclass(frozen=True, slots=True)
+class LocalCatalog:
+    """Provider/model ids plus the reasoning support the runtime advertised."""
+
+    models: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: provider -> model -> ``"supported"``/``"always"``
+    thinking: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
 _CATALOG_LOCK = threading.Lock()
-_CATALOG: dict[str, tuple[str, ...]] | None = None
+_CATALOG: LocalCatalog | None = None
 
 _LOCAL_KEYRING_SERVICE = "harness.local"
 
@@ -48,10 +59,10 @@ def store_api_key(provider: str, api_key_env: str, api_key: str) -> str | None:
         return None
 
 
-def _load_catalog() -> dict[str, tuple[str, ...]]:
+def _load_catalog() -> LocalCatalog:
     executable = shutil.which("harness-local")
     if executable is None:
-        return {}
+        return LocalCatalog()
     try:
         completed = subprocess.run(
             [executable, "--catalog"],
@@ -62,11 +73,12 @@ def _load_catalog() -> dict[str, tuple[str, ...]]:
         )
         payload = json.loads(completed.stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
-        return {}
+        return LocalCatalog()
     entries = payload.get("providers") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
-        return {}
-    catalog: dict[str, tuple[str, ...]] = {}
+        return LocalCatalog()
+    models_by_provider: dict[str, tuple[str, ...]] = {}
+    thinking_by_provider: dict[str, dict[str, str]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -74,8 +86,27 @@ def _load_catalog() -> dict[str, tuple[str, ...]]:
         models = entry.get("models")
         if not isinstance(name, str) or not name or not isinstance(models, list):
             continue
-        catalog[name] = tuple(str(model) for model in models if isinstance(model, str))
-    return catalog
+        models_by_provider[name] = tuple(
+            str(model) for model in models if isinstance(model, str)
+        )
+        thinking = entry.get("thinking")
+        if isinstance(thinking, dict):
+            thinking_by_provider[name] = {
+                str(model): str(level)
+                for model, level in thinking.items()
+                if isinstance(model, str) and level in ("supported", "always")
+            }
+    return LocalCatalog(models=models_by_provider, thinking=thinking_by_provider)
+
+
+def _catalog() -> LocalCatalog:
+    global _CATALOG
+    if _CATALOG is not None:
+        return _CATALOG
+    with _CATALOG_LOCK:
+        if _CATALOG is None:
+            _CATALOG = _load_catalog()
+        return _CATALOG
 
 
 def local_model_catalog() -> dict[str, tuple[str, ...]]:
@@ -85,13 +116,23 @@ def local_model_catalog() -> dict[str, tuple[str, ...]]:
     pinned runtime's registry and returns JSON. An unavailable runtime produces an
     empty catalog so the dialog can still fall back to manual provider/model input.
     """
-    global _CATALOG
-    if _CATALOG is not None:
-        return _CATALOG
-    with _CATALOG_LOCK:
-        if _CATALOG is None:
-            _CATALOG = _load_catalog()
-        return _CATALOG
+    return _catalog().models
+
+
+def local_thinking_support(provider: str, model: str) -> str | None:
+    """``"supported"``, ``"always"``, ``"custom"``, or ``None``.
+
+    ``None`` means the model is known and its profile says it cannot reason.
+    A custom id outside the catalog returns ``"custom"`` so the user can opt in
+    rather than being blocked by a registry that does not know the alias.
+    """
+    catalog = _catalog()
+    support = catalog.thinking.get(provider, {}).get(model)
+    if support is not None:
+        return support
+    if model in catalog.models.get(provider, ()):
+        return None
+    return "custom"
 
 
 def local_target(

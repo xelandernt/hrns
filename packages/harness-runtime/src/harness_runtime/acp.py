@@ -28,6 +28,7 @@ from typing import Any, TypeAlias
 import acp
 from acp import schema
 from acp.exceptions import RequestError
+from harness_config import EFFORT_DEFAULT, EFFORT_OFF, THINKING_LEVELS
 from harness_protocol import (
     EXTENSION_METHODS,
     BindingChange,
@@ -57,6 +58,7 @@ ToolCallPresenter: TypeAlias = Callable[[ToolCallPart], ToolCallPresentation | N
 
 __all__ = [
     "BINDING_OPTION_PREFIX",
+    "EFFORT_OPTION_ID",
     "EXTENSION_METHODS_V1",
     "MAX_TEXT_UPDATE_BYTES",
     "MODEL_OPTION_ID",
@@ -66,6 +68,7 @@ __all__ = [
     "chunk_text",
     "config_options",
     "default_presenter",
+    "effort_option",
     "event_to_update",
     "extension_advertisement",
     "harness_rpc_error",
@@ -98,6 +101,9 @@ MAX_TEXT_UPDATE_BYTES = 48 * 1024
 
 #: Stable id of the standard model selection option.
 MODEL_OPTION_ID = "model"
+
+#: Stable id of the local runtime's unified reasoning-effort option.
+EFFORT_OPTION_ID = "effort"
 
 #: Capability toggles are exposed as ``binding:<bindingId>`` standard options.
 BINDING_OPTION_PREFIX = "binding:"
@@ -457,6 +463,51 @@ def model_option(models: Sequence[str], current: str | None) -> schema.SessionCo
     )
 
 
+_EFFORT_LABELS = {
+    EFFORT_DEFAULT: ("Default", "Let the provider choose its default reasoning effort."),
+    EFFORT_OFF: ("Off", "Disable reasoning when the model allows it."),
+    "minimal": ("Minimal", "Fastest responses with the least reasoning."),
+    "low": ("Low", "Light reasoning for straightforward work."),
+    "medium": ("Medium", "Balanced reasoning for everyday work."),
+    "high": ("High", "Deeper reasoning for harder work."),
+    "xhigh": ("XHigh", "Maximum reasoning; highest cost and latency."),
+}
+
+
+def effort_option(
+    current: str | None,
+    *,
+    support: str | None,
+) -> schema.SessionConfigOptionSelect | None:
+    """The unified ``effort`` select option, or ``None`` when the model cannot reason.
+
+    ``support`` is ``"supported"``, ``"always"``, or ``"custom"`` (an id the
+    registry cannot profile). Always-on models omit ``off`` because pydantic-ai
+    silently ignores it there.
+    """
+    if support is None:
+        return None
+    values = [EFFORT_DEFAULT]
+    if support != "always":
+        values.append(EFFORT_OFF)
+    values.extend(THINKING_LEVELS)
+    current_value = current if current in values else EFFORT_DEFAULT
+    return schema.SessionConfigOptionSelect(
+        id=EFFORT_OPTION_ID,
+        name="Reasoning effort",
+        type="select",
+        current_value=current_value,
+        options=[
+            schema.SessionConfigSelectOption(
+                value=value, name=_EFFORT_LABELS[value][0], description=_EFFORT_LABELS[value][1]
+            )
+            for value in values
+        ],
+        description="Reasoning effort used by the next turn. Only models that support thinking show this.",
+        category="model",
+    )
+
+
 def _binding_toggle_option(
     descriptor: BindingDescriptor,
     *,
@@ -512,6 +563,8 @@ def config_options(
     *,
     models: Sequence[str] = (),
     current_model: str | None = None,
+    current_effort: str | None = None,
+    effort_support: str | None = None,
     boolean_toggles: bool = False,
 ) -> list[schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean]:
     """The complete standard ACP configuration option list for a session.
@@ -523,6 +576,9 @@ def config_options(
     model = model_option(models, current_model)
     if model is not None:
         options.append(model)
+    effort = effort_option(current_effort, support=effort_support)
+    if effort is not None:
+        options.append(effort)
     for descriptor in descriptors:
         option = _binding_toggle_option(descriptor, boolean=boolean_toggles)
         if option is not None:

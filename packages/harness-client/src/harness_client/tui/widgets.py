@@ -211,6 +211,8 @@ class TranscriptPane(VerticalScroll):
         self._replay = False
         self._replay_entries: list[tuple[str, Any]] = []
         self.auto_expand_tools = False
+        #: Expand reasoning text (the Thinking/Thought row appears either way).
+        self.show_thoughts = False
         self._ticker: Any = None
         self.renderers = RendererRegistry()
         try:
@@ -274,11 +276,13 @@ class TranscriptPane(VerticalScroll):
             return
         if thought:
             if self._thought is None:
-                self._thought = ReasoningBlock()
+                self._thought = ReasoningBlock(expanded=self.show_thoughts)
                 await self._mount_block(self._thought)
             self._thought_buffer += text
             self._thought.append_text(text)
+            self.scroll_end(animate=False)
         else:
+            self._end_thought()
             if self._stream is None:
                 self._stream = MessageBlock("agent", "")
                 await self._mount_block(self._stream)
@@ -286,16 +290,20 @@ class TranscriptPane(VerticalScroll):
             self._stream.append_text(text)
             self._dirty = True
 
+    def _end_thought(self) -> None:
+        """Finish the reasoning segment so its spinner stops before other output."""
+        if self._thought is not None:
+            self._thought.finish()
+        self._thought = None
+        self._thought_buffer = ""
+
     async def finish_message(self) -> None:
         self.flush()
         if self._stream is not None:
             self._stream.finish()
-        if self._thought is not None:
-            self._thought.finish()
+        self._end_thought()
         self._stream = None
         self._stream_buffer = ""
-        self._thought = None
-        self._thought_buffer = ""
 
     def flush(self) -> None:
         if not self._dirty or self._stream is None:
@@ -318,6 +326,7 @@ class TranscriptPane(VerticalScroll):
             existing = self._replay_tool(event.tool_call_id)
             self._replay_entries.append(("tool", merge_tool_event(existing, event)))
             return
+        self._end_thought()
         self._end_agent_stream()
         merged = merge_tool_event(None, event)
         card = self._tool_card(merged)
@@ -462,15 +471,78 @@ class MessageBlock(Vertical):
 
 
 class ReasoningBlock(Collapsible):
-    """Agent-provided reasoning, collapsed by default; never fabricated."""
+    """Agent-provided reasoning with a live ``Thinking`` indicator.
 
-    def __init__(self) -> None:
+    Mirrors OpenCode's presentation: a spinner and ``Thinking`` while tokens
+    arrive, then ``Thought`` with the elapsed time. The body follows the user's
+    reasoning preference; providers that do not stream thoughts never create it.
+    """
+
+    DEFAULT_CSS = """
+    ReasoningBlock {
+        background: transparent;
+        border-top: none;
+        padding: 0 0 0 1;
+        margin: 0 0 1 1;
+        height: auto;
+    }
+    ReasoningBlock CollapsibleTitle {
+        background: transparent;
+        color: $warning;
+        padding: 0;
+        width: auto;
+    }
+    ReasoningBlock CollapsibleTitle:hover,
+    ReasoningBlock CollapsibleTitle:focus {
+        background: transparent;
+        color: $foreground;
+    }
+    ReasoningBlock > Contents {
+        padding: 0 0 0 2;
+    }
+    """
+
+    def __init__(self, *, expanded: bool = False) -> None:
         self._text = ""
         self._dropped = 0
         self._marked = False
+        self._started = time.monotonic()
+        self._finished: float | None = None
+        self._spin_index = 0
+        self._timer: Any = None
         self._body = Static("", markup=False)
         self._body.add_class("reasoning-body")
-        super().__init__(self._body, title="Reasoning", collapsed=True)
+        super().__init__(self._body, title="Thinking", collapsed=not expanded)
+        self.add_class("reasoning-block")
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(0.1, self._tick)
+        self._refresh_title()
+
+    def on_unmount(self) -> None:
+        self._stop_spinner()
+
+    def _stop_spinner(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        if self._finished is not None:
+            self._stop_spinner()
+            return
+        self._spin_index = (self._spin_index + 1) % len(SPINNER_FRAMES)
+        self._refresh_title()
+
+    def _refresh_title(self) -> None:
+        title = Text()
+        if self._finished is None:
+            title.append(f"{SPINNER_FRAMES[self._spin_index]} ", style="bold")
+            title.append("Thinking")
+        else:
+            title.append("Thought")
+            title.append(f" · {self._finished - self._started:.1f}s", style="dim")
+        self.title = title
 
     def append_text(self, text: str) -> None:
         self._text += text
@@ -482,10 +554,17 @@ class ReasoningBlock(Collapsible):
                 self._marked = True
                 self._dropped += 1
                 self._text = "…" + self._text[1:]
-        self._body.update(readable_text(self._text))
+        if self.is_mounted:
+            self._body.update(readable_text(self._text))
 
     def finish(self) -> None:
-        self._body.update(readable_text(self._text))
+        if self._finished is not None:
+            return
+        self._finished = time.monotonic()
+        self._stop_spinner()
+        if self.is_mounted:
+            self._body.update(readable_text(self._text))
+        self._refresh_title()
 
 
 class NoticeBlock(Static):
@@ -731,6 +810,7 @@ class StatusBar(Static):
         connected: bool,
         session_id: str | None,
         model: str = "",
+        effort: str = "",
         mode: str = "",
         usage: str = "",
         busy: bool = False,
@@ -750,6 +830,8 @@ class StatusBar(Static):
             text.append(permission, style="bold" if permission != "ask" else "")
         if model:
             text.append(f"   model {model}")
+        if effort:
+            text.append(f"   effort {effort}")
         if usage:
             text.append(f"   {usage}")
         if busy:

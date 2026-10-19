@@ -9,6 +9,7 @@ each event is projected from the public ``AgentStreamEvent`` union.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 from harness_protocol import RuntimeEvent
@@ -21,6 +22,7 @@ from pydantic_ai.messages import (
     OutputToolCallEvent,
     OutputToolResultEvent,
     PartDeltaEvent,
+    PartEndEvent,
     PartStartEvent,
     RetryPromptPart,
     TextPart,
@@ -34,6 +36,7 @@ from pydantic_ai.usage import RunUsage
 from pydantic_core import to_jsonable_python
 
 __all__ = [
+    "TranslationState",
     "deferred_requests_payload",
     "output_payload",
     "translate_event",
@@ -41,13 +44,61 @@ __all__ = [
 ]
 
 
+@dataclass
+class TranslationState:
+    """Per-turn state needed to decode streamed thinking parts.
+
+    Some providers (notably OpenAI's Responses API) carry reasoning text in
+    ``provider_details['raw_content']`` and stream it as updater callbacks
+    instead of ``content_delta``. Tracking the last emitted text lets us turn
+    those cumulative updates into the deltas the runtime vocabulary expects.
+    """
+
+    thinking: dict[int, tuple[dict[str, Any], str]] = field(default_factory=dict)
+
+
 def _part_index(event: Any) -> int | None:
     index = getattr(event, "index", None)
     return index if isinstance(index, int) else None
 
 
-def translate_event(event: Any) -> list[RuntimeEvent]:
-    """Project one native stream event into zero or more runtime events."""
+def _raw_thinking_text(details: Any) -> str:
+    """Join a thinking part's provider-specific raw reasoning chunks."""
+    if not isinstance(details, dict):
+        return ""
+    raw = details.get("raw_content")
+    if isinstance(raw, list):
+        return "".join(str(item) for item in raw)
+    return raw if isinstance(raw, str) else ""
+
+
+def _thinking_event(
+    text: str,
+    index: int | None,
+    *,
+    thought: bool = True,
+    part_start: bool = False,
+) -> RuntimeEvent:
+    return RuntimeEvent(
+        type="text_delta",
+        data={
+            "text": text,
+            "part_index": index,
+            "kind": "thinking" if thought else "text",
+            "thought": thought,
+            "part_start": part_start,
+        },
+    )
+
+
+def translate_event(
+    event: Any, state: TranslationState | None = None
+) -> list[RuntimeEvent]:
+    """Project one native stream event into zero or more runtime events.
+
+    ``state`` is optional for stateless callers; pass one per turn to decode
+    providers that stream reasoning through cumulative ``provider_details``.
+    """
     if isinstance(event, AgentRunResultEvent):
         return []  # the trailing result event is represented by turn_complete
     if isinstance(event, PartStartEvent):
@@ -66,19 +117,16 @@ def translate_event(event: Any) -> list[RuntimeEvent]:
                     },
                 )
             ]
-        if isinstance(part, ThinkingPart) and part.content:
-            return [
-                RuntimeEvent(
-                    type="text_delta",
-                    data={
-                        "text": part.content,
-                        "part_index": index,
-                        "kind": "thinking",
-                        "thought": True,
-                        "part_start": True,
-                    },
-                )
-            ]
+        if isinstance(part, ThinkingPart):
+            details = (
+                dict(part.provider_details)
+                if isinstance(part.provider_details, dict)
+                else {}
+            )
+            text = part.content or _raw_thinking_text(details)
+            if state is not None and index is not None:
+                state.thinking[index] = (details, text)
+            return [_thinking_event(text, index, part_start=True)] if text else []
         return []
     if isinstance(event, PartDeltaEvent):
         delta = event.delta
@@ -95,19 +143,39 @@ def translate_event(event: Any) -> list[RuntimeEvent]:
                     },
                 )
             ]
-        if isinstance(delta, ThinkingPartDelta) and delta.content_delta:
-            return [
-                RuntimeEvent(
-                    type="text_delta",
-                    data={
-                        "text": delta.content_delta,
-                        "part_index": index,
-                        "kind": "thinking",
-                        "thought": True,
-                    },
-                )
-            ]
+        if isinstance(delta, ThinkingPartDelta):
+            text = delta.content_delta or ""
+            if state is not None and index is not None:
+                details, emitted = state.thinking.get(index, ({}, ""))
+                change = delta.provider_details
+                if callable(change):
+                    try:
+                        details = change(dict(details))
+                    except Exception:
+                        details = dict(details)
+                elif isinstance(change, dict):
+                    details = {**details, **change}
+                current = _raw_thinking_text(details)
+                if text:
+                    emitted += text
+                elif current.startswith(emitted):
+                    text = current[len(emitted):]
+                    emitted = current
+                else:
+                    text = current
+                    emitted = current
+                state.thinking[index] = (details, emitted)
+            return [_thinking_event(text, index)] if text else []
         return []
+    if isinstance(event, PartEndEvent) and isinstance(event.part, ThinkingPart):
+        index = _part_index(event)
+        text = ""
+        if state is not None and index is not None:
+            details, emitted = state.thinking.pop(index, ({}, ""))
+            final = _raw_thinking_text(event.part.provider_details)
+            if final.startswith(emitted):
+                text = final[len(emitted):]
+        return [_thinking_event(text, index)] if text else []
     if isinstance(event, FunctionToolCallEvent | OutputToolCallEvent):
         part = event.part
         return [

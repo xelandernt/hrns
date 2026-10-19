@@ -362,6 +362,16 @@ def option_values(option: dict[str, Any]) -> list[dict[str, str]]:
     return values
 
 
+def effort_option(
+    options: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Find the local runtime's unified reasoning-effort option, if advertised."""
+    for option in options:
+        if isinstance(option, dict) and option.get("id") == "effort":
+            return option
+    return None
+
+
 def model_option(options: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> dict[str, Any] | None:
     """Find the option that selects the model, if the agent exposes one."""
     candidates: list[dict[str, Any]] = []
@@ -546,7 +556,7 @@ class Settings:
 
     theme: str = "harness"
     auto_expand_tools: bool = False
-    show_thoughts: bool = True
+    show_thoughts: bool = False
     side_panel: bool = True
     permission_mode: str = "ask"
     extra: dict[str, Any] = field(default_factory=dict)
@@ -560,7 +570,7 @@ class Settings:
         return cls(
             theme=str(mapping.get("theme", "harness")),
             auto_expand_tools=bool(mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))),
-            show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", True))),
+            show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
             side_panel=bool(mapping.get("sidePanel", mapping.get("side_panel", True))),
             permission_mode=mode,
         )

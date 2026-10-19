@@ -71,7 +71,7 @@ definition workspace resource (`resources[requirement.name] = cwd` for `kind ==
 | `session.catalog.descriptors()` | complete descriptor list for standard config options and change-mode gating |
 | `session.plugins(...)` | not used for the ACP method (no session id in `plugins/list`); the host pages `registry.catalog()` instead |
 | `session.update_configuration(changes, request_id=…, expected_revision=…)` | extension update and standard `session/set_config_option` |
-| `session.stream(prompt, model=…, deferred_tool_results=…)` → `RuntimeEvent` iterator | `session/prompt` |
+| `session.stream(prompt, model=…, model_settings=…, deferred_tool_results=…)` → `RuntimeEvent` iterator | `session/prompt` |
 | `session.cancel()` | `session/cancel` |
 | `session.close()` | close/reload |
 | `session.transcript()` | `session/load` replay |

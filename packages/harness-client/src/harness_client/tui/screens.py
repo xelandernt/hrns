@@ -10,7 +10,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from harness_config import LocalSettings
+from harness_config import (
+    EFFORT_DEFAULT,
+    LocalSettings,
+    thinking_from_settings,
+    with_thinking,
+)
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
@@ -40,7 +45,7 @@ from ..events import (
 )
 from ..interactions import PERMISSION_MODES, PermissionDecision, PermissionRequest
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
-from ..local import local_model_catalog, local_target
+from ..local import local_model_catalog, local_target, local_thinking_support
 from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow, stepped_value
 from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
@@ -53,12 +58,13 @@ from .dialogs import (
     InfoDialog,
     SettingsDialog,
 )
-from .local import LocalModelResult
+from .local import LocalModelResult, effort_choices, effort_label
 from .state import (
     Settings,
     binding_summary,
     build_form_fields,
     config_option_value,
+    effort_option,
     format_usage,
     model_option,
     option_values,
@@ -254,9 +260,13 @@ class ConnectScreen(Screen[None]):
                     detail="Choose a cloud or local provider and model, then work in this project.",
                 ))
             else:
+                effort = effort_label(thinking_from_settings(settings))
                 self.entries.append(PickEntry(
                     kind="local_model",
-                    label=f"Local model · {settings.provider}:{settings.model}",
+                    label=(
+                        f"Local model · {settings.provider}:{settings.model}"
+                        f" · effort {effort}"
+                    ),
                     detail="Run the configured provider and model on this project.",
                 ))
             local = [profile for profile in self.profiles.profiles.values() if not profile.is_remote]
@@ -810,6 +820,7 @@ class ChatScreen(Screen[None]):
     def _apply_settings(self) -> None:
         pane = self.query_one("#transcript", TranscriptPane)
         pane.auto_expand_tools = self.settings.auto_expand_tools
+        pane.show_thoughts = self.settings.show_thoughts
         if self.settings.theme in {"harness", "textual-light", "textual-dark", "ansi-light", "ansi-dark"}:
             with contextlib.suppress(Exception):
                 self.app.theme = self.settings.theme
@@ -844,6 +855,10 @@ class ChatScreen(Screen[None]):
         option = model_option(self.session.config_options)
         if option:
             model = config_option_value(option)
+        effort = ""
+        reasoning = effort_option(self.session.config_options)
+        if reasoning:
+            effort = config_option_value(reasoning)
         mode = self.session.current_mode_id or ""
         self.query_one("#topbar", TopBar).show(
             target_text=self.target.location_text(),
@@ -856,6 +871,7 @@ class ChatScreen(Screen[None]):
             connected=self.connected,
             session_id=session_id,
             model=model,
+            effort=effort,
             mode=mode,
             usage=format_usage(self._usage),
             busy=self.busy,
@@ -1018,8 +1034,8 @@ class ChatScreen(Screen[None]):
             await pane.add_user(event.text)
             return
         if isinstance(event, AgentTextChunk):
-            if not self.settings.show_thoughts and event.thought:
-                return
+            # The Thinking row is a status indicator, not reasoning content; it
+            # appears even when the user keeps reasoning text collapsed.
             await pane.append_agent_text(event.text, thought=event.thought)
             return
         if isinstance(event, ToolEvent):
@@ -1135,10 +1151,13 @@ class ChatScreen(Screen[None]):
         self.busy = busy
         session_id = self.session.session_id if self.session else None
         option = model_option(self.session.config_options) if self.session else None
+        reasoning = effort_option(self.session.config_options) if self.session else None
+        effort = config_option_value(reasoning) if reasoning else ""
         self.query_one("#statusbar", StatusBar).show(
             connected=self.connected,
             session_id=session_id,
             model=config_option_value(option) if option else "",
+            effort=effort,
             mode=self.session.current_mode_id or "" if self.session else "",
             usage=format_usage(self._usage),
             busy=busy,
@@ -1459,6 +1478,8 @@ class ChatScreen(Screen[None]):
             self.refresh_capabilities()
         elif name == "models":
             await self._show_models()
+        elif name == "effort":
+            await self._show_effort()
         elif name == "permissions":
             self._show_permissions()
         elif name == "settings":
@@ -2068,11 +2089,17 @@ class ChatScreen(Screen[None]):
             return
         if settings.model and settings.model not in models:
             models.insert(0, settings.model)
+        effort = effort_label(thinking_from_settings(settings))
+        current_note = (
+            f"current · effort {effort}"
+            if settings.model and local_thinking_support(settings.provider, settings.model)
+            else "current"
+        )
         choices = [
             {
                 "value": model,
                 "name": model,
-                "description": "current" if model == settings.model else "",
+                "description": current_note if model == settings.model else "",
             }
             for model in models
         ]
@@ -2090,12 +2117,18 @@ class ChatScreen(Screen[None]):
             if value == "__configure__":
                 self._open_local_model_form(settings)
                 return
-            asyncio.create_task(self._select_local_model(settings, value))
+            self._select_local_model(settings, value)
 
+        current_effort = (
+            f" · effort {effort}"
+            if settings.model and local_thinking_support(settings.provider, settings.model)
+            else ""
+        )
         self.app.push_screen(
             ChoiceDialog(
                 "Models",
-                f"Provider {settings.provider}. The selection applies to the next message.",
+                f"Provider {settings.provider}{current_effort}. "
+                "The selection applies to the next message.",
                 choices,
                 current=settings.model,
             ),
@@ -2110,9 +2143,60 @@ class ChatScreen(Screen[None]):
             self._models_configured,
         )
 
-    async def _select_local_model(self, settings: LocalSettings, model: str) -> None:
+    def _select_local_model(self, settings: LocalSettings, model: str) -> None:
+        """Model choice first; prompt for effort when that model can reason.
+
+        Canceling the effort step cancels the whole change, matching Codex.
+        """
+        support = local_thinking_support(settings.provider, model)
+        if support is None:
+            # A model outside the catalog has unknown support: keep a manually
+            # configured thinking level instead of clearing it.
+            known = model in local_model_catalog().get(settings.provider, ())
+            asyncio.create_task(
+                self._save_model_selection(settings, model, None, touch_thinking=known)
+            )
+            return
+        current = thinking_from_settings(settings) if model == settings.model else None
+        self._choose_effort(
+            settings,
+            model,
+            current=current,
+            on_select=lambda effort: asyncio.create_task(
+                self._save_model_selection(settings, model, effort)
+            ),
+        )
+
+    def _choose_effort(
+        self,
+        settings: LocalSettings,
+        model: str,
+        *,
+        current: str | None,
+        on_select: Any,
+    ) -> None:
+        self.app.push_screen(
+            ChoiceDialog(
+                "Reasoning effort",
+                f"{settings.provider}:{model}. Applies to the next message.",
+                effort_choices(settings.provider, model),
+                current=current or EFFORT_DEFAULT,
+            ),
+            lambda value: on_select(value) if value else None,
+        )
+
+    async def _save_model_selection(
+        self,
+        settings: LocalSettings,
+        model: str,
+        effort: str | None,
+        *,
+        touch_thinking: bool = True,
+    ) -> None:
         try:
             configured = settings.model_copy(update={"model": model})
+            if touch_thinking:
+                configured = with_thinking(configured, effort)
             path = configured.save(settings.config_file)
         except (ValueError, OSError) as exc:
             await self._notice(f"Could not save the model selection: {exc}", "error")
@@ -2124,6 +2208,68 @@ class ChatScreen(Screen[None]):
                 model=model,
                 api_key_ref=None,
                 api_key_changed=False,
+                effort=effort,
+            )
+        )
+
+    async def _show_effort(self) -> None:
+        if self.session.client is not self.client:
+            await self._notice(
+                "This session is not attached to the reconnected client. Start a new session first.",
+                "warning",
+            )
+            return
+        if self.target.kind != "local" or self.target.profile.command != "harness-local":
+            await self._notice(
+                "Reasoning effort is only available for local models.",
+                "warning",
+            )
+            return
+        try:
+            settings = self._local_settings()
+        except (ValueError, OSError) as exc:
+            await self._notice(f"Local settings are unavailable: {exc}", "error")
+            return
+        if not settings.model:
+            await self._notice("Configure a local model before setting reasoning effort.", "error")
+            return
+        support = local_thinking_support(settings.provider, settings.model)
+        if support is None:
+            await self._notice(
+                f"{settings.provider}:{settings.model} does not advertise reasoning effort.",
+                "warning",
+            )
+            return
+        option = effort_option(self.session.config_options)
+        current = (
+            str(option.get("currentValue"))
+            if option is not None
+            else (thinking_from_settings(settings) or EFFORT_DEFAULT)
+        )
+        self._choose_effort(
+            settings,
+            settings.model,
+            current=current,
+            on_select=lambda effort: asyncio.create_task(
+                self._set_local_effort(settings, effort)
+            ),
+        )
+
+    async def _set_local_effort(self, settings: LocalSettings, effort: str) -> None:
+        try:
+            configured = with_thinking(settings, effort)
+            path = configured.save(settings.config_file)
+        except (ValueError, OSError) as exc:
+            await self._notice(f"Could not save the reasoning effort: {exc}", "error")
+            return
+        await self._apply_model_settings(
+            LocalModelResult(
+                path=path,
+                provider=settings.provider,
+                model=settings.model,
+                api_key_ref=None,
+                api_key_changed=False,
+                effort=effort,
             )
         )
 
@@ -2158,12 +2304,32 @@ class ChatScreen(Screen[None]):
                 await self._notice(f"Model change failed: {exc.message}", "error")
                 return
             self.session.remember(options)
-            self._update_chrome()
-            await self._notice(
-                f"Model set to {wanted}; it applies to the next message.",
-                "success",
-            )
-            return
+            if result.effort is not None:
+                if effort_option(options) is not None:
+                    try:
+                        options = await self.session.set_config_option("effort", result.effort)
+                    except HarnessClientError as exc:
+                        await self._notice(
+                            f"Reasoning effort change failed: {exc.message}", "error"
+                        )
+                        return
+                    self.session.remember(options)
+                elif result.effort != EFFORT_DEFAULT:
+                    # The new model may not have advertised effort until the switch
+                    # landed; restart so the saved setting is read at startup.
+                    restart = True
+            if not restart:
+                self._update_chrome()
+                suffix = (
+                    f" · effort {effort_label(result.effort)}"
+                    if result.effort is not None
+                    else ""
+                )
+                await self._notice(
+                    f"Model set to {wanted}{suffix}; it applies to the next message.",
+                    "success",
+                )
+                return
         try:
             target = local_target(
                 result.path,
@@ -2244,10 +2410,17 @@ class ChatScreen(Screen[None]):
                     if value is not None:
                         self._set_standard_value(option.get("id"), value)
 
+                reasoning = effort_option(self.session.config_options)
+                subtitle = "Model selection is a standard ACP session config option."
+                if reasoning:
+                    subtitle = (
+                        "Model selection is a standard ACP session config option. "
+                        f"Current effort: {config_option_value(reasoning)}."
+                    )
                 self.app.push_screen(
                     ChoiceDialog(
                         "Model",
-                        "Model selection is a standard ACP session config option.",
+                        subtitle,
                         values,
                         current=str(option.get("currentValue")),
                     ),

@@ -39,7 +39,13 @@ from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.usage import RunUsage
 from pydantic_core import to_jsonable_python
 
-from ._events import deferred_requests_payload, output_payload, translate_event, usage_payload
+from ._events import (
+    TranslationState,
+    deferred_requests_payload,
+    output_payload,
+    translate_event,
+    usage_payload,
+)
 from .definitions import (
     AgentDefinition,
     AgentFactoryContext,
@@ -414,6 +420,7 @@ class TurnOptions:
     output_type: Any = None
     deps: Any = None
     model: Any = None
+    model_settings: Any = None
     instructions: Any = None
     retries: Any = None
     usage_limits: Any = None
@@ -1398,6 +1405,7 @@ class Session:
         output_type: Any = None,
         deps: Any = None,
         model: Any = None,
+        model_settings: Any = None,
         instructions: Any = None,
         retries: Any = None,
         usage_limits: Any = None,
@@ -1409,6 +1417,7 @@ class Session:
             output_type=output_type,
             deps=deps,
             model=model,
+            model_settings=model_settings,
             instructions=instructions,
             retries=retries,
             usage_limits=usage_limits,
@@ -1425,6 +1434,7 @@ class Session:
         output_type: Any = None,
         deps: Any = None,
         model: Any = None,
+        model_settings: Any = None,
         instructions: Any = None,
         retries: Any = None,
         usage_limits: Any = None,
@@ -1436,6 +1446,7 @@ class Session:
             output_type=output_type,
             deps=deps,
             model=model,
+            model_settings=model_settings,
             instructions=instructions,
             retries=retries,
             usage_limits=usage_limits,
@@ -1840,6 +1851,7 @@ class Session:
         emit: Callable[[Any], None] | None,
     ) -> Any:
         final: Any = None
+        translation = TranslationState()
         async with agent.run_stream_events(**kwargs) as events:
             if self._active_turn is not None:
                 self._active_turn.events = events
@@ -1847,7 +1859,7 @@ class Session:
                 if isinstance(event, AgentRunResultEvent):
                     final = event.result
                     continue
-                for runtime_event in translate_event(event):
+                for runtime_event in translate_event(event, translation):
                     await self._journal(runtime_event, turn_id)
                     if emit is not None:
                         emit(runtime_event)
@@ -1884,6 +1896,8 @@ class Session:
                 kwargs["model"] = options.model
             elif self._model_override is not None:
                 kwargs["model"] = self._model_override
+        if options.model_settings is not None:
+            kwargs["model_settings"] = options.model_settings
         if options.instructions is not None:
             kwargs["instructions"] = options.instructions
         if options.retries is not None:

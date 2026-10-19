@@ -44,6 +44,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
         "Select or configure the local provider and model",
         aliases=("model",),
     ),
+    LocalCommand("effort", "Set the local model's reasoning effort"),
     LocalCommand(
         "plugins",
         "Enable, disable, add or edit capability plugins",

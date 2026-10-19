@@ -13,6 +13,15 @@ from platformdirs import user_config_path, user_data_path
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
 
+#: Unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
+THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+
+#: TUI/ACP spelling for "do not set thinking; use the provider default".
+EFFORT_DEFAULT = "default"
+
+#: TUI/ACP spelling for ``thinking=False`` (disable reasoning).
+EFFORT_OFF = "off"
+
 
 def default_local_config_path() -> Path:
     project = Path.cwd() / "harness.local.toml"
@@ -115,3 +124,31 @@ class LocalSettings(BaseSettings):
             finally:
                 temporary.unlink(missing_ok=True)
         return target
+
+
+def thinking_from_settings(settings: LocalSettings) -> str | None:
+    """The configured effort as a TUI/ACP value, or ``None`` for the default."""
+    value = settings.model_settings.get("thinking")
+    if value is False:
+        return EFFORT_OFF
+    if isinstance(value, str) and value in THINKING_LEVELS:
+        return value
+    # ``True`` and an unset value both mean "provider default".
+    return None
+
+
+def with_thinking(settings: LocalSettings, effort: str | None) -> LocalSettings:
+    """Return a copy whose ``model_settings.thinking`` reflects ``effort``.
+
+    Only the ``thinking`` key is touched so other model settings survive.
+    """
+    model_settings = dict(settings.model_settings)
+    if effort in (None, "", EFFORT_DEFAULT):
+        model_settings.pop("thinking", None)
+    elif effort == EFFORT_OFF:
+        model_settings["thinking"] = False
+    elif effort in THINKING_LEVELS:
+        model_settings["thinking"] = effort
+    else:
+        raise ValueError(f"Unknown reasoning effort: {effort!r}")
+    return settings.model_copy(update={"model_settings": model_settings})

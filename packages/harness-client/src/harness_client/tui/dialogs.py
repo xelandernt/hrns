@@ -547,7 +547,9 @@ class SettingsDialog(_DialogBase):
             id="settings-theme",
         )
         self._expand = Checkbox("Expand tool details automatically", value=settings.auto_expand_tools)
-        self._thoughts = Checkbox("Show agent reasoning when provided", value=settings.show_thoughts)
+        self._thoughts = Checkbox(
+            "Expand agent reasoning when provided", value=settings.show_thoughts
+        )
         self._panel = Checkbox("Show side panel on wide terminals", value=settings.side_panel)
         permission_labels = {
             "ask": "ask every time",

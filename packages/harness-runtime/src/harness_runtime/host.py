@@ -53,6 +53,7 @@ from acp.meta import AGENT_METHODS, CLIENT_METHODS
 from acp.schema import DeleteSessionRequest, DeleteSessionResponse
 from acp.stdio import stdio_streams
 from acp.utils import normalize_result, notify_model, request_model
+from harness_config import THINKING_LEVELS
 from harness_protocol import (
     AddChange,
     BindingChange,
@@ -172,6 +173,23 @@ def _consume_task_result(task: "asyncio.Task[Any]") -> None:
         task.exception()
 
 
+#: Providers whose model classes accept the explicit OpenAI reasoning-effort key.
+#: Custom model ids use it because the unified ``thinking`` setting is gated on a
+#: model profile the registry does not have for them.
+_OPENAI_EFFORT_PROVIDERS = frozenset(
+    {"openai", "openai-chat", "openai-responses", "azure", "azure-responses", "deepseek"}
+)
+
+
+def _valid_effort(effort: str | None, support: str | None) -> str | None:
+    """Normalize a stored effort against the selected model's reasoning support."""
+    if support is None or effort is None:
+        return None
+    if effort == acp_map.EFFORT_OFF:
+        return None if support == "always" else effort
+    return effort if effort in THINKING_LEVELS else None
+
+
 # ---------------------------------------------------------------------------
 # Host configuration
 # ---------------------------------------------------------------------------
@@ -234,6 +252,12 @@ class HostPolicy:
     allow_client_mcp: bool = True
     models: tuple[str, ...] = ()
     default_model: str | None = None
+    #: Model id -> ``"supported"`` or ``"always"`` when the model reasons.
+    thinking_models: Mapping[str, str] = field(default_factory=dict)
+    #: Initial unified ``thinking`` effort (``None`` means the provider default).
+    default_effort: str | None = None
+    #: Model settings read from local configuration at process start.
+    model_settings: Mapping[str, Any] = field(default_factory=dict)
     resources: Mapping[str, Any] = field(default_factory=dict)
     default_cwd: str | None = None
 
@@ -262,6 +286,7 @@ class HostPolicy:
 class SessionMeta:
     cwd: str
     model: str | None = None
+    effort: str | None = None
 
 
 class HostMetadataStore:
@@ -310,7 +335,9 @@ class HostMetadataStore:
             ) from exc
         if not isinstance(data, dict) or not isinstance(data.get("cwd"), str):
             return None
-        meta = SessionMeta(cwd=data["cwd"], model=data.get("model"))
+        meta = SessionMeta(
+            cwd=data["cwd"], model=data.get("model"), effort=data.get("effort")
+        )
         self._memory[session_id] = meta
         return meta
 
@@ -321,7 +348,10 @@ class HostMetadataStore:
         path = self._path(session_id)
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
-            json.dumps({"cwd": meta.cwd, "model": meta.model}, sort_keys=True),
+            json.dumps(
+                {"cwd": meta.cwd, "model": meta.model, "effort": meta.effort},
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
         os.replace(temporary, path)
@@ -348,12 +378,14 @@ class HostedSession:
         *,
         cwd: str,
         model: str | None,
+        effort: str | None = None,
     ) -> None:
         self.host = host
         self.runtime = runtime_session
         self.session_id = str(runtime_session.session_id)
         self.cwd = cwd
         self.model = model
+        self.effort = _valid_effort(effort, self._effort_support())
         self.turn_lock = asyncio.Lock()
         self.active_turn: asyncio.Task[Any] | None = None
         self.cancel_requested = False
@@ -377,8 +409,16 @@ class HostedSession:
     def closed(self) -> bool:
         return self._closed
 
+    def _effort_support(self) -> str | None:
+        if not self.model:
+            return None
+        return self.host.policy.thinking_models.get(self.model)
+
     async def persist_meta(self) -> None:
-        await self.host.metadata.put(self.session_id, SessionMeta(cwd=self.cwd, model=self.model))
+        await self.host.metadata.put(
+            self.session_id,
+            SessionMeta(cwd=self.cwd, model=self.model, effort=self.effort),
+        )
 
     # --- turn execution ------------------------------------------------
 
@@ -571,6 +611,28 @@ class HostedSession:
             kwargs["deferred_tool_results"] = deferred_results
         if self.host.policy.models and self.model:
             kwargs["model"] = self.model
+        support = self._effort_support()
+        if (
+            self.host.policy.model_settings
+            or self.host.policy.thinking_models
+            or self.effort is not None
+        ):
+            model_settings = dict(self.host.policy.model_settings)
+            if self.effort is not None and support is not None:
+                off = self.effort == acp_map.EFFORT_OFF
+                model_settings["thinking"] = False if off else self.effort
+                provider = (self.model or "").partition(":")[0]
+                if support == "custom" and provider in _OPENAI_EFFORT_PROVIDERS:
+                    # Profiles absent from the registry would silently ignore
+                    # unified thinking; the explicit key still reaches the wire.
+                    model_settings["openai_reasoning_effort"] = (
+                        "none" if off else self.effort
+                    )
+            else:
+                # Session state is authoritative: "Default" must also clear a level
+                # that the configuration supplied when the process started.
+                model_settings.pop("thinking", None)
+            kwargs["model_settings"] = model_settings
         return stream(prompt, **kwargs)
 
     async def _forward_event(self, event_type: str, data: Mapping[str, Any]) -> None:
@@ -974,6 +1036,7 @@ class HarnessHostAgent:
                 runtime_session,
                 cwd=requested_cwd,
                 model=self.policy.default_model,
+                effort=self.policy.default_effort,
             )
             self._sessions[state.session_id] = state
             await state.persist_meta()
@@ -1045,6 +1108,7 @@ class HarnessHostAgent:
                 runtime_session,
                 cwd=stored_cwd,
                 model=restored_model or self.policy.default_model,
+                effort=(meta.effort if meta and meta.effort else self.policy.default_effort),
             )
             self._sessions[session_id] = state
             await state.persist_meta()
@@ -1173,6 +1237,8 @@ class HarnessHostAgent:
         try:
             if config_id == acp_map.MODEL_OPTION_ID:
                 await self._set_model(state, value)
+            elif config_id == acp_map.EFFORT_OPTION_ID:
+                await self._set_effort(state, value)
             elif config_id.startswith(acp_map.BINDING_OPTION_PREFIX):
                 binding_id = config_id[len(acp_map.BINDING_OPTION_PREFIX) :]
                 if isinstance(value, bool):
@@ -1426,7 +1492,41 @@ class HarnessHostAgent:
                 {"model": value, "options": list(self.policy.models)},
             )
         async with state.turn_lock:
-            state.model = value
+            if value != state.model:
+                # Effort is paired with the model; a switch starts from the
+                # configured default when the new model supports it.
+                state.model = value
+                state.effort = _valid_effort(
+                    self.policy.default_effort, state._effort_support()
+                )
+            await state.persist_meta()
+
+    async def _set_effort(self, state: HostedSession, value: str | bool) -> None:
+        if not isinstance(value, str):
+            raise HarnessError(
+                "INVALID_CONFIGURATION", "The effort option expects a string value."
+            )
+        support = state._effort_support()
+        option = acp_map.effort_option(None, support=support)
+        if option is None:
+            raise HarnessError(
+                "CAPABILITY_UNAVAILABLE",
+                "The selected model does not offer reasoning effort.",
+                {"model": state.model},
+            )
+        allowed = {
+            item.value
+            for item in option.options
+            if isinstance(item, schema.SessionConfigSelectOption)
+        }
+        if value not in allowed:
+            raise HarnessError(
+                "INVALID_CONFIGURATION",
+                f"Reasoning effort {value!r} is not available for this model.",
+                {"model": state.model, "options": sorted(allowed)},
+            )
+        async with state.turn_lock:
+            state.effort = None if value == acp_map.EFFORT_DEFAULT else value
             await state.persist_meta()
 
     async def _standard_options(
@@ -1438,6 +1538,8 @@ class HarnessHostAgent:
             descriptors,
             models=self.policy.models,
             current_model=state.model,
+            current_effort=state.effort or acp_map.EFFORT_DEFAULT,
+            effort_support=state._effort_support(),
             boolean_toggles=self._boolean_config_options,
         )
 

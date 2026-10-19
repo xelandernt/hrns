@@ -83,7 +83,14 @@ cloud region/project settings), and `[model_settings]` for Pydantic AI model set
 ```toml
 [model_settings]
 temperature = 0.2
+thinking = "high"
 ```
+
+`thinking` is Pydantic AI's unified reasoning-effort setting (`minimal`, `low`,
+`medium`, `high`, `xhigh`, or `false` to disable it where the model allows). In the
+terminal, `/models` offers the ladder after selecting a model that supports reasoning,
+and `/effort` reopens it later; changes apply to the next message. Models without
+thinking support ignore the setting.
 
 Use environment-based authentication for secrets instead of putting them in
 `provider_options`. Unsupported constructor options fail at startup; custom

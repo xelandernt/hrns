@@ -6,11 +6,12 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from harness_config import LocalSettings
+from harness_config import LocalSettings, thinking_from_settings
 from harness_protocol import HarnessError
 from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.capabilities import PrepareTools
@@ -81,8 +82,36 @@ def _provider_sort_key(name: str) -> tuple[int, int, str]:
     return (1, 0, name)
 
 
-def provider_catalog() -> dict[str, list[dict[str, Any]]]:
-    """Known providers and their model ids, read from Pydantic AI."""
+def thinking_support(model_ids: Iterable[str]) -> dict[str, str]:
+    """Map model ids to ``"supported"``/``"always"`` when the model reasons.
+
+    The client never imports Pydantic AI, so the catalog carries this instead.
+    Profile lookup does not need credentials; providers whose extra is not
+    installed simply contribute no entry.
+    """
+    from pydantic_ai.models import infer_model_profile, known_model_names
+
+    known = set(known_model_names())
+    support: dict[str, str] = {}
+    for model_id in model_ids:
+        if model_id not in known:
+            # A custom id the registry cannot profile. The user chose it, so let
+            # them opt into effort instead of claiming the model cannot reason.
+            support[model_id] = "custom"
+            continue
+        try:
+            profile = infer_model_profile(model_id)
+        except Exception:  # a missing provider extra is not a catalog failure
+            continue
+        if profile.get("thinking_always_enabled"):
+            support[model_id] = "always"
+        elif profile.get("supports_thinking"):
+            support[model_id] = "supported"
+    return support
+
+
+def known_models() -> dict[str, list[str]]:
+    """Model ids grouped by provider, without the (slower) profile lookup."""
     from pydantic_ai.models import known_model_names, parse_model_id
 
     grouped: dict[str, set[str]] = {name: set() for name in _EXTRA_PROVIDERS}
@@ -92,14 +121,29 @@ def provider_catalog() -> dict[str, list[dict[str, Any]]]:
             continue
         grouped.setdefault(provider, set()).add(model)
     return {
-        "providers": [
+        provider: sorted(models, key=str.lower) for provider, models in grouped.items()
+    }
+
+
+def provider_catalog() -> dict[str, Any]:
+    """Known providers, their model ids, and reasoning support, from Pydantic AI."""
+    grouped = known_models()
+    providers: list[dict[str, Any]] = []
+    for provider in sorted(grouped, key=_provider_sort_key):
+        models = grouped[provider]
+        support = thinking_support(f"{provider}:{model}" for model in models)
+        providers.append(
             {
                 "name": provider,
-                "models": sorted(grouped[provider], key=str.lower),
+                "models": models,
+                "thinking": {
+                    model: level
+                    for model in models
+                    if (level := support.get(f"{provider}:{model}"))
+                },
             }
-            for provider in sorted(grouped, key=_provider_sort_key)
-        ]
-    }
+        )
+    return {"providers": providers}
 
 
 def configured_model(settings: LocalSettings, model_id: str | None = None) -> Model:
@@ -151,10 +195,9 @@ async def _require_tool_approval(_ctx: Any, tools: list[Any]) -> list[Any]:
 def _local_models(settings: LocalSettings) -> tuple[str, ...]:
     """Known model ids for the configured provider, current model first."""
     current = f"{settings.provider}:{settings.model}"
-    for entry in provider_catalog().get("providers", []):
-        if entry.get("name") != settings.provider:
-            continue
-        models = [f"{settings.provider}:{model}" for model in entry.get("models", [])]
+    known = known_models().get(settings.provider)
+    if known:
+        models = [f"{settings.provider}:{model}" for model in known]
         if current not in models:
             models.insert(0, current)
         return tuple(dict.fromkeys(models))
@@ -187,7 +230,8 @@ def build_local_agent(
         return Agent.from_spec(
             spec,
             model=selected,
-            model_settings=settings.model_settings,
+            # Model settings (including reasoning effort) arrive per turn from the
+            # host so live changes do not require rebuilding the process.
             capabilities=managed_capabilities,
             output_type=[str, DeferredToolRequests],
         )
@@ -205,14 +249,18 @@ def build_local_agent(
         str(store.path),
         HostMetadataStore(store.path),
     )
+    models = _local_models(settings)
     return HarnessHostAgent(
         bundle,
         HostPolicy(
             allowed_cwds=(str(workspace),),
             default_cwd=str(workspace),
-            models=_local_models(settings),
+            models=models,
             default_model=f"{settings.provider}:{settings.model}",
             resources={"model.default": model},
+            thinking_models=thinking_support(models),
+            default_effort=thinking_from_settings(settings),
+            model_settings=settings.model_settings,
         ),
     )
 

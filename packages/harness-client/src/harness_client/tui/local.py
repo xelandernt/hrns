@@ -8,10 +8,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from harness_config import LocalSettings
+from harness_config import (
+    EFFORT_DEFAULT,
+    EFFORT_OFF,
+    THINKING_LEVELS,
+    LocalSettings,
+    thinking_from_settings,
+    with_thinking,
+)
 from textual.widgets import Input, Select
 
-from ..local import local_model_catalog, store_api_key, stored_api_key_ref
+from ..local import (
+    local_model_catalog,
+    local_thinking_support,
+    store_api_key,
+    stored_api_key_ref,
+)
 from .dialogs import FormDialog, _collect_fields
 
 
@@ -24,6 +36,44 @@ class LocalModelResult:
     model: str
     api_key_ref: str | None = None
     api_key_changed: bool = False
+    #: ACP/TUI effort value to apply live; ``None`` means "leave it alone".
+    effort: str | None = None
+
+
+#: Codex-style labels and one-line explanations for the unified thinking ladder.
+EFFORT_LABELS: dict[str, tuple[str, str]] = {
+    EFFORT_DEFAULT: ("Default", "Let the provider choose its default reasoning effort."),
+    EFFORT_OFF: ("Off", "Disable reasoning when the model allows it."),
+    "minimal": ("Minimal", "Fastest responses with the least reasoning."),
+    "low": ("Low", "Light reasoning for straightforward work."),
+    "medium": ("Medium", "Balanced reasoning for everyday work."),
+    "high": ("High", "Deeper reasoning for harder work."),
+    "xhigh": ("XHigh", "Maximum reasoning; highest cost and latency."),
+}
+
+
+def effort_label(value: str | None) -> str:
+    """Display name for an effort value; ``None``/``"default"`` read as Default."""
+    key = value or EFFORT_DEFAULT
+    return EFFORT_LABELS.get(key, (key, ""))[0]
+
+
+def effort_values(support: str | None) -> tuple[str, ...]:
+    """Values offered for a model; always-on models cannot disable reasoning."""
+    values = [EFFORT_DEFAULT]
+    if support != "always":
+        values.append(EFFORT_OFF)
+    values.extend(THINKING_LEVELS)
+    return tuple(values)
+
+
+def effort_choices(provider: str, model: str) -> list[dict[str, str]]:
+    """ChoiceDialog payload for the effort step; the dialog marks the current value."""
+    support = local_thinking_support(provider, model)
+    return [
+        {"value": value, "name": EFFORT_LABELS[value][0], "description": EFFORT_LABELS[value][1]}
+        for value in effort_values(support)
+    ]
 
 #: Used only when ``harness-local`` is unavailable; the runtime normally supplies
 #: the provider list from the pinned Pydantic AI version.
@@ -131,6 +181,22 @@ class LocalModelDialog(FormDialog):
                 default=model_custom,
             ),
             _field(
+                "effort",
+                "Reasoning effort",
+                description=(
+                    "Unified thinking setting. Ignored by models without reasoning support; "
+                    "Default leaves the provider's choice in place."
+                ),
+                kind="select",
+                default=thinking_from_settings(settings) or EFFORT_DEFAULT,
+                choices=[
+                    (value, EFFORT_LABELS[value][0])
+                    for value in effort_values(
+                        local_thinking_support(settings.provider, settings.model)
+                    )
+                ],
+            ),
+            _field(
                 "api_key",
                 "API key (optional)",
                 description=(
@@ -236,6 +302,7 @@ class LocalModelDialog(FormDialog):
         provider = provider or str(values.get("provider") or "").strip()
         model = str(values.pop("model_custom", "") or "").strip()
         model = model or str(values.get("model") or "").strip()
+        effort = str(values.pop("effort", "") or EFFORT_DEFAULT).strip()
         api_key = str(values.pop("api_key", "") or "").strip()
         api_key_env = str(values.get("api_key_env") or "").strip()
         if not provider:
@@ -266,6 +333,7 @@ class LocalModelDialog(FormDialog):
             configured = LocalSettings(
                 config_file=None, **{**self.settings.model_dump(), **values}
             )
+            configured = with_thinking(configured, effort)
             configured.require_model()
             path = configured.save(self.settings.config_file)
         except (ValueError, TypeError, OSError) as exc:
@@ -287,5 +355,6 @@ class LocalModelDialog(FormDialog):
                 model=configured.model,
                 api_key_ref=api_key_ref,
                 api_key_changed=bool(api_key),
+                effort=effort,
             )
         )
