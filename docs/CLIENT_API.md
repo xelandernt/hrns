@@ -21,7 +21,9 @@ hrns connect --stdio -- my-agent --acp    # any stdio ACP agent
 hrns connect --server team --agent research-assistant
 ```
 
-The full-screen application has a streaming transcript, multiline composer (`Enter` to submit), session list, capability/configuration panel, activity panel, permission dialog, and structured elicitation dialog. `Ctrl+Q` or `Ctrl+C` quits. Narrow terminals collapse the side panel; preserve the transcript rather than resizing into unreadable columns. Unsupported ACP features are absent, not shown as broken controls.
+The full-screen application has a streaming transcript, multiline composer (`Enter` to submit), session list, capability/configuration panel, activity panel, inline approval bar, and structured elicitation dialog. `Ctrl+Q` or `Ctrl+C` quits. Narrow terminals collapse the side panel; preserve the transcript rather than resizing into unreadable columns. Unsupported ACP features are absent, not shown as broken controls.
+
+Tool approvals are non-modal: a bar above the composer shows the tool call and the agent's options while the transcript stays visible. `y`/`Enter` allows once, `a` always allows that exact call, `n` rejects once, and `Esc` stops the turn and returns focus to the composer so the next message can redirect the agent. An agent's `allow_always` is scoped to the same tool and arguments; it is narrower than a command-prefix rule. `/permissions` selects `ask` (every request), `reads` (auto-approve read, search and think; ask for everything else), or `all` (auto-approve any offered allow option; this is **not** a sandbox). The status bar always shows the active mode, and every automatic decision is noted in the transcript.
 
 Stage explicit file attachments with `/attach PATH`; `/attach list` shows staged files and `/attach clear` removes them. They are sent as content with the next message and the transcript labels the attachment names. `/attach` never grants the agent a local filesystem path.
 
@@ -29,7 +31,7 @@ The capability panel displays host-policy state, selected versus active revision
 
 In the capability panel, `a` adds a binding from the host's registered plugin inventory when the peer advertises `_harness/plugins/list`. The chooser follows the catalog's pagination and only offers runtime-compatible `next_turn` plugins; the form asks for a binding id and validated plugin configuration, and the add is submitted as the same revision-checked transaction as other edits. A plugin's `new_session` lifecycle can only be chosen at session creation. Toggle (`Enter`/`Space`), configure (`e`) and refresh (`r`) remain available for offered bindings. Capability and plugin inventories are read to the last cursor, so large catalogs are not silently truncated.
 
-Command palette: `/agents`, `/sessions`, `/capabilities`, `/model`, `/settings`, `/help`. Agent-advertised commands appear in their own section; collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
+Command palette: `/agents`, `/sessions`, `/capabilities`, `/model`, `/permissions`, `/settings`, `/help`. Agent-advertised commands appear in their own section; collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
 
 ## CLI
 

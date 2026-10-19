@@ -22,6 +22,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from ..interactions import (
+    PERMISSION_MODES,
     ElicitationAnswer,
     ElicitationRequest,
     PermissionRequest,
@@ -518,6 +519,17 @@ class SettingsDialog(_DialogBase):
         self._expand = Checkbox("Expand tool details automatically", value=settings.auto_expand_tools)
         self._thoughts = Checkbox("Show agent reasoning when provided", value=settings.show_thoughts)
         self._panel = Checkbox("Show side panel on wide terminals", value=settings.side_panel)
+        permission_labels = {
+            "ask": "ask every time",
+            "reads": "allow reads, ask for the rest",
+            "all": "allow all tools",
+        }
+        self._permission = Select(
+            [(permission_labels[mode], mode) for mode in PERMISSION_MODES],
+            value=settings.permission_mode if settings.permission_mode in PERMISSION_MODES else "ask",
+            allow_blank=False,
+            id="settings-permission",
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -528,6 +540,14 @@ class SettingsDialog(_DialogBase):
                 yield self._expand
                 yield self._thoughts
                 yield self._panel
+                yield Static("Tool approvals", classes="field-label", markup=False)
+                yield self._permission
+                yield Static(
+                    "Ask shows every request. Allow reads auto-approves read, search and think calls. "
+                    "Allow all is explicit and is not a sandbox.",
+                    markup=False,
+                    classes="field-help",
+                )
             yield Static(
                 "Saved to the profile file when it exists."
                 if self.can_persist
@@ -552,5 +572,6 @@ class SettingsDialog(_DialogBase):
                 auto_expand_tools=self._expand.value,
                 show_thoughts=self._thoughts.value,
                 side_panel=self._panel.value,
+                permission_mode=str(self._permission.value),
             )
         )

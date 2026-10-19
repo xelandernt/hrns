@@ -6,10 +6,12 @@ application.
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS
+from ..interactions import PERMISSION_MODES
 
 __all__ = [
     "build_form_fields",
@@ -23,8 +25,11 @@ __all__ = [
     "model_option",
     "option_values",
     "pending_application_text",
+    "permission_mode_label",
     "presentation_payload",
+    "tool_args_preview",
     "tool_detail_text",
+    "tool_result_text",
     "tool_status_label",
 ]
 
@@ -33,6 +38,7 @@ LOCAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("sessions", "List, load, resume, close or delete sessions"),
     ("capabilities", "Inspect and change session capabilities"),
     ("model", "Change the active model or mode"),
+    ("permissions", "Choose how tool approvals are answered"),
     ("settings", "Terminal preferences"),
     ("attach", "Stage a local file for the next message"),
     ("help", "Keyboard map and commands"),
@@ -53,12 +59,84 @@ def local_command_names() -> frozenset[str]:
     return LOCAL_COMMAND_NAMES
 
 
+def permission_mode_label(mode: str) -> str:
+    """Short status-bar label; the mode value stays the on-wire/persisted key."""
+    return {"ask": "ask", "reads": "reads", "all": "allow all"}.get(mode, mode)
+
+
 def tool_status_label(status: str) -> str:
     return TOOL_STATUS_LABELS.get(status or "", f"○ {status}")
 
 
-def tool_detail_text(event: Any, *, limit: int = UI_MAX_TOOL_CONTENT_CHARS) -> str:
-    """Readable details for any tool payload; specialized renderers come first."""
+def _one_line(value: Any, limit: int) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def tool_args_preview(data: dict[str, Any], *, limit: int = 80) -> str:
+    """Compact, one-line argument summary for a tool call header.
+
+    ACP exposes the original call arguments as opaque JSON (``raw_input``).
+    Recognising the common agent tools keeps the header readable; anything
+    unknown falls back to the first two ``key=value`` pairs.
+    """
+    raw = data.get("raw_input")
+    if isinstance(raw, str):
+        return _one_line(raw, limit)
+    if not isinstance(raw, dict):
+        return ""
+
+    def value(*keys: str) -> Any:
+        for key in keys:
+            if key in raw:
+                return raw[key]
+        return None
+
+    kind = str(data.get("kind") or "")
+    path = value("file_path", "path")
+    if kind == "execute" or "command" in raw:
+        return _one_line(value("command", "cmd") or "", limit)
+    if kind == "read":
+        parts = [str(path or "?")]
+        if raw.get("limit") is not None:
+            parts.append(f"limit={raw['limit']}")
+        if raw.get("offset") is not None:
+            parts.append(f"offset={raw['offset']}")
+        return _one_line(", ".join(parts), limit)
+    if kind in {"edit", "delete", "move"}:
+        return _one_line(path or value("target") or "", limit)
+    if kind == "search":
+        pattern = value("pattern", "query") or "?"
+        return _one_line(f'"{pattern}", {path or "."}', limit)
+    if kind == "fetch":
+        return _one_line(value("url", "query") or "", limit)
+    if kind == "think":
+        return _one_line(value("thought", "text") or "", limit)
+
+    pairs = list(raw.items())[:2]
+    return _one_line(", ".join(f"{key}={item!r}" for key, item in pairs), limit)
+
+
+def _diff_counts(event: Any) -> tuple[int, int] | None:
+    """Changed-line counts for ACP file-edit content, when present."""
+    added = removed = 0
+    found = False
+    for block in getattr(event, "content", ()) or ():
+        if not isinstance(block, dict) or block.get("type") != "diff":
+            continue
+        found = True
+        old_lines = str(block.get("oldText") or "").splitlines()
+        new_lines = str(block.get("newText") or "").splitlines()
+        matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in {"replace", "delete"}:
+                removed += i2 - i1
+            if tag in {"replace", "insert"}:
+                added += j2 - j1
+    return (added, removed) if found else None
+
+
+def _tool_content_parts(event: Any) -> list[str]:
     parts: list[str] = []
     for block in getattr(event, "content", ()) or ():
         if not isinstance(block, dict):
@@ -99,22 +177,61 @@ def tool_detail_text(event: Any, *, limit: int = UI_MAX_TOOL_CONTENT_CHARS) -> s
             rendered = _render_json(block)
             if rendered:
                 parts.append(f"{kind or 'activity'}\n{rendered}")
-    if getattr(event, "raw_input", None) is not None:
-        rendered = _render_json(event.raw_input)
-        if rendered:
-            parts.append("input\n" + rendered)
-    if getattr(event, "raw_output", None) is not None:
-        rendered = _render_json(event.raw_output)
-        if rendered:
-            parts.append("output\n" + rendered)
-    for location in getattr(event, "locations", ()) or ():
-        if isinstance(location, dict) and location.get("path"):
-            line = f":{location['line']}" if location.get("line") else ""
-            parts.append(f"location {location['path']}{line}")
+    return parts
+
+
+def _tool_output_part(event: Any) -> str:
+    raw = getattr(event, "raw_output", None)
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    rendered = _render_json(raw)
+    return f"output\n{rendered}" if rendered else ""
+
+
+def _join_parts(parts: list[str], limit: int) -> str:
     text = "\n\n".join(part for part in parts if part).strip()
     if len(text) > limit:
         text = text[:limit] + f"\n… truncated at {limit:,} characters"
     return text
+
+
+def _output_already_shown(parts: list[str], output: str) -> bool:
+    """Whether every non-empty output line is already in a content block."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return True
+    existing = {line.strip() for part in parts for line in part.splitlines()}
+    return all(line in existing for line in lines)
+
+
+def tool_result_text(event: Any, *, limit: int = UI_MAX_TOOL_CONTENT_CHARS) -> str:
+    """The result body only: content blocks and raw output, not arguments."""
+    parts = _tool_content_parts(event)
+    output = _tool_output_part(event)
+    # Some peers repeat the raw output inside a content block; prefer the
+    # richer content version instead of showing it twice.
+    if output and not _output_already_shown(parts, output):
+        parts.append(output)
+    return _join_parts(parts, limit)
+
+
+def tool_detail_text(event: Any, *, limit: int = UI_MAX_TOOL_CONTENT_CHARS) -> str:
+    """Full detail for the expanded view, including call arguments."""
+    parts = _tool_content_parts(event)
+    output = _tool_output_part(event)
+    if output and not _output_already_shown(parts, output):
+        parts.append(output)
+    if getattr(event, "raw_input", None) is not None:
+        rendered = _render_json(event.raw_input)
+        if rendered:
+            parts.append("input\n" + rendered)
+    for location in getattr(event, "locations", ()) or ():
+        if isinstance(location, dict) and location.get("path"):
+            line = f":{location['line']}" if location.get("line") else ""
+            parts.append(f"location {location['path']}{line}")
+    return _join_parts(parts, limit)
 
 
 def _render_json(value: Any) -> str:
@@ -137,12 +254,21 @@ def merge_tool_event(existing: dict[str, Any] | None, event: Any) -> dict[str, A
     kind = getattr(event, "kind", "") or ""
     if kind or event.is_new:
         merged["kind"] = kind
+    raw_input = getattr(event, "raw_input", None)
+    if raw_input is not None:
+        merged["raw_input"] = raw_input
     status = getattr(event, "status", "") or ""
     if status:
         merged["status"] = status
+    result = tool_result_text(event)
+    if result:
+        merged["result"] = result
     detail = tool_detail_text(event)
     if detail:
-        merged["detail"] = detail[:UI_MAX_TOOL_CONTENT_CHARS]
+        merged["detail"] = detail
+    counts = _diff_counts(event)
+    if counts is not None:
+        merged["diffAdded"], merged["diffRemoved"] = counts
     meta = getattr(event, "meta", None)
     if isinstance(meta, dict) and meta:
         existing_meta = merged.get("meta")
@@ -433,16 +559,21 @@ class Settings:
     auto_expand_tools: bool = False
     show_thoughts: bool = True
     side_panel: bool = True
+    permission_mode: str = "ask"
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, mapping: dict[str, Any] | None) -> Settings:
         mapping = mapping or {}
+        mode = str(mapping.get("permissionMode", mapping.get("permission_mode", "ask")))
+        if mode not in PERMISSION_MODES:
+            mode = "ask"
         return cls(
             theme=str(mapping.get("theme", "harness")),
             auto_expand_tools=bool(mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))),
             show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", True))),
             side_panel=bool(mapping.get("sidePanel", mapping.get("side_panel", True))),
+            permission_mode=mode,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -451,4 +582,5 @@ class Settings:
             "auto_expand_tools": self.auto_expand_tools,
             "show_thoughts": self.show_thoughts,
             "side_panel": self.side_panel,
+            "permission_mode": self.permission_mode,
         }

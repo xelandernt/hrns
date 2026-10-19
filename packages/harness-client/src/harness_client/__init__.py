@@ -38,6 +38,8 @@ from .events import (
     UserMessageReplayed,
 )
 from .interactions import (
+    PERMISSION_MODES,
+    READ_ONLY_KINDS,
     ElicitationAnswer,
     ElicitationRequest,
     HeadlessInteractions,
@@ -45,6 +47,7 @@ from .interactions import (
     PermissionDecision,
     PermissionRequest,
     RequireInteractions,
+    auto_permission,
 )
 from .profiles import Profile, Profiles, default_profiles_path, secret_value
 from .renderers import RendererRegistry, readable_text
@@ -73,6 +76,7 @@ __all__ = [
     "InteractionRejected",
     "InteractionRequired",
     "ModesUpdated",
+    "PERMISSION_MODES",
     "PermissionDecision",
     "PermissionRequest",
     "PlanChanged",
@@ -80,6 +84,7 @@ __all__ = [
     "Profile",
     "Profiles",
     "ProtocolError",
+    "READ_ONLY_KINDS",
     "RendererRegistry",
     "RequireInteractions",
     "SecretMissing",
@@ -92,6 +97,7 @@ __all__ = [
     "TurnStarted",
     "UsageUpdated",
     "UserMessageReplayed",
+    "auto_permission",
     "WebSocketAgentTransport",
     "default_profiles_path",
     "readable_text",

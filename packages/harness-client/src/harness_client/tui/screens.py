@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ from ..events import (
     UsageUpdated,
     UserMessageReplayed,
 )
+from ..interactions import PERMISSION_MODES, PermissionDecision, PermissionRequest
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
 from ..local import local_target
 from ..profiles import Profile, Profiles
@@ -56,8 +57,11 @@ from .state import (
     format_usage,
     model_option,
     option_values,
+    permission_mode_label,
 )
 from .widgets import (
+    ApprovalBar,
+    ApprovalDecided,
     BindingEditRequested,
     BindingToggleRequested,
     CapabilityAddRequested,
@@ -565,6 +569,8 @@ class ChatScreen(Screen[None]):
         self._attachments: list[str] = []
         self._session_rows: list[dict[str, Any]] = []
         self._session_cursor: str | None = None
+        self._approval_future: asyncio.Future[PermissionDecision] | None = None
+        self._redirect_after_turn = False
 
     # --------------------------------------------------------------- structure
 
@@ -573,6 +579,7 @@ class ChatScreen(Screen[None]):
         with Horizontal(id="main"):
             yield TranscriptPane(id="transcript")
             yield SidePanel()
+        yield ApprovalBar(id="approval")
         yield Composer(id="composer")
         yield HintBar(id="hintbar")
         yield StatusBar(id="statusbar")
@@ -591,6 +598,7 @@ class ChatScreen(Screen[None]):
         self._run_bootstrap()
 
     def on_unmount(self) -> None:
+        self._resolve_approval(None, focus=False)
         if self._consumer is not None:
             self._consumer.cancel()
             self._consumer = None
@@ -626,6 +634,7 @@ class ChatScreen(Screen[None]):
             with contextlib.suppress(Exception):
                 self.app.theme = self.settings.theme
         self._apply_layout()
+        self._update_chrome()
 
     def _apply_layout(self) -> None:
         width = self.app.size.width
@@ -671,6 +680,7 @@ class ChatScreen(Screen[None]):
             usage=format_usage(self._usage),
             busy=self.busy,
             detail="client " + CLIENT_VERSION,
+            permission=permission_mode_label(self.settings.permission_mode),
         )
         activity = self.query_one("#side-panel", SidePanel).activity
         location = self.target.location()
@@ -952,7 +962,78 @@ class ChatScreen(Screen[None]):
             usage=format_usage(self._usage),
             busy=busy,
             detail=detail,
+            permission=permission_mode_label(self.settings.permission_mode),
         )
+        if not busy:
+            if self._approval_future is not None:
+                self._resolve_approval(None)
+            if self._redirect_after_turn:
+                self._redirect_after_turn = False
+                self.query_one("#hintbar", HintBar).show(
+                    "Turn stopped · type a new instruction for the agent"
+                )
+                self.query_one("#composer", Composer).focus()
+
+    # --------------------------------------------------------------- approvals
+
+    async def request_approval(self, request: PermissionRequest) -> PermissionDecision:
+        if self._approval_future is not None:
+            self._resolve_approval(None)
+        future: asyncio.Future[PermissionDecision] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._approval_future = future
+        self.query_one("#approval", ApprovalBar).show(request)
+        return await future
+
+    def expect_redirect(self) -> None:
+        """Focus the composer when the current turn stops, so the user can redirect."""
+        self._redirect_after_turn = True
+
+    def _resolve_approval(self, option_id: str | None, *, focus: bool = True) -> None:
+        future, self._approval_future = self._approval_future, None
+        if future is not None and not future.done():
+            future.set_result(PermissionDecision(option_id=option_id))
+        with contextlib.suppress(Exception):
+            self.query_one("#approval", ApprovalBar).hide()
+        if focus and self.is_mounted:
+            with contextlib.suppress(Exception):
+                self.query_one("#composer", Composer).focus()
+
+    def on_approval_decided(self, event: ApprovalDecided) -> None:
+        self._resolve_approval(event.option_id)
+        if event.option_id is None:
+            self._redirect_after_turn = True
+            self._cancel_turn()
+
+    def on_key(self, event: Any) -> None:
+        """Shortcuts work only while the approval prompt owns focus."""
+        if self._approval_future is None:
+            return
+        bar = self.query_one("#approval", ApprovalBar)
+        if not bar.pending or not bar.has_focus_within:
+            return
+        key = str(event.key)
+        if key.isdigit() and key != "0":
+            option_id = bar.option_id_at(int(key) - 1)
+            if option_id:
+                event.stop()
+                self._resolve_approval(option_id)
+            return
+        kinds = {
+            "y": "allow_once",
+            "a": "allow_always",
+            "n": "reject_once",
+            "N": "reject_always",
+            "shift+n": "reject_always",
+        }
+        kind = kinds.get(key)
+        if kind is None:
+            return
+        option_id = bar.option_id_for_kind(kind)
+        if option_id:
+            event.stop()
+            self._resolve_approval(option_id)
 
     # --------------------------------------------------------------- submitting
 
@@ -1055,6 +1136,8 @@ class ChatScreen(Screen[None]):
             self.action_show_capabilities()
         elif name == "model":
             await self._show_model_dialog()
+        elif name == "permissions":
+            self._show_permissions()
         elif name == "settings":
             self._show_settings()
         elif name == "help":
@@ -1688,14 +1771,20 @@ class ChatScreen(Screen[None]):
         panel = self.query_one("#side-panel", SidePanel)
         panel.display = True
         self._panel_forced = True
-        with contextlib.suppress(Exception):
+
+        def activate() -> None:
+            # TabbedContent resolves its private ContentTabs by immediate-child
+            # lookup. Assigning ``active`` before compose has mounted it raises
+            # NoMatches, so wait until the show/refresh cycle has run.
             panel.active = tab
-        if tab == "capabilities":
-            panel.capabilities._list.focus()
-        elif tab == "sessions":
-            panel.sessions._table.focus()
-        else:
-            panel.activity.focus()
+            if tab == "capabilities":
+                panel.capabilities._list.focus()
+            elif tab == "sessions":
+                panel.sessions._table.focus()
+            else:
+                panel.activity.focus()
+
+        self.call_after_refresh(activate)
 
     def action_toggle_panel(self) -> None:
         panel = self.query_one("#side-panel", SidePanel)
@@ -1769,6 +1858,42 @@ invents commands the agent did not advertise.
 """
         self.app.push_screen(HelpDialog(body))
 
+    def _show_permissions(self) -> None:
+        labels = {
+            "ask": "Ask every time",
+            "reads": "Allow reads, ask for the rest",
+            "all": "Allow all tools",
+        }
+        descriptions = {
+            "ask": "Show the approval bar for every tool request.",
+            "reads": "Approve read, search and think calls automatically; ask before writes, commands and network access.",
+            "all": "Approve every call whose agent offered an allow option. This is not a sandbox.",
+        }
+        choices = [
+            {"value": mode, "name": labels[mode], "description": descriptions[mode]}
+            for mode in PERMISSION_MODES
+        ]
+
+        def apply(mode: str | None) -> None:
+            if mode not in PERMISSION_MODES:
+                return
+            self.settings = replace(self.settings, permission_mode=mode)
+            self.app.apply_settings(self.settings)  # type: ignore[attr-defined]
+            self._apply_settings()
+            asyncio.create_task(
+                self._notice(f"Approvals: {labels[mode]}.", "success")
+            )
+
+        self.app.push_screen(
+            ChoiceDialog(
+                "Tool approvals",
+                "How should this client answer the agent's tool requests?",
+                choices,
+                current=self.settings.permission_mode,
+            ),
+            apply,
+        )
+
     def _show_settings(self) -> None:
         def apply(settings: Settings | None) -> None:
             if settings is not None:
@@ -1785,6 +1910,13 @@ invents commands the agent did not advertise.
         )
 
     def action_interrupt_or_focus(self) -> None:
+        if self._approval_future is not None:
+            # Esc is the Codex-style "no, and tell it what to do differently":
+            # stop the pending call, stop the turn, then hand back the composer.
+            self._resolve_approval(None)
+            self._redirect_after_turn = True
+            self._cancel_turn()
+            return
         if self.busy:
             self._cancel_turn()
         else:

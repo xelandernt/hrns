@@ -19,10 +19,22 @@ __all__ = [
     "ElicitationRequest",
     "HeadlessInteractions",
     "InteractionPolicy",
+    "PERMISSION_MODES",
     "PermissionDecision",
     "PermissionRequest",
+    "READ_ONLY_KINDS",
     "RequireInteractions",
+    "auto_permission",
 ]
+
+#: Interactive approval modes. ``ask`` surfaces every request, ``reads``
+#: auto-answers read-only tool kinds, and ``all`` auto-approves any call whose
+#: agent offered an allow option. None of these is a sandbox.
+PERMISSION_MODES = ("ask", "reads", "all")
+
+#: Tool kinds that cannot change the workspace or reach the network. ``fetch``
+#: is deliberately absent: it crosses the network boundary.
+READ_ONLY_KINDS = frozenset({"read", "search", "think"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +74,24 @@ class PermissionDecision:
     @property
     def selected(self) -> bool:
         return self.option_id is not None
+
+
+def auto_permission(mode: str, request: PermissionRequest) -> PermissionDecision | None:
+    """Return the decision an interactive mode can make without the user.
+
+    ``None`` means "ask". An unknown mode is treated as ``ask``. A request with
+    no tool kind is never auto-approved by ``reads``: failing safe matters more
+    than a quiet transcript.
+    """
+    if mode not in {"reads", "all"}:
+        return None
+    if mode == "reads" and request.kind not in READ_ONLY_KINDS:
+        return None
+    option = request.first_of_kind("allow_once", "allow_always")
+    if option is None:
+        return None
+    option_id = str(option.get("optionId") or "")
+    return PermissionDecision(option_id=option_id) if option_id else None
 
 
 @dataclass(frozen=True, slots=True)

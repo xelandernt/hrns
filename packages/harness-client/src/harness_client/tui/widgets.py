@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import time
 from collections import deque
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from rich.text import Text
@@ -25,6 +29,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS, UI_MAX_TRANSCRIPT_BLOCKS
+from ..interactions import PermissionRequest
 from ..renderers import RendererRegistry, readable_text
 from .state import (
     binding_summary,
@@ -33,11 +38,13 @@ from .state import (
     merge_tool_event,
     pending_application_text,
     presentation_payload,
-    tool_status_label,
+    tool_args_preview,
 )
 
 __all__ = [
     "ActivityPanel",
+    "ApprovalBar",
+    "ApprovalDecided",
     "CapabilityPanel",
     "Composer",
     "HintBar",
@@ -48,15 +55,11 @@ __all__ = [
     "TopBar",
 ]
 
-TOOL_GLYPHS = {
-    "read": "▤",
-    "edit": "✎",
-    "execute": "›",
-    "fetch": "⇢",
-    "search": "⌕",
-    "think": "∴",
-    "other": "•",
-}
+# One monochrome marker per tool call; status carries the meaning while it
+# runs. The result body is shown as a short ``⎿`` preview beneath the header.
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+TOOL_PREVIEW_LINES = 12
+TOOL_OUTPUT_INDENT = "    ⎿  "
 
 # Retained text per message block is bounded so a single very long streaming
 # reply cannot grow the widget tree or make Markdown re-renders unbounded.
@@ -357,13 +360,19 @@ class MessageBlock(Vertical):
     are dropped from the head and counted so the trim stays visible.
     """
 
+    ROLE_LABELS = {"you": "You", "agent": "Assistant"}
+
     def __init__(self, role: str, text: str = "") -> None:
         super().__init__()
         self.role = role
         self._text = text
         self._dropped = 0
         self._marked = False
-        self._label = Static(Text(role, style="dim"))
+        label = Text()
+        label.append(self.ROLE_LABELS.get(role, role.title()), style="bold")
+        label.append("  ")
+        label.append(datetime.now().strftime("%H:%M"), style="dim")
+        self._label = Static(label, markup=False)
         self._label.add_class("message-role")
         self._body = Markdown(text) if role == "agent" else Static(text, markup=False)
         self._body.add_class("message-body")
@@ -446,12 +455,18 @@ class NoticeBlock(Static):
 
 
 class ToolCard(Vertical):
-    """A generic, always-readable tool activity card with expandable details.
+    """An inline tool activity row with a short, expandable result preview.
 
-    Generic title/status/bounded text are always present. A versioned
-    presentation payload may be rendered by a locally installed adapter;
-    unknown adapters, versions and exceptions fall back to that generic text.
+    The general layout mirrors the Pydantic Deep Agents terminal: one header
+    line carries the status mark or spinner, the tool title, compact arguments,
+    elapsed time and a diff badge. Results appear underneath as a dim,
+    indented ``⎿`` preview capped at :data:`TOOL_PREVIEW_LINES` lines. Enter or
+    a click expands the full result in place instead of opening a separate
+    details panel.
     """
+
+    can_focus = True
+    BINDINGS = [Binding("enter", "toggle_expand", "Expand output", show=False)]
 
     def __init__(
         self,
@@ -463,38 +478,111 @@ class ToolCard(Vertical):
         super().__init__()
         self.data = dict(data)
         self.renderer = renderer
+        self._expanded = bool(auto_expand)
+        self._started = time.monotonic()
+        self._finished: float | None = None
+        self._spin_index = 0
+        self._timer: Any = None
+        self._body_text = ""
         self._header = Static(markup=False)
-        self._detail = Static("", markup=False)
-        self._collapsible = Collapsible(
-            self._detail, title="Details", collapsed=not auto_expand
-        )
+        self._header.add_class("tool-header")
+        self._preview = Static("", markup=False)
+        self._preview.add_class("tool-output")
+        self._full = Static("", markup=False)
+        self._full.add_class("tool-output-expanded")
         self.add_class("tool-card")
-        self._render_header()
-        self._render_detail()
+        self._refresh()
 
     def compose(self) -> ComposeResult:
         yield self._header
-        yield self._collapsible
+        yield self._preview
+        yield self._full
+
+    def on_mount(self) -> None:
+        if self._is_pending():
+            self._timer = self.set_interval(0.1, self._tick)
+        self._refresh()
+
+    def on_unmount(self) -> None:
+        self._stop_spinner()
 
     @property
     def tool_call_id(self) -> str:
         return self.data.get("toolCallId", "")
 
-    def _render_header(self) -> None:
-        glyph = TOOL_GLYPHS.get(self.data.get("kind") or "other", "•")
-        status = tool_status_label(self.data.get("status", ""))
-        title = self.data.get("title") or self.data.get("toolCallId") or "tool"
-        text = Text()
-        text.append(f"{glyph} ", style="bold")
-        text.append(readable_text(title))
-        text.append("   ")
-        text.append(status, style="dim")
-        if self.data.get("kind"):
-            text.append(f"   {self.data['kind']}", style="dim")
-        self._header.update(text)
+    def _is_pending(self) -> bool:
+        return str(self.data.get("status") or "") in {"", "pending", "in_progress"}
 
-    def _render_detail(self) -> None:
-        generic = readable_text(self.data.get("detail") or "").strip()
+    def _elapsed(self) -> float | None:
+        if self._finished is not None:
+            return self._finished
+        if self._is_pending():
+            return max(0.0, time.monotonic() - self._started)
+        return None
+
+    def _stop_spinner(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        if not self._is_pending():
+            self._stop_spinner()
+            return
+        self._spin_index = (self._spin_index + 1) % len(SPINNER_FRAMES)
+        self._header.update(self._header_text())
+
+    def _header_text(self) -> Text:
+        pending = self._is_pending()
+        status = str(self.data.get("status") or "")
+        if pending:
+            symbol = SPINNER_FRAMES[self._spin_index]
+            word = {"pending": "pending", "in_progress": "running"}.get(status, "queued")
+        elif status == "completed":
+            symbol, word = "✓", "completed"
+        elif status == "failed":
+            symbol, word = "✗", "failed"
+        else:
+            symbol, word = "•", status
+
+        title = readable_text(
+            self.data.get("title") or self.data.get("toolCallId") or "tool",
+            limit=200,
+        )
+        args = tool_args_preview(self.data)
+        text = Text()
+        if is_subagent_tool(self.data):
+            text.append("│  ", style="dim")
+        text.append(f"{symbol} ", style="bold" if not pending else "dim")
+        text.append(title)
+        if args:
+            text.append("(", style="dim")
+            text.append(args, style="dim")
+            text.append(")", style="dim")
+
+        added = int(self.data.get("diffAdded") or 0)
+        removed = int(self.data.get("diffRemoved") or 0)
+        if added or removed:
+            text.append("  ")
+            if added:
+                text.append(f"+{added}", style="bold")
+            if added and removed:
+                text.append(" ")
+            if removed:
+                text.append(f"-{removed}", style="bold")
+
+        text.append("  ")
+        text.append(word, style="dim")
+        elapsed = self._elapsed()
+        if elapsed is not None:
+            text.append(f"  {elapsed:.1f}s", style="dim")
+        if self._body_text:
+            text.append("  ")
+            text.append("▾" if self._expanded else "▸", style="dim")
+        return text
+
+    def _detail_text(self, source: str) -> str:
+        generic = readable_text(source).strip()
         rendered = generic
         payload = presentation_payload(self.data)
         if payload is not None:
@@ -506,15 +594,77 @@ class ToolCard(Vertical):
                 if not candidate.get("fallback"):
                     candidate["fallback"] = generic
                 rendered = self.renderer.render(candidate, fallback=generic or "Activity")
-        if not rendered.strip():
-            rendered = "No details were supplied by the agent."
-        self._detail.update(rendered)
-        self._collapsible.display = True
+        return rendered.strip()
+
+    def _render_header(self) -> None:
+        self._header.update(self._header_text())
+
+    def _render_lines(self, lines: list[str], *, limit: int | None) -> Text:
+        selected = lines if limit is None else lines[:limit]
+        text = Text()
+        for index, line in enumerate(selected):
+            if index:
+                text.append("\n")
+            text.append(TOOL_OUTPUT_INDENT, style="dim")
+            # Only the diff markers get weight; the rest stays quiet so the
+            # transcript reads as one calm stream.
+            style = "bold" if line.startswith(("+ ", "- ")) else "dim"
+            text.append(line, style=style)
+        if limit is not None and len(lines) > limit:
+            if selected:
+                text.append("\n")
+            text.append(TOOL_OUTPUT_INDENT, style="dim")
+            remaining = len(lines) - limit
+            plural = "line" if remaining == 1 else "lines"
+            text.append(f"… ({remaining} more {plural})", style="dim")
+        return text
+
+    def _render_body(self) -> None:
+        # The preview is the result only, while the expanded view also carries
+        # the full argument payload when the peer supplies one.
+        preview_source = self.data.get("result") or self.data.get("detail") or ""
+        full_source = self.data.get("detail") or self.data.get("result") or ""
+        raw_input = self.data.get("raw_input")
+        if raw_input is not None:
+            rendered_input = readable_text(raw_input, limit=UI_MAX_TOOL_CONTENT_CHARS)
+            if rendered_input and rendered_input not in full_source:
+                prefix = f"{full_source}\n\n" if full_source else ""
+                full_source = f"{prefix}input\n{rendered_input}"
+        preview_body = self._detail_text(preview_source)
+        full_body = preview_body if full_source == preview_source else self._detail_text(full_source)
+        self._body_text = preview_body or full_body
+
+        preview_lines = preview_body.splitlines()
+        full_lines = full_body.splitlines()
+        self._preview.update(self._render_lines(preview_lines, limit=TOOL_PREVIEW_LINES))
+        self._full.update(self._render_lines(full_lines, limit=None))
+
+        preview_visible = bool(preview_lines) and not self._expanded and not self._is_pending()
+        full_visible = bool(full_lines) and self._expanded
+        self._preview.set_class(preview_visible, "visible")
+        self._full.set_class(full_visible, "visible")
+
+    def _refresh(self) -> None:
+        self._render_body()
+        self._render_header()
+
+    def action_toggle_expand(self) -> None:
+        if not self._body_text:
+            return
+        self._expanded = not self._expanded
+        self._refresh()
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_toggle_expand()
 
     def update_from(self, data: dict[str, Any]) -> None:
+        was_pending = self._is_pending()
         self.data = dict(data)
-        self._render_header()
-        self._render_detail()
+        if was_pending and not self._is_pending():
+            self._finished = max(0.0, time.monotonic() - self._started)
+            self._stop_spinner()
+        self._refresh()
 
 
 class HintBar(Static):
@@ -535,6 +685,7 @@ class StatusBar(Static):
         usage: str = "",
         busy: bool = False,
         detail: str = "",
+        permission: str = "",
     ) -> None:
         text = Text()
         text.append("● " if connected else "○ ", style="bold" if connected else "dim")
@@ -544,6 +695,9 @@ class StatusBar(Static):
             text.append(session_id, style="bold")
         if mode:
             text.append(f"   mode {mode}")
+        if permission:
+            text.append("   approvals ")
+            text.append(permission, style="bold" if permission != "ask" else "")
         if model:
             text.append(f"   model {model}")
         if usage:
@@ -553,6 +707,158 @@ class StatusBar(Static):
         if detail:
             text.append(f"   {detail}", style="dim")
         self.update(text)
+
+
+class ApprovalDecided(Message):
+    """The local user answered a pending tool approval."""
+
+    def __init__(self, option_id: str | None) -> None:
+        super().__init__()
+        self.option_id = option_id
+
+
+APPROVAL_LABELS: dict[str, tuple[str, str]] = {
+    "allow_once": ("Yes, proceed", "y"),
+    "allow_always": ("Yes, always allow this exact call", "a"),
+    "reject_once": ("No, reject this call", "n"),
+    "reject_always": ("No, always reject this exact call", "shift+n"),
+}
+
+
+def _approval_detail(request: PermissionRequest) -> Text:
+    """Render the actual call, not the clipped JSON blob from the wire."""
+    raw = request.raw_input
+    lines: list[str] = []
+    if isinstance(raw, Mapping):
+        command = raw.get("command") or raw.get("cmd")
+        if command:
+            if isinstance(command, (list, tuple)):
+                command = " ".join(str(part) for part in command)
+            lines.append(f"$ {command}")
+        path = raw.get("path") or raw.get("file_path") or raw.get("filename")
+        if path and not command:
+            lines.append(f"path: {path}")
+        pattern = raw.get("pattern") or raw.get("query")
+        if pattern and not command:
+            lines.append(f"pattern: {pattern}")
+        diff = raw.get("patch") or raw.get("diff")
+        old = raw.get("old_string")
+        new = raw.get("new_string")
+        content = raw.get("content")
+        if isinstance(diff, str) and diff.strip():
+            lines.extend(diff.splitlines()[:10])
+        elif isinstance(old, str) and isinstance(new, str):
+            lines.extend(f"- {line}" for line in old.splitlines()[:5])
+            lines.extend(f"+ {line}" for line in new.splitlines()[:5])
+        elif isinstance(content, str) and content.strip():
+            lines.extend(f"+ {line}" for line in content.splitlines()[:8])
+        elif not lines:
+            try:
+                rendered = json.dumps(raw, indent=2, ensure_ascii=False, default=str)
+            except Exception:
+                rendered = str(raw)
+            lines.extend(rendered.splitlines()[:10])
+    elif raw is not None:
+        lines.extend(str(raw).splitlines()[:10])
+    if not lines:
+        lines.extend((request.detail or "No additional tool details were provided.").splitlines()[:10])
+
+    text = Text()
+    for index, line in enumerate(lines):
+        if index:
+            text.append("\n")
+        style = "green" if line.startswith("+ ") else "red" if line.startswith("- ") else ""
+        text.append(readable_text(line, limit=240), style=style)
+    return text
+
+
+class ApprovalBar(Vertical):
+    """Non-modal approval prompt above the composer.
+
+    The transcript stays readable and the agent's tool card remains in place.
+    Focus moves to the option list; the screen owns the y/a/n shortcuts so they
+    cannot fire while the composer is focused.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._request: PermissionRequest | None = None
+        self._header = Static("", markup=False)
+        self._header.add_class("approval-header")
+        self._detail = Static("", markup=False)
+        self._detail.add_class("approval-detail")
+        self._options = OptionList(id="approval-options", markup=False)
+        self._hint = Static("", markup=False)
+        self._hint.add_class("approval-hint")
+        self.display = False
+
+    def compose(self) -> ComposeResult:
+        yield self._header
+        yield self._detail
+        yield self._options
+        yield self._hint
+
+    @property
+    def pending(self) -> bool:
+        return self._request is not None
+
+    def show(self, request: PermissionRequest) -> None:
+        self._request = request
+        header = Text()
+        header.append("Approval needed", style="bold")
+        header.append("  ")
+        header.append(readable_text(request.summary(), limit=200), style="bold")
+        if request.kind:
+            header.append(f"  ·  {readable_text(request.kind, limit=40)}", style="dim")
+        self._header.update(header)
+        self._detail.update(_approval_detail(request))
+        self._options.clear_options()
+        for option in request.options:
+            kind = str(option.get("kind") or "")
+            label, shortcut = APPROVAL_LABELS.get(
+                kind, (str(option.get("name") or kind or "Option"), "")
+            )
+            suffix = f"   ({shortcut})" if shortcut else ""
+            label = readable_text(label, limit=120)
+            self._options.add_option(Option(f"{label}{suffix}", id=str(option.get("optionId") or "")))
+        kinds = {str(option.get("kind") or "") for option in request.options}
+        hints = ["↑/↓ choose", "Enter confirm"]
+        if "allow_once" in kinds:
+            hints.append("y allow once")
+        if "allow_always" in kinds:
+            hints.append("a always allow")
+        if "reject_once" in kinds:
+            hints.append("n reject")
+        if "reject_always" in kinds:
+            hints.append("shift+n always reject")
+        hints.append("Esc stop and redirect")
+        self._hint.update(" · ".join(hints))
+        self.display = True
+        if self._options.option_count:
+            self._options.highlighted = 0
+        self.call_after_refresh(self._options.focus)
+
+    def hide(self) -> None:
+        self._request = None
+        self.display = False
+        self._options.clear_options()
+
+    def option_id_for_kind(self, kind: str) -> str | None:
+        if self._request is None:
+            return None
+        option = self._request.first_of_kind(kind)
+        option_id = str(option.get("optionId") or "") if option else ""
+        return option_id or None
+
+    def option_id_at(self, index: int) -> str | None:
+        if self._request is None or not 0 <= index < len(self._request.options):
+            return None
+        option_id = str(self._request.options[index].get("optionId") or "")
+        return option_id or None
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.post_message(ApprovalDecided(str(event.option_id)))
 
 
 # --------------------------------------------------------------- side panels

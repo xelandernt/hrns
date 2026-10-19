@@ -20,6 +20,7 @@ from ..interactions import (
     InteractionPolicy,
     PermissionDecision,
     PermissionRequest,
+    auto_permission,
 )
 from ..launch import ConnectionTarget, transport_for
 from ..local import local_model_catalog
@@ -51,7 +52,7 @@ HARNESS_THEME = Theme(
 
 
 class UiInteractionPolicy(InteractionPolicy):
-    """Approvals and elicitation answered by modal dialogs inside the app."""
+    """Approvals answered inline, elicitation answered by a dialog."""
 
     def __init__(self, app: HarnessApp) -> None:
         self.app = app
@@ -102,10 +103,14 @@ class HarnessApp(App[int]):
     }
     #transcript:focus { border: none; }
 
+    .role-you,
+    .role-agent {
+        height: auto;
+    }
     .message-role {
-        color: $text-muted;
+        color: $accent;
         margin-top: 1;
-        text-style: italic;
+        text-style: bold;
     }
     .role-you .message-body {
         border-left: thick $accent;
@@ -130,18 +135,25 @@ class HarnessApp(App[int]):
     .notice-success { border-left: thick $success; color: $foreground; }
 
     .tool-card {
-        background: $panel;
-        border-left: thick $secondary;
+        background: transparent;
+        border-left: tall $secondary 40%;
         padding: 0 1;
-        margin: 0 0 1 0;
+        margin: 0 0 1 1;
         height: auto;
     }
-    .tool-card Collapsible {
-        background: transparent;
-        border: none;
-        padding: 0;
+    .tool-card:focus { background: transparent; }
+    .tool-card .tool-header { height: auto; }
+    .tool-card .tool-output,
+    .tool-card .tool-output-expanded {
+        padding: 0 0 0 3;
+        color: $text-muted;
+        height: auto;
+        display: none;
     }
-    .tool-card Static { background: transparent; }
+    .tool-card .tool-output.visible,
+    .tool-card .tool-output-expanded.visible {
+        display: block;
+    }
 
     /* --------------------------------------------------------- side panel */
 
@@ -183,13 +195,14 @@ class HarnessApp(App[int]):
         color: $text-muted;
         height: auto;
     }
-    #binding-list, #choice-list, #command-list, #permission-options {
+    #binding-list, #choice-list, #command-list, #permission-options, #approval-options {
         background: transparent;
         height: auto;
         max-height: 14;
         scrollbar-size-vertical: 1;
     }
-    #binding-list:focus, #choice-list:focus, #command-list:focus, #permission-options:focus {
+    #binding-list:focus, #choice-list:focus, #command-list:focus, #permission-options:focus,
+    #approval-options:focus {
         border: none;
     }
     #session-table {
@@ -209,6 +222,37 @@ class HarnessApp(App[int]):
     }
 
     /* ----------------------------------------------------------- composer */
+
+    #approval {
+        height: auto;
+        max-height: 16;
+        margin: 0 1;
+        padding: 0 1;
+        background: $surface;
+        border: solid $warning;
+    }
+    #approval .approval-header {
+        height: auto;
+        padding: 0 0 1 0;
+    }
+    #approval .approval-detail {
+        height: auto;
+        max-height: 9;
+        padding: 0 0 0 1;
+        color: $foreground;
+    }
+    #approval .approval-hint {
+        height: auto;
+        color: $text-muted;
+        padding: 0 0 0 1;
+    }
+    #approval-options {
+        background: transparent;
+        height: auto;
+        max-height: 5;
+        scrollbar-size-vertical: 1;
+    }
+    #approval-options:focus { border: none; }
 
     #composer {
         dock: bottom;
@@ -383,6 +427,7 @@ class HarnessApp(App[int]):
         self.session: SessionProxy | None = None
         self.target: ConnectionTarget | None = None
         self._shutting_down = False
+        self._approval_lock = asyncio.Lock()
 
     # --------------------------------------------------------------- lifecycle
 
@@ -496,6 +541,49 @@ class HarnessApp(App[int]):
         self.session = None
 
     async def ask_permission(self, request: PermissionRequest) -> PermissionDecision:
+        """Answer a tool approval inline, or automatically when the mode allows it.
+
+        The modal remains only as a fallback when another screen is on top, so a
+        permission request can never be buried behind an unrelated dialog.
+        """
+        decision = auto_permission(self.settings.permission_mode, request)
+        if decision is not None:
+            await self._audit_permission(request)
+            return decision
+
+        async with self._approval_lock:
+            # The mode may have changed while this request waited for the lock.
+            decision = auto_permission(self.settings.permission_mode, request)
+            if decision is not None:
+                await self._audit_permission(request)
+                return decision
+            if not self.screen_stack:
+                return PermissionDecision(option_id=None)
+            screen = self.screen
+            if not isinstance(screen, ChatScreen):
+                return await self._ask_permission_dialog(request)
+            decision = await screen.request_approval(request)
+            if decision.option_id is None:
+                screen.expect_redirect()
+            return decision
+
+    def _chat_screen(self) -> ChatScreen | None:
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, ChatScreen):
+                return screen
+        return None
+
+    async def _audit_permission(self, request: PermissionRequest) -> None:
+        screen = self._chat_screen()
+        if screen is None:
+            return
+        kind = request.kind or "tool"
+        with contextlib.suppress(Exception):
+            await screen._notice(f"Auto-approved {kind}: {request.summary()}", "info")
+
+    async def _ask_permission_dialog(
+        self, request: PermissionRequest
+    ) -> PermissionDecision:
         future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()
 
         def done(result: str | None) -> None:

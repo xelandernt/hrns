@@ -105,9 +105,11 @@ uv run hrns run --local --allow-all "Run the project tests"
 
 Local mode inherits your shell environment for provider authentication. All function
 tools request permission through the existing ACP controls, including reads, edits,
-and commands. Headless execution requires `--allow-all`, `--deny-all`, or reports
-that interaction is required. The local workspace starts at the selected project;
-it is **not a sandbox**. Approved commands execute with your user's permissions.
+and commands. In the terminal, `/permissions` can auto-approve read-only kinds
+(`reads`) or every offered allow option (`all`); `ask` remains the safe default.
+Headless execution requires `--allow-all`, `--deny-all`, or reports that interaction
+is required. The local workspace starts at the selected project; it is **not a
+sandbox**. Approved commands execute with your user's permissions.
 
 Sessions are stored in the platform's Harness user data directory by default.
 Set `store = "/absolute/path/sessions.db"` to select another SQLite store. Existing

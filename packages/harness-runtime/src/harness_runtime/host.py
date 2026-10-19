@@ -654,11 +654,17 @@ class HostedSession:
             if scope in self._always_reject:
                 results[tool_call_id] = ToolDenied("Rejected by the client.")
                 continue
+            kind = acp_map.tool_call_start_update(
+                {"tool_call_id": tool_call_id, "tool_name": tool_name, "args": args},
+                cwd=self.cwd,
+                presenter=self.host.presenter,
+            ).kind
             if tool_call_id not in self.started_tools:
                 await self._send(
                     acp.start_tool_call(
                         tool_call_id=tool_call_id,
                         title=acp_map.humanize_tool_name(tool_name),
+                        kind=kind,
                         status="pending",
                         raw_input=_jsonable(args),
                     )
@@ -668,7 +674,9 @@ class HostedSession:
                 # The call was announced as running before the model paused for approval;
                 # correct it to pending so a rejected call is never shown as executed.
                 await self._send(
-                    acp.update_tool_call(tool_call_id=tool_call_id, status="pending")
+                    acp.update_tool_call(
+                        tool_call_id=tool_call_id, status="pending", kind=kind
+                    )
                 )
             self._permission_counter += 1
             options = acp_map.permission_options(
@@ -687,6 +695,7 @@ class HostedSession:
                     tool_call=schema.ToolCallUpdate(
                         tool_call_id=tool_call_id,
                         title=acp_map.humanize_tool_name(tool_name),
+                        kind=kind,
                         status="pending",
                         raw_input=_jsonable(args),
                     ),
