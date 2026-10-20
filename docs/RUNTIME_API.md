@@ -2,11 +2,11 @@
 
 Status: **stable for integration**. This is the programmatic core owned by the runtime
 component; ACP host, catalog, server, and Python callers program against exactly this
-surface. Wire DTOs come from `harness_protocol`; the runtime never defines a second wire
+surface. Wire DTOs come from `harness.protocol`; the runtime never defines a second wire
 model.
 
 ```python
-from harness_runtime import (
+from harness.runtime import (
     # definition + plugins
     AgentDefinition, DefinitionBinding, AgentSpec, DefinitionManifest,
     PluginRegistry, PluginDescriptor, CompatibilityConstraints,
@@ -20,7 +20,7 @@ from harness_runtime import (
 )
 ```
 
-Nothing here imports ACP, Textual, or the server; `harness_runtime.acp` / `.host` /
+Nothing here imports ACP, Textual, or the server; `harness.runtime.acp` / `.host` /
 `.catalog` / `.starters` import this core and not the other way around.
 
 ---
@@ -348,7 +348,7 @@ imports nothing until a binding is composed. `registry.catalog()` → `list[Plug
 
 ## 5a. Managed workspace lifecycle
 
-`harness_runtime.workspaces` owns workspace identity and lifetime; the runtime integrates it
+`harness.runtime.workspaces` owns workspace identity and lifetime; the runtime integrates it
 without implementing a second sandbox abstraction.
 
 - Configure either a completed `WorkspaceManager` (`workspaces=`) or explicit
@@ -435,14 +435,14 @@ async with manager.open_session(definition, resources=resources) as session:
 
 ## 9. Host integration notes
 
-- `harness_runtime.host` owns `HostBundle` (`definition, registry, manager, store_path,
+- `harness.runtime.host` owns `HostBundle` (`definition, registry, manager, store_path,
   meta`) and its default `build_local_bundle(setup)` uses entry-point discovery for the
   explicitly offered plugin catalog. Because `PluginRegistry` resolves bundled catalog
   descriptors as a lazy lookup fallback, definitions may reference bundled upstream plugin
   ids even when the host did not register them for local binding creation.
-- `harness_runtime.session.build_host_bundle(setup)` is the fully catalog-backed
-  alternative for `harness-host --runtime-module harness_runtime.session`: it composes
-  `harness_runtime.catalog.build_catalog_registry()` (bundled entries explicitly
+- `harness.runtime.session.build_host_bundle(setup)` is the fully catalog-backed
+  alternative for `harness-host --runtime-module harness.runtime.session`: it composes
+  `harness.runtime.catalog.build_catalog_registry()` (bundled entries explicitly
   registered, so they are also offered for local add) plus installed
   `harness.capabilities` entry points. Deployments that offer catalog capabilities for
   client-side add should use it, or construct `SessionManager` over a catalog registry
@@ -453,5 +453,5 @@ async with manager.open_session(definition, resources=resources) as session:
   `LocalWorkspaceBackend`; rich workspace objects pass through unchanged.
 - The ACP adapter should fetch descriptors from `session.catalog.descriptors(...)` (or the
   paginated `session.capabilities()`) and use `session.snapshot` for the selected state.
-- `harness_runtime.acp` maps runtime events to ACP updates; `tool_update.status` follows
+- `harness.runtime.acp` maps runtime events to ACP updates; `tool_update.status` follows
   ACP's vocabulary and `text_delta.thought` marks reasoning deltas.

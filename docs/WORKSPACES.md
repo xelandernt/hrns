@@ -1,6 +1,6 @@
 # Workspace lifecycle
 
-`harness_runtime.workspaces` is the runtime host's workspace **identity and lifetime** service.
+`harness.runtime.workspaces` is the runtime host's workspace **identity and lifetime** service.
 It does not implement a sandbox. Execution stays in the official Pydantic AI backend selected by
 the deployment: `LocalWorkspaceBackend` on a trusted host, or an upstream Harness integration such
 as `SmolSandboxBackend` or `E2BSandboxBackend` for isolation.
@@ -43,7 +43,7 @@ callback is the only persistence integration; pass a mutable mapping for a stand
 host filesystem. Its working directory is a starting point, not a security boundary.
 
 ```python
-from harness_runtime.workspaces import WorkspaceManager, local_workspace_provider
+from harness.runtime.workspaces import WorkspaceManager, local_workspace_provider
 
 manager = WorkspaceManager(
     providers=[local_workspace_provider("/srv/harness/projects/example")],
@@ -88,7 +88,7 @@ Descriptor: `SMOL_SANDBOX_DESCRIPTOR` (`isolation="isolated"`). Prerequisites:
 
 ```python
 from pydantic_ai_harness.smol_sandbox import SmolSandbox, SmolSandboxBackend
-from harness_runtime.workspaces import (
+from harness.runtime.workspaces import (
     SMOL_SANDBOX_DESCRIPTOR,
     WorkspaceProvider,
     WorkspaceRef,
@@ -130,7 +130,7 @@ Descriptor: `E2B_SANDBOX_DESCRIPTOR` (`isolation="isolated"`). Prerequisites:
 
 ```python
 from pydantic_ai_harness.e2b_sandbox import E2BSandbox, E2BSandboxBackend
-from harness_runtime.workspaces import E2B_SANDBOX_DESCRIPTOR, WorkspaceProvider
+from harness.runtime.workspaces import E2B_SANDBOX_DESCRIPTOR, WorkspaceProvider
 
 e2b = E2BSandbox(template="my-harness-template", sandbox_timeout=3600)
 
@@ -161,7 +161,7 @@ A pure manager can use `record_store={}`. A host should adapt its existing sessi
 create a second store. The four callbacks may be synchronous or asynchronous:
 
 ```python
-from harness_runtime.workspaces import WorkspaceManager, WorkspaceRecordCallbacks
+from harness.runtime.workspaces import WorkspaceManager, WorkspaceRecordCallbacks
 
 records = WorkspaceRecordCallbacks(
     get=session_store.get_workspace_record,       # (session_id) -> WorkspaceRecord | None
@@ -200,7 +200,7 @@ manager retry `delete` for an environment that has already been destroyed.
 ### TTL and deterministic clocks
 
 ```python
-from harness_runtime.workspaces import DEFAULT_EPHEMERAL_TTL_SECONDS, WorkspaceManager
+from harness.runtime.workspaces import DEFAULT_EPHEMERAL_TTL_SECONDS, WorkspaceManager
 
 manager = WorkspaceManager(
     providers=[...],

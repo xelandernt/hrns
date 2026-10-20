@@ -3,10 +3,10 @@
 ## Reproducible checks
 
 ```sh
-uv sync --locked --all-packages
+uv sync --locked --all-extras
 uv run ruff check .
 uv run pytest -q
-uv build --all-packages
+uv build
 ```
 
 The suite uses real Pydantic AI test/function models and the pinned official ACP SDK, without model-provider credentials. External SaaS, cloud sandbox and durability integrations require their own credentials and services; catalog metadata alone is not an integration test.
@@ -21,8 +21,8 @@ Checked 18 October 2026 on macOS with Python 3.12:
 - `uv run pytest -q`: **561 passed, 15 skipped** (the skipped tests are opt-in PostgreSQL integration tests; the PostgreSQL suite was separately run against PostgreSQL 17).
 - Independent adversarial and spec reviews added `tests/test_runtime_review.py` (12), `tests/test_server_review.py` (32), `tests/test_acp_review.py` (16), and `tests/test_spec_{runtime,client,server,tui,manifest}.py` (65). Every confirmed finding was fixed: initial-configuration directional policy, close-during-composition cancellation, unavailable `add`, new-session-only `add`, duplicate definition pins, non-finite configuration values, deferred-approval cancellation settlement, complete `session/load` user-message and interruption replay, extension negotiation and error codes, model allow-list reload, unavailable standard options, root workspace matching, complete transaction retry identity, canonical cursors, capability/tool identity collisions, saved-policy revalidation, definition pin snapshots, transcript ordering, SQLite transaction error mapping, strict worker RPC frames, authoritative load-vs-resume recovery, advertised agent authentication, TUI read-only capability handling/pagination/attachment preflight, renderer fallback, and declarative binding-policy round-tripping.
 - `uv run ruff check .`: clean.
-- `uv build --all-packages`: four wheels and four source distributions built.
-- Isolated wheel environments: protocol imports with only Pydantic; client imports without Pydantic AI or the runtime; runtime and server import without Textual; all console scripts answer `--version`/`--help`.
+- `uv build`: one wheel and one source distribution built.
+- Isolated extra environments: the base install imports without AI or UI libraries; the `client` extra imports without Pydantic AI or the runtime; `runtime` and `server` import without Textual; all console scripts answer `--version`/`--help`.
 - Hosted end-to-end: authenticated catalog, WebSocket worker, capability disable, transaction retry replay, transcript reload, and the stdio bridge into the hosted worker all pass.
 
 ## Contract fixtures

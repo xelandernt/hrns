@@ -9,7 +9,7 @@ planning, repository context, skills, and the existing capability panel.
 Install the OpenAI extra (also used by DeepSeek):
 
 ```sh
-uv sync --locked --all-packages --extra openai
+uv sync --locked --extra client --extra runtime --extra openai
 export DEEPSEEK_API_KEY='your-key'
 ```
 
@@ -98,7 +98,7 @@ OpenAI-compatible endpoints should use `openai-chat`.
 
 ## Configuration and execution
 
-The shared `harness-config` package uses **pydantic-settings** without importing
+The shared `harness.config` module uses **pydantic-settings** without importing
 the runtime or UI. Precedence is explicit values, `HARNESS_LOCAL_*` environment
 variables, the selected TOML file, then defaults. Example environment names:
 `HARNESS_LOCAL_PROVIDER`, `HARNESS_LOCAL_MODEL`, `HARNESS_LOCAL_BASE_URL`,

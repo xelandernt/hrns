@@ -22,19 +22,20 @@ import tempfile
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
-from harness_protocol import CapabilityPolicy, EnableChange  # noqa: E402
-from harness_runtime.definitions import AgentDefinition, DefinitionBinding  # noqa: E402
-from harness_runtime.registry import (  # noqa: E402
-    BindingContext,
-    PluginDescriptor,
-    PluginRegistry,
-)
-from harness_runtime.session import SessionManager  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 from pydantic_ai import Agent  # noqa: E402
 from pydantic_ai.capabilities import AbstractCapability  # noqa: E402
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart  # noqa: E402
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
+
+from harness.protocol import CapabilityPolicy, EnableChange  # noqa: E402
+from harness.runtime.definitions import AgentDefinition, DefinitionBinding  # noqa: E402
+from harness.runtime.registry import (  # noqa: E402
+    BindingContext,
+    PluginDescriptor,
+    PluginRegistry,
+)
+from harness.runtime.session import SessionManager  # noqa: E402
 
 PLUGIN_ID = "example.house_style"
 BINDING_ID = "style"

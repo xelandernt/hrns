@@ -1,6 +1,6 @@
 # Shared implementation contracts
 
-`harness_protocol` is available now. It exports:
+`harness.protocol` is available now. It exports:
 
 - `HarnessError(code, message, details=None)` with `to_rpc()` and `to_http()`.
 - `EnableChange(type='enable', binding_id, enabled)`, `ConfigureChange(type='configure', binding_id, fields)`, `AddChange(type='add', binding_id, plugin_id, config={}, enabled=True)`.
@@ -15,7 +15,7 @@ Wire DTOs accept snake_case and camelCase. `.to_wire()` emits JSON-safe camelCas
 
 ### Review clarification
 
-Extension list responses use versioned `BindingListResponse` and `PluginListResponse`, both with **`items`** and optional `nextCursor`. The binding list also carries `selectedRevision`, `activeRevision`, and `policyRevision`. Clients and hosts should share these models rather than guess `bindings`/`plugins` response keys. `BindingDescriptor.policy.changeMode` is authoritative; the top-level `changeMode` is a validated convenience mirror and cannot override policy. All transport/version/method constants come from `harness_protocol`; hosts filter `_harness/plugins/list` out of their advertisement when local binding creation is prohibited.
+Extension list responses use versioned `BindingListResponse` and `PluginListResponse`, both with **`items`** and optional `nextCursor`. The binding list also carries `selectedRevision`, `activeRevision`, and `policyRevision`. Clients and hosts should share these models rather than guess `bindings`/`plugins` response keys. `BindingDescriptor.policy.changeMode` is authoritative; the top-level `changeMode` is a validated convenience mirror and cannot override policy. All transport/version/method constants come from `harness.protocol`; hosts filter `_harness/plugins/list` out of their advertisement when local binding creation is prohibited.
 
 ## Worker environment
 

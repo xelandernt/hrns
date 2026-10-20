@@ -1,7 +1,7 @@
 # Optional PostgreSQL session store
 
-`harness_runtime.postgres.PostgresSessionStore` is a server-side durable store behind the
-same asynchronous interface as the default SQLite WAL [`SessionStore`](../packages/harness-runtime/src/harness_runtime/store.py).
+`harness.runtime.postgres.PostgresSessionStore` is a server-side durable store behind the
+same asynchronous interface as the default SQLite WAL [`SessionStore`](../src/harness/runtime/store.py).
 It is optional: importing the module works without a database driver, and no server
 connection is opened until the store is used.
 
@@ -15,22 +15,22 @@ database tests as skipped.
 
 ## Install
 
-The driver is the existing `postgres` extra of `harness-runtime` (`psycopg[binary]>=3.2`):
+The driver is the `postgres` extra (`psycopg[binary]>=3.2`):
 
 ```sh
-uv sync --all-packages --extra postgres
+uv sync --extra postgres
 # or, outside the workspace:
-pip install 'harness-runtime[postgres]'
+pip install 'harness[postgres]'
 ```
 
 Without the extra, constructing a store raises an actionable `ImportError`; merely
-importing `harness_runtime.postgres` does not fail.
+importing `harness.runtime.postgres` does not fail.
 
 ## Usage
 
 ```python
-from harness_runtime import AgentDefinition, PluginRegistry, SessionManager
-from harness_runtime.postgres import PostgresSessionStore
+from harness.runtime import AgentDefinition, PluginRegistry, SessionManager
+from harness.runtime.postgres import PostgresSessionStore
 
 store = PostgresSessionStore(
     "postgresql://harness:secret@db.example/harness?sslmode=require"
@@ -52,7 +52,7 @@ workspace-record callbacks automatically. A manually constructed manager can be 
 same way:
 
 ```python
-from harness_runtime.workspaces import WorkspaceManager
+from harness.runtime.workspaces import WorkspaceManager
 
 workspaces = WorkspaceManager(
     providers=providers,
@@ -95,10 +95,10 @@ file.
 ## Host integration
 
 The runtime now selects the backend from `HARNESS_STORE` / `--store` at the process
-boundary with `harness_runtime.host.build_store`:
+boundary with `harness.runtime.host.build_store`:
 
 ```python
-from harness_runtime.host import build_store
+from harness.runtime.host import build_store
 
 store = build_store("postgresql://harness:secret@db.example/harness")
 manager = SessionManager(registry, store=store)
@@ -118,7 +118,7 @@ the same DSN is never exposed in catalog responses. Integration notes:
   The runtime store now records the authoritative `cwd` (`summary.cwd`), which the host
   prefers on reload, so `None` is a valid minimal choice. Keep a separate local sidecar
   directory if the host-selected model must survive worker restarts.
-- The existing `build_local_bundle` / `harness_runtime.session.build_host_bundle`
+- The existing `build_local_bundle` / `harness.runtime.session.build_host_bundle`
   helpers call `str(store.path)`. A PostgreSQL store has no filesystem path, so those
   builders need the selector branch and an explicit metadata path (or `None`) rather than
   reusing the DSN.
@@ -162,7 +162,7 @@ unrelated application's generic `sessions` table. A dedicated database (or dedic
 
 Migrations are forward-only and run under a PostgreSQL transaction-level advisory lock,
 so concurrent workers cannot race schema creation. The current schema version is exported
-as `harness_runtime.postgres.SCHEMA_VERSION`. A database whose schema is newer than the
+as `harness.runtime.postgres.SCHEMA_VERSION`. A database whose schema is newer than the
 runtime supports fails with `DEPLOYMENT_UNAVAILABLE` rather than being modified. Schema
 v2 adds the nullable `owner_pid`/`owner_host` columns to existing v1 control tables with
 `ADD COLUMN IF NOT EXISTS`; v3 adds `harness_workspace_records`; v4 adds the
@@ -230,7 +230,7 @@ Real integration tests are opt-in. Point them at a disposable database (they cre
 schema and clean up their own sessions; they never drop shared tables):
 
 ```sh
-uv sync --all-packages --extra postgres
+uv sync --extra postgres
 HARNESS_TEST_POSTGRES_DSN='postgresql://postgres:test@127.0.0.1:5432/harness_test' \
   uv run pytest -q tests/test_postgres.py
 ```

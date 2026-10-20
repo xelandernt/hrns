@@ -7,7 +7,7 @@
 #
 # Load with:
 #   harness-host --manifest examples/starters/research.yaml
-#   harness_runtime.starters.load_starter_manifest(path, starter="research")
+#   harness.runtime.starters.load_starter_manifest(path, starter="research")
 schema_version: 1
 agent_id: harness.research
 name: Research starter

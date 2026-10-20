@@ -7,7 +7,7 @@ environment per deployment, behind a `harness-host` stdio worker launched for
 each authenticated connection.
 
 The server deliberately depends only on Starlette, Uvicorn, and Pydantic. It
-does not import `harness-runtime` or Textual, and it does not parse ACP
+does not import `harness.runtime` or Textual, and it does not parse ACP
 methods — ACP semantics, sessions, and session ownership stay in the worker.
 The worker-side half of this boundary is specified in
 [CONTRACTS.md](CONTRACTS.md).
@@ -36,7 +36,7 @@ harness-server --config examples/deployments.toml --check
 harness-server --config examples/deployments.toml --host 127.0.0.1 --port 8080
 
 # Equivalent when the console script is not on PATH yet
-python -m harness_server --config examples/deployments.toml
+python -m harness.server --config examples/deployments.toml
 ```
 
 CLI flags:
@@ -67,8 +67,8 @@ lockfile verification:
 
 ```python
 import uvicorn
-from harness_server import create_app, load_config
-from harness_server.cli import install_log_filters
+from harness.server import create_app, load_config
+from harness.server.cli import install_log_filters
 
 config = load_config("deployments.toml")
 install_log_filters()  # optional: silences the Uvicorn denial-response quirk
@@ -140,7 +140,7 @@ forms validate identically.
 | `require_tls` | `true` | Reject non-TLS peers except loopback (see [TLS](#tls)). |
 | `forwarded_allow_ips` | `["127.0.0.1"]` | Peers trusted to set `X-Forwarded-Proto`; `["*"]` trusts all (only behind a trustworthy proxy). |
 | `store_path` | `var/harness-store` | Directory created at startup. Workers receive `<dir>/<deploymentId>.sqlite3` as `HARNESS_STORE` (one shared WAL database per immutable revision). Relative paths resolve against the config file. |
-| `store_url` | unset | Optional PostgreSQL URI DSN (`postgresql://...` or `postgres://...`) supplied to every worker as `HARNESS_STORE`. It takes precedence over `store_path`; the deployment environment must install `harness-runtime[postgres]`. Session rows remain scoped by principal and deployment id. The server itself never imports the database driver. Libpq keyword DSNs are rejected here because the generic `HARNESS_STORE` selector only recognises URI prefixes; pass those directly to `PostgresSessionStore` instead. |
+| `store_url` | unset | Optional PostgreSQL URI DSN (`postgresql://...` or `postgres://...`) supplied to every worker as `HARNESS_STORE`. It takes precedence over `store_path`; the deployment environment must install `harness[postgres]`. Session rows remain scoped by principal and deployment id. The server itself never imports the database driver. Libpq keyword DSNs are rejected here because the generic `HARNESS_STORE` selector only recognises URI prefixes; pass those directly to `PostgresSessionStore` instead. |
 | `log_level` | `info` | Default Uvicorn level. |
 | `root_path` | `""` | Default ASGI root path. |
 | `max_worker_count` | `32` | Concurrent worker processes for the whole server. |
@@ -498,7 +498,7 @@ Coverage highlights:
 - POSIX process-group handling is required; macOS and Linux are the supported
   server hosts.
 - The server does not implement session persistence, transcript storage, or
-  ACP method dispatch — those belong to `harness-host` and `harness-runtime`
+  ACP method dispatch — those belong to `harness-host` and `harness.runtime`
   (see [CONTRACTS.md](CONTRACTS.md)).
 - There is no built-in per-request rate limiter beyond WebSocket capacity
   limits; put request-rate limits at the TLS terminator if needed.

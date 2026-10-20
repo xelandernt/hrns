@@ -1,6 +1,6 @@
 # Client usage
 
-`harness-client` is a standalone ACP v1 client. It does **not** import `harness-runtime`, Pydantic AI, or any installed agent plugin, so the same installation can drive a project host, an editor-style third-party agent, or a hosted deployment.
+`harness.client` is a standalone ACP v1 client module. It does **not** import `harness.runtime`, Pydantic AI, or any installed agent plugin, so the same installation can drive a project host, an editor-style third-party agent, or a hosted deployment.
 
 - [Terminal](#terminal)
 - [CLI](#cli)
@@ -96,7 +96,7 @@ Secret references are `env:NAME` and `keyring:service[/username]`. A missing sec
 ```python
 import asyncio
 
-from harness_client import HarnessAcpClient, Profile, StdioAgentTransport
+from harness.client import HarnessAcpClient, Profile, StdioAgentTransport
 
 async def main():
     profile = Profile(name="local", transport="stdio", command="my-agent", args=["--acp"])

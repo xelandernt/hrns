@@ -1,7 +1,7 @@
 # ACP runtime contract (adapter requirements)
 
 Status: **published for integration**. The ACP host in
-`harness_runtime.acp` / `harness_runtime.host` consumes exactly the surface below, which
+`harness.runtime.acp` / `harness.runtime.host` consumes exactly the surface below, which
 is the surface documented in [RUNTIME_API.md](RUNTIME_API.md). This file records the
 adapter-facing details, the host-owned state that the runtime does not carry, and the
 gaps observed while implementing the adapter.
@@ -15,8 +15,8 @@ translation; it only maps the runtime's decisions onto ACP v1 and the project
 `harness-host` (and tests) compose these pieces:
 
 ```python
-from harness_runtime import AgentDefinition, PluginRegistry, SessionManager, SessionStore
-from harness_runtime.host import HostBundle
+from harness.runtime import AgentDefinition, PluginRegistry, SessionManager, SessionStore
+from harness.runtime.host import HostBundle
 
 manager = SessionManager(
     registry,
@@ -32,7 +32,7 @@ agent = build_agent(bundle, setup)          # -> HarnessHostAgent (acp.Agent)
 
 A deployment module may instead expose `build_host_bundle(setup: HostSetup) ->
 HostBundle`; the CLI selects it with `--runtime-module module`. The built-in
-`harness_runtime.host.build_local_bundle` is the default. `HostSetup` fields:
+`harness.runtime.host.build_local_bundle` is the default. `HostSetup` fields:
 `definition` (import reference or manifest path), `store_path`, `model`, `models`,
 `resources`, `hosted`, `principal`, `deployment_id`, `allowed_cwds`,
 `local_binding_creation`.

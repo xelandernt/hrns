@@ -1,6 +1,6 @@
 # Capability catalog and coverage
 
-`harness_runtime.catalog` is the runtime's bundled, lazy inventory of the reviewed Pydantic AI
+`harness.runtime.catalog` is the runtime's bundled, lazy inventory of the reviewed Pydantic AI
 and official Harness capability surface (CONCEPT.md section 9). It provides stable plugin ids,
 real upstream import targets, validated serializable configuration, lazy factories, named
 resource references, and an honest three-way coverage record.
@@ -9,7 +9,7 @@ This document is the coverage matrix: **what is actually tested**, what needs an
 integration, and what the pinned upstream releases do not ship.
 
 ```python
-from harness_runtime.catalog import build_catalog_registry, entry, iter_plugins
+from harness.runtime.catalog import build_catalog_registry, entry, iter_plugins
 
 registry = build_catalog_registry()   # 92 reviewed capability plugins + the bundled example plugin
 registry.discover()                   # plus installed harness.capabilities entry points
@@ -198,7 +198,7 @@ tool name (`web_search`) collides with Exa/You.com search; use one per agent or 
 | Repository context | `harness.repo_context` | `pydantic_ai_harness.repo_context:RepoContext` | verified | `RepoContextConfig` | `workspace` | next_turn/run |
 | Pydantic AI docs | `harness.pydantic_ai_docs` | `pydantic_ai_harness.pydantic_ai_docs:PydanticAIDocs` | verified | `PydanticAIDocsConfig` | opt. `workspace` | next_turn/run |
 
-`harness.skills` is verified because harness-runtime already depends on PyYAML; the upstream
+`harness.skills` is verified because the `harness[runtime]` extra already depends on PyYAML; the upstream
 `[skills]` extra exists for other distributions. Memory content and skill bodies are
 model-visible untrusted data: bind trusted stores and libraries only.
 
@@ -346,7 +346,7 @@ objects, not standalone managed capabilities; the managed surface is the core
 
 ## Starters
 
-Both starters are ordinary `AgentDefinition` objects in `harness_runtime.starters`; the editable
+Both starters are ordinary `AgentDefinition` objects in `harness.runtime.starters`; the editable
 YAML copies live in `examples/starters/`. Manifest loading validates every plugin id and
 configuration against this catalog.
 

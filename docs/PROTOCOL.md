@@ -1,11 +1,11 @@
 # Harness protocol v1
 
 Audience: third-party client implementers. This document describes the wire contract of the
-`harness-protocol` package and the project-owned `_harness/*` ACP extension. The standard ACP v1
+`harness.protocol` module and the project-owned `_harness/*` ACP extension. The standard ACP v1
 surface remains the baseline; the extension is optional.
 
 > **Status.** The DTOs, constants, and helpers described here are implemented in
-> `packages/harness-protocol` and exercised by `tests/test_protocol.py`. Host, client, and runtime
+> `src/harness/protocol` and exercised by `tests/test_protocol.py`. Host, client, and runtime
 > integration is still in progress. Except for model validation and the framing/hash helpers, the
 > behavior in this document is a contract obligation, not a verified runtime result. Nothing here
 > claims ACP conformance or interoperability with any third-party implementation.
@@ -553,7 +553,7 @@ For the update example above, the canonical payload hash is:
 An implementation can reproduce it with (where `params` is the request's `params` object):
 
 ```python
-from harness_protocol import ConfigurationUpdate, canonical_hash
+from harness.protocol import ConfigurationUpdate, canonical_hash
 
 update = ConfigurationUpdate.model_validate(params)
 payload_hash = canonical_hash(update.to_wire())
@@ -697,7 +697,7 @@ standard fallback, but that does not relax DTO validation for extension requests
 
 ## 11. Contract versus runtime status
 
-Verified in `harness-protocol` and `tests/test_protocol.py`:
+Verified in `harness.protocol` and `tests/test_protocol.py`:
 
 - Pydantic DTO fields, camelCase aliases, strict unknown-field rejection, defaults, and the
   `type`-discriminated change union.

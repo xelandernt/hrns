@@ -32,10 +32,10 @@ harness-host --manifest examples/starters/developer.yaml \
 python - <<'PY'
 import asyncio
 from pydantic_ai.workspaces import LocalWorkspaceBackend
-from harness_runtime.catalog import build_catalog_registry
-from harness_runtime.resources import ResourceSet
-from harness_runtime.session import SessionManager
-from harness_runtime.starters import developer_definition
+from harness.runtime.catalog import build_catalog_registry
+from harness.runtime.resources import ResourceSet
+from harness.runtime.session import SessionManager
+from harness.runtime.starters import developer_definition
 
 async def main():
     definition = developer_definition()
@@ -68,7 +68,7 @@ harness-host --manifest examples/starters/research.yaml --model test
 Offline structural run with only planning and context controls:
 
 ```python
-from harness_runtime.starters import research_definition
+from harness.runtime.starters import research_definition
 definition = research_definition(web=False)   # no web bindings enabled
 ```
 
@@ -78,7 +78,7 @@ and browser capabilities stay disabled in the shipped manifest.
 ## 4. Editable manifests
 
 `examples/starters/developer.yaml` and `research.yaml` are `DefinitionManifest` schema v1
-files. `harness_runtime.starters.load_starter_manifest(path, starter=...)` validates every
+files. `harness.runtime.starters.load_starter_manifest(path, starter=...)` validates every
 plugin id and configuration against the bundled catalog and converts the manifest into an
 `AgentDefinition`; unknown plugins and invalid configurations fail before a session opens.
 

@@ -10,16 +10,17 @@ Textual / headless client ── ACP stdio ──► harness-host ──► Pyda
                                  dedicated worker environment
 ```
 
-## Four distributions
+## One distribution, five modules
 
-| Package | Owns | Deliberately independent of |
+| Module | Owns | Deliberately independent of |
 | --- | --- | --- |
-| `harness-protocol` | Typed extension DTOs, errors, framing and pagination | AI runtime, terminal, network hosting |
-| `harness-runtime` | Definitions, plugins, policy, execution, persistence, ACP worker | Terminal and server |
-| `harness-client` | ACP connections, profiles, terminal, headless runner, stdio bridge | Native agent code and provider SDKs |
-| `harness-server` | Authentication, deployment discovery, connection worker supervision | Terminal and installed agent plugins |
+| `harness.protocol` | Typed extension DTOs, errors, framing and pagination | AI runtime, terminal, network hosting |
+| `harness.config` | Shared local settings using pydantic-settings | AI runtime, terminal, network hosting |
+| `harness.runtime` | Definitions, plugins, policy, execution, persistence, ACP worker | Terminal and server |
+| `harness.client` | ACP connections, profiles, terminal, headless runner, stdio bridge | Native agent code and provider SDKs |
+| `harness.server` | Authentication, deployment discovery, connection worker supervision | Terminal and installed agent plugins |
 
-Installing the client does not install Pydantic AI. The server forwards protocol messages to the configured deployment executable rather than importing agent packages. Worker process separation allows different deployments to use incompatible Python dependencies; it is not sandboxing of plugin Python code.
+Installing the `client` extra does not install Pydantic AI. The server forwards protocol messages to the configured deployment executable rather than importing agent packages. Worker process separation allows different deployments to use incompatible Python dependencies; it is not sandboxing of plugin Python code.
 
 ## Native behavior stays native
 
@@ -41,7 +42,7 @@ An idempotent state selection does not require permission for a transition that 
 
 Canonical history and configuration live on the runtime host. Session access is scoped by principal and immutable deployment ID. Workers must release control only after active work is drained. SQLite WAL and short transactions coordinate connection workers. A saved transcript is distinct from model history and from live capability instances; live objects are never pickled.
 
-Attachments can use `harness_runtime.blobs.FileBlobStore`: bounded, content-addressed files outside ephemeral workspaces, with owner/session namespaces and integrity checks. A digest alone does not grant another session access.
+Attachments can use `harness.runtime.blobs.FileBlobStore`: bounded, content-addressed files outside ephemeral workspaces, with owner/session namespaces and integrity checks. A digest alone does not grant another session access.
 
 ## Execution locations
 

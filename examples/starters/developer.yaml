@@ -6,7 +6,7 @@
 #
 # Load with:
 #   harness-host --manifest examples/starters/developer.yaml
-#   harness_runtime.starters.load_starter_manifest(path, starter="developer")
+#   harness.runtime.starters.load_starter_manifest(path, starter="developer")
 schema_version: 1
 agent_id: harness.developer
 name: Developer starter

@@ -9,7 +9,7 @@ Harness combines native Pydantic AI capabilities with policy-controlled sessions
 Requires **Python 3.11+**, macOS or Linux, and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv sync --locked --all-packages
+uv sync --locked --all-extras
 uv run ruff check .
 ```
 
@@ -21,7 +21,7 @@ The local developer agent is the default connection mode. Install the provider
 extra and set the API key for the provider you use:
 
 ```sh
-uv sync --locked --all-packages --extra openai
+uv sync --locked --extra client --extra runtime --extra openai
 export DEEPSEEK_API_KEY='your-key'
 uv run hrns
 ```
@@ -54,17 +54,26 @@ uv run hrns connect --stdio -- /path/to/agent --acp
 See [client usage](docs/CLIENT_API.md) for headless execution, profiles, approvals
 and the bridge.
 
-## Packages
+## Layout
 
-| Distribution | Purpose |
-| --- | --- |
-| `harness-protocol` | Versioned extension schemas and transport contracts |
-| `harness-config` | Shared local settings using pydantic-settings, without AI or UI dependencies |
-| `harness-runtime` | Native agent definitions, plugin management, sessions, `harness-host` and `harness-local` |
-| `harness-client` | Textual terminal, scripted ACP runner and stdio bridge |
-| `harness-server` | Authenticated deployment catalog and WebSocket worker hosting |
+Harness is one distribution with optional extras. Protocol and local settings
+ship by default; the runtime, terminal, and server dependencies are opt-in.
 
-The client does not depend on Pydantic AI or installed agent plugins. Local agents run in a separate process. Hosted deployments launch the executable from their own resolved Python environment.
+| Module | Extra | Purpose |
+| --- | --- | --- |
+| `harness.protocol` | base | Versioned extension schemas and transport contracts |
+| `harness.config` | base | Shared local settings using pydantic-settings |
+| `harness.runtime` | `runtime` | Native agent definitions, plugin management, sessions, `harness-host` and `harness-local` |
+| `harness.client` | `client` | Textual terminal, scripted ACP runner and stdio bridge |
+| `harness.server` | `server` | Authenticated deployment catalog and WebSocket worker hosting |
+
+Install only what you need, for example `pip install 'harness[client]'`,
+`pip install 'harness[openai]'`, or `pip install 'harness[all]'`.
+
+The `harness.client` module does not import Pydantic AI or installed agent
+plugins, and installing `harness[client]` alone does not install the runtime.
+Local agents run in a separate process. Hosted deployments launch the executable
+from their own resolved Python environment.
 
 ## Design essentials
 
@@ -93,10 +102,10 @@ The client does not depend on Pydantic AI or installed agent plugins. Local agen
 
 ```sh
 uv run ruff check .
-uv build --all-packages
+uv build
 ```
 
-Or run `just check` with [just](https://just.systems/) installed. CI exercises the same checks on macOS/Linux and Python 3.11–3.13. Wheels are written to `dist/` and can be installed separately with their declared dependencies.
+Or run `just check` with [just](https://just.systems/) installed. CI exercises the same checks on macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
 
 External provider, sandbox and durability integrations need their upstream extras and credentials. See the coverage matrix for managed, locally verified and deployment-only distinctions.
 
