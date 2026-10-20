@@ -31,6 +31,7 @@ runtime = [
     "packaging>=24",
 ]
 server = [
+    "fastapi>=0.156,<1",
     "starlette>=0.47,<2",
     "uvicorn>=0.35",
     "websockets>=15,<18",

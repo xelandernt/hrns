@@ -6,7 +6,7 @@ a bounded WebSocket transport. Agent execution happens in a dedicated
 environment per deployment, behind a `harness-host` stdio worker launched for
 each authenticated connection.
 
-The server deliberately depends only on Starlette, Uvicorn, and Pydantic. It
+The server deliberately depends only on FastAPI, Uvicorn, and Pydantic. It
 does not import `harness.runtime` or Textual, and it does not parse ACP
 methods — ACP semantics, sessions, and session ownership stay in the worker.
 The worker-side half of this boundary is specified in
@@ -82,8 +82,8 @@ uvicorn.run(
 )
 ```
 
-Tested against Starlette 1.8, Uvicorn 0.54, Pydantic 2.14, and Python 3.12
-(the package requires Python 3.11+).
+Tested against FastAPI 0.156 (Starlette 1.9), Uvicorn 0.54, Pydantic 2.14,
+and Python 3.12 (the package requires Python 3.11+).
 
 The server is a single process by design: capacity counters and live-worker
 bookkeeping are in memory. Do not run multiple Uvicorn workers against
@@ -226,6 +226,10 @@ All responses are JSON. Errors always use one envelope:
 | `GET` | `/v1/agents` | bearer | Paginated catalog of revisions available to the caller. |
 | `GET` | `/v1/agents/{agentId}` | bearer | Descriptor for one immutable revision. |
 | `GET` | `/v1/agents/{agentId}/acp` + WebSocket upgrade | bearer | ACP transport (see below). |
+
+FastAPI also serves unauthenticated API documentation at `/docs` and
+`/redoc`, with the generated schema at `/openapi.json`. These pages describe
+the catalog endpoints and contain no deployment or principal data.
 
 ### `GET /v1/agents`
 
@@ -466,7 +470,7 @@ The complete environment contract is in [CONTRACTS.md](CONTRACTS.md).
 
 ## Tests
 
-The server is tested with an in-process Starlette `TestClient` and a fake
+The server is tested with an in-process FastAPI `TestClient` and a fake
 `harness-host` (`tests/_fake_hosts.py`) — no runtime, ACP SDK, or provider
 credentials are needed:
 

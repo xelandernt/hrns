@@ -2,8 +2,9 @@
 
 Handshake failures are answered at the HTTP layer with the standard error
 envelope (the ASGI WebSocket Denial Response extension, supported by Uvicorn
-and the Starlette test client).  Servers without that extension fall back to
-an immediate WebSocket close with the documented application close code.
+and the Starlette/FastAPI test client).  Servers without that extension fall
+back to an immediate WebSocket close with the documented application close
+code.
 
 After a successful upgrade the proxy is intentionally content-neutral: every
 text frame carries exactly one JSON-RPC object and is forwarded unchanged in
@@ -16,10 +17,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Annotated, Any
 
-from starlette.responses import JSONResponse
-from starlette.websockets import WebSocket
+from fastapi import APIRouter, Depends, Path, WebSocket
+from fastapi.responses import JSONResponse
 
 from .auth import enforce_transport
 from .errors import (
@@ -31,11 +32,14 @@ from .errors import (
     CLOSE_UNAUTHORIZED,
     ApiError,
 )
+from .state import HarnessState, get_websocket_state
 from .worker import WorkerSession, WorkerSpawnError
 
-__all__ = ["acp_websocket", "denial_fallback_code"]
+__all__ = ["router", "acp_websocket", "denial_fallback_code"]
 
 logger = logging.getLogger("harness.server.acp")
+
+router = APIRouter()
 
 
 _FALLBACK_CODES = {
@@ -96,13 +100,16 @@ async def _close_session(session: WorkerSession) -> None:
             pass
 
 
-async def acp_websocket(ws: WebSocket) -> None:
+@router.websocket("/v1/agents/{agent_id}/acp")
+async def acp_websocket(
+    ws: WebSocket,
+    agent_id: Annotated[str, Path(description="Immutable deployment revision id.")],
+    state: Annotated[HarnessState, Depends(get_websocket_state)],
+) -> None:
     """Serve one authenticated ACP connection for ``/v1/agents/{id}/acp``."""
 
-    state = ws.app.state.harness
     settings = state.settings
     scope = ws.scope
-    agent_id = str(scope.get("path_params", {}).get("agent_id", ""))
 
     # -- handshake policy (all checks happen before the upgrade completes) --
     try:

@@ -19,6 +19,15 @@ wheels = [
 ]
 
 [[package]]
+name = "annotated-doc"
+version = "0.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/8e/38aa427ed5402449e226975b649c5dc73ccadfefeb95e6aecb8f8ea4b6b6/annotated_doc-0.0.5.tar.gz", hash = "sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb", size = 10758, upload-time = "2026-07-28T13:50:58.129Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl", hash = "sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101", size = 5302, upload-time = "2026-07-28T13:50:57.239Z" },
+]
+
+[[package]]
 name = "annotated-types"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -388,6 +397,23 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.156.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/11/e3/400f278162f423df77f6a05fa5d51a54b8fafbc032ea902ce612fadb13f7/fastapi-0.156.2.tar.gz", hash = "sha256:6c735592f4842b04d62aa9147aa8f287ac95e293a5257257ca6a405819d4e066", size = 494193, upload-time = "2026-10-20T20:12:14.144Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/9d/fdd72314f3b6c52d1da8a75caa90719464d8997501b367edacbef1ee6f08/fastapi-0.156.2-py3-none-any.whl", hash = "sha256:5ccf73cbadf1f74382194e8edd4cf3b79df773d6f33c7387bbe85b465ef7d517", size = 146787, upload-time = "2026-10-20T20:12:12.607Z" },
+]
+
+[[package]]
 name = "genai-prices"
 version = "0.1.13"
 source = { registry = "https://pypi.org/simple" }
@@ -432,6 +458,7 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "agent-client-protocol" },
+    { name = "fastapi" },
     { name = "httpx" },
     { name = "keyring" },
     { name = "packaging" },
@@ -477,6 +504,7 @@ runtime = [
     { name = "pyyaml" },
 ]
 server = [
+    { name = "fastapi" },
     { name = "starlette" },
     { name = "uvicorn" },
     { name = "websockets" },
@@ -493,6 +521,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'client'", specifier = ">=0.11,<0.12" },
+    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.156,<1" },
     { name = "harness", extras = ["client", "runtime", "server", "openai", "anthropic", "postgres"], marker = "extra == 'all'" },
     { name = "harness", extras = ["runtime"], marker = "extra == 'anthropic'" },
     { name = "harness", extras = ["runtime"], marker = "extra == 'openai'" },

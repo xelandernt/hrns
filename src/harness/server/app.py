@@ -1,36 +1,30 @@
-"""Application assembly: ``create_app``, shared state, lifespan and errors."""
+"""Application assembly: ``create_app``, lifespan and error envelopes."""
 
 from __future__ import annotations
 
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Mapping
 
-from starlette.applications import Starlette
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Route, WebSocketRoute
 
 from ._version import __version__
-from .api import get_agent, healthz, list_agents
-from .auth import PrincipalIndex
-from .catalog import CursorCodec
+from .api import router as api_router
 from .config import (
     ConfigError,
-    DeploymentConfig,
     HarnessServerConfig,
-    PrincipalConfig,
-    ServerSettings,
     finalize_config,
     load_config,
 )
 from .errors import ApiError, envelope
-from .proxy import acp_websocket
-from .worker import WorkerRegistry, WorkerSlots
+from .proxy import router as proxy_router
+from .state import HarnessState
 
 __all__ = ["HarnessState", "create_app"]
 
@@ -48,66 +42,8 @@ _HTTP_CODES: dict[int, tuple[str, str]] = {
 }
 
 
-@dataclass
-class HarnessState:
-    """Per-application immutable catalog plus mutable capacity accounting."""
-
-    config: HarnessServerConfig
-    settings: ServerSettings
-    store_path: str
-    deployments: dict[str, DeploymentConfig]
-    deployment_order: list[DeploymentConfig]
-    principals: PrincipalIndex
-    cursor_codec: CursorCodec
-    slots: WorkerSlots
-    registry: WorkerRegistry
-
-    @classmethod
-    def from_config(cls, config: HarnessServerConfig) -> "HarnessState":
-        deployments = {deployment.id: deployment for deployment in config.deployments}
-        return cls(
-            config=config,
-            settings=config.server,
-            store_path=config.server.store_path,
-            deployments=deployments,
-            deployment_order=list(config.deployments),
-            principals=PrincipalIndex(config.principals),
-            cursor_codec=CursorCodec(),
-            slots=WorkerSlots(
-                config.server.max_worker_count,
-                config.server.max_connections_per_principal,
-            ),
-            registry=WorkerRegistry(),
-        )
-
-    def deployment(self, agent_id: str) -> DeploymentConfig | None:
-        return self.deployments.get(agent_id)
-
-    def worker_store_path(self, agent_id: str) -> str:
-        """Value handed to workers as ``HARNESS_STORE``.
-
-        By default this is one SQLite database per immutable deployment revision:
-        workers of the same revision (all connections) share it under SQLite WAL,
-        while different runtime versions never contend for one schema. With
-        ``server.store_url`` the same PostgreSQL DSN is supplied to every worker;
-        rows remain scoped to ``(principal, deploymentId)`` inside the database.
-        """
-
-        if self.settings.store_url:
-            return self.settings.store_url
-        return str(Path(self.store_path) / f"{agent_id}.sqlite3")
-
-    def allowed_deployments(self, principal: PrincipalConfig) -> list[DeploymentConfig]:
-        allowed = set(principal.allowed_agent_ids)
-        return [
-            deployment
-            for deployment in self.deployment_order
-            if deployment.id in allowed
-        ]
-
-
 @asynccontextmanager
-async def _lifespan(app: Starlette) -> AsyncIterator[None]:
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: HarnessState = app.state.harness
     if not state.settings.store_url:
         store = Path(state.store_path)
@@ -148,6 +84,18 @@ async def _http_exception_handler(request: Request, exc: Exception) -> JSONRespo
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
 
+async def _validation_error_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    if not isinstance(exc, RequestValidationError):  # pragma: no cover - defensive
+        raise exc
+    if request.scope.get("type") != "http":  # pragma: no cover - defensive
+        raise exc
+    code, message = _HTTP_CODES[422]
+    details = {"errors": jsonable_encoder(exc.errors())}
+    return JSONResponse(envelope(code, message, details), status_code=422)
+
+
 async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     if request.scope.get("type") != "http":  # pragma: no cover - defensive
         raise exc
@@ -160,11 +108,12 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 
 def create_app(
     config: HarnessServerConfig | Mapping[str, Any] | str | os.PathLike[str],
-) -> Starlette:
-    """Build the Starlette application for a validated deployment config.
+) -> FastAPI:
+    """Build the FastAPI application for a validated deployment config.
 
     ``config`` accepts an already validated :class:`HarnessServerConfig`, a
-    path to a TOML file, or an equivalent mapping (handy for tests).
+    path to a TOML file, or an equivalent mapping (handy for tests and
+    embedding).
     """
 
     if isinstance(config, (str, os.PathLike)):
@@ -187,20 +136,23 @@ def create_app(
         )
 
     state = HarnessState.from_config(config)
-    routes = [
-        Route("/healthz", healthz, methods=["GET"]),
-        Route("/v1/agents", list_agents, methods=["GET"]),
-        Route("/v1/agents/{agent_id}", get_agent, methods=["GET"]),
-        WebSocketRoute("/v1/agents/{agent_id}/acp", acp_websocket),
-    ]
-    app = Starlette(
-        routes=routes,
+    app = FastAPI(
+        title="harness-server",
+        version=__version__,
+        description=(
+            "Authenticated catalog of immutable agent deployment revisions and "
+            "the ACP-over-WebSocket transport."
+        ),
         lifespan=_lifespan,
+        redirect_slashes=False,
         exception_handlers={
             ApiError: _api_error_handler,
             HTTPException: _http_exception_handler,
+            RequestValidationError: _validation_error_handler,
             Exception: _unhandled_exception_handler,
         },
     )
     app.state.harness = state
+    app.include_router(api_router)
+    app.include_router(proxy_router)
     return app
