@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from starlette.responses import JSONResponse
@@ -72,7 +73,7 @@ async def _deny(ws: WebSocket, exc: ApiError) -> None:
         pass
 
 
-def _offered_subprotocols(scope: dict[str, Any]) -> list[str]:
+def _offered_subprotocols(scope: Mapping[str, Any]) -> list[str]:
     offered = scope.get("subprotocols") or []
     return [value for value in offered if isinstance(value, str)]
 

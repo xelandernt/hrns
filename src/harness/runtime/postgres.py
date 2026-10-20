@@ -34,8 +34,8 @@ import asyncio
 import json
 import os
 import socket
-from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, TypeVar
+from collections.abc import Mapping
+from typing import Any
 
 from harness.protocol import HarnessError
 
@@ -76,8 +76,6 @@ _MISSING_DRIVER = (
     "Install it with `pip install 'harness[postgres]'` "
     "(or `uv sync --extra postgres`)."
 )
-
-_T = TypeVar("_T")
 
 # Serialize schema creation across processes.  The value is a stable, arbitrary
 # signed 64-bit key ("HARNPG" in ASCII); PostgreSQL advisory locks are per database.
@@ -434,6 +432,8 @@ class PostgresSessionStore(SessionStore):
         )
 
     async def _ensure_connected_locked(self) -> Any:
+        if psycopg is None:
+            raise ImportError(_MISSING_DRIVER) from _PSYCOPG_IMPORT_ERROR
         connection = self._connection
         if connection is not None and not connection.closed and not connection.broken:
             return connection
@@ -497,7 +497,7 @@ class PostgresSessionStore(SessionStore):
                 (version, now_ms()),
             )
 
-    async def _run(self, operation: Callable[[Any], Awaitable[_T]]) -> _T:
+    async def _run(self, fn: Any, *args: Any) -> Any:
         """Run *operation* in a transaction, serializing this process's connection use.
 
         Deadlocks and serialization failures are safe to retry because the whole
@@ -506,6 +506,8 @@ class PostgresSessionStore(SessionStore):
         semantics (session creation and transaction claims handle their own races).
         """
 
+        if _pg_errors is None:
+            raise ImportError(_MISSING_DRIVER) from _PSYCOPG_IMPORT_ERROR
         async with self._lock:
             connection = await self._ensure_connected_locked()
             if not self._initialized:
@@ -515,7 +517,7 @@ class PostgresSessionStore(SessionStore):
             for attempt in range(_MAX_TRANSACTION_ATTEMPTS):
                 try:
                     async with connection.transaction():
-                        return await operation(connection)
+                        return await fn(connection)
                 except (_pg_errors.DeadlockDetected, _pg_errors.SerializationFailure):
                     if attempt + 1 >= _MAX_TRANSACTION_ATTEMPTS:
                         raise
@@ -544,6 +546,9 @@ class PostgresSessionStore(SessionStore):
         initial_bindings: dict[str, dict[str, Any]],
         policy_revision: int,
     ) -> StoredRevision:
+        if _pg_errors is None:
+            raise ImportError(_MISSING_DRIVER) from _PSYCOPG_IMPORT_ERROR
+
         async def operation(connection: Any) -> StoredRevision:
             timestamp = now_ms()
             await connection.execute(

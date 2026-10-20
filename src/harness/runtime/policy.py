@@ -17,7 +17,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_core import to_jsonable_python
@@ -506,7 +506,7 @@ class PolicyCatalog:
             return fallback
         return BindingState(**self._active_bindings[binding_id])
 
-    def application_status(self, active_revision: int | None, selected_revision: int) -> str:
+    def application_status(self, active_revision: int | None, selected_revision: int) -> Literal["applied", "pending"]:
         if active_revision is None or selected_revision == active_revision:
             return "applied"
         return "pending"
@@ -516,7 +516,7 @@ class PolicyCatalog:
         *,
         selected_revision: int,
         active_revision: int | None,
-        application_status: str | None = None,
+        application_status: Literal["applied", "failed", "pending"] | None = None,
     ) -> ConfigurationSnapshot:
         """Selected configuration snapshot.
 

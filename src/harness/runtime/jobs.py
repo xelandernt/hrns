@@ -46,6 +46,11 @@ class OwnedJob:
         }
 
 
+async def _await_any(awaitable: Awaitable[Any]) -> Any:
+    """Run any awaitable as a coroutine so it can be owned by an ``asyncio.Task``."""
+    return await awaitable
+
+
 class SessionJobManager:
     """Tracks explicitly registered session jobs, isolated by binding identity."""
 
@@ -79,10 +84,12 @@ class SessionJobManager:
             description=description,
         )
         if context is None:
-            task = asyncio.create_task(awaitable, name=name or f"harness:{binding_id}:{job.job_id}")
+            task = asyncio.create_task(
+                _await_any(awaitable), name=name or f"harness:{binding_id}:{job.job_id}"
+            )
         else:
             task = asyncio.create_task(
-                awaitable,
+                _await_any(awaitable),
                 name=name or f"harness:{binding_id}:{job.job_id}",
                 context=context,
             )

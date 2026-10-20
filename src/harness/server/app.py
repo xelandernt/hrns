@@ -130,13 +130,17 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
         logger.info("harness-server stopped")
 
 
-async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+async def _api_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    if not isinstance(exc, ApiError):  # pragma: no cover - defensive
+        raise exc
     if request.scope.get("type") != "http":  # pragma: no cover - WS path handled inline
         raise exc
     return JSONResponse(exc.envelope(), status_code=exc.status_code, headers=exc.headers)
 
 
-async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+async def _http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    if not isinstance(exc, HTTPException):  # pragma: no cover - defensive
+        raise exc
     if request.scope.get("type") != "http":  # pragma: no cover - defensive
         raise exc
     code, message = _HTTP_CODES.get(exc.status_code, ("HTTP_ERROR", "request failed"))

@@ -8,7 +8,7 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from ._version import __version__
 from .catalog import AgentDeployment
@@ -34,7 +34,7 @@ __all__ = ["main", "build_parser"]
 
 
 class _ArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:  # pragma: no cover - argparse boilerplate
+    def error(self, message: str) -> NoReturn:  # pragma: no cover - argparse boilerplate
         self.print_usage(sys.stderr)
         self.exit(EXIT_USAGE, f"harness: {message}\n")
 

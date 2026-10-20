@@ -9,6 +9,7 @@ install:
 
 lint:
     uv run ruff check .
+    uv run pyrefly check . --no-progress-bar
 
 build:
     uv build

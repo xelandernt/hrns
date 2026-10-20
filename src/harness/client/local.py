@@ -142,7 +142,7 @@ def local_target(
     api_key_ref: str | None = None,
 ) -> ConnectionTarget:
     try:
-        settings = LocalSettings(**({"config_file": config} if config is not None else {}))
+        settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
         settings.require_model()
         env_has_key = bool(
             settings.api_key is not None

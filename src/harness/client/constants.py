@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from acp import PROTOCOL_VERSION
+from websockets.typing import Subprotocol
 
 import harness.protocol as _protocol
 from harness.protocol import PING_INTERVAL, PING_TIMEOUT, SUBPROTOCOL
@@ -29,7 +30,7 @@ EXTENSION_VERSION = _protocol.EXTENSION_VERSION
 MAX_MESSAGE_BYTES = _protocol.MAX_MESSAGE_BYTES
 WS_PING_INTERVAL = float(PING_INTERVAL)
 WS_PING_TIMEOUT = float(PING_TIMEOUT)
-WS_SUBPROTOCOL = SUBPROTOCOL
+WS_SUBPROTOCOL: Subprotocol = Subprotocol(SUBPROTOCOL)
 
 #: Retention bounds for the terminal UI and logs.
 UI_MAX_TRANSCRIPT_BLOCKS = 400

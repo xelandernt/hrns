@@ -154,7 +154,7 @@ class CapabilitiesListed:
 class PluginListed:
     """Paginated plugins offered for local binding creation."""
 
-    plugins: tuple[dict[str, Any], ...] = ()
+    plugins: tuple[Any, ...] = ()
     next_cursor: str | None = None
 
 

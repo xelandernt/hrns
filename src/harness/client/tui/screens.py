@@ -254,8 +254,8 @@ class ConnectScreen(Screen[None]):
                 )
         else:
             settings = self._local_settings()
-            local_ready = bool(settings and settings.model)
-            if not local_ready:
+            local_ready = settings is not None and bool(settings.model)
+            if settings is None or not settings.model:
                 self.entries.append(PickEntry(
                     kind="configure_local", label="Configure local model…",
                     detail="Choose a cloud or local provider and model, then work in this project.",
@@ -455,7 +455,7 @@ class ConnectScreen(Screen[None]):
             target = self.initial_target
             args = target.profile.args if target and target.profile.command == "harness-local" else []
             config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
-            settings = LocalSettings(**({"config_file": config} if config else {}))
+            settings = LocalSettings(config_file=config) if config else LocalSettings()
         except (ValueError, OSError) as exc:
             self._status.update(f"error · {exc}")
             return
@@ -1697,17 +1697,17 @@ class ChatScreen(Screen[None]):
             }
             for plugin in available
         ]
+        def start_plugin(plugin_id: str | None) -> None:
+            if isinstance(plugin_id, str) and plugin_id:
+                asyncio.create_task(self._plugin_add_form(plugin_id))
+
         self.app.push_screen(
             ChoiceDialog(
                 "Add a local capability",
                 "Only plugins the host advertises for local binding creation are listed.",
                 choices,
             ),
-            lambda plugin_id: (
-                asyncio.create_task(self._plugin_add_form(plugin_id))
-                if isinstance(plugin_id, str) and plugin_id
-                else None
-            ),
+            start_plugin,
         )
 
     async def _plugin_add_form(self, plugin_id: str) -> None:
@@ -2067,7 +2067,7 @@ class ChatScreen(Screen[None]):
             else []
         )
         config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
-        return LocalSettings(**({"config_file": config} if config else {}))
+        return LocalSettings(config_file=config) if config else LocalSettings()
 
     async def _show_models(self) -> None:
         if self.session.client is not self.client:

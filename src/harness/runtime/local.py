@@ -221,6 +221,8 @@ def build_local_agent(
     definition.name = f"Local · {settings.provider}:{settings.model}"
     definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))
     spec = definition.spec
+    if spec is None:
+        raise ValueError("The local developer definition has no agent spec.")
 
     def factory(*, model: Any, managed_capabilities: list[Any]) -> Agent:
         selected = (
@@ -288,14 +290,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(provider_catalog(), ensure_ascii=False))
         return 0
     try:
-        settings = LocalSettings(
-            **(
-                {"config_file": None}
-                if args.env_only
-                else {"config_file": args.config}
-                if args.config
-                else {}
-            )
+        settings = (
+            LocalSettings(config_file=None)
+            if args.env_only
+            else LocalSettings(config_file=args.config)
+            if args.config
+            else LocalSettings()
         )
         asyncio.run(_run(settings))
     except (ValueError, OSError, HarnessError) as exc:

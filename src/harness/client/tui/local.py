@@ -296,8 +296,8 @@ class LocalModelDialog(FormDialog):
 
     def action_accept_form(self) -> None:
         values, error = _collect_fields(self.fields, self._widgets)
-        if error:
-            self.show_error(error)
+        if error or values is None:
+            self.show_error(error or "The form has no values.")
             return
         provider = str(values.pop("provider_custom", "") or "").strip()
         provider = provider or str(values.get("provider") or "").strip()

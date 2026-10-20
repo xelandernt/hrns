@@ -542,7 +542,7 @@ class ReasoningBlock(Collapsible):
         else:
             title.append("Thought")
             title.append(f" · {self._finished - self._started:.1f}s", style="dim")
-        self.title = title
+        self.title = title  # type: ignore[assignment]  # Textual accepts rich Content at runtime.
 
     def append_text(self, text: str) -> None:
         self._text += text
@@ -1057,7 +1057,7 @@ class CapabilityPanel(Vertical):
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=False),
         Binding("e", "edit", "Configure", show=False),
-        Binding("space", "toggle", "Toggle", show=False),
+        Binding("space", "toggle_binding", "Toggle", show=False),
         Binding("a", "add", "Add local capability", show=False),
     ]
 
@@ -1327,7 +1327,7 @@ class CapabilityPanel(Vertical):
             return
         self.post_message(CapabilityAddRequested())
 
-    def action_toggle(self) -> None:
+    def action_toggle_binding(self) -> None:
         if self.extension_mode and not self.can_write:
             self.show_message("This host advertises a read-only capability catalog.")
             return

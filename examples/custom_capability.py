@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from typing import Any
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
@@ -114,7 +115,7 @@ async def streamed_model(_messages: list[ModelMessage], info: AgentInfo):
     yield f"custom example: style={style}"
 
 
-def build_agent(*, managed_capabilities: tuple[object, ...] = ()) -> Agent[None, str]:
+def build_agent(*, managed_capabilities: tuple[AbstractCapability[Any], ...] = ()) -> Agent[None, str]:
     # Fresh agent per turn; managed bindings are bound at construction so the custom
     # capability's instructions reach the model request.
     return Agent(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from rich.text import Text
@@ -420,7 +421,7 @@ class CommandPaletteDialog(_DialogBase):
 
     def __init__(
         self,
-        local_commands: list[LocalCommand],
+        local_commands: Sequence[LocalCommand],
         agent_commands: list[dict[str, Any]],
         *,
         collision_names: set[str] | None = None,

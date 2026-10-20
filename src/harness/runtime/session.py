@@ -34,6 +34,7 @@ from pydantic_core import to_jsonable_python
 from harness.protocol import (
     BindingChange,
     ConfigurationSnapshot,
+    EnableChange,
     HarnessError,
     RuntimeEvent,
     changes_adapter,
@@ -1310,7 +1311,7 @@ class Session:
                 disabled = {
                     change.binding_id
                     for change in normalized
-                    if getattr(change, "type", None) == "enable"
+                    if isinstance(change, EnableChange)
                     and not change.enabled
                     and current.get(change.binding_id) is not None
                     and current[change.binding_id].enabled

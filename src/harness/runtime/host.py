@@ -36,7 +36,7 @@ import os
 import re
 import sys
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import reduce
@@ -888,7 +888,7 @@ class HostedSession:
             with contextlib.suppress(BaseException):
                 await self._send(acp.update_tool_call(tool_call_id=tool_call_id, status="failed"))
 
-    async def _send(self, update: schema.SessionUpdate) -> None:
+    async def _send(self, update: acp_map.SessionUpdate) -> None:
         await self.host.send_update(self.session_id, update)
 
 
@@ -943,7 +943,7 @@ class HarnessHostAgent:
             raise HarnessError("CAPABILITY_UNAVAILABLE", "ACP connection is not established yet.")
         return self._conn
 
-    async def send_update(self, session_id: str, update: schema.SessionUpdate) -> None:
+    async def send_update(self, session_id: str, update: acp_map.SessionUpdate) -> None:
         await self.require_connection().session_update(session_id=session_id, update=update)
 
     # --- initialization ---------------------------------------------------
@@ -1464,13 +1464,15 @@ class HarnessHostAgent:
         descriptors = {descriptor.binding_id: descriptor for descriptor in await self._all_descriptors(state)}
         for change in changes:
             if isinstance(change, AddChange):
-                descriptor = self.bundle.registry.lookup(change.plugin_id)
+                plugin = self.bundle.registry.lookup(change.plugin_id)
+                if plugin is None or plugin.change_mode != "new_session":
+                    continue
             else:
                 descriptor = descriptors.get(change.binding_id)
-            if descriptor is None or descriptor.change_mode != "new_session":
-                continue
-            if isinstance(change, EnableChange) and descriptor.enabled == change.enabled:
-                continue  # an idempotent state selection is not an edit
+                if descriptor is None or descriptor.change_mode != "new_session":
+                    continue
+                if isinstance(change, EnableChange) and descriptor.enabled == change.enabled:
+                    continue  # an idempotent state selection is not an edit
             raise HarnessError(
                 "NEW_SESSION_REQUIRED",
                 f"Binding {change.binding_id!r} can only change when a new session is created.",
@@ -1644,7 +1646,7 @@ def _iso_millis(value: int | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def build_router(agent: HarnessHostAgent, *, use_unstable_protocol: bool = True) -> Any:
+def build_router(agent: Any, *, use_unstable_protocol: bool = True) -> Any:
     """Build the SDK agent router plus the standard session-delete route.
 
     The installed ACP SDK defines ``session/delete`` in ``AGENT_METHODS`` and provides
@@ -1676,7 +1678,7 @@ class _AgentClientChannel:
         self._conn = connection
 
     async def session_update(
-        self, session_id: str, update: schema.SessionUpdate, **kwargs: Any
+        self, session_id: str, update: acp_map.SessionUpdate, **kwargs: Any
     ) -> None:
         notification = schema.SessionNotification(
             session_id=session_id, update=update, field_meta=kwargs or None
@@ -1800,10 +1802,14 @@ def definition_from_manifest(manifest: DefinitionManifest) -> AgentDefinition:
 _REGISTRY_HOOK_NAMES = ("build_registry", "registry")
 
 
+async def _await_result(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
+
+
 def _coerce_definition(target: Any, *, source: str) -> AgentDefinition:
     if callable(target) and not isinstance(target, AgentDefinition | DefinitionManifest):
         target = target()
-        target = asyncio.run(target) if inspect.isawaitable(target) else target
+        target = asyncio.run(_await_result(target)) if inspect.isawaitable(target) else target
     if isinstance(target, DefinitionManifest):
         return definition_from_manifest(target)
     if isinstance(target, AgentDefinition):

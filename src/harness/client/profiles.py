@@ -281,7 +281,7 @@ class Profiles:
 
         return Profiles(profile_map, tui, sources)
 
-    def upsert(self, profile: Profile, *, set_default: bool = False) -> False | None:
+    def upsert(self, profile: Profile, *, set_default: bool = False) -> None:
         """Add or replace a profile; optionally flag it as the default."""
         if set_default:
             for existing in self.profiles.values():

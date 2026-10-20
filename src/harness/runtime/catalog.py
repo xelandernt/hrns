@@ -40,7 +40,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -52,6 +52,9 @@ from .registry import (
     PluginDescriptor,
     PluginRegistry,
 )
+
+if TYPE_CHECKING:
+    from .resources import ResourceKind
 
 __all__ = [
     "CATALOG",
@@ -122,7 +125,7 @@ class CatalogKind(StrEnum):
 #: Stable resource names used by catalog factories.  Definitions declare these in their
 #: ``resources`` list; deployments bind host values.  Kinds map to
 #: :data:`harness.runtime.resources.ResourceKind`.
-RESOURCE_KINDS: dict[str, str] = {
+RESOURCE_KINDS: dict[str, ResourceKind] = {
     "workspace": "workspace",
     "model.default": "model",
     "model.judge": "model",
@@ -163,7 +166,7 @@ RESOURCE_KINDS: dict[str, str] = {
 }
 
 
-def _resource_kind(name: str) -> str:
+def _resource_kind(name: str) -> ResourceKind:
     return RESOURCE_KINDS.get(name, "custom")
 
 
@@ -202,7 +205,7 @@ class BandConfig(_Config):
 class BudgetConfig(_Config):
     """A validated budget window; ``scope`` callables are Python-only and not exposed."""
 
-    usd: Decimal | None = Field(default=None, ge=0)
+    usd: Decimal | None = Field(default=None, ge=Decimal(0))
     tokens: int | None = Field(default=None, ge=1)
     window: Literal["run", "conversation", "day", "month", "total"] = "day"
     warn_at: float | None = Field(default=None, gt=0, lt=1)

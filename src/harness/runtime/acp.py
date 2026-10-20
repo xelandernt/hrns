@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 import acp
 from acp import schema
@@ -57,6 +57,23 @@ from pydantic_ai_harness.experimental.acp import (  # noqa: E402
 #: upstream package, but ``ToolCallPresentation``/``default_coding_presenter`` are).
 ToolCallPresenter: TypeAlias = Callable[[ToolCallPart], ToolCallPresentation | None]
 
+#: ACP session update variants accepted by ``schema.SessionNotification.update``.
+SessionUpdate: TypeAlias = (
+    schema.UserMessageChunk
+    | schema.AgentMessageChunk
+    | schema.AgentThoughtChunk
+    | schema.ToolCallStart
+    | schema.ToolCallProgress
+    | schema.AgentPlanUpdate
+    | schema.AgentPlanContentUpdate
+    | schema.AgentPlanRemovedUpdate
+    | schema.AvailableCommandsUpdate
+    | schema.CurrentModeUpdate
+    | schema.ConfigOptionUpdate
+    | schema.SessionInfoUpdate
+    | schema.UsageUpdate
+)
+
 __all__ = [
     "BINDING_OPTION_PREFIX",
     "EFFORT_OPTION_ID",
@@ -64,6 +81,7 @@ __all__ = [
     "MAX_TEXT_UPDATE_BYTES",
     "MODEL_OPTION_ID",
     "PLUGINS_LIST_METHOD",
+    "SessionUpdate",
     "absolutize_presentation",
     "changed_method_supported",
     "chunk_text",
@@ -169,7 +187,7 @@ def chunk_text(text: str, budget: int = MAX_TEXT_UPDATE_BYTES) -> Iterator[str]:
         yield "".join(chunk)
 
 
-def text_updates(text: str, *, thought: bool = False) -> Iterator[schema.SessionUpdate]:
+def text_updates(text: str, *, thought: bool = False) -> Iterator[SessionUpdate]:
     """Agent text (or thought) chunks sized for the stdio buffer."""
     for chunk in chunk_text(text):
         yield acp.update_agent_thought_text(chunk) if thought else acp.update_agent_message_text(chunk)
@@ -300,7 +318,7 @@ def tool_call_progress_update(data: Mapping[str, Any]) -> schema.ToolCallProgres
     return acp.update_tool_call(
         tool_call_id=tool_call_id,
         title=str(title) if title is not None else None,
-        status=status if status in _TOOL_STATUSES else None,
+        status=cast(schema.ToolCallStatus, status) if status in _TOOL_STATUSES else None,
         raw_input=jsonable(raw_input) if raw_input is not None else None,
         raw_output=jsonable(output) if output is not None else None,
     )
@@ -380,7 +398,7 @@ def event_to_update(
     *,
     cwd: str,
     presenter: ToolCallPresenter,
-) -> schema.SessionUpdate | None:
+) -> SessionUpdate | None:
     """Translate one non-permission runtime event into an ACP session update.
 
     Returns ``None`` for events that are not renderable (turn completion, errors,
@@ -452,7 +470,7 @@ def model_option(models: Sequence[str], current: str | None) -> schema.SessionCo
     """The standard ``model`` select option, or ``None`` when no models are offered."""
     if not models:
         return None
-    current_value = current if current in models else models[0]
+    current_value = current if current is not None and current in models else models[0]
     return schema.SessionConfigOptionSelect(
         id=MODEL_OPTION_ID,
         name="Model",
@@ -591,7 +609,7 @@ def model_view(models: Sequence[str], current: str | None) -> dict[str, Any] | N
     """JSON view of model selection included in extension responses."""
     if not models:
         return None
-    current_value = current if current in models else models[0]
+    current_value = current if current is not None and current in models else models[0]
     return {
         "currentValue": current_value,
         "options": [{"value": model, "name": model} for model in models],
