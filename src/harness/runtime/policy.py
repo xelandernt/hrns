@@ -8,7 +8,7 @@ atomic transaction: either every change applies or none does.
 "Turning off" means *omitting* the capability from the next turn's agent: enabled bindings
 are resolved into a stable topological order and instantiated fresh from plugin factories,
 so tools, instructions, hooks, and model settings of disabled bindings are all absent.
-Requests that already match the selected state are idempotent no-ops; directional
+Requests that already match the selected state are idempotent no-ops; toggle
 permissions apply only to actual transitions.
 """
 
@@ -205,7 +205,7 @@ def _set_path(config: dict[str, Any], path: str, value: Any) -> None:
 
 
 def is_noop_change(change: BindingChange, current: Mapping[str, BindingOffering]) -> bool:
-    """Whether one change already matches the selected state (dir. permissions don't apply)."""
+    """Whether one change already matches the selected state (toggle permissions don't apply)."""
     offering = current.get(change.binding_id)
     if isinstance(change, EnableChange):
         return offering is not None and change.enabled == offering.enabled
@@ -697,21 +697,13 @@ class PolicyCatalog:
                         "reason": offering.availability_reason,
                     },
                 )
-            # Initial selections get a lifecycle exception (new_session settings),
-            # not a directional-policy exception: host authority still applies.
-            if not (offering.policy.client_can_enable or offering.session_added):
-                raise HarnessError(
-                    "POLICY_DENIED",
-                    f"Client policy forbids enabling binding {offering.binding_id!r}.",
-                    details={"binding_id": offering.binding_id},
-                )
-        else:
-            if not (offering.policy.client_can_disable or offering.session_added):
-                raise HarnessError(
-                    "POLICY_DENIED",
-                    f"Client policy forbids disabling binding {offering.binding_id!r}.",
-                    details={"binding_id": offering.binding_id},
-                )
+        # Initial selections get a lifecycle exception, but host toggle policy still applies.
+        if not (offering.policy.client_can_toggle or offering.session_added):
+            raise HarnessError(
+                "POLICY_DENIED",
+                f"Client policy forbids toggling binding {offering.binding_id!r}.",
+                details={"binding_id": offering.binding_id},
+            )
         work[change.binding_id] = (change.enabled, config)
         return True
 
@@ -940,8 +932,7 @@ class PolicyCatalog:
             available=descriptor.default_policy.available
             and descriptor.compatibility.runtime_compatible,
             enabled_by_default=False,
-            client_can_enable=True,
-            client_can_disable=True,
+            client_can_toggle=True,
             editable_fields=host_editable_fields(descriptor),
             # Preserve the plugin's lifecycle; a host cannot promote a new_session
             # integration into a safe next-turn toggle merely by adding it.
@@ -1016,8 +1007,7 @@ def host_editable_fields(descriptor: PluginDescriptor) -> set[str]:
     """Configuration paths the host lets clients edit for a runtime-added binding."""
     if descriptor.config_model is None:
         return set()
-    schema = descriptor.config_schema()
-    return set((schema.get("properties") or {}).keys())
+    return set(descriptor.default_policy.editable_fields)
 
 
 def order_enabled_offerings(

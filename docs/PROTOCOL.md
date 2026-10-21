@@ -258,8 +258,7 @@ Response:
         "policy": {
           "available": true,
           "enabledByDefault": true,
-          "clientCanEnable": true,
-          "clientCanDisable": true,
+          "clientCanToggle": true,
           "editableFields": ["provider"],
           "changeMode": "next_turn"
         },
@@ -497,7 +496,7 @@ action interrupts current work. A running turn continues with its original activ
 session allows one controlling connection and one prompt turn at a time; a second attempt is
 `SESSION_BUSY`. Different sessions run concurrently.
 
-`policyRevision` changes when host policy changes (availability, directional permissions,
+`policyRevision` changes when host policy changes (availability, toggle permissions,
 editability, or lifecycle). Clients should refresh descriptors/snapshots when it changes. A policy
 change that invalidates a saved selection blocks new work and returns the required changes rather
 than silently granting old permissions.
@@ -509,7 +508,7 @@ Lifecycle rules:
 - `new_session` settings are inspectable but not editable in an existing session. Updating one is
   `NEW_SESSION_REQUIRED`; create a new session with `initialConfiguration`.
 - `available: false` bindings cannot be enabled and are shown with `availabilityReason`.
-  `clientCanEnable`/`clientCanDisable` govern actual transitions; requests that already match the
+  `clientCanToggle` governs actual transitions; requests that already match the
   selected state are no-ops. Locked capabilities are not presented as editable ACP config options.
 - Disabling omits the capability's future contributions; it does not delete persisted state.
   `stateMode` (`run`, `session`, `external`) describes state ownership, not protocol visibility.
@@ -596,7 +595,7 @@ secrets in errors.
 
 | `data.code` | Typical meaning |
 | --- | --- |
-| `POLICY_DENIED` | Host policy or directional permission forbids the transition; locked/mandatory binding. |
+| `POLICY_DENIED` | Host policy or toggle permission forbids the transition; locked/mandatory binding. |
 | `INVALID_CONFIGURATION` | Schema/field validation, invalid cursor or limit, empty/oversized transaction, unknown params. |
 | `REVISION_CONFLICT` | Stale `expectedRevision`, in-progress duplicate, or `requestId` reuse with a different body. |
 | `DEPENDENCY_CONFLICT` | Missing requirements, conflicts, or disabling a required dependency without its dependents. |

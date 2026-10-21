@@ -66,8 +66,7 @@ class ConfigurationUpdate(WireModel):
 class CapabilityPolicy(WireModel):
     available: bool = True
     enabled_by_default: bool = True
-    client_can_enable: bool = False
-    client_can_disable: bool = False
+    client_can_toggle: bool = False
     editable_fields: set[str] = Field(default_factory=set)
     change_mode: Literal["next_turn", "new_session"] = "new_session"
 

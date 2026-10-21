@@ -159,8 +159,7 @@ def _binding(
     config: dict[str, Any] | None = None,
     *,
     enabled: bool,
-    client_can_enable: bool = True,
-    client_can_disable: bool = True,
+    client_can_toggle: bool = True,
 ) -> DefinitionBinding:
     entry = catalog.entry(plugin_id)
     payload = _validate_binding_config(plugin_id, config or {})
@@ -168,8 +167,7 @@ def _binding(
     policy = CapabilityPolicy(
         available=True,
         enabled_by_default=enabled,
-        client_can_enable=client_can_enable and not mandatory,
-        client_can_disable=client_can_disable and not mandatory,
+        client_can_toggle=client_can_toggle and not mandatory,
         editable_fields=set(entry.config_model.model_fields) if entry.config_model else set(),
         change_mode=entry.change_mode,
     )
@@ -206,8 +204,7 @@ def developer_bindings() -> list[DefinitionBinding]:
             "pydantic.local_workspace",
             {"read_only": False},
             enabled=True,
-            client_can_enable=False,
-            client_can_disable=False,
+            client_can_toggle=False,
         ),
         _binding("filesystem", "harness.filesystem", {"read_only": False}, enabled=True),
         _binding("shell", "harness.shell", {"default_timeout": 30.0}, enabled=True),
@@ -401,8 +398,7 @@ def definition_from_manifest(
         policy = catalog_entry.policy().model_copy(
             update={
                 "enabled_by_default": binding.enabled,
-                "client_can_disable": False if mandatory else True,
-                "client_can_enable": False if mandatory else True,
+                "client_can_toggle": not mandatory,
             }
         )
         bindings.append(
