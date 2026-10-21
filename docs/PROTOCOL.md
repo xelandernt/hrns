@@ -738,3 +738,19 @@ accept these shapes.
    `_harness/plugins/list`; never upload code or expect remote plugin installation.
 9. Enforce the 16 MiB message limit, text-only one-object frames, and the 30-second ping/pong
    timeout on WebSocket connections.
+
+## Session naming and usage metadata
+
+Hosts and clients may negotiate `_harness/session/rename` alongside the other v1
+extension methods. The request and response use `SessionTitleUpdate`:
+`{"sessionId": "s_…", "title": "My session"}`. The title must contain 1–120
+characters. Repeating a rename sets the same name; the session must be open on
+this connection, preserving the existing ownership check in session/load.
+
+At prompt completion (including failure/cancellation) and after session/load,
+the host sends a standard `session_info_update` with the current title and
+`_meta.harness.sessionUsage`. This optional metadata contains `scope: "session"`,
+Pydantic AI usage counters, an optional decimal USD `cost` string, and
+`cost_status` (`estimated`, `partial`, or `unavailable`). Input token totals
+already include cached tokens. Clients must not add the per-prompt response
+usage to these cumulative totals. Standard ACP peers may ignore this metadata.

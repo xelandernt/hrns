@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS
@@ -394,15 +395,29 @@ def model_option(
 
 def format_usage(usage: dict[str, Any] | None) -> str:
     if not usage:
-        return ""
-    parts: list[str] = []
-    total = usage.get("totalTokens") or usage.get("total_tokens")
-    if total is not None:
-        parts.append(f"{int(total):,} tokens")
-    cost = usage.get("cost") or {}
-    if isinstance(cost, dict) and cost.get("amount") is not None:
-        currency = cost.get("currency", "")
-        parts.append(f"{cost.get('amount')} {currency}".strip())
+        return "Cost unavailable"
+    cost = usage.get("cost")
+    status = usage.get("cost_status", "estimated")
+    currency = "USD"
+    if isinstance(cost, dict):
+        currency = cost.get("currency", "USD")
+        cost = cost.get("amount")
+    try:
+        amount = Decimal(str(cost))
+        if not amount.is_finite():
+            raise ValueError("Non-finite cost")
+        parts = [f"{currency} {amount:.6f} ({status})"]
+    except (InvalidOperation, ValueError, TypeError):
+        parts = ["Cost unavailable"]
+    for camel, snake, label in (
+        ("inputTokens", "input_tokens", "in"),
+        ("outputTokens", "output_tokens", "out"),
+        ("cachedReadTokens", "cache_read_tokens", "cache read"),
+        ("cachedWriteTokens", "cache_write_tokens", "cache write"),
+    ):
+        value = usage.get(camel, usage.get(snake))
+        if isinstance(value, int):
+            parts.append(f"{label} {value:,}")
     return " · ".join(parts)
 
 

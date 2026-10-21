@@ -286,7 +286,7 @@ def usage_payload(usage: RunUsage | None) -> dict[str, Any]:
         payload["details"] = dict(usage.details)
     if usage.cost is not None:
         try:
-            payload["cost"] = float(usage.cost)
+            payload["cost"] = str(usage.cost)
         except (TypeError, ValueError):  # pragma: no cover - defensive
             pass
     if usage.total_tokens:

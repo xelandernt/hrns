@@ -20,13 +20,15 @@ import inspect
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import Agent, CancellationToken, RunCancelled
-from pydantic_ai.messages import ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse, repair_messages
 from pydantic_ai.run import AgentRunResultEvent
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 from pydantic_core import to_jsonable_python
 
@@ -47,6 +49,7 @@ from ._events import (
     translate_event,
     usage_payload,
 )
+from ._model_usage import normalize_model_usage
 from ._unavailable_tools import UnavailableTools
 from .definitions import (
     AgentDefinition,
@@ -300,6 +303,8 @@ def _usage_from_payload(payload: Mapping[str, Any] | None) -> RunUsage:
         }
     }
     try:
+        if known.get("cost") is not None:
+            known["cost"] = Decimal(str(known["cost"]))
         return RunUsage(**known)
     except Exception:  # pragma: no cover - defensive
         return RunUsage()
@@ -1206,6 +1211,50 @@ class Session:
         copy.incr(self._total_usage)
         return copy
 
+    async def set_title(self, title: str, *, manual: bool = True) -> dict[str, Any]:
+        """Rename this session. Human names take precedence over generated names."""
+        title = " ".join(title.split())
+        if not title or len(title) > 120:
+            raise HarnessError("INVALID_CONFIGURATION", "Session names must be 1–120 characters.")
+        async with self._state_lock:
+            transcript = await self._store.load_transcript(self._session_id, limit=None)
+            if not manual and any(
+                row["kind"] == "session_info" and row["data"].get("manual") for row in transcript
+            ):
+                summary = await self._store.get_session(self._session_id)
+                return {"title": summary.title if summary else title, "manual": True}
+            await self._store.set_session_title(self._session_id, title)
+            data = {"title": title, "manual": manual}
+            await self._store.append_transcript(self._session_id, None, "session_info", data)
+            return data
+
+    async def _suggest_title(self, title: str) -> str:
+        """Set a concise session title based on the user's initial request.
+
+        Call on the first turn, or when the user explicitly requests a new title.
+        Keep the title stable otherwise. A name chosen by the user is preserved.
+        """
+        data = await self.set_title(title, manual=False)
+        return str(data["title"])
+
+    async def usage_summary(self) -> dict[str, Any]:
+        """Persisted session totals, including failed and cancelled requests."""
+        turns = await self._store.list_turns(self._session_id)
+        total = RunUsage()
+        incomplete = False
+        for turn in turns:
+            if turn.usage:
+                total.incr(_usage_from_payload(turn.usage))
+                incomplete |= turn.usage.get("cost_status") != "estimated"
+            elif turn.status != "running":
+                incomplete = True
+        payload = usage_payload(total)
+        payload["scope"] = "session"
+        payload["cost_status"] = (
+            "unavailable" if total.cost is None else "partial" if incomplete else "estimated"
+        )
+        return payload
+
     @property
     def snapshot(self) -> ConfigurationSnapshot:
         """Selected configuration plus active revision and application status."""
@@ -1717,6 +1766,23 @@ class Session:
                 token.cancel()
             await self._store.mark_revision_applied(self._session_id, active_revision)
             await self._store.touch_session(self._session_id)
+            if not self._history and prompt is not None:
+                # Give every first request a recognizable fallback even if the model
+                # does not call the naming tool. Only plain prompt text is included.
+                payload = _prompt_payload(prompt)
+                if isinstance(payload, str):
+                    title = payload
+                elif isinstance(payload, list):
+                    title = " ".join(
+                        item.get("text", "")
+                        for item in payload
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    )
+                else:
+                    title = ""
+                title = " ".join(title.split())[:80]
+                if title:
+                    await self.set_title(title, manual=False)
             kwargs = self._run_kwargs(
                 prompt, options, active_turn, run_capabilities, model_handled=model_handled
             )
@@ -1916,8 +1982,31 @@ class Session:
             "run_id": active_turn.turn_id,
             "cancellation_token": active_turn.cancel_token,
         }
+        title_tools: FunctionToolset[Any] = FunctionToolset()
+        title_tools.tool_plain(name="set_session_title")(self._suggest_title)
+        kwargs["toolsets"] = [title_tools]
+        if not self._history:
+            naming_instruction = (
+                "At the start of this session, call set_session_title once with a short "
+                "descriptive title (3–8 words) based on the user's first request."
+            )
+            instructions = options.instructions
+            kwargs["instructions"] = [
+                *(
+                    instructions
+                    if isinstance(instructions, (list, tuple))
+                    else [instructions]
+                    if instructions is not None
+                    else []
+                ),
+                naming_instruction,
+            ]
         if self._history:
-            kwargs["message_history"] = list(self._history)
+            kwargs["message_history"] = (
+                repair_messages(self._history)
+                if prompt is not None and options.deferred_tool_results is None
+                else list(self._history)
+            )
         if self._conversation_id:
             kwargs["conversation_id"] = self._conversation_id
         if options.output_type is not None:
@@ -1926,12 +2015,12 @@ class Session:
             kwargs["deps"] = options.deps
         if not model_handled:
             if options.model is not None:
-                kwargs["model"] = options.model
+                kwargs["model"] = normalize_model_usage(options.model)
             elif self._model_override is not None:
-                kwargs["model"] = self._model_override
+                kwargs["model"] = normalize_model_usage(self._model_override)
         if options.model_settings is not None:
             kwargs["model_settings"] = options.model_settings
-        if options.instructions is not None:
+        if options.instructions is not None and "instructions" not in kwargs:
             kwargs["instructions"] = options.instructions
         if options.retries is not None:
             kwargs["retries"] = options.retries
@@ -1978,6 +2067,7 @@ class Session:
             or self._resources.get_model()
             or self._definition.model
         )
+        model = normalize_model_usage(model)
         definition = self._definition
         if definition.spec is not None:
             spec: Any = definition.spec
@@ -2003,6 +2093,8 @@ class Session:
                     f"Definition factory for {definition.agent_id!r} did not return a native agent.",
                     details={"returned": type(agent).__name__},
                 )
+            if isinstance(agent, Agent):
+                agent.model = normalize_model_usage(agent.model)
             model_handled = _factory_declares_model(factory)
             # A Python factory may embed private fixed behavior; the definition's
             # ``fixed_capabilities`` are still added by the framework every turn.
@@ -2110,13 +2202,24 @@ class Session:
         error: Any = None,
         deferred: Any = None,
     ) -> None:
+        payload = usage_payload(usage) if usage is not None else None
+        if payload is not None:
+            responses = [message for message in messages if isinstance(message, ModelResponse)]
+            priced = sum(message.usage.cost is not None for message in responses)
+            payload["cost_status"] = (
+                "unavailable"
+                if usage is None or usage.cost is None
+                else "estimated"
+                if priced == usage.requests and priced > 0
+                else "partial"
+            )
         await self._store.finalize_turn(
             self._session_id,
             turn_id,
             status=status,
             output=output,
             error=error,
-            usage=usage_payload(usage) if usage is not None else None,
+            usage=payload,
             messages=_messages_json(messages),
         )
         if error is not None:
