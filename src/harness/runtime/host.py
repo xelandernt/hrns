@@ -291,15 +291,19 @@ class SessionMeta:
 
 
 class HostMetadataStore:
-    """Tiny durable sidecar: one atomic JSON file per ACP session.
+    """Persist ACP metadata in a session store or stdio sidecar files.
 
     The runtime persists conversation/config/turns; the working directory and the
     host-selected model are ACP-host concerns. Per-session files (not one index) keep
     workers of different sessions from clobbering each other. A ``None`` path means
-    process-memory only.
+    process-memory only unless ``store`` is supplied. Network servers pass their
+    shared session store so SQLite and PostgreSQL both retain cwd/model/effort.
     """
 
-    def __init__(self, store_path: str | Path | None) -> None:
+    def __init__(
+        self, store_path: str | Path | None = None, *, store: SessionStore | None = None
+    ) -> None:
+        self.store = store
         base: Path | None = None
         if store_path is not None and str(store_path) != ":memory:":
             base = Path(store_path).expanduser()
@@ -319,6 +323,9 @@ class HostMetadataStore:
         return self.directory / f"{session_id}.json"
 
     async def get(self, session_id: str) -> SessionMeta | None:
+        if self.store is not None:
+            data = await self.store.get_acp_metadata(session_id)
+            return SessionMeta(**data) if data is not None else None
         if session_id in self._memory:
             return self._memory[session_id]
         if self.directory is None:
@@ -336,13 +343,16 @@ class HostMetadataStore:
             ) from exc
         if not isinstance(data, dict) or not isinstance(data.get("cwd"), str):
             return None
-        meta = SessionMeta(
-            cwd=data["cwd"], model=data.get("model"), effort=data.get("effort")
-        )
+        meta = SessionMeta(cwd=data["cwd"], model=data.get("model"), effort=data.get("effort"))
         self._memory[session_id] = meta
         return meta
 
     async def put(self, session_id: str, meta: SessionMeta) -> None:
+        if self.store is not None:
+            await self.store.put_acp_metadata(
+                session_id, {"cwd": meta.cwd, "model": meta.model, "effort": meta.effort}
+            )
+            return
         self._memory[session_id] = meta
         if self.directory is None:
             return
@@ -358,6 +368,9 @@ class HostMetadataStore:
         os.replace(temporary, path)
 
     async def delete(self, session_id: str) -> None:
+        if self.store is not None:
+            await self.store.delete_acp_metadata(session_id)
+            return
         self._memory.pop(session_id, None)
         if self.directory is not None:
             with contextlib.suppress(FileNotFoundError):
@@ -494,9 +507,7 @@ class HostedSession:
                         details = dict(data.get("details") or {})
                         if details.get("cancelled"):
                             await self._fail_outstanding_tools()
-                            return schema.PromptResponse(
-                                stop_reason="cancelled", usage=usage
-                            )
+                            return schema.PromptResponse(stop_reason="cancelled", usage=usage)
                         raise HarnessError(
                             str(data.get("code") or "TURN_FAILED"),
                             str(data.get("message") or "The agent turn failed."),
@@ -513,19 +524,13 @@ class HostedSession:
                         approvals = list(data.get("approvals") or [])
                         continue
                     if event_type == "turn_complete":
-                        stop_reason = acp_map.stop_reason_for(
-                            data.get("stop_reason") or "end_turn"
-                        )
+                        stop_reason = acp_map.stop_reason_for(data.get("stop_reason") or "end_turn")
                         usage = _usage_total(usage, data.get("usage"))
                         # Some providers return the final answer only in the run
                         # result after tool calls instead of streaming it. Forward
                         # that text so the client does not lose the response.
                         output = data.get("output")
-                        if (
-                            isinstance(output, str)
-                            and output.strip()
-                            and not text_since_tool
-                        ):
+                        if isinstance(output, str) and output.strip() and not text_since_tool:
                             for update in acp_map.text_updates(output):
                                 await self._send(update)
                         deferred = data.get("deferred_tool_requests") or {}
@@ -599,7 +604,9 @@ class HostedSession:
             ) from exc
         return schema.PromptResponse(stop_reason=stop_reason, usage=usage)
 
-    def _stream(self, prompt: Any, deferred_results: DeferredToolResults | None) -> AsyncIterator[Any]:
+    def _stream(
+        self, prompt: Any, deferred_results: DeferredToolResults | None
+    ) -> AsyncIterator[Any]:
         runtime = self.runtime
         stream = getattr(runtime, "stream", None)
         if stream is None:
@@ -626,9 +633,7 @@ class HostedSession:
                 if support == "custom" and provider in _OPENAI_EFFORT_PROVIDERS:
                     # Profiles absent from the registry would silently ignore
                     # unified thinking; the explicit key still reaches the wire.
-                    model_settings["openai_reasoning_effort"] = (
-                        "none" if off else self.effort
-                    )
+                    model_settings["openai_reasoning_effort"] = "none" if off else self.effort
             else:
                 # Session state is authoritative: "Default" must also clear a level
                 # that the configuration supplied when the process started.
@@ -737,18 +742,24 @@ class HostedSession:
                 # The call was announced as running before the model paused for approval;
                 # correct it to pending so a rejected call is never shown as executed.
                 await self._send(
-                    acp.update_tool_call(
-                        tool_call_id=tool_call_id, status="pending", kind=kind
-                    )
+                    acp.update_tool_call(tool_call_id=tool_call_id, status="pending", kind=kind)
                 )
             self._permission_counter += 1
             options = acp_map.permission_options(
                 {
                     "options": [
                         {"option_id": "allow-once", "name": "Allow once", "kind": "allow_once"},
-                        {"option_id": "allow-always", "name": "Always allow", "kind": "allow_always"},
+                        {
+                            "option_id": "allow-always",
+                            "name": "Always allow",
+                            "kind": "allow_always",
+                        },
                         {"option_id": "reject-once", "name": "Reject", "kind": "reject_once"},
-                        {"option_id": "reject-always", "name": "Always reject", "kind": "reject_always"},
+                        {
+                            "option_id": "reject-always",
+                            "name": "Always reject",
+                            "kind": "reject_always",
+                        },
                     ]
                 }
             )
@@ -807,9 +818,7 @@ class HostedSession:
                 )
         return DeferredToolResults(approvals=results)
 
-    async def _settle_deferred_as_cancelled(
-        self, approvals: Sequence[Mapping[str, Any]]
-    ) -> None:
+    async def _settle_deferred_as_cancelled(self, approvals: Sequence[Mapping[str, Any]]) -> None:
         """Resume a cancelled approval pause with denials until history is clean.
 
         A model may request another approval after observing a denial; each round is
@@ -967,7 +976,9 @@ class HarnessHostAgent:
             methods, version = set(), None
         self._client_ext = methods if version == 1 else set()
         negotiated = (
-            protocol_version if 1 <= protocol_version <= acp.PROTOCOL_VERSION else acp.PROTOCOL_VERSION
+            protocol_version
+            if 1 <= protocol_version <= acp.PROTOCOL_VERSION
+            else acp.PROTOCOL_VERSION
         )
         advertisement = acp_map.extension_advertisement(
             local_binding_creation=self.policy.allow_local_binding_creation
@@ -1114,9 +1125,7 @@ class HarnessHostAgent:
             self._sessions[session_id] = state
             await state.persist_meta()
             await self._replay_transcript(state)
-            return schema.LoadSessionResponse(
-                config_options=await self._standard_options(state)
-            )
+            return schema.LoadSessionResponse(config_options=await self._standard_options(state))
         except HarnessError as exc:
             raise acp_map.harness_rpc_error(exc) from exc
         except RequestError:
@@ -1316,9 +1325,7 @@ class HarnessHostAgent:
                 "The session is not open in this host; load it before listing capabilities.",
                 {"sessionId": request.session_id},
             )
-        descriptors, next_cursor = await state.runtime.capabilities(
-            request.cursor, request.limit
-        )
+        descriptors, next_cursor = await state.runtime.capabilities(request.cursor, request.limit)
         snapshot = state.snapshot
         response = BindingListResponse(
             items=[
@@ -1461,7 +1468,9 @@ class HarnessHostAgent:
         """``new_session`` bindings are inspectable but not editable after creation."""
         if not changes:
             return
-        descriptors = {descriptor.binding_id: descriptor for descriptor in await self._all_descriptors(state)}
+        descriptors = {
+            descriptor.binding_id: descriptor for descriptor in await self._all_descriptors(state)
+        }
         for change in changes:
             if isinstance(change, AddChange):
                 plugin = self.bundle.registry.lookup(change.plugin_id)
@@ -1481,9 +1490,7 @@ class HarnessHostAgent:
 
     async def _set_model(self, state: HostedSession, value: str | bool) -> None:
         if not isinstance(value, str):
-            raise HarnessError(
-                "INVALID_CONFIGURATION", "The model option expects a string value."
-            )
+            raise HarnessError("INVALID_CONFIGURATION", "The model option expects a string value.")
         if not self.policy.models:
             raise HarnessError(
                 "CAPABILITY_UNAVAILABLE", "This deployment does not offer model selection."
@@ -1499,16 +1506,12 @@ class HarnessHostAgent:
                 # Effort is paired with the model; a switch starts from the
                 # configured default when the new model supports it.
                 state.model = value
-                state.effort = _valid_effort(
-                    self.policy.default_effort, state._effort_support()
-                )
+                state.effort = _valid_effort(self.policy.default_effort, state._effort_support())
             await state.persist_meta()
 
     async def _set_effort(self, state: HostedSession, value: str | bool) -> None:
         if not isinstance(value, str):
-            raise HarnessError(
-                "INVALID_CONFIGURATION", "The effort option expects a string value."
-            )
+            raise HarnessError("INVALID_CONFIGURATION", "The effort option expects a string value.")
         support = state._effort_support()
         option = acp_map.effort_option(None, support=support)
         if option is None:
@@ -1751,9 +1754,7 @@ def build_agent(bundle: HostBundle, setup: HostSetup | None = None) -> HarnessHo
         deployment_id=setup.deployment_id if setup else "local",
         hosted=hosted,
         allowed_cwds=setup.allowed_cwds if setup else None,
-        allow_local_binding_creation=(
-            setup.advertise_local_binding_creation if setup else True
-        ),
+        allow_local_binding_creation=(setup.advertise_local_binding_creation if setup else True),
         allow_client_mcp=not hosted,
         models=models,
         default_model=(setup.default_model() if setup else None) or (models[0] if models else None),
@@ -1961,7 +1962,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="agent definition import reference (package.module:attribute) or manifest path",
     )
     parser.add_argument(
-        "--definition", dest="definition_flag", help="definition source (alternative to the positional)"
+        "--definition",
+        dest="definition_flag",
+        help="definition source (alternative to the positional)",
     )
     parser.add_argument("--manifest", help="YAML/JSON agent definition manifest path")
     parser.add_argument(
@@ -2013,7 +2016,9 @@ def _require_env(name: str) -> str:
 def setup_from_args(args: argparse.Namespace) -> HostSetup:
     """Resolve CLI arguments + the trusted hosted environment into a :class:`HostSetup`."""
     hosted = bool(args.hosted) or _env_flag("HARNESS_HOSTED")
-    sources = [source for source in (args.definition, args.definition_flag, args.manifest) if source]
+    sources = [
+        source for source in (args.definition, args.definition_flag, args.manifest) if source
+    ]
     if not sources:
         raise _UsageError("an agent definition import reference or manifest path is required")
     if len(sources) > 1:

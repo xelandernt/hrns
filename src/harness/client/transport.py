@@ -117,7 +117,9 @@ class AgentTransport(Protocol):
 
     def describe(self) -> str: ...
 
-    async def open(self, client: Any, *, on_loss: LossHandler | None = None) -> ConnectionBundle: ...
+    async def open(
+        self, client: Any, *, on_loss: LossHandler | None = None
+    ) -> ConnectionBundle: ...
 
     async def close(self) -> None: ...
 
@@ -154,7 +156,7 @@ class StdioAgentTransport:
         self._closing = False
 
     def describe(self) -> str:
-        argv = " ".join([_quote(self.command), *( _quote(a) for a in self.args)])
+        argv = " ".join([_quote(self.command), *(_quote(a) for a in self.args)])
         where = f" (cwd {self.cwd})" if self.cwd else ""
         return f"local stdio · {argv}{where}"
 
@@ -182,7 +184,10 @@ class StdioAgentTransport:
                 details={"command": self.command},
             ) from exc
         except PermissionError as exc:
-            raise TransportError(f"Cannot launch '{self.command}': permission denied.", details={"command": self.command}) from exc
+            raise TransportError(
+                f"Cannot launch '{self.command}': permission denied.",
+                details={"command": self.command},
+            ) from exc
         except (asyncio.TimeoutError, TimeoutError) as exc:
             raise TransportError(f"Timed out launching agent process '{self.command}'.") from exc
         except OSError as exc:
@@ -190,7 +195,9 @@ class StdioAgentTransport:
         self._process = process
         stderr = getattr(process, "stderr", None)
         if stderr is not None:
-            self._stderr_task = asyncio.create_task(self._pump_stderr(stderr), name="harness-client.agent-stderr")
+            self._stderr_task = asyncio.create_task(
+                self._pump_stderr(stderr), name="harness-client.agent-stderr"
+            )
 
         async def watch() -> None:
             code = await process.wait()
@@ -349,14 +356,20 @@ class WebSocketAgentTransport:
 
     def _auth_headers(self) -> dict[str, str]:
         headers = dict(self.headers)
-        token = self._token if self._token is not None else (secret_value(self.token_ref) if self.token_ref else None)
+        token = (
+            self._token
+            if self._token is not None
+            else (secret_value(self.token_ref) if self.token_ref else None)
+        )
         if token:
             headers.setdefault("Authorization", f"Bearer {token}")
         return headers
 
     async def open(self, client: Any, *, on_loss: LossHandler | None = None) -> ConnectionBundle:
         if self._ws is not None:
-            raise TransportError("This WebSocket transport is already connected; create a new one to reconnect.")
+            raise TransportError(
+                "This WebSocket transport is already connected; create a new one to reconnect."
+            )
         try:
             ws = await asyncio.wait_for(
                 ws_connect(

@@ -1,6 +1,6 @@
 """HTTP/JSON error envelopes and WebSocket close-code constants.
 
-Every error response served by ``harness-server`` uses one predictable
+Catalog errors served by ``AgentServer`` use one predictable
 envelope shape::
 
     {"error": {"code": "<machine-readable-key>", "message": "<human-readable>",
@@ -27,11 +27,9 @@ __all__ = [
     "CLOSE_INVALID_PAYLOAD",
     "CLOSE_MESSAGE_TOO_BIG",
     "CLOSE_UNAUTHORIZED",
-    "CLOSE_TLS_REQUIRED",
     "CLOSE_AGENT_NOT_FOUND",
     "CLOSE_SUBPROTOCOL_REQUIRED",
     "CLOSE_SERVER_BUSY",
-    "CLOSE_WORKER_EXITED",
     "CLOSE_OUTBOUND_STALLED",
     "ERROR_STATUS",
     "ApiError",
@@ -46,28 +44,24 @@ ACP_SUBPROTOCOL = SUBPROTOCOL
 #: text message; no batches, no binary.
 
 # WebSocket close codes used by the ACP transport.
-CLOSE_PROTOCOL_ERROR = 1002          # malformed / non-object / batch frame
-CLOSE_UNSUPPORTED_DATA = 1003        # binary frame
-CLOSE_INVALID_PAYLOAD = 1007         # invalid UTF-8
-CLOSE_MESSAGE_TOO_BIG = 1009         # oversize text frame
-CLOSE_UNAUTHORIZED = 4401            # fallback for 401 denial
-CLOSE_TLS_REQUIRED = 4403            # fallback for TLS enforcement denial
-CLOSE_AGENT_NOT_FOUND = 4404         # fallback for unknown/forbidden agent
-CLOSE_SUBPROTOCOL_REQUIRED = 4455    # fallback for missing subprotocol
-CLOSE_SERVER_BUSY = 4503             # fallback for capacity denial
-CLOSE_WORKER_EXITED = 4511           # worker process died or was killed
-CLOSE_OUTBOUND_STALLED = 4512        # consumer stopped draining frames
+CLOSE_PROTOCOL_ERROR = 1002  # malformed / non-object / batch frame
+CLOSE_UNSUPPORTED_DATA = 1003  # binary frame
+CLOSE_INVALID_PAYLOAD = 1007  # invalid UTF-8
+CLOSE_MESSAGE_TOO_BIG = 1009  # oversize text frame
+CLOSE_UNAUTHORIZED = 4401  # fallback for 401 denial
+CLOSE_AGENT_NOT_FOUND = 4404  # fallback for unknown/forbidden agent
+CLOSE_SUBPROTOCOL_REQUIRED = 4455  # fallback for missing subprotocol
+CLOSE_SERVER_BUSY = 4503  # fallback for capacity denial
+CLOSE_OUTBOUND_STALLED = 4512  # consumer stopped draining frames
 
 _STABLE_ERROR_CODES: dict[str, int] = {
     "INVALID_REQUEST": 400,
     "UNAUTHORIZED": 401,
     "FORBIDDEN": 403,
-    "TLS_REQUIRED": 403,
     "NOT_FOUND": 404,
     "METHOD_NOT_ALLOWED": 405,
     "CONFLICT": 409,
     "SERVER_BUSY": 503,
-    "WORKER_SPAWN_FAILED": 503,
     "INTERNAL_ERROR": 500,
 }
 

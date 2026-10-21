@@ -31,9 +31,35 @@ __all__ = [
 #: Per-file limit; the client's prompt-size check still applies to the aggregate.
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 _TEXTUAL_SUFFIXES = {
-    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".md", ".txt", ".csv", ".tsv",
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".xml", ".sql", ".sh",
-    ".rs", ".go", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".rb", ".php",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".md",
+    ".txt",
+    ".csv",
+    ".tsv",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".css",
+    ".html",
+    ".xml",
+    ".sql",
+    ".sh",
+    ".rs",
+    ".go",
+    ".java",
+    ".kt",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".rb",
+    ".php",
 }
 
 
@@ -135,6 +161,7 @@ def attachment_summary(attachments: Sequence[str]) -> list[dict[str, Any]]:
             size = path.stat().st_size
         except OSError:
             size = None
-        result.append({"name": path.name, "path": str(path), "size": size,
-                       "mimeType": _media_type(path)})
+        result.append(
+            {"name": path.name, "path": str(path), "size": size, "mimeType": _media_type(path)}
+        )
     return result

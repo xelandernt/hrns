@@ -83,6 +83,7 @@ _MIGRATION_LOCK_KEY = 0x4841524E50470001
 
 _MAX_TRANSACTION_ATTEMPTS = 3
 
+
 def _process_host_identity() -> str:
     """Identity for PID-liveness comparisons (host + boot + PID namespace when known).
 
@@ -240,10 +241,8 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         (
             # Added when ownership learned to distinguish dead local owners from live
             # remote workers.  The columns are nullable for rows created by schema v1.
-            "ALTER TABLE harness_session_control "
-            "ADD COLUMN IF NOT EXISTS owner_pid INTEGER",
-            "ALTER TABLE harness_session_control "
-            "ADD COLUMN IF NOT EXISTS owner_host TEXT",
+            "ALTER TABLE harness_session_control ADD COLUMN IF NOT EXISTS owner_pid INTEGER",
+            "ALTER TABLE harness_session_control ADD COLUMN IF NOT EXISTS owner_host TEXT",
         ),
     ),
     (
@@ -282,6 +281,18 @@ _MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
                 state TEXT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 PRIMARY KEY (session_id, binding_id)
+            )
+            """,
+        ),
+    ),
+    (
+        6,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS harness_acp_metadata (
+                session_id TEXT PRIMARY KEY
+                    REFERENCES harness_sessions(session_id) ON DELETE CASCADE,
+                data TEXT NOT NULL
             )
             """,
         ),
@@ -606,8 +617,7 @@ class PostgresSessionStore(SessionStore):
     async def get_session(self, session_id: str) -> SessionSummary | None:
         async def operation(connection: Any) -> SessionSummary | None:
             cursor = await connection.execute(
-                "SELECT * FROM harness_sessions "
-                "WHERE session_id = %s AND status != 'deleted'",
+                "SELECT * FROM harness_sessions WHERE session_id = %s AND status != 'deleted'",
                 (session_id,),
             )
             row = await cursor.fetchone()
@@ -652,8 +662,7 @@ class PostgresSessionStore(SessionStore):
 
         async def operation(connection: Any) -> SessionSummary | None:
             cursor = await connection.execute(
-                "SELECT * FROM harness_sessions "
-                "WHERE session_id = %s AND status != 'deleted'",
+                "SELECT * FROM harness_sessions WHERE session_id = %s AND status != 'deleted'",
                 (session_id,),
             )
             row = await cursor.fetchone()
@@ -729,6 +738,34 @@ class PostgresSessionStore(SessionStore):
 
         await self._run(operation)
 
+    async def get_acp_metadata(self, session_id: str) -> dict[str, Any] | None:
+        async def operation(connection: Any) -> dict[str, Any] | None:
+            cursor = await connection.execute(
+                "SELECT data FROM harness_acp_metadata WHERE session_id = %s", (session_id,)
+            )
+            row = await cursor.fetchone()
+            return json.loads(row["data"]) if row is not None else None
+
+        return await self._run(operation)
+
+    async def put_acp_metadata(self, session_id: str, data: dict[str, Any]) -> None:
+        async def operation(connection: Any) -> None:
+            await connection.execute(
+                "INSERT INTO harness_acp_metadata (session_id, data) VALUES (%s, %s) "
+                "ON CONFLICT(session_id) DO UPDATE SET data = EXCLUDED.data",
+                (session_id, _compact_json(data)),
+            )
+
+        await self._run(operation)
+
+    async def delete_acp_metadata(self, session_id: str) -> None:
+        async def operation(connection: Any) -> None:
+            await connection.execute(
+                "DELETE FROM harness_acp_metadata WHERE session_id = %s", (session_id,)
+            )
+
+        await self._run(operation)
+
     # --- ownership ----------------------------------------------------
 
     async def acquire_control(
@@ -748,9 +785,7 @@ class PostgresSessionStore(SessionStore):
         process liveness instead.
         """
 
-        effective_stale_after = (
-            stale_after if stale_after is not None else self.control_stale_after
-        )
+        effective_stale_after = stale_after if stale_after is not None else self.control_stale_after
 
         async def operation(connection: Any) -> bool:
             if not await self._lock_session(connection, session_id):
@@ -826,8 +861,7 @@ class PostgresSessionStore(SessionStore):
             if not await self._lock_session(connection, session_id):
                 return
             await connection.execute(
-                "DELETE FROM harness_session_control "
-                "WHERE session_id = %s AND owner_token = %s",
+                "DELETE FROM harness_session_control WHERE session_id = %s AND owner_token = %s",
                 (session_id, owner_token),
             )
 
@@ -1011,9 +1045,7 @@ class PostgresSessionStore(SessionStore):
                     details={"session_id": session_id, "request_id": request_id},
                 )
             if row["status"] == "committed" and row["revision"] is not None:
-                stored = await self._select_revision(
-                    connection, session_id, int(row["revision"])
-                )
+                stored = await self._select_revision(connection, session_id, int(row["revision"]))
                 if stored is not None:
                     return stored
 
@@ -1188,9 +1220,7 @@ class PostgresSessionStore(SessionStore):
             )
             history = list(messages or [])
             if history:
-                await self._insert_messages(
-                    connection, session_id, turn_id, history, timestamp
-                )
+                await self._insert_messages(connection, session_id, turn_id, history, timestamp)
             await connection.execute(
                 "UPDATE harness_sessions SET last_active_at = %s WHERE session_id = %s",
                 (timestamp, session_id),
@@ -1255,9 +1285,7 @@ class PostgresSessionStore(SessionStore):
 
         async def operation(connection: Any) -> None:
             await self._require_session(connection, session_id)
-            await self._insert_messages(
-                connection, session_id, turn_id, list(messages), now_ms()
-            )
+            await self._insert_messages(connection, session_id, turn_id, list(messages), now_ms())
 
         await self._run(operation)
 
@@ -1443,8 +1471,14 @@ class PostgresSessionStore(SessionStore):
     async def set_plugin_state(
         self, session_id: str, binding_id: str, *, schema_version: int, state: Mapping[str, Any]
     ) -> None:
-        if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version < 1:
-            raise HarnessError("INVALID_CONFIGURATION", "schema_version must be a positive integer.")
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version < 1
+        ):
+            raise HarnessError(
+                "INVALID_CONFIGURATION", "schema_version must be a positive integer."
+            )
         try:
             payload = json.dumps(
                 dict(state), sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -1509,8 +1543,7 @@ class PostgresSessionStore(SessionStore):
         async def operation(connection: Any) -> int:
             await self._require_session(connection, session_id)
             cursor = await connection.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS seq FROM harness_transcript "
-                "WHERE session_id = %s",
+                "SELECT COALESCE(MAX(seq), 0) AS seq FROM harness_transcript WHERE session_id = %s",
                 (session_id,),
             )
             row = await cursor.fetchone()
@@ -1535,8 +1568,7 @@ class PostgresSessionStore(SessionStore):
         async def operation(connection: Any) -> None:
             await self._require_session(connection, session_id)
             cursor = await connection.execute(
-                "SELECT data FROM harness_transcript "
-                "WHERE session_id = %s AND seq = %s FOR UPDATE",
+                "SELECT data FROM harness_transcript WHERE session_id = %s AND seq = %s FOR UPDATE",
                 (session_id, seq),
             )
             row = await cursor.fetchone()
@@ -1557,8 +1589,7 @@ class PostgresSessionStore(SessionStore):
             data = json.loads(row["data"])
             data["text"] = data.get("text", "") + appended
             await connection.execute(
-                "UPDATE harness_transcript SET data = %s "
-                "WHERE session_id = %s AND seq = %s",
+                "UPDATE harness_transcript SET data = %s WHERE session_id = %s AND seq = %s",
                 (json.dumps(data), session_id, seq),
             )
 
@@ -1628,8 +1659,7 @@ class PostgresSessionStore(SessionStore):
         self, connection: Any, session_id: str, revision: int
     ) -> StoredRevision | None:
         cursor = await connection.execute(
-            "SELECT * FROM harness_configuration_revisions "
-            "WHERE session_id = %s AND revision = %s",
+            "SELECT * FROM harness_configuration_revisions WHERE session_id = %s AND revision = %s",
             (session_id, revision),
         )
         row = await cursor.fetchone()

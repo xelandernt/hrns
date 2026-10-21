@@ -132,14 +132,14 @@ BINDING_OPTION_PREFIX = "binding:"
 PLUGINS_LIST_METHOD = "_harness/plugins/list"
 
 #: The extension methods this host can serve (requests) plus the notification it may send.
-EXTENSION_METHODS_V1: tuple[str, ...] = tuple(dict.fromkeys((*EXTENSION_METHODS, PLUGINS_LIST_METHOD)))
+EXTENSION_METHODS_V1: tuple[str, ...] = tuple(
+    dict.fromkeys((*EXTENSION_METHODS, PLUGINS_LIST_METHOD))
+)
 
 #: The notification the agent sends when configuration changed outside an update request.
 CHANGED_METHOD = "_harness/configuration/changed"
 
-_REPLAY_EXCLUDED = frozenset(
-    {"permission_request", "turn_complete", "error", "config_changed"}
-)
+_REPLAY_EXCLUDED = frozenset({"permission_request", "turn_complete", "error", "config_changed"})
 
 
 def jsonable(value: Any) -> Any:
@@ -190,7 +190,11 @@ def chunk_text(text: str, budget: int = MAX_TEXT_UPDATE_BYTES) -> Iterator[str]:
 def text_updates(text: str, *, thought: bool = False) -> Iterator[SessionUpdate]:
     """Agent text (or thought) chunks sized for the stdio buffer."""
     for chunk in chunk_text(text):
-        yield acp.update_agent_thought_text(chunk) if thought else acp.update_agent_message_text(chunk)
+        yield (
+            acp.update_agent_thought_text(chunk)
+            if thought
+            else acp.update_agent_message_text(chunk)
+        )
 
 
 def user_message_update(text: str) -> schema.UserMessageChunk:
@@ -239,9 +243,7 @@ def _resolve_within(path: str, cwd: str) -> str | None:
     return resolved
 
 
-def absolutize_presentation(
-    presentation: ToolCallPresentation, cwd: str
-) -> ToolCallPresentation:
+def absolutize_presentation(presentation: ToolCallPresentation, cwd: str) -> ToolCallPresentation:
     """Make a presentation's locations/diffs absolute for the ACP client.
 
     ACP requires tool-call locations and file-edit diffs to carry absolute paths.
@@ -302,7 +304,20 @@ def tool_call_start_update(
     )
 
 
-_TOOL_KINDS = frozenset({"read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"})
+_TOOL_KINDS = frozenset(
+    {
+        "read",
+        "edit",
+        "delete",
+        "move",
+        "search",
+        "execute",
+        "think",
+        "fetch",
+        "switch_mode",
+        "other",
+    }
+)
 _TOOL_STATUSES = frozenset({"pending", "in_progress", "completed", "failed"})
 
 
@@ -406,8 +421,14 @@ def event_to_update(
     """
     if event_type == "text_delta":
         text = data.get("text", data.get("delta", ""))
-        return None if not isinstance(text, str) or not text else (
-            acp.update_agent_thought_text(text) if data.get("thought") else acp.update_agent_message_text(text)
+        return (
+            None
+            if not isinstance(text, str) or not text
+            else (
+                acp.update_agent_thought_text(text)
+                if data.get("thought")
+                else acp.update_agent_message_text(text)
+            )
         )
     if event_type == "tool_call":
         return tool_call_start_update(data, cwd=cwd, presenter=presenter)
@@ -448,16 +469,24 @@ def permission_options(data: Mapping[str, Any]) -> list[schema.PermissionOption]
             option_id = item.get("option_id", item.get("optionId", item.get("id")))
             name = item.get("name", item.get("label"))
             kind = item.get("kind")
-            if not option_id or not name or kind not in {"allow_once", "allow_always", "reject_once", "reject_always"}:
+            if (
+                not option_id
+                or not name
+                or kind not in {"allow_once", "allow_always", "reject_once", "reject_always"}
+            ):
                 continue
-            options.append(schema.PermissionOption(option_id=str(option_id), name=str(name), kind=kind))
+            options.append(
+                schema.PermissionOption(option_id=str(option_id), name=str(name), kind=kind)
+            )
     if options:
         return options
     return [
         schema.PermissionOption(option_id="allow-once", name="Allow once", kind="allow_once"),
         schema.PermissionOption(option_id="allow-always", name="Always allow", kind="allow_always"),
         schema.PermissionOption(option_id="reject-once", name="Reject", kind="reject_once"),
-        schema.PermissionOption(option_id="reject-always", name="Always reject", kind="reject_always"),
+        schema.PermissionOption(
+            option_id="reject-always", name="Always reject", kind="reject_always"
+        ),
     ]
 
 
@@ -466,7 +495,9 @@ def permission_options(data: Mapping[str, Any]) -> list[schema.PermissionOption]
 # ---------------------------------------------------------------------------
 
 
-def model_option(models: Sequence[str], current: str | None) -> schema.SessionConfigOptionSelect | None:
+def model_option(
+    models: Sequence[str], current: str | None
+) -> schema.SessionConfigOptionSelect | None:
     """The standard ``model`` select option, or ``None`` when no models are offered."""
     if not models:
         return None
@@ -642,7 +673,11 @@ def parse_client_extensions(meta: Any) -> tuple[set[str], int | None]:
         return set(), None
     version = meta.get("version")
     methods = meta.get("methods")
-    if not isinstance(version, int) or not isinstance(methods, Sequence) or isinstance(methods, str):
+    if (
+        not isinstance(version, int)
+        or not isinstance(methods, Sequence)
+        or isinstance(methods, str)
+    ):
         return set(), None
     cleaned = {str(method) for method in methods if isinstance(method, str)}
     return cleaned, version
@@ -764,5 +799,3 @@ def mcp_forbidden_error(*, hosted: bool, servers: Sequence[Any]) -> HarnessError
         "a declared definition resource.",
         {"mcpServerCount": len(servers)},
     )
-
-

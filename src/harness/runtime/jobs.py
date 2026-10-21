@@ -145,18 +145,16 @@ class SessionJobManager:
 
     def tasks(self) -> set[asyncio.Task[Any]]:
         """Live task objects owned explicitly by this job manager."""
-        return {
-            job.task
-            for job in self._jobs.values()
-            if job.task is not None and job.is_active()
-        }
+        return {job.task for job in self._jobs.values() if job.task is not None and job.is_active()}
 
     def snapshot(self) -> list[dict[str, Any]]:
         return [job.to_dict() for job in self._jobs.values() if job.is_active()]
 
     async def cancel_binding(self, binding_id: str, *, timeout: float = 5.0) -> bool:
         """Cancel and drain one binding's work. Returns whether everything is settled."""
-        jobs = [job for job in self._jobs.values() if job.binding_id == binding_id and job.is_active()]
+        jobs = [
+            job for job in self._jobs.values() if job.binding_id == binding_id and job.is_active()
+        ]
         if not jobs:
             return True
         tasks: list[asyncio.Task[Any]] = []
@@ -178,7 +176,9 @@ class SessionJobManager:
             # tracked: already submitted provider effects cannot be retracted.
         if tasks:
             await asyncio.wait(tasks, timeout=max(0.0, timeout))
-        return not any(job.binding_id == binding_id and job.is_active() for job in self._jobs.values())
+        return not any(
+            job.binding_id == binding_id and job.is_active() for job in self._jobs.values()
+        )
 
     async def close(self, *, timeout: float = 10.0) -> bool:
         """Cancel every job. Returns ``False`` if any task or external job remains."""

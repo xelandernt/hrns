@@ -216,7 +216,11 @@ def parse_plugin_list(payload: dict[str, Any]) -> PluginListResult:
 
 def parse_configuration_snapshot(payload: dict[str, Any]) -> ConfigurationSnapshot:
     """Parse get/update/changed responses, ignoring compatible host extras."""
-    if isinstance(payload, dict) and "snapshot" in payload and isinstance(payload["snapshot"], dict):
+    if (
+        isinstance(payload, dict)
+        and "snapshot" in payload
+        and isinstance(payload["snapshot"], dict)
+    ):
         payload = payload["snapshot"]
     if not isinstance(payload, dict):
         raise ValueError("configuration snapshot must be an object")

@@ -693,9 +693,12 @@ class InputGuardrailConfig(_Config):
     @model_validator(mode="after")
     def _no_replace_in_parallel(self) -> InputGuardrailConfig:
         if self.parallel and any(
-            detector.kind in {"redact_secrets", "redact_personal_data"} for detector in self.detectors
+            detector.kind in {"redact_secrets", "redact_personal_data"}
+            for detector in self.detectors
         ):
-            raise ValueError("redacting detectors cannot run with parallel=True (replace is refused)")
+            raise ValueError(
+                "redacting detectors cannot run with parallel=True (replace is refused)"
+            )
         return self
 
 
@@ -918,7 +921,11 @@ def _resource(
     if not bound:
         if not required:
             return default
-        code = "WORKSPACE_UNAVAILABLE" if _resource_kind(name) == "workspace" else "RESOURCE_UNAVAILABLE"
+        code = (
+            "WORKSPACE_UNAVAILABLE"
+            if _resource_kind(name) == "workspace"
+            else "RESOURCE_UNAVAILABLE"
+        )
         suffix = f" ({description})" if description else ""
         raise HarnessError(
             code,
@@ -928,7 +935,11 @@ def _resource(
                 "plugin_id": plugin_id,
                 "resource": name,
                 "kind": _resource_kind(name),
-                **({"binding_id": binding.binding_id} if getattr(binding, "binding_id", None) else {}),
+                **(
+                    {"binding_id": binding.binding_id}
+                    if getattr(binding, "binding_id", None)
+                    else {}
+                ),
             },
         )
     try:
@@ -1164,7 +1175,7 @@ HARNESS_EXTRA = "pydantic-ai-harness"
 
 def _install(extra_group: str, *extras: str) -> str:
     joined = ",".join(extras)
-    return f'{extra_group}[{joined}]'
+    return f"{extra_group}[{joined}]"
 
 
 # ---------------------------------------------------------------------------
@@ -1326,7 +1337,15 @@ def _build_image_generation(_cls: Any, config: Any, binding: BindingContext) -> 
             plugin_id="pydantic.image_generation",
             description="an ImageGenerator for local (non-native) generation",
         )
-    for field in ("action", "background", "moderation", "quality", "size", "output_format", "image_model"):
+    for field in (
+        "action",
+        "background",
+        "moderation",
+        "quality",
+        "size",
+        "output_format",
+        "image_model",
+    ):
         value = _cfg(config, field)
         if value is not None:
             kwargs[field] = value
@@ -1471,7 +1490,10 @@ def _build_researcher(_cls: Any, config: Any, binding: BindingContext) -> Any:
         description="workspace for spill-to-workspace tool output limits",
     )
     kwargs: dict[str, Any] = {}
-    if _cfg(config, "replace_default_instructions", False) or _cfg(config, "instructions") is not None:
+    if (
+        _cfg(config, "replace_default_instructions", False)
+        or _cfg(config, "instructions") is not None
+    ):
         kwargs["instructions"] = _cfg(config, "instructions")
     if not _cfg(config, "include_default_subagent", True):
         kwargs["subagents"] = []
@@ -1892,14 +1914,18 @@ def _detector_chain(config: Any, plugin_id: str) -> list[Any]:
 
 
 def _build_input_guardrail(_cls: Any, config: Any, binding: BindingContext) -> Any:
-    return _cls(guard=_detector_chain(config, "harness.input_guardrail"), parallel=_cfg(config, "parallel", False))
+    return _cls(
+        guard=_detector_chain(config, "harness.input_guardrail"),
+        parallel=_cfg(config, "parallel", False),
+    )
 
 
 def _build_output_guardrail(_cls: Any, config: Any, binding: BindingContext) -> Any:
     import pydantic_ai_harness.guardrails.detectors as detectors  # noqa: PLC0415 - lazy
 
     chain = [
-        detectors.for_text(detector) for detector in _detector_chain(config, "harness.output_guardrail")
+        detectors.for_text(detector)
+        for detector in _detector_chain(config, "harness.output_guardrail")
     ]
     return _cls(guard=chain)
 
@@ -2050,7 +2076,9 @@ def _build_system_reminders(_cls: Any, config: Any, binding: BindingContext) -> 
         )
     if _cfg(config, "goal_reanchor", False):
         dynamic.append(reminders.GoalReanchor())
-    return _cls(reminders=static, dynamic_reminders=dynamic, cache_ttl=_cfg(config, "cache_ttl", "5m"))
+    return _cls(
+        reminders=static, dynamic_reminders=dynamic, cache_ttl=_cfg(config, "cache_ttl", "5m")
+    )
 
 
 def _build_trajectory_judge(_cls: Any, config: Any, binding: BindingContext) -> Any:
@@ -2076,7 +2104,9 @@ def _build_capability_creation(_cls: Any, config: Any, binding: BindingContext) 
         plugin_id="harness.capability_creation",
         description="writable LocalWorkspace whose Python code the host admits",
     )
-    return _cls(directory=Path(_cfg(config, "directory", ".authored")), guidance=_cfg(config, "guidance"))
+    return _cls(
+        directory=Path(_cfg(config, "directory", ".authored")), guidance=_cfg(config, "guidance")
+    )
 
 
 # — services and durability —
@@ -2110,7 +2140,9 @@ def _build_instrumentation(_cls: Any, config: Any, binding: BindingContext) -> A
         include_binary_content=_cfg(config, "include_binary_content", True),
         include_model_request_parameters=_cfg(config, "include_model_request_parameters", True),
         version=_cfg(config, "version", 5),
-        use_aggregated_usage_attribute_names=_cfg(config, "use_aggregated_usage_attribute_names", True),
+        use_aggregated_usage_attribute_names=_cfg(
+            config, "use_aggregated_usage_attribute_names", True
+        ),
     )
     return _cls(settings=settings)
 
@@ -2155,7 +2187,9 @@ def _hosted_factory(
 
     def factory(config: Any, binding: BindingContext) -> Any:
         cls = _load(plugin_id, import_ref, install_hint)
-        kwargs: dict[str, Any] = {"include_instructions": _cfg(config, "include_instructions", True)}
+        kwargs: dict[str, Any] = {
+            "include_instructions": _cfg(config, "include_instructions", True)
+        }
         if _present(config, "read_only"):
             kwargs["read_only"] = _cfg(config, "read_only", False)
         identifier = _cfg(config, "id")
@@ -2317,7 +2351,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         tier=CatalogTier.VERIFIED,
         config_model=FileSystemConfig,
         factory=_call_with(
-            "harness.filesystem", "pydantic_ai_harness.filesystem:FileSystem", None, _build_filesystem
+            "harness.filesystem",
+            "pydantic_ai_harness.filesystem:FileSystem",
+            None,
+            _build_filesystem,
         ),
         deployment_resources=("workspace",),
         change_mode="next_turn",
@@ -2505,7 +2542,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         group=CatalogGroup.TOOLS_MEDIA,
         tier=CatalogTier.INSTALL_REQUIRED,
         config_model=MCPConfig,
-        factory=_call_with("pydantic.mcp", "pydantic_ai.capabilities:MCP", _install(CORE, "mcp"), _build_mcp),
+        factory=_call_with(
+            "pydantic.mcp", "pydantic_ai.capabilities:MCP", _install(CORE, "mcp"), _build_mcp
+        ),
         extras=(_install(CORE, "mcp"),),
         requires_modules=("fastmcp",),
         change_mode="next_turn",
@@ -2526,7 +2565,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         tier=CatalogTier.INSTALL_REQUIRED,
         config_model=MCPNativeConfig,
         factory=_call_with(
-            "pydantic.mcp_native", "pydantic_ai.capabilities:MCP", _install(CORE, "mcp"), _build_mcp_native
+            "pydantic.mcp_native",
+            "pydantic_ai.capabilities:MCP",
+            _install(CORE, "mcp"),
+            _build_mcp_native,
         ),
         extras=(_install(CORE, "mcp"),),
         requires_modules=("fastmcp",),
@@ -2572,7 +2614,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         tier=CatalogTier.VERIFIED,
         config_model=LocalStackConfig,
         factory=_call_with(
-            "harness.localstack", "pydantic_ai_harness.localstack:LocalStack", None, _build_localstack
+            "harness.localstack",
+            "pydantic_ai_harness.localstack:LocalStack",
+            None,
+            _build_localstack,
         ),
         change_mode="next_turn",
         state_mode="run",
@@ -2887,7 +2932,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="next_turn",
         state_mode="run",
         presentation=("tool.mcp",),
-        notes=("Credential: STACKONE_API_KEY. account_id is required; actions narrow the surface.",),
+        notes=(
+            "Credential: STACKONE_API_KEY. account_id is required; actions narrow the surface.",
+        ),
         signature_verified=False,
     ),
     # -- web and research ---------------------------------------------------
@@ -2943,11 +2990,15 @@ CATALOG: tuple[CatalogEntry, ...] = (
         group=CatalogGroup.WEB,
         tier=CatalogTier.VERIFIED,
         config_model=XSearchConfig,
-        factory=_call_with("pydantic.x_search", "pydantic_ai.capabilities:XSearch", None, _build_x_search),
+        factory=_call_with(
+            "pydantic.x_search", "pydantic_ai.capabilities:XSearch", None, _build_x_search
+        ),
         change_mode="next_turn",
         state_mode="run",
         presentation=("tool.web",),
-        notes=("Native X search needs provider support; local fallback requires a configured model.",),
+        notes=(
+            "Native X search needs provider support; local fallback requires a configured model.",
+        ),
     ),
     _entry(
         plugin_id="harness.exa_search",
@@ -3344,7 +3395,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="next_turn",
         state_mode="run",
         presentation=("activity.compaction",),
-        notes=("max_fraction resolves against the model context window; TestModel cannot resolve one.",),
+        notes=(
+            "max_fraction resolves against the model context window; TestModel cannot resolve one.",
+        ),
     ),
     _entry(
         plugin_id="harness.summarizing_compaction",
@@ -3457,7 +3510,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="next_turn",
         state_mode="run",
         presentation=("activity.compaction",),
-        notes=("The file_key callable is required and cannot be inferred safely; bind it as a resource.",),
+        notes=(
+            "The file_key callable is required and cannot be inferred safely; bind it as a resource.",
+        ),
     ),
     _entry(
         plugin_id="harness.warn_near_limits",
@@ -3484,7 +3539,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="next_turn",
         state_mode="run",
         presentation=("activity.usage",),
-        notes=("For operator alerts subscribe to ContextUsageEvent; this capability only steers the model.",),
+        notes=(
+            "For operator alerts subscribe to ContextUsageEvent; this capability only steers the model.",
+        ),
     ),
     _entry(
         plugin_id="harness.report_context_usage",
@@ -3602,7 +3659,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="next_turn",
         state_mode="external",
         presentation=("activity.search",),
-        notes=("Pair with StepPersistence over the same store; scope is explicit to silence deprecation.",),
+        notes=(
+            "Pair with StepPersistence over the same store; scope is explicit to silence deprecation.",
+        ),
     ),
     _entry(
         plugin_id="harness.skills",
@@ -3667,7 +3726,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="next_turn",
         state_mode="run",
         presentation=("activity.docs",),
-        notes=("With local_docs_path the read goes through the run workspace; set one deliberately.",),
+        notes=(
+            "With local_docs_path the read goes through the run workspace; set one deliberately.",
+        ),
     ),
     # -- interaction and controls ------------------------------------------
     _entry(
@@ -3818,7 +3879,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         tier=CatalogTier.VERIFIED,
         config_model=SpendLimitsConfig,
         factory=_call_with(
-            "harness.spend_limits", "pydantic_ai_harness.spend:SpendLimits", None, _build_spend_limits
+            "harness.spend_limits",
+            "pydantic_ai_harness.spend:SpendLimits",
+            None,
+            _build_spend_limits,
         ),
         change_mode="next_turn",
         state_mode="external",
@@ -4113,7 +4177,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="new_session",
         state_mode="external",
         presentation=("activity.durability",),
-        notes=("Deployment-bound durability engine; constructor arguments are not managed beyond 'name'.",),
+        notes=(
+            "Deployment-bound durability engine; constructor arguments are not managed beyond 'name'.",
+        ),
         signature_verified=False,
     ),
     _entry(
@@ -4136,7 +4202,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         change_mode="new_session",
         state_mode="external",
         presentation=("activity.durability",),
-        notes=("Deployment-bound durability engine; constructor arguments are not managed beyond 'name'.",),
+        notes=(
+            "Deployment-bound durability engine; constructor arguments are not managed beyond 'name'.",
+        ),
         signature_verified=False,
     ),
     _entry(
@@ -4311,9 +4379,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         group=CatalogGroup.LOOP,
         tier=CatalogTier.VERIFIED,
         config_model=_NoConfig,
-        factory=_call_with(
-            "pydantic.hooks", "pydantic_ai.capabilities:Hooks", None, _build_hooks
-        ),
+        factory=_call_with("pydantic.hooks", "pydantic_ai.capabilities:Hooks", None, _build_hooks),
         deployment_resources=("hooks",),
         change_mode="next_turn",
         state_mode="run",
@@ -4635,7 +4701,9 @@ MEDIA_STORES: tuple[CatalogEntry, ...] = (
         change_mode="new_session",
         state_mode="external",
         presentation=("activity.media",),
-        notes=("The asyncpg-compatible pool is a host resource; its lifecycle stays with the host.",),
+        notes=(
+            "The asyncpg-compatible pool is a host resource; its lifecycle stays with the host.",
+        ),
     ),
 )
 
@@ -4648,8 +4716,12 @@ _BY_ID: dict[str, CatalogEntry] = {entry.plugin_id: entry for entry in (*CATALOG
 CATALOG_PLUGIN_IDS = frozenset(_BY_ID)
 if len(_BY_ID) != len(CATALOG) + len(MEDIA_STORES):  # pragma: no cover - import-time invariant
     duplicates = sorted(
-        {entry.plugin_id for entry in (*CATALOG, *MEDIA_STORES) if
-         sum(1 for other in (*CATALOG, *MEDIA_STORES) if other.plugin_id == entry.plugin_id) > 1}
+        {
+            entry.plugin_id
+            for entry in (*CATALOG, *MEDIA_STORES)
+            if sum(1 for other in (*CATALOG, *MEDIA_STORES) if other.plugin_id == entry.plugin_id)
+            > 1
+        }
     )
     raise RuntimeError(f"duplicate catalog plugin ids: {duplicates}")
 
@@ -4726,10 +4798,14 @@ def register_catalog(
     cannot compose. Install-required entries are registered with their import gates, so a
     composition fails with an actionable install message instead of a silent downgrade.
     """
-    accepted = set(include_tiers) if include_tiers is not None else {
-        CatalogTier.VERIFIED,
-        CatalogTier.INSTALL_REQUIRED,
-    }
+    accepted = (
+        set(include_tiers)
+        if include_tiers is not None
+        else {
+            CatalogTier.VERIFIED,
+            CatalogTier.INSTALL_REQUIRED,
+        }
+    )
     registered: list[str] = []
     for catalog_entry in iter_plugins():
         if catalog_entry.tier not in accepted:
@@ -4739,9 +4815,7 @@ def register_catalog(
     return registered
 
 
-def build_catalog_registry(
-    *, allow_local_binding_creation: bool = False
-) -> PluginRegistry:
+def build_catalog_registry(*, allow_local_binding_creation: bool = False) -> PluginRegistry:
     """Create a registry with the bundled catalog registered."""
     registry = PluginRegistry(allow_local_binding_creation=allow_local_binding_creation)
     register_catalog(registry)

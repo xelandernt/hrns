@@ -256,21 +256,27 @@ class ConnectScreen(Screen[None]):
             settings = self._local_settings()
             local_ready = settings is not None and bool(settings.model)
             if settings is None or not settings.model:
-                self.entries.append(PickEntry(
-                    kind="configure_local", label="Configure local model…",
-                    detail="Choose a cloud or local provider and model, then work in this project.",
-                ))
+                self.entries.append(
+                    PickEntry(
+                        kind="configure_local",
+                        label="Configure local model…",
+                        detail="Choose a cloud or local provider and model, then work in this project.",
+                    )
+                )
             else:
                 effort = effort_label(thinking_from_settings(settings))
-                self.entries.append(PickEntry(
-                    kind="local_model",
-                    label=(
-                        f"Local model · {settings.provider}:{settings.model}"
-                        f" · effort {effort}"
-                    ),
-                    detail="Run the configured provider and model on this project.",
-                ))
-            local = [profile for profile in self.profiles.profiles.values() if not profile.is_remote]
+                self.entries.append(
+                    PickEntry(
+                        kind="local_model",
+                        label=(
+                            f"Local model · {settings.provider}:{settings.model} · effort {effort}"
+                        ),
+                        detail="Run the configured provider and model on this project.",
+                    )
+                )
+            local = [
+                profile for profile in self.profiles.profiles.values() if not profile.is_remote
+            ]
             remote = [profile for profile in self.profiles.profiles.values() if profile.is_remote]
             for profile in sorted(local, key=lambda item: item.name):
                 self.entries.append(
@@ -291,15 +297,20 @@ class ConnectScreen(Screen[None]):
                     )
                 )
             if local_ready:
-                self.entries.append(PickEntry(
-                    kind="configure_local", label="Change local model…",
-                    detail="Choose another cloud or local provider and model.",
-                ))
-            self.entries.append(PickEntry(
-                kind="add_target",
-                label="Add remote or ACP target…",
-                detail="Save a server profile or a stdio ACP command, then connect to it.",
-            ))
+                self.entries.append(
+                    PickEntry(
+                        kind="configure_local",
+                        label="Change local model…",
+                        detail="Choose another cloud or local provider and model.",
+                    )
+                )
+            self.entries.append(
+                PickEntry(
+                    kind="add_target",
+                    label="Add remote or ACP target…",
+                    detail="Save a server profile or a stdio ACP command, then connect to it.",
+                )
+            )
         self._render_visible(self._filter.value if self.is_mounted else "")
 
     def _local_settings(self) -> LocalSettings | None:
@@ -314,9 +325,7 @@ class ConnectScreen(Screen[None]):
         self._visible = [
             entry
             for entry in self.entries
-            if not needle
-            or needle in entry.label.lower()
-            or needle in entry.detail.lower()
+            if not needle or needle in entry.label.lower() or needle in entry.detail.lower()
         ]
         for entry in self._visible:
             label = Text()
@@ -353,13 +362,13 @@ class ConnectScreen(Screen[None]):
         lines: list[str] = [entry.label]
         if entry.profile is not None:
             profile = entry.profile
-            lines.append(
-                f"{'remote' if profile.is_remote else 'local'} · profile {profile.name}"
-            )
+            lines.append(f"{'remote' if profile.is_remote else 'local'} · profile {profile.name}")
             lines.append("")
             if profile.is_remote:
                 lines.append(f"server: {profile.url}")
-                lines.append(f"agent: {entry.deployment.agent_id if entry.deployment else profile.agent or '(choose)'}")
+                lines.append(
+                    f"agent: {entry.deployment.agent_id if entry.deployment else profile.agent or '(choose)'}"
+                )
                 if entry.deployment is not None:
                     deployment = entry.deployment
                     if deployment.description:
@@ -453,7 +462,9 @@ class ConnectScreen(Screen[None]):
             return
         try:
             target = self.initial_target
-            args = target.profile.args if target and target.profile.command == "harness-local" else []
+            args = (
+                target.profile.args if target and target.profile.command == "harness-local" else []
+            )
             config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
             settings = LocalSettings(config_file=config) if config else LocalSettings()
         except (ValueError, OSError) as exc:
@@ -484,7 +495,7 @@ class ConnectScreen(Screen[None]):
             {
                 "name": "url",
                 "title": "Server URL",
-                "description": "Remote server base URL, for example https://agents.example.com.",
+                "description": "Required for remote servers, for example https://agents.example.com.",
                 "kind": "text",
             },
             {
@@ -508,7 +519,7 @@ class ConnectScreen(Screen[None]):
             {
                 "name": "command",
                 "title": "ACP command",
-                "description": "Executable launched directly for stdio transport (no shell).",
+                "description": "Required for stdio: executable launched directly (no shell).",
                 "kind": "text",
             },
             {
@@ -536,12 +547,25 @@ class ConnectScreen(Screen[None]):
                 "kind": "text",
             },
         ]
+
+        def validate_target(values: dict[str, Any]) -> str | None:
+            if values.get("transport") == "server" and not str(values.get("url") or "").strip():
+                return "A server URL is required for remote server profiles."
+            if values.get("transport") == "stdio" and not str(values.get("command") or "").strip():
+                return "An ACP command is required for stdio profiles."
+            try:
+                shlex.split(str(values.get("args") or ""))
+            except ValueError as exc:
+                return f"Invalid command arguments: {exc}"
+            return None
+
         self.app.push_screen(
             FormDialog(
                 "Add a connection target",
                 "Saved to the first profiles file. Secrets should be references, not literals.",
                 fields,
                 accept_label="Save and connect",
+                validate=validate_target,
             ),
             self._target_added,
         )
@@ -663,13 +687,13 @@ class ConnectScreen(Screen[None]):
         except HarnessClientError as exc:
             self._status.update(f"error · {exc.message}")
             return
-        self._catalog_agents = sorted(agents, key=lambda item: (not item.recommended, item.name.lower()))
+        self._catalog_agents = sorted(
+            agents, key=lambda item: (not item.recommended, item.name.lower())
+        )
         self._browsing = profile
         self._render_entries()
         self._list.focus()
-        self._status.update(
-            f"{len(agents)} deployments on {profile.url}. Esc returns to profiles."
-        )
+        self._status.update(f"{len(agents)} deployments on {profile.url}. Esc returns to profiles.")
 
     @work(group="connect", exclusive=True)
     async def _connect_worker(self, target: ConnectionTarget) -> None:
@@ -699,7 +723,9 @@ class ConnectScreen(Screen[None]):
             self._browse_profile(self._browsing)
         else:
             self._render_entries()
-            self._status.update("Profiles reloaded. Press n to add a target or edit the TOML file directly.")
+            self._status.update(
+                "Profiles reloaded. Press n to add a target or edit the TOML file directly."
+            )
 
     def action_quit_app(self) -> None:
         self.app.action_quit_app()  # type: ignore[attr-defined]
@@ -822,7 +848,13 @@ class ChatScreen(Screen[None]):
         pane = self.query_one("#transcript", TranscriptPane)
         pane.auto_expand_tools = self.settings.auto_expand_tools
         pane.show_thoughts = self.settings.show_thoughts
-        if self.settings.theme in {"harness", "textual-light", "textual-dark", "ansi-light", "ansi-dark"}:
+        if self.settings.theme in {
+            "harness",
+            "textual-light",
+            "textual-dark",
+            "ansi-light",
+            "ansi-dark",
+        }:
             with contextlib.suppress(Exception):
                 self.app.theme = self.settings.theme
         self._apply_layout()
@@ -886,7 +918,9 @@ class ChatScreen(Screen[None]):
             f"location: {location.get('kind', 'unknown')}",
         ]
         if location.get("kind") == "local":
-            lines.append(f"command: {self.target.profile.command} {' '.join(self.target.profile.args)}".rstrip())
+            lines.append(
+                f"command: {self.target.profile.command} {' '.join(self.target.profile.args)}".rstrip()
+            )
             lines.append(f"workspace: {self.target.cwd}")
         else:
             lines.append(f"server: {self.target.profile.url}")
@@ -931,9 +965,7 @@ class ChatScreen(Screen[None]):
     @work(group="bootstrap", exclusive=True)
     async def _run_bootstrap(self) -> None:
         if self.initial_load and self.initial_session_id:
-            await self._load_session(
-                self.initial_session_id, cwd=self.session.cwd, initial=True
-            )
+            await self._load_session(self.initial_session_id, cwd=self.session.cwd, initial=True)
         self._refresh_panels()
 
     @work(group="panels", exclusive=True)
@@ -957,9 +989,9 @@ class ChatScreen(Screen[None]):
                 "Start a new session to change capabilities."
             )
             return
-        if self.client.extension.supports("_harness/capabilities/list") and self.client.extension.supports(
-            "_harness/configuration/get"
-        ):
+        if self.client.extension.supports(
+            "_harness/capabilities/list"
+        ) and self.client.extension.supports("_harness/configuration/get"):
             try:
                 bindings = await self._all_capability_pages()
                 snapshot = await self.session.configuration()
@@ -972,9 +1004,7 @@ class ChatScreen(Screen[None]):
                     active_revision=snapshot.active_revision,
                     selected_revision=snapshot.selected_revision,
                     policy_revision=snapshot.policy_revision,
-                    can_write=self.client.extension.supports(
-                        "_harness/configuration/update"
-                    ),
+                    can_write=self.client.extension.supports("_harness/configuration/update"),
                 )
                 return
             except ExtensionUnavailable:
@@ -1026,8 +1056,11 @@ class ChatScreen(Screen[None]):
         pane = self.query_one("#transcript", TranscriptPane)
         session_id = getattr(event, "session_id", None)
         expected = self._replay_target or (self.session.session_id if self.session else None)
-        if session_id is not None and expected is not None and session_id != expected and not isinstance(
-            event, ConnectionEvent
+        if (
+            session_id is not None
+            and expected is not None
+            and session_id != expected
+            and not isinstance(event, ConnectionEvent)
         ):
             return
         if isinstance(event, UserMessageReplayed):
@@ -1065,7 +1098,11 @@ class ChatScreen(Screen[None]):
                 self._usage = event.usage
                 self.query_one("#side-panel", SidePanel).activity.set_usage(event.usage)
             if event.stop_reason not in {"end_turn", ""}:
-                severity = "error" if event.stop_reason in {"error", "connection_lost", "interaction_required"} else "warning"
+                severity = (
+                    "error"
+                    if event.stop_reason in {"error", "connection_lost", "interaction_required"}
+                    else "warning"
+                )
                 message = {
                     "cancelled": "Turn cancelled.",
                     "refusal": "The agent refused the request.",
@@ -1087,7 +1124,9 @@ class ChatScreen(Screen[None]):
             return
         if isinstance(event, PlanChanged):
             self._plan = event.entries
-            self.query_one("#side-panel", SidePanel).activity.set_plan(event.entries, cleared=event.cleared)
+            self.query_one("#side-panel", SidePanel).activity.set_plan(
+                event.entries, cleared=event.cleared
+            )
             return
         if isinstance(event, ConfigOptionsUpdated):
             self.session.remember(event.options)
@@ -1143,9 +1182,7 @@ class ChatScreen(Screen[None]):
                 active_revision=snapshot.active_revision,
                 selected_revision=snapshot.selected_revision,
                 policy_revision=snapshot.policy_revision,
-                can_write=self.client.extension.supports(
-                    "_harness/configuration/update"
-                ),
+                can_write=self.client.extension.supports("_harness/configuration/update"),
             )
 
     def _set_busy(self, busy: bool, detail: str = "") -> None:
@@ -1180,9 +1217,7 @@ class ChatScreen(Screen[None]):
     async def request_approval(self, request: PermissionRequest) -> PermissionDecision:
         if self._approval_future is not None:
             self._resolve_approval(None)
-        future: asyncio.Future[PermissionDecision] = (
-            asyncio.get_running_loop().create_future()
-        )
+        future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()
         self._approval_future = future
         self.query_one("#approval", ApprovalBar).show(request)
         return await future
@@ -1257,12 +1292,17 @@ class ChatScreen(Screen[None]):
             self._hide_command_suggestions()
             return
         needle = body.strip().lower()
-        local = [command for command in LOCAL_COMMANDS if not command.hidden and command.matches(needle)]
+        local = [
+            command for command in LOCAL_COMMANDS if not command.hidden and command.matches(needle)
+        ]
         if needle:
             local.sort(
-                key=lambda command: 0
-                if needle in {command.name.lower(), *(alias.lower() for alias in command.aliases)}
-                else 1
+                key=lambda command: (
+                    0
+                    if needle
+                    in {command.name.lower(), *(alias.lower() for alias in command.aliases)}
+                    else 1
+                )
             )
         local_names = {
             name for command in LOCAL_COMMANDS for name in (command.name, *command.aliases)
@@ -1275,9 +1315,7 @@ class ChatScreen(Screen[None]):
         ]
         if needle:
             agent.sort(
-                key=lambda command: 0
-                if needle == str(command.get("name", "")).lower()
-                else 1
+                key=lambda command: 0 if needle == str(command.get("name", "")).lower() else 1
             )
 
         items: list[dict[str, Any]] = []
@@ -1405,7 +1443,9 @@ class ChatScreen(Screen[None]):
             self.query_one("#composer", Composer).focus()
             return
         if self.busy:
-            await self._notice("A turn is already running. Press Esc to cancel it first.", "warning")
+            await self._notice(
+                "A turn is already running. Press Esc to cancel it first.", "warning"
+            )
             return
         attachments = list(self._attachments)
         try:
@@ -1611,7 +1651,9 @@ class ChatScreen(Screen[None]):
                 return
             self._apply_binding_config(binding_id, fields_values)
 
-        subtitle = "Field replacements apply at the next turn boundary when the binding mode allows it."
+        subtitle = (
+            "Field replacements apply at the next turn boundary when the binding mode allows it."
+        )
         if summary["requires"]:
             subtitle += " Requires: " + ", ".join(summary["requires"]) + "."
         if summary["conflicts"]:
@@ -1697,6 +1739,7 @@ class ChatScreen(Screen[None]):
             }
             for plugin in available
         ]
+
         def start_plugin(plugin_id: str | None) -> None:
             if isinstance(plugin_id, str) and plugin_id:
                 asyncio.create_task(self._plugin_add_form(plugin_id))
@@ -1784,13 +1827,15 @@ class ChatScreen(Screen[None]):
         try:
             snapshot = await self.session.configuration()
             updated = await self.session.update_configuration(
-                [{
-                    "type": "add",
-                    "bindingId": binding_id,
-                    "pluginId": plugin_id,
-                    "config": config,
-                    "enabled": enabled,
-                }],
+                [
+                    {
+                        "type": "add",
+                        "bindingId": binding_id,
+                        "pluginId": plugin_id,
+                        "config": config,
+                        "enabled": enabled,
+                    }
+                ],
                 expected_revision=snapshot.selected_revision,
                 request_id=f"ui-add-{uuid.uuid4().hex}",
             )
@@ -1839,7 +1884,9 @@ class ChatScreen(Screen[None]):
         option = panel.option(option_id) or {}
         if option.get("type") == "boolean":
             try:
-                options = await self.session.set_config_option(option_id, not bool(option.get("currentValue")))
+                options = await self.session.set_config_option(
+                    option_id, not bool(option.get("currentValue"))
+                )
             except HarnessClientError as exc:
                 panel.show_message(exc.message)
                 return
@@ -2042,7 +2089,9 @@ class ChatScreen(Screen[None]):
         except HarnessClientError as exc:
             await self._notice(f"Close failed: {exc.message}", "error")
             return
-        await self._notice(f"Closed session {session_id}; history is retained by the agent.", "success")
+        await self._notice(
+            f"Closed session {session_id}; history is retained by the agent.", "success"
+        )
         if session_id == self.session.session_id:
             await self._new_session(replace_session=True)
         self.refresh_sessions()
@@ -2251,9 +2300,7 @@ class ChatScreen(Screen[None]):
             settings,
             settings.model,
             current=current,
-            on_select=lambda effort: asyncio.create_task(
-                self._set_local_effort(settings, effort)
-            ),
+            on_select=lambda effort: asyncio.create_task(self._set_local_effort(settings, effort)),
         )
 
     async def _set_local_effort(self, settings: LocalSettings, effort: str) -> None:
@@ -2322,9 +2369,7 @@ class ChatScreen(Screen[None]):
             if not restart:
                 self._update_chrome()
                 suffix = (
-                    f" · effort {effort_label(result.effort)}"
-                    if result.effort is not None
-                    else ""
+                    f" · effort {effort_label(result.effort)}" if result.effort is not None else ""
                 )
                 await self._notice(
                     f"Model set to {wanted}{suffix}; it applies to the next message.",
@@ -2338,7 +2383,9 @@ class ChatScreen(Screen[None]):
                 cwd=self.target.cwd,
             )
         except HarnessClientError as exc:
-            await self._notice(f"Saved the configuration, but it cannot be used yet: {exc.message}", "error")
+            await self._notice(
+                f"Saved the configuration, but it cannot be used yet: {exc.message}", "error"
+            )
             return
         self.app.target = target  # type: ignore[attr-defined]
         self.target = target
@@ -2350,17 +2397,15 @@ class ChatScreen(Screen[None]):
         await self._reconnect()
 
     async def _show_subagents(self) -> None:
-        if (
-            self.client.extension.supports("_harness/capabilities/list")
-            and not self._bindings_raw
-        ):
+        if self.client.extension.supports("_harness/capabilities/list") and not self._bindings_raw:
             await self._refresh_capabilities()
         lines = ["Read-only overview. Configure subagents from `/plugins`.", ""]
         summaries = [
             summary
             for raw in self._bindings_raw
             for summary in (binding_summary(raw, None),)
-            if "subagent" in f"{summary['name']} {summary['pluginId']} {summary['description']}".lower()
+            if "subagent"
+            in f"{summary['name']} {summary['pluginId']} {summary['description']}".lower()
         ]
         if not self.client.extension.supports("_harness/capabilities/list"):
             lines.append(
@@ -2407,6 +2452,7 @@ class ChatScreen(Screen[None]):
         if option:
             values = option_values(option)
             if values:
+
                 def apply(value: str | None) -> None:
                     if value is not None:
                         self._set_standard_value(option.get("id"), value)
@@ -2431,7 +2477,11 @@ class ChatScreen(Screen[None]):
         modes = (self.session.modes or {}).get("availableModes") or []
         if modes:
             choices = [
-                {"value": str(mode.get("id", "")), "name": str(mode.get("name", "")), "description": str(mode.get("description") or "")}
+                {
+                    "value": str(mode.get("id", "")),
+                    "name": str(mode.get("name", "")),
+                    "description": str(mode.get("description") or ""),
+                }
                 for mode in modes
             ]
 
@@ -2502,9 +2552,7 @@ class ChatScreen(Screen[None]):
     def action_command_palette(self) -> None:
         agent_commands = list(self._commands)
         local_names = {
-            name
-            for command in LOCAL_COMMANDS
-            for name in (command.name, *command.aliases)
+            name for command in LOCAL_COMMANDS for name in (command.name, *command.aliases)
         }
         agent_names = {str(command.get("name", "")) for command in agent_commands}
         collisions = local_names & agent_names
@@ -2535,7 +2583,10 @@ class ChatScreen(Screen[None]):
 
     def action_help(self) -> None:
         agent_lines = (
-            "\n".join(f"- `/{command.get('name')}` — {command.get('description', '')}" for command in self._commands)
+            "\n".join(
+                f"- `/{command.get('name')}` — {command.get('description', '')}"
+                for command in self._commands
+            )
             or "No agent commands advertised."
         )
         local_lines = []
@@ -2603,9 +2654,7 @@ invents commands the agent did not advertise.
             self.settings = replace(self.settings, permission_mode=mode)
             self.app.apply_settings(self.settings)  # type: ignore[attr-defined]
             self._apply_settings()
-            asyncio.create_task(
-                self._notice(f"Approvals: {labels[mode]}.", "success")
-            )
+            asyncio.create_task(self._notice(f"Approvals: {labels[mode]}.", "success"))
 
         self.app.push_screen(
             ChoiceDialog(
@@ -2737,7 +2786,9 @@ invents commands the agent did not advertise.
                 return
             self.session = loaded
             self.app.session = loaded  # type: ignore[attr-defined]
-            await self._notice(f"Session {session_id} reloaded from authoritative history.", "success")
+            await self._notice(
+                f"Session {session_id} reloaded from authoritative history.", "success"
+            )
         else:
             await self._notice(
                 "Reconnected. This agent does not advertise session/load, so the transcript cannot "

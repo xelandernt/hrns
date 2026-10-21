@@ -24,10 +24,14 @@ manager = SessionManager(
     definitions=[definition],
     allow_local_binding_creation=not hosted,
 )
-bundle = HostBundle(definition=definition, registry=registry, manager=manager,
-                    store_path=resolved_sqlite_path_or_none,
-                    meta=optional_host_metadata_store)
-agent = build_agent(bundle, setup)          # -> HarnessHostAgent (acp.Agent)
+bundle = HostBundle(
+    definition=definition,
+    registry=registry,
+    manager=manager,
+    store_path=resolved_sqlite_path_or_none,
+    meta=optional_host_metadata_store,
+)
+agent = build_agent(bundle, setup)  # -> HarnessHostAgent (acp.Agent)
 ```
 
 A deployment module may instead expose `build_host_bundle(setup: HostSetup) ->
@@ -42,6 +46,12 @@ Definition sources are `package.module:attribute`, `package.module` (attribute
 deployment registry hook — `build_registry()` or `registry` — returning
 a `PluginRegistry`; the host registers installed `harness.capabilities` entry points on
 top and the runtime's bundled catalog remains resolvable lazily through `lookup()`.
+
+Network hosting uses `AgentServer` with registered Python definitions directly; it does
+not use definition import strings, a worker environment, or `HostSetup`. Each connection
+gets a `HostBundle` and `HostPolicy` with a connection-local manager and the shared store.
+`HostMetadataStore(store=store)` persists ACP cwd/model/effort in either backend. FastAPI
+lifespan owns database initialization and shutdown. See [SERVER.md](SERVER.md).
 
 ## 2. Manager surface used
 
@@ -92,7 +102,7 @@ the adapter because the upstream helper is not exported.
 
 ## 4. Host-owned state
 
-The runtime does not carry two ACP concerns, so the host keeps a durable sidecar keyed by
+The stdio adapter records ACP concerns in a durable sidecar keyed by
 session id (one atomic JSON file per session under `<store>.acp-sessions/`; in-memory
 when the store is `:memory:` or absent):
 
@@ -100,7 +110,10 @@ when the store is `:memory:` or absent):
   runtime, and used from there when present);
 * the client-selected model id (`session/set_config_option` `model`).
 
-This sidecar is the only durable host-owned state. No live agents, capabilities, or
+For embedded network connections this metadata is persisted in the supplied session
+store instead of sidecar files, including selected reasoning effort.
+
+This metadata is the only durable ACP-adapter-owned state. No live agents, capabilities, or
 client objects are stored.
 
 The host also serializes configuration transactions behind an active prompt (including

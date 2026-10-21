@@ -38,11 +38,21 @@ class FileBlobStore:
         session = hashlib.sha256(session_id.encode()).hexdigest()
         return self.root / owner / session
 
-    def put(self, principal: str, session_id: str, content: bytes, *,
-            media_type: str = "application/octet-stream", name: str | None = None) -> BlobRef:
+    def put(
+        self,
+        principal: str,
+        session_id: str,
+        content: bytes,
+        *,
+        media_type: str = "application/octet-stream",
+        name: str | None = None,
+    ) -> BlobRef:
         if len(content) > self.max_bytes:
-            raise HarnessError("MESSAGE_TOO_LARGE", "Attachment exceeds the configured storage limit",
-                               {"limit": self.max_bytes, "size": len(content)})
+            raise HarnessError(
+                "MESSAGE_TOO_LARGE",
+                "Attachment exceeds the configured storage limit",
+                {"limit": self.max_bytes, "size": len(content)},
+            )
         digest = hashlib.sha256(content).hexdigest()
         directory = self._directory(principal, session_id)
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -57,8 +67,12 @@ class FileBlobStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        return BlobRef(sha256=digest, size=len(content), media_type=media_type,
-                       name=Path(name).name if name else None)
+        return BlobRef(
+            sha256=digest,
+            size=len(content),
+            media_type=media_type,
+            name=Path(name).name if name else None,
+        )
 
     def get(self, principal: str, session_id: str, ref: BlobRef) -> bytes:
         path = self._directory(principal, session_id) / ref.sha256
@@ -67,9 +81,14 @@ class FileBlobStore:
             with path.open("rb") as handle:
                 content = handle.read(self.max_bytes + 1)
         except FileNotFoundError as exc:
-            raise HarnessError("ATTACHMENT_UNAVAILABLE", "Attachment is unavailable in this session") from exc
-        if (len(content) > self.max_bytes or len(content) != ref.size
-                or hashlib.sha256(content).hexdigest() != ref.sha256):
+            raise HarnessError(
+                "ATTACHMENT_UNAVAILABLE", "Attachment is unavailable in this session"
+            ) from exc
+        if (
+            len(content) > self.max_bytes
+            or len(content) != ref.size
+            or hashlib.sha256(content).hexdigest() != ref.sha256
+        ):
             raise HarnessError("ATTACHMENT_UNAVAILABLE", "Attachment failed its integrity check")
         return content
 

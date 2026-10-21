@@ -5,11 +5,25 @@
 ```sh
 uv sync --locked --all-extras
 uv run ruff check .
-uv run pytest -q
 uv build
 ```
 
-The suite uses real Pydantic AI test/function models and the pinned official ACP SDK, without model-provider credentials. External SaaS, cloud sandbox and durability integrations require their own credentials and services; catalog metadata alone is not an integration test.
+Runtime smoke checks can use real Pydantic AI test/function models and the pinned official ACP SDK without model-provider credentials. The test suite is currently absent. External SaaS, cloud sandbox and durability integrations require their own credentials and services; catalog metadata alone is not an integration test.
+
+## Embedded server verification
+
+The FastAPI embedding change was checked through actual loopback HTTP and WebSocket
+connections using the real Harness client: multi-agent catalog pagination, native
+capability streaming/toggling, application authentication and cross-user isolation,
+independent connection cleanup, and SQLite session reload after recreating the server.
+Selected model and capability configuration survived restart; existing application routes
+and lifespan executed normally. No test files were added.
+
+Changed Python paths passed Ruff and Pyrefly; wheel and source distribution builds passed.
+The full project type check passes, including the root `test.py` DeepSeek/FastAPI example.
+Live PostgreSQL checks were not rerun because the local Docker
+daemon was unavailable; the historical PostgreSQL results below predate the new ACP
+metadata migration.
 
 ## Release record
 
@@ -43,9 +57,9 @@ Provider-specific behavior, isolation strength, API availability and durability 
 ## Operational boundaries
 
 - Client and server use ACP v1. The WebSocket framing is a versioned project transport, not a claim of compatibility with draft ACP network transports.
-- A running worker executes installed host Python code. Workspace isolation applies to workspace-aware operations, not arbitrary plugin code.
+- Network agents execute installed Python code in the FastAPI process; local stdio agents execute in their launched process. Workspace isolation applies to workspace-aware operations, not arbitrary plugin code.
 - Persistent conversations do not provide exactly-once external effects. Interrupted turns must be inspected; uncertain prompts are not resent automatically.
 - Reference tests run on macOS/Linux. Provider-backed sandbox suites require their documented host prerequisites.
-- The host is single-instance with per-connection workers. Shared database support does not imply distributed worker orchestration.
+- The embedded server keeps connection accounting in process and creates a session manager per connection. Shared database support does not imply distributed task orchestration.
 
 The final release check records actual test/build results in the repository's implementation plan and commit history.

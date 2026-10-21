@@ -8,7 +8,8 @@ install:
     uv sync --locked --all-extras
 
 lint:
-    uv run ruff check .
+    uv run ruff format .
+    uv run ruff check . --fix
     uv run pyrefly check . --no-progress-bar
 
 build:

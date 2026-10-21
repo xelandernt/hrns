@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from rich.text import Text
@@ -183,7 +183,9 @@ def _collect_fields(
             value = coerce_value(field, _raw_value(widget))
         except (TypeError, ValueError):
             return None, f"{field['title']} needs a valid {field.get('kind')} value."
-        if field.get("required") and (value is None or value == "" or value == []):
+        if field.get("required") and (
+            value is None or value == [] or (isinstance(value, str) and not value.strip())
+        ):
             return None, f"{field['title']} is required."
         if value not in (None, ""):
             values[field["name"]] = value
@@ -191,7 +193,7 @@ def _collect_fields(
 
 
 class FormDialog(_DialogBase):
-    """Build a form from a JSON-schema subset and return coerced values."""
+    """Build a form and submit with Enter in an input or Ctrl+Enter anywhere."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
@@ -207,12 +209,15 @@ class FormDialog(_DialogBase):
         accept_label: str = "Apply",
         explanation: str = "",
         current: dict[str, Any] | None = None,
+        validate: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> None:
+        """Optionally validate collected values, returning an error to keep the form open."""
         super().__init__(title, subtitle)
         self.fields = fields
         self.accept_label = accept_label
         self.explanation = explanation
         self.current = current or {}
+        self._validate = validate
         self._widgets: dict[str, Any] = {}
         self._scroll = VerticalScroll(classes="form-scroll")
 
@@ -256,8 +261,14 @@ class FormDialog(_DialogBase):
         else:
             self.dismiss(None)
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_accept_form()
+
     def action_accept_form(self) -> None:
         values, error = _collect_fields(self.fields, self._widgets)
+        if not error and values is not None and self._validate is not None:
+            error = self._validate(values)
         if error:
             self.show_error(error)
             return
@@ -288,7 +299,9 @@ class ElicitationDialog(_DialogBase):
                     markup=False,
                     classes="dialog-help",
                 )
-                yield Static(self.request.url or "(no URL supplied)", markup=False, classes="url-box")
+                yield Static(
+                    self.request.url or "(no URL supplied)", markup=False, classes="url-box"
+                )
             else:
                 yield Static(
                     "Answer the fields the agent requested. Required fields are marked *.",
@@ -426,7 +439,9 @@ class CommandPaletteDialog(_DialogBase):
         *,
         collision_names: set[str] | None = None,
     ) -> None:
-        super().__init__("Commands", "Local commands run in the terminal. Agent commands are sent to the agent.")
+        super().__init__(
+            "Commands", "Local commands run in the terminal. Agent commands are sent to the agent."
+        )
         self.local_commands = local_commands
         self.agent_commands = agent_commands
         self.collisions = collision_names or set()
@@ -454,7 +469,11 @@ class CommandPaletteDialog(_DialogBase):
     def _rebuild(self, needle: str) -> None:
         needle = needle.strip().lower()
         self._list.clear_options()
-        local = [command for command in self.local_commands if not command.hidden and command.matches(needle)]
+        local = [
+            command
+            for command in self.local_commands
+            if not command.hidden and command.matches(needle)
+        ]
         if local:
             self._list.add_option(Option("Local commands", id="__local_header", disabled=True))
             for command in local:
@@ -473,7 +492,9 @@ class CommandPaletteDialog(_DialogBase):
                 name = str(command.get("name", ""))
                 description = str(command.get("description", ""))
                 suffix = "   (use /agent NAME on collision)" if name in self.collisions else ""
-                self._list.add_option(Option(f"/{name}   {description}{suffix}", id=f"agent:{name}"))
+                self._list.add_option(
+                    Option(f"/{name}   {description}{suffix}", id=f"agent:{name}")
+                )
         if not local and not agent:
             self._list.add_option(Option("No matching commands", id="__none", disabled=True))
         if self._list.option_count:
@@ -547,7 +568,9 @@ class SettingsDialog(_DialogBase):
             allow_blank=False,
             id="settings-theme",
         )
-        self._expand = Checkbox("Expand tool details automatically", value=settings.auto_expand_tools)
+        self._expand = Checkbox(
+            "Expand tool details automatically", value=settings.auto_expand_tools
+        )
         self._thoughts = Checkbox(
             "Expand agent reasoning when provided", value=settings.show_thoughts
         )
@@ -559,7 +582,9 @@ class SettingsDialog(_DialogBase):
         }
         self._permission = Select(
             [(permission_labels[mode], mode) for mode in PERMISSION_MODES],
-            value=settings.permission_mode if settings.permission_mode in PERMISSION_MODES else "ask",
+            value=settings.permission_mode
+            if settings.permission_mode in PERMISSION_MODES
+            else "ask",
             allow_blank=False,
             id="settings-permission",
         )

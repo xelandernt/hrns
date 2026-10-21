@@ -69,7 +69,12 @@ class InteractionRejected(HarnessClientError):
 class CatalogError(HarnessClientError):
     """The HTTP deployment catalog rejected a request."""
 
-    def __init__(self, status: int, code: str, message: str, details: dict[str, Any] | None = None) -> None:
-        super().__init__(f"[{status}] {code}: {message}", details={"status": status, "code": code, **(details or {})})
+    def __init__(
+        self, status: int, code: str, message: str, details: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(
+            f"[{status}] {code}: {message}",
+            details={"status": status, "code": code, **(details or {})},
+        )
         self.status = status
         self.code = code

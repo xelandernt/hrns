@@ -31,6 +31,7 @@ runtime = [
     "packaging>=24",
 ]
 server = [
+    "harness[runtime]",
     "fastapi>=0.156,<1",
     "starlette>=0.47,<2",
     "uvicorn>=0.35",
@@ -56,7 +57,6 @@ all = [
 hrns = "harness.client.cli:main"
 harness-host = "harness.runtime.host:main"
 harness-local = "harness.runtime.local:main"
-harness-server = "harness.server.cli:main"
 
 [dependency-groups]
 dev = [

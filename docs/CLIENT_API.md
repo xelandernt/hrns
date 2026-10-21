@@ -91,12 +91,24 @@ Secret references are `env:NAME` and `keyring:service[/username]`. A missing sec
 
 `--attach PATH` (repeatable) embeds regular files in the prompt as ACP resources. Text files are sent as UTF-8 text resources; other files are base64 binary resources. Each file is capped at 8 MiB and the aggregate at the transport's 16 MiB frame budget. Directories, missing files and oversized files fail before connecting. The client refuses image, audio or embedded-resource blocks the agent did not advertise during `initialize`. Attachments never grant the agent access to the client filesystem; paths are display metadata, and hosted agents receive only the embedded bytes.
 
+## Embedded network agents
+
+Network agents are registered in an existing FastAPI app through `AgentServer`; see
+[SERVER.md](SERVER.md). The client uses the same catalog and WebSocket endpoints.
+Application authentication is optional; omit `--token` for a server without it.
+
+```sh
+hrns connect --url http://127.0.0.1:8080 --agent research
+hrns connect --url http://127.0.0.1:8080 --agent research --token env:HARNESS_TOKEN
+```
+
 ## Python API
 
 ```python
 import asyncio
 
 from harness.client import HarnessAcpClient, Profile, StdioAgentTransport
+
 
 async def main():
     profile = Profile(name="local", transport="stdio", command="my-agent", args=["--acp"])
@@ -116,6 +128,7 @@ async def main():
     finally:
         await client.disconnect()
 
+
 asyncio.run(main())
 ```
 
@@ -124,7 +137,7 @@ asyncio.run(main())
 ```python
 proxy = SessionProxy(client, session.session_id, cwd=".")
 await proxy.prompt("Hello")
-snapshot = await proxy.configuration()            # extension required
+snapshot = await proxy.configuration()  # extension required
 await proxy.update_configuration(
     [{"type": "enable", "bindingId": "web", "enabled": False}],
     expected_revision=snapshot.selected_revision,

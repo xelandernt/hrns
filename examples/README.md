@@ -69,7 +69,8 @@ Offline structural run with only planning and context controls:
 
 ```python
 from harness.runtime.starters import research_definition
-definition = research_definition(web=False)   # no web bindings enabled
+
+definition = research_definition(web=False)  # no web bindings enabled
 ```
 
 Optional memory (`memory.store`), delegation (`subagents.agents`), MCP (`pydantic-ai-slim[mcp]`)
@@ -99,3 +100,18 @@ Loading the same files through `harness-host --manifest ...` uses the host's man
 
 Runtime Capability Creation is intentionally absent from all starters; enabling it is an
 explicit deployment decision.
+
+## 5. Existing FastAPI application
+
+`examples/fastapi_app.py` registers an agent with a custom native capability, mounts
+network ACP in an existing FastAPI app, and shares an explicit SQLite store:
+
+```sh
+uv sync --locked --extra server --extra client --extra openai
+export OPENAI_API_KEY='your-key'
+uv run uvicorn examples.fastapi_app:app --host 127.0.0.1 --port 8080 --ws-max-size 16777216
+uv run hrns connect --url http://127.0.0.1:8080 --agent example.house_style
+```
+
+`EXAMPLE_MODEL=test` selects the offline structural model. Authentication and PostgreSQL
+are Python dependencies described in [SERVER.md](../docs/SERVER.md).

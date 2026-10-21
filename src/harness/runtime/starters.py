@@ -436,7 +436,9 @@ def definition_from_manifest(
     )
 
 
-def load_starter_manifest(path: str | Path, *, starter: StarterName | None = None) -> AgentDefinition:
+def load_starter_manifest(
+    path: str | Path, *, starter: StarterName | None = None
+) -> AgentDefinition:
     """Parse and validate an editable starter YAML/JSON file."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")

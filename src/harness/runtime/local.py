@@ -121,9 +121,7 @@ def known_models() -> dict[str, list[str]]:
         if provider is None:
             continue
         grouped.setdefault(provider, set()).add(model)
-    return {
-        provider: sorted(models, key=str.lower) for provider, models in grouped.items()
-    }
+    return {provider: sorted(models, key=str.lower) for provider, models in grouped.items()}
 
 
 def provider_catalog() -> dict[str, Any]:
@@ -225,11 +223,7 @@ def build_local_agent(
         raise ValueError("The local developer definition has no agent spec.")
 
     def factory(*, model: Any, managed_capabilities: list[Any]) -> Agent:
-        selected = (
-            configured_model(settings, model)
-            if isinstance(model, str)
-            else model
-        )
+        selected = configured_model(settings, model) if isinstance(model, str) else model
         return Agent.from_spec(
             spec,
             model=selected,

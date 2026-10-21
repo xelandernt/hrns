@@ -169,7 +169,9 @@ class HeadlessRun:
         self._interaction_details = {"kind": exc.kind, "summary": exc.message}
         self.outcome.interactions.append(self._interaction_details)
 
-    def finish(self, *, session: SessionProxy | None, error: HarnessClientError | None = None) -> RunOutcome:
+    def finish(
+        self, *, session: SessionProxy | None, error: HarnessClientError | None = None
+    ) -> RunOutcome:
         self.outcome.duration_ms = int((time.monotonic() - self._started) * 1000)
         self.outcome.session_id = session.session_id if session else self.outcome.session_id
         if session is not None:
@@ -184,11 +186,15 @@ class HeadlessRun:
         if error is not None:
             self.outcome.ok = False
             self.outcome.error = {
-                "code": "interaction-required" if isinstance(error, InteractionRequired) else "run-failed",
+                "code": "interaction-required"
+                if isinstance(error, InteractionRequired)
+                else "run-failed",
                 "message": error.message,
             }
             self.outcome.exit_code = (
-                EXIT_INTERACTION_REQUIRED if isinstance(error, InteractionRequired) else EXIT_FAILURE
+                EXIT_INTERACTION_REQUIRED
+                if isinstance(error, InteractionRequired)
+                else EXIT_FAILURE
             )
         elif self._interaction_detected:
             self.outcome.ok = False
@@ -204,7 +210,9 @@ class HeadlessRun:
 
     def print_outcome(self) -> None:
         if self.json_output:
-            self.stdout.write(json.dumps(self.outcome.to_json(), ensure_ascii=False, indent=2) + "\n")
+            self.stdout.write(
+                json.dumps(self.outcome.to_json(), ensure_ascii=False, indent=2) + "\n"
+            )
             self.stdout.flush()
             return
         if self.stream and not self.outcome.text.endswith("\n"):

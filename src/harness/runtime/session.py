@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import copy
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -48,6 +47,7 @@ from ._events import (
     translate_event,
     usage_payload,
 )
+from ._unavailable_tools import UnavailableTools
 from .definitions import (
     AgentDefinition,
     AgentFactoryContext,
@@ -125,16 +125,7 @@ def _snapshot_definition(definition: AgentDefinition) -> AgentDefinition:
     not configuration. Specs, bindings, resources, and feature lists are cloned so a caller
     cannot mutate a session's pinned revision after it was registered or opened.
     """
-    clone = definition.model_copy(deep=False)
-    clone.bindings = [binding.model_copy(deep=True) for binding in definition.bindings]
-    clone.resources = [requirement.model_copy(deep=True) for requirement in definition.resources]
-    clone.interaction_features = list(definition.interaction_features)
-    clone.fixed_capabilities = list(definition.fixed_capabilities)
-    if isinstance(definition.spec, BaseModel):
-        clone.spec = definition.spec.model_copy(deep=True)
-    elif isinstance(definition.spec, dict):
-        clone.spec = copy.deepcopy(definition.spec)
-    return clone
+    return definition.snapshot()
 
 
 def _coerce_store(store: SessionStore | str | Path | None) -> SessionStore:
@@ -166,7 +157,8 @@ def _normalize_changes(changes: Any) -> list[BindingChange]:
         return list(changes_adapter.validate_python(payload))
     except ValidationError as exc:
         errors = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()[:5]
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:5]
         )
         raise HarnessError(
             "INVALID_CONFIGURATION",
@@ -585,7 +577,9 @@ class SessionManager:
         """
         if resume is not None:
             resumed_id = (
-                resume.get("session_id") if isinstance(resume, Mapping) else getattr(resume, "session_id", None)
+                resume.get("session_id")
+                if isinstance(resume, Mapping)
+                else getattr(resume, "session_id", None)
             )
             if not resumed_id and isinstance(resume, str):
                 resumed_id = resume
@@ -635,7 +629,9 @@ class SessionManager:
 
     @staticmethod
     def _workspace_requirements(definition: AgentDefinition) -> list[Any]:
-        return [requirement for requirement in definition.resources if requirement.kind == "workspace"]
+        return [
+            requirement for requirement in definition.resources if requirement.kind == "workspace"
+        ]
 
     async def _managed_workspace_lease(
         self,
@@ -761,9 +757,7 @@ class SessionManager:
                     resolved_session_id, definition, stored=None
                 )
                 if workspace_lease is not None:
-                    resource_set = _bind_workspace_lease(
-                        resource_set, definition, workspace_lease
-                    )
+                    resource_set = _bind_workspace_lease(resource_set, definition, workspace_lease)
                 resource_set.validate_requirements(definition.resources, context=context)
         except BaseException:
             if revision is not None:
@@ -814,8 +808,10 @@ class SessionManager:
             )
         target_store = _coerce_store(store) if store is not None else self._store
         summary = await target_store.get_session(session_id)
-        if summary is None or summary.principal != principal or (
-            deployment_id is not None and summary.deployment_id != deployment_id
+        if (
+            summary is None
+            or summary.principal != principal
+            or (deployment_id is not None and summary.deployment_id != deployment_id)
         ):
             raise HarnessError(
                 "POLICY_DENIED",
@@ -920,9 +916,7 @@ class SessionManager:
                     session_id, definition, stored=stored_workspace
                 )
                 if workspace_lease is not None:
-                    resource_set = _bind_workspace_lease(
-                        resource_set, definition, workspace_lease
-                    )
+                    resource_set = _bind_workspace_lease(resource_set, definition, workspace_lease)
                 resource_set.validate_requirements(definition.resources, context=context)
             interrupted = await target_store.mark_turn_interrupted(session_id)
             for turn_id in interrupted:
@@ -930,7 +924,10 @@ class SessionManager:
                     session_id,
                     turn_id,
                     "turn_interrupted",
-                    {"code": "TURN_INTERRUPTED", "message": "The host stopped while this turn was running."},
+                    {
+                        "code": "TURN_INTERRUPTED",
+                        "message": "The host stopped while this turn was running.",
+                    },
                 )
             history = _load_messages(await target_store.load_messages_json(session_id))
             turns = await target_store.list_turns(session_id)
@@ -989,7 +986,10 @@ class SessionManager:
                     "WORKSPACE_DELETE_UNSUPPORTED",
                     f"Session {session_id!r} owns a managed workspace, but no workspace manager is "
                     "configured to delete it; the session and its workspace identity are retained.",
-                    details={"session_id": session_id, "provider": getattr(workspace_record, "provider", None)},
+                    details={
+                        "session_id": session_id,
+                        "provider": getattr(workspace_record, "provider", None),
+                    },
                 )
             # Destroy the environment and its retained identity before forgetting the session.
             await self._workspaces.delete(session_id)
@@ -1233,12 +1233,16 @@ class Session:
 
     # --- listing ------------------------------------------------------
 
-    async def capabilities(self, cursor: str | None = None, limit: int = 50) -> tuple[list[Any], str | None]:
+    async def capabilities(
+        self, cursor: str | None = None, limit: int = 50
+    ) -> tuple[list[Any], str | None]:
         """Paginated binding descriptors (the extension's capabilities list)."""
         descriptors = self._catalog.descriptors()
         return paginate(descriptors, cursor, limit)
 
-    async def plugins(self, cursor: str | None = None, limit: int = 50) -> tuple[list[Any], str | None]:
+    async def plugins(
+        self, cursor: str | None = None, limit: int = 50
+    ) -> tuple[list[Any], str | None]:
         """Paginated registered plugins, when this host advertises local binding creation."""
         if not self._manager.registry.allow_local_binding_creation:
             raise HarnessError(
@@ -1302,7 +1306,10 @@ class Session:
                     raise HarnessError(
                         "REVISION_CONFLICT",
                         "The configuration changed since the client's expected revision.",
-                        details={"snapshot": self.snapshot.to_wire(), "expected_revision": expected_revision},
+                        details={
+                            "snapshot": self.snapshot.to_wire(),
+                            "expected_revision": expected_revision,
+                        },
                     )
                 outcome = self._catalog.apply_changes(normalized)
                 # Only a validated disable may stop owned work. Same-ID retries
@@ -1320,7 +1327,9 @@ class Session:
                 # owned jobs are drained at the next turn boundary instead.
                 if self._active_turn is None:
                     for binding_id in sorted(disabled):
-                        if self._jobs.has_active(binding_id) and not await self._jobs.cancel_binding(binding_id):
+                        if self._jobs.has_active(
+                            binding_id
+                        ) and not await self._jobs.cancel_binding(binding_id):
                             raise HarnessError(
                                 "CAPABILITY_BUSY",
                                 f"Binding {binding_id!r} still owns background work that could not be stopped.",
@@ -1517,7 +1526,10 @@ class Session:
             raise HarnessError(
                 "REVISION_CONFLICT",
                 "The configuration changed since the client's expected revision.",
-                details={"snapshot": self.snapshot.to_wire(), "expected_revision": expected_revision},
+                details={
+                    "snapshot": self.snapshot.to_wire(),
+                    "expected_revision": expected_revision,
+                },
             )
         self._model_override = model
         return self.snapshot
@@ -1623,9 +1635,7 @@ class Session:
                 )
             selected_bindings = self.snapshot.bindings
             busy_disabled = {
-                binding_id
-                for binding_id, state in selected_bindings.items()
-                if not state.enabled
+                binding_id for binding_id, state in selected_bindings.items() if not state.enabled
             } & self._jobs.busy_bindings()
             # Work left over from a disable requested during the previous turn is
             # stopped here, before acquiring the new composition.
@@ -1634,7 +1644,10 @@ class Session:
                     raise HarnessError(
                         "CAPABILITY_BUSY",
                         "Background work still owns a disabled binding; the next turn cannot start.",
-                        details={"binding_ids": sorted(busy_disabled), "jobs": self._jobs.snapshot()},
+                        details={
+                            "binding_ids": sorted(busy_disabled),
+                            "jobs": self._jobs.snapshot(),
+                        },
                     )
             active_revision = self._selected_revision
             async with self._state_lock:
@@ -1707,6 +1720,23 @@ class Session:
             kwargs = self._run_kwargs(
                 prompt, options, active_turn, run_capabilities, model_handled=model_handled
             )
+            disabled = tuple(
+                binding_id for binding_id, state in captured.bindings.items() if not state.enabled
+            )
+            if disabled:
+                transcript = await self._store.load_transcript(self._session_id, limit=None)
+                remembered_tools = frozenset(
+                    entry["data"]["tool_name"]
+                    for entry in transcript
+                    if entry["kind"] == "tool_call"
+                    and entry["data"].get("kind") == "function"
+                    and isinstance(entry["data"].get("tool_name"), str)
+                )
+                if remembered_tools:
+                    kwargs["capabilities"] = [
+                        UnavailableTools(disabled, remembered_tools),
+                        *kwargs.get("capabilities", []),
+                    ]
             try:
                 result = await self._drive_scoped(agent, kwargs, turn_id, emit)
             except (RunCancelled, asyncio.CancelledError) as exc:
@@ -1787,7 +1817,10 @@ class Session:
                         "failed",
                         messages=self._partial_new_messages(),
                         usage=self._current_usage(),
-                        error={"code": "TURN_FAILED", "message": "The turn ended without a recorded outcome."},
+                        error={
+                            "code": "TURN_FAILED",
+                            "message": "The turn ended without a recorded outcome.",
+                        },
                     )
                 except Exception:  # pragma: no cover - persistence best effort during teardown
                     pass
@@ -1822,9 +1855,7 @@ class Session:
             finally:
                 await self._drain_run_scoped(scope, baseline)
 
-    async def _drain_run_scoped(
-        self, scope: object, baseline: set[asyncio.Task[Any]]
-    ) -> None:
+    async def _drain_run_scoped(self, scope: object, baseline: set[asyncio.Task[Any]]) -> None:
         current = asyncio.current_task()
         owned = self._jobs.tasks()
         children: list[asyncio.Task[Any]] = []
@@ -1922,9 +1953,7 @@ class Session:
             session_id=self._session_id,
             principal=self._principal,
             deployment_id=self._deployment_id,
-            binding_ids=tuple(
-                offering.binding_id for offering in self._catalog.enabled_ordered()
-            ),
+            binding_ids=tuple(offering.binding_id for offering in self._catalog.enabled_ordered()),
         )
 
     async def _build_agent(
@@ -2170,7 +2199,6 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
         task.exception()
     except (asyncio.CancelledError, Exception):  # pragma: no cover - defensive
         return
-
 
 
 def _cwd_from_resources(definition: AgentDefinition, resources: ResourceSet) -> str | None:
