@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS session_control (
     acquired_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS acp_metadata (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    data TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS configuration_revisions (
     session_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
@@ -321,9 +326,7 @@ class SessionStore:
         initial_bindings: dict[str, dict[str, Any]],
         policy_revision: int,
     ) -> StoredRevision:
-        return await self._run(
-            self._create_session_sync, record, initial_bindings, policy_revision
-        )
+        return await self._run(self._create_session_sync, record, initial_bindings, policy_revision)
 
     def _create_session_sync(
         self,
@@ -378,10 +381,14 @@ class SessionStore:
         return await self._run(self._get_session_sync, session_id)
 
     def _get_session_sync(self, session_id: str) -> SessionSummary | None:
-        row = self._connect().execute(
-            "SELECT * FROM sessions WHERE session_id = ? AND status != 'deleted'",
-            (session_id,),
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute(
+                "SELECT * FROM sessions WHERE session_id = ? AND status != 'deleted'",
+                (session_id,),
+            )
+            .fetchone()
+        )
         return _summary(row) if row is not None else None
 
     async def list_sessions(
@@ -422,10 +429,14 @@ class SessionStore:
         return await self._run(self._load_record_sync, session_id)
 
     def _load_record_sync(self, session_id: str) -> SessionSummary | None:
-        row = self._connect().execute(
-            "SELECT * FROM sessions WHERE session_id = ? AND status != 'deleted'",
-            (session_id,),
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute(
+                "SELECT * FROM sessions WHERE session_id = ? AND status != 'deleted'",
+                (session_id,),
+            )
+            .fetchone()
+        )
         if row is None:
             return None
         summary = _summary(row)
@@ -493,6 +504,39 @@ class SessionStore:
             connection.execute("DELETE FROM session_control WHERE session_id = ?", (session_id,))
             connection.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
+    async def get_acp_metadata(self, session_id: str) -> dict[str, Any] | None:
+        """Load the ACP working directory and selected model/effort."""
+
+        def operation() -> dict[str, Any] | None:
+            row = (
+                self._connect()
+                .execute("SELECT data FROM acp_metadata WHERE session_id = ?", (session_id,))
+                .fetchone()
+            )
+            return json.loads(row["data"]) if row is not None else None
+
+        return await self._run(operation)
+
+    async def put_acp_metadata(self, session_id: str, data: dict[str, Any]) -> None:
+        def operation() -> None:
+            connection = self._connect()
+            with connection:
+                connection.execute(
+                    "INSERT INTO acp_metadata (session_id, data) VALUES (?, ?) "
+                    "ON CONFLICT(session_id) DO UPDATE SET data = excluded.data",
+                    (session_id, json.dumps(data)),
+                )
+
+        await self._run(operation)
+
+    async def delete_acp_metadata(self, session_id: str) -> None:
+        def operation() -> None:
+            connection = self._connect()
+            with connection:
+                connection.execute("DELETE FROM acp_metadata WHERE session_id = ?", (session_id,))
+
+        await self._run(operation)
+
     # --- ownership ----------------------------------------------------
 
     async def acquire_control(
@@ -539,13 +583,17 @@ class SessionStore:
                     return True
                 owner_pid = row["owner_pid"]
                 if isinstance(owner_pid, int) and owner_pid > 0 and not _pid_alive(owner_pid):
-                    connection.execute("DELETE FROM session_control WHERE session_id = ?", (session_id,))
+                    connection.execute(
+                        "DELETE FROM session_control WHERE session_id = ?", (session_id,)
+                    )
                 elif (
                     stale_after is not None
                     and owner_pid is None
                     and timestamp - int(row["acquired_at"]) > stale_after * 1000
                 ):
-                    connection.execute("DELETE FROM session_control WHERE session_id = ?", (session_id,))
+                    connection.execute(
+                        "DELETE FROM session_control WHERE session_id = ?", (session_id,)
+                    )
                 else:
                     return False
             connection.execute(
@@ -617,7 +665,8 @@ class SessionStore:
                     (session_id, revision, payload, policy_revision, source, request_id, now_ms()),
                 )
                 connection.execute(
-                    "UPDATE sessions SET last_active_at = ? WHERE session_id = ?", (now_ms(), session_id)
+                    "UPDATE sessions SET last_active_at = ? WHERE session_id = ?",
+                    (now_ms(), session_id),
                 )
         except sqlite3.IntegrityError as exc:
             raise HarnessError(
@@ -637,20 +686,28 @@ class SessionStore:
         return await self._run(self._latest_revision_sync, session_id)
 
     def _latest_revision_sync(self, session_id: str) -> StoredRevision | None:
-        row = self._connect().execute(
-            "SELECT * FROM configuration_revisions WHERE session_id = ? ORDER BY revision DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute(
+                "SELECT * FROM configuration_revisions WHERE session_id = ? ORDER BY revision DESC LIMIT 1",
+                (session_id,),
+            )
+            .fetchone()
+        )
         return _revision(row) if row is not None else None
 
     async def get_revision(self, session_id: str, revision: int) -> StoredRevision | None:
         return await self._run(self._get_revision_sync, session_id, revision)
 
     def _get_revision_sync(self, session_id: str, revision: int) -> StoredRevision | None:
-        row = self._connect().execute(
-            "SELECT * FROM configuration_revisions WHERE session_id = ? AND revision = ?",
-            (session_id, revision),
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute(
+                "SELECT * FROM configuration_revisions WHERE session_id = ? AND revision = ?",
+                (session_id, revision),
+            )
+            .fetchone()
+        )
         return _revision(row) if row is not None else None
 
     async def mark_revision_applied(
@@ -702,9 +759,7 @@ class SessionStore:
                         )
                     if row["status"] == "committed":
                         snapshot = (
-                            json.loads(row["result_snapshot"])
-                            if row["result_snapshot"]
-                            else None
+                            json.loads(row["result_snapshot"]) if row["result_snapshot"] else None
                         )
                         return TransactionClaim(
                             status="committed",
@@ -802,9 +857,7 @@ class SessionStore:
                 current_revision = int(latest["revision"] or 0)
                 if create_revision:
                     revision = current_revision + 1
-                    payload = json.dumps(
-                        bindings or {}, sort_keys=True, separators=(",", ":")
-                    )
+                    payload = json.dumps(bindings or {}, sort_keys=True, separators=(",", ":"))
                     connection.execute(
                         "INSERT INTO configuration_revisions "
                         "(session_id, revision, bindings, policy_revision, source, request_id, "
@@ -896,9 +949,7 @@ class SessionStore:
         active_revision: int,
         prompt: Any,
     ) -> StoredTurn:
-        return await self._run(
-            self._create_turn_sync, session_id, turn_id, active_revision, prompt
-        )
+        return await self._run(self._create_turn_sync, session_id, turn_id, active_revision, prompt)
 
     def _create_turn_sync(
         self, session_id: str, turn_id: str, active_revision: int, prompt: Any
@@ -924,7 +975,8 @@ class SessionStore:
                 ),
             )
             connection.execute(
-                "UPDATE sessions SET last_active_at = ? WHERE session_id = ?", (timestamp, session_id)
+                "UPDATE sessions SET last_active_at = ? WHERE session_id = ?",
+                (timestamp, session_id),
             )
         return StoredTurn(
             session_id=session_id,
@@ -998,7 +1050,8 @@ class SessionStore:
                         (session_id, seq, turn_id, json.dumps(message), timestamp),
                     )
             connection.execute(
-                "UPDATE sessions SET last_active_at = ? WHERE session_id = ?", (timestamp, session_id)
+                "UPDATE sessions SET last_active_at = ? WHERE session_id = ?",
+                (timestamp, session_id),
             )
 
     async def mark_turn_interrupted(self, session_id: str) -> list[str]:
@@ -1024,26 +1077,36 @@ class SessionStore:
         return await self._run(self._get_turn_sync, session_id, turn_id)
 
     def _get_turn_sync(self, session_id: str, turn_id: str) -> StoredTurn | None:
-        row = self._connect().execute(
-            "SELECT * FROM turns WHERE session_id = ? AND turn_id = ?", (session_id, turn_id)
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute(
+                "SELECT * FROM turns WHERE session_id = ? AND turn_id = ?", (session_id, turn_id)
+            )
+            .fetchone()
+        )
         return _turn(row) if row is not None else None
 
     async def list_turns(self, session_id: str) -> list[StoredTurn]:
         return await self._run(self._list_turns_sync, session_id)
 
     def _list_turns_sync(self, session_id: str) -> list[StoredTurn]:
-        rows = self._connect().execute(
-            "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_index", (session_id,)
-        ).fetchall()
+        rows = (
+            self._connect()
+            .execute("SELECT * FROM turns WHERE session_id = ? ORDER BY turn_index", (session_id,))
+            .fetchall()
+        )
         return [_turn(row) for row in rows]
 
     # --- history ------------------------------------------------------
 
-    async def append_messages(self, session_id: str, turn_id: str | None, messages: list[Any]) -> None:
+    async def append_messages(
+        self, session_id: str, turn_id: str | None, messages: list[Any]
+    ) -> None:
         await self._run(self._append_messages_sync, session_id, turn_id, list(messages))
 
-    def _append_messages_sync(self, session_id: str, turn_id: str | None, messages: list[Any]) -> None:
+    def _append_messages_sync(
+        self, session_id: str, turn_id: str | None, messages: list[Any]
+    ) -> None:
         if not messages:
             return
         connection = self._connect()
@@ -1066,18 +1129,24 @@ class SessionStore:
         return await self._run(self._load_messages_json_sync, session_id)
 
     def _load_messages_json_sync(self, session_id: str) -> str:
-        rows = self._connect().execute(
-            "SELECT message FROM messages WHERE session_id = ? ORDER BY seq", (session_id,)
-        ).fetchall()
+        rows = (
+            self._connect()
+            .execute(
+                "SELECT message FROM messages WHERE session_id = ? ORDER BY seq", (session_id,)
+            )
+            .fetchall()
+        )
         return "[" + ",".join(row["message"] for row in rows) + "]"
 
     async def message_count(self, session_id: str) -> int:
         return await self._run(self._message_count_sync, session_id)
 
     def _message_count_sync(self, session_id: str) -> int:
-        row = self._connect().execute(
-            "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?", (session_id,)
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute("SELECT COUNT(*) AS count FROM messages WHERE session_id = ?", (session_id,))
+            .fetchone()
+        )
         return int(row["count"])
 
     # --- workspace identities ----------------------------------------
@@ -1089,9 +1158,11 @@ class SessionStore:
     def _get_workspace_record_sync(self, session_id: str) -> Any | None:
         from .workspaces import WorkspaceRecord
 
-        row = self._connect().execute(
-            "SELECT record FROM workspace_records WHERE session_id = ?", (session_id,)
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute("SELECT record FROM workspace_records WHERE session_id = ?", (session_id,))
+            .fetchone()
+        )
         if row is None:
             return None
         try:
@@ -1125,9 +1196,7 @@ class SessionStore:
     def _delete_workspace_record_sync(self, session_id: str) -> None:
         connection = self._connect()
         with connection:
-            connection.execute(
-                "DELETE FROM workspace_records WHERE session_id = ?", (session_id,)
-            )
+            connection.execute("DELETE FROM workspace_records WHERE session_id = ?", (session_id,))
 
     async def list_workspace_records(self) -> list[Any]:
         """All retained workspace identities (for TTL cleanup)."""
@@ -1136,9 +1205,11 @@ class SessionStore:
     def _list_workspace_records_sync(self) -> list[Any]:
         from .workspaces import WorkspaceRecord
 
-        rows = self._connect().execute(
-            "SELECT record FROM workspace_records ORDER BY session_id"
-        ).fetchall()
+        rows = (
+            self._connect()
+            .execute("SELECT record FROM workspace_records ORDER BY session_id")
+            .fetchall()
+        )
         records: list[WorkspaceRecord] = []
         for row in rows:
             try:
@@ -1168,18 +1239,20 @@ class SessionStore:
         self, session_id: str, binding_id: str, *, schema_version: int | None = None
     ) -> dict[str, Any] | None:
         """Load retained state for a binding, never as an authorization decision."""
-        return await self._run(
-            self._get_plugin_state_sync, session_id, binding_id, schema_version
-        )
+        return await self._run(self._get_plugin_state_sync, session_id, binding_id, schema_version)
 
     def _get_plugin_state_sync(
         self, session_id: str, binding_id: str, schema_version: int | None
     ) -> dict[str, Any] | None:
-        row = self._connect().execute(
-            "SELECT schema_version, state FROM plugin_state "
-            "WHERE session_id = ? AND binding_id = ?",
-            (session_id, binding_id),
-        ).fetchone()
+        row = (
+            self._connect()
+            .execute(
+                "SELECT schema_version, state FROM plugin_state "
+                "WHERE session_id = ? AND binding_id = ?",
+                (session_id, binding_id),
+            )
+            .fetchone()
+        )
         if row is None:
             return None
         if schema_version is not None and int(row["schema_version"]) != schema_version:
@@ -1212,15 +1285,19 @@ class SessionStore:
     async def set_plugin_state(
         self, session_id: str, binding_id: str, *, schema_version: int, state: Mapping[str, Any]
     ) -> None:
-        await self._run(
-            self._set_plugin_state_sync, session_id, binding_id, schema_version, state
-        )
+        await self._run(self._set_plugin_state_sync, session_id, binding_id, schema_version, state)
 
     def _set_plugin_state_sync(
         self, session_id: str, binding_id: str, schema_version: int, state: Mapping[str, Any]
     ) -> None:
-        if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version < 1:
-            raise HarnessError("INVALID_CONFIGURATION", "schema_version must be a positive integer.")
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version < 1
+        ):
+            raise HarnessError(
+                "INVALID_CONFIGURATION", "schema_version must be a positive integer."
+            )
         try:
             payload = json.dumps(
                 dict(state), sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -1234,8 +1311,7 @@ class SessionStore:
         connection = self._connect()
         with connection:
             row = connection.execute(
-                "SELECT schema_version FROM plugin_state "
-                "WHERE session_id = ? AND binding_id = ?",
+                "SELECT schema_version FROM plugin_state WHERE session_id = ? AND binding_id = ?",
                 (session_id, binding_id),
             ).fetchone()
             if row is not None and int(row["schema_version"]) != schema_version:
@@ -1254,7 +1330,8 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise HarnessError(
-                    "SESSION_CLOSED", f"Session {session_id!r} does not exist.",
+                    "SESSION_CLOSED",
+                    f"Session {session_id!r} does not exist.",
                     details={"session_id": session_id},
                 )
             connection.execute(
@@ -1286,9 +1363,7 @@ class SessionStore:
         kind: str,
         data: dict[str, Any],
     ) -> int:
-        return await self._run(
-            self._append_transcript_sync, session_id, turn_id, kind, data
-        )
+        return await self._run(self._append_transcript_sync, session_id, turn_id, kind, data)
 
     def _append_transcript_sync(
         self, session_id: str, turn_id: str | None, kind: str, data: dict[str, Any]

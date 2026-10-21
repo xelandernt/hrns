@@ -15,6 +15,7 @@ manifest fails with an actionable list of non-portable fields instead of droppin
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -256,11 +257,28 @@ class AgentDefinition(BaseModel):
     interaction_features: list[str] = Field(default_factory=list)
     """ACP interaction feature identifiers (host-owned list)."""
 
+    def snapshot(self) -> AgentDefinition:
+        """Copy editable configuration while retaining native host objects."""
+        clone = self.model_copy(deep=False)
+        clone.bindings = [binding.model_copy(deep=True) for binding in self.bindings]
+        clone.resources = [requirement.model_copy(deep=True) for requirement in self.resources]
+        clone.interaction_features = list(self.interaction_features)
+        clone.fixed_capabilities = list(self.fixed_capabilities)
+        if isinstance(self.spec, BaseModel):
+            clone.spec = self.spec.model_copy(deep=True)
+        elif isinstance(self.spec, dict):
+            clone.spec = copy.deepcopy(self.spec)
+        return clone
+
     # --- validation -------------------------------------------------------
 
     @field_validator("spec", mode="before")
     def _coerce_spec(cls, value: Any) -> Any:
-        if value is None or isinstance(value, dict | NativeAgentSpec) or isinstance(value, BaseModel):
+        if (
+            value is None
+            or isinstance(value, dict | NativeAgentSpec)
+            or isinstance(value, BaseModel)
+        ):
             return value
         raise ValueError(f"Unsupported definition spec of type {type(value).__name__!r}")
 
@@ -275,14 +293,18 @@ class AgentDefinition(BaseModel):
             try:  # Fail fast on malformed specs so they never surface as turn-time surprises.
                 NativeAgentSpec.model_validate(self.spec)
             except ValidationError as exc:
-                raise ValueError(f"invalid AgentSpec on definition {self.agent_id!r}: {exc.errors()[:2]}") from exc
+                raise ValueError(
+                    f"invalid AgentSpec on definition {self.agent_id!r}: {exc.errors()[:2]}"
+                ) from exc
         ids = [binding.binding_id for binding in self.bindings]
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate binding IDs in definition {self.agent_id!r}")
         seen: set[str] = set()
         for requirement in self.resources:
             if requirement.name in seen:
-                raise ValueError(f"duplicate resource requirement {requirement.name!r} on {self.agent_id!r}")
+                raise ValueError(
+                    f"duplicate resource requirement {requirement.name!r} on {self.agent_id!r}"
+                )
             seen.add(requirement.name)
         return self
 
@@ -363,7 +385,8 @@ def parse_manifest_data(data: Mapping[str, Any], *, source: str = "manifest") ->
         manifest = DefinitionManifest.model_validate(dict(data))
     except ValidationError as exc:
         errors = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()[:5]
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:5]
         )
         raise HarnessError(
             "INVALID_CONFIGURATION",
@@ -395,18 +418,26 @@ def parse_manifest_text(
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise HarnessError("INVALID_CONFIGURATION", f"{source} is not valid JSON: {exc}") from exc
+            raise HarnessError(
+                "INVALID_CONFIGURATION", f"{source} is not valid JSON: {exc}"
+            ) from exc
     else:
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError as exc:
-            raise HarnessError("INVALID_CONFIGURATION", f"{source} is not valid YAML: {exc}") from exc
+            raise HarnessError(
+                "INVALID_CONFIGURATION", f"{source} is not valid YAML: {exc}"
+            ) from exc
     if not isinstance(data, dict):
-        raise HarnessError("INVALID_CONFIGURATION", f"{source} must parse to an object, got {type(data).__name__}")
+        raise HarnessError(
+            "INVALID_CONFIGURATION", f"{source} must parse to an object, got {type(data).__name__}"
+        )
     return parse_manifest_data(data, source=source)
 
 
-def manifest_from_file(path: str | Path, *, fmt: Literal["yaml", "json"] | None = None) -> DefinitionManifest:
+def manifest_from_file(
+    path: str | Path, *, fmt: Literal["yaml", "json"] | None = None
+) -> DefinitionManifest:
     """Load a manifest from a file, inferring format from the extension."""
     source = str(path)
     return parse_manifest_text(Path(path).read_text(encoding="utf-8"), fmt=fmt, source=source)
@@ -415,12 +446,17 @@ def manifest_from_file(path: str | Path, *, fmt: Literal["yaml", "json"] | None 
 def load_agent_spec(spec: Mapping[str, Any], *, source: str = "manifest spec") -> dict[str, Any]:
     """Validate a mapping against the upstream ``AgentSpec`` model, normalized for ``Agent.from_spec``."""
     try:
-        return NativeAgentSpec.model_validate(dict(spec)).model_dump(mode="json", exclude_defaults=True)
+        return NativeAgentSpec.model_validate(dict(spec)).model_dump(
+            mode="json", exclude_defaults=True
+        )
     except ValidationError as exc:
         errors = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()[:3]
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()[:3]
         )
-        raise HarnessError("INVALID_CONFIGURATION", f"invalid AgentSpec in {source}: {errors}") from exc
+        raise HarnessError(
+            "INVALID_CONFIGURATION", f"invalid AgentSpec in {source}: {errors}"
+        ) from exc
 
 
 def definition_to_manifest(definition: AgentDefinition) -> DefinitionManifest:

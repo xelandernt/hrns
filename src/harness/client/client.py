@@ -138,7 +138,9 @@ def _checked_limit(limit: int | None) -> int | None:
     try:
         value = int(limit)
     except (TypeError, ValueError) as exc:
-        raise HarnessClientError("The pagination limit must be an integer between 1 and 100.") from exc
+        raise HarnessClientError(
+            "The pagination limit must be an integer between 1 and 100."
+        ) from exc
     if not 1 <= value <= 100:
         raise HarnessClientError("The pagination limit must be between 1 and 100.")
     return value
@@ -299,11 +301,7 @@ class HarnessAcpClient:
 
     @property
     def connected(self) -> bool:
-        return (
-            self._bundle is not None
-            and not self._closing
-            and self.connection_state == "ready"
-        )
+        return self._bundle is not None and not self._closing and self.connection_state == "ready"
 
     # --------------------------------------------------------------- lifecycle
 
@@ -445,7 +443,11 @@ class HarnessAcpClient:
 
     def _publish_connection(self, state: str, detail: str) -> None:
         self.connection_state = state
-        location = {"kind": "local" if self._transport and "stdio" in type(self._transport).__name__.lower() else "remote"}
+        location = {
+            "kind": "local"
+            if self._transport and "stdio" in type(self._transport).__name__.lower()
+            else "remote"
+        }
         self.bus.publish(
             ConnectionEvent(
                 state=state,
@@ -587,7 +589,9 @@ class HarnessAcpClient:
         session.apply_state(response.modes, response.config_options)
         return session
 
-    async def list_sessions(self, cwd: str | None = None, cursor: str | None = None) -> SessionsListed:
+    async def list_sessions(
+        self, cwd: str | None = None, cursor: str | None = None
+    ) -> SessionsListed:
         if cwd is not None:
             _absolute_path(cwd, label="working directory filter")
         if not self.has_session_capability("list"):
@@ -597,7 +601,8 @@ class HarnessAcpClient:
         except RequestError as exc:
             raise HarnessClientError(self._describe_rpc_error("session/list", exc)) from exc
         sessions = tuple(
-            item.model_dump(mode="json", by_alias=True, exclude_none=True) for item in response.sessions
+            item.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for item in response.sessions
         )
         result = SessionsListed(sessions=sessions, next_cursor=response.next_cursor)
         self.bus.publish(result)
@@ -686,7 +691,9 @@ class HarnessAcpClient:
         display_text: str | None = None,
     ) -> Any:
         self._pending_interaction_error = None
-        blocks = prompt if isinstance(prompt, list) else [TextContentBlock(type="text", text=prompt)]
+        blocks = (
+            prompt if isinstance(prompt, list) else [TextContentBlock(type="text", text=prompt)]
+        )
         self._check_prompt_capabilities(blocks)
         payloads: list[Any] = []
         for block in blocks:
@@ -713,14 +720,20 @@ class HarnessAcpClient:
                 f"The prompt payload is {total:,} bytes; the transport accepts at most "
                 f"{MAX_MESSAGE_BYTES:,} bytes. Attach a smaller file."
             )
-        hint = display_text if display_text is not None else (prompt if isinstance(prompt, str) else "")
+        hint = (
+            display_text
+            if display_text is not None
+            else (prompt if isinstance(prompt, str) else "")
+        )
         self.bus.publish(TurnStarted(session_id=session_id, prompt_text=hint))
         try:
             response = await self.connection.prompt(session_id=session_id, prompt=blocks)
         except RequestError as exc:
             await self.drain_events()
             detail = self._describe_rpc_error("session/prompt", exc)
-            self.bus.publish(TurnCompleted(session_id=session_id, stop_reason="error", detail=detail))
+            self.bus.publish(
+                TurnCompleted(session_id=session_id, stop_reason="error", detail=detail)
+            )
             raise HarnessClientError(detail) from exc
         except asyncio.CancelledError:
             self.bus.publish(TurnCompleted(session_id=session_id, stop_reason="cancelled"))
@@ -744,7 +757,11 @@ class HarnessAcpClient:
                 )
             )
             raise interaction
-        usage = response.usage.model_dump(mode="json", by_alias=True, exclude_none=True) if response.usage else None
+        usage = (
+            response.usage.model_dump(mode="json", by_alias=True, exclude_none=True)
+            if response.usage
+            else None
+        )
         self.bus.publish(
             TurnCompleted(session_id=session_id, stop_reason=response.stop_reason, usage=usage)
         )
@@ -762,7 +779,9 @@ class HarnessAcpClient:
         except RequestError as exc:
             raise HarnessClientError(self._describe_rpc_error("session/set_mode", exc)) from exc
 
-    async def set_config_option(self, session_id: str, config_id: str, value: str | bool) -> tuple[dict[str, Any], ...]:
+    async def set_config_option(
+        self, session_id: str, config_id: str, value: str | bool
+    ) -> tuple[dict[str, Any], ...]:
         if isinstance(value, bool) and not self._boolean_options_advertised:
             raise ProtocolError(
                 "Boolean session options were not negotiated with this agent; choose a select value instead."
@@ -772,7 +791,9 @@ class HarnessAcpClient:
                 config_id=config_id, session_id=session_id, value=value
             )
         except RequestError as exc:
-            raise HarnessClientError(self._describe_rpc_error("session/set_config_option", exc)) from exc
+            raise HarnessClientError(
+                self._describe_rpc_error("session/set_config_option", exc)
+            ) from exc
         options = tuple(
             option.model_dump(mode="json", by_alias=True, exclude_none=True)
             for option in response.config_options
@@ -814,7 +835,9 @@ class HarnessAcpClient:
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"capabilities/list returned malformed data: {exc}") from exc
 
-    async def harness_plugins(self, *, cursor: str | None = None, limit: int | None = None) -> PluginListResult:
+    async def harness_plugins(
+        self, *, cursor: str | None = None, limit: int | None = None
+    ) -> PluginListResult:
         payload: dict[str, Any] = {}
         if cursor:
             payload["cursor"] = cursor
@@ -852,7 +875,9 @@ class HarnessAcpClient:
             raise HarnessClientError(f"Invalid configuration change: {exc}") from exc
         self._check_local_add(validated)
         try:
-            payload = build_configuration_update(session_id, request_id, expected_revision, validated)
+            payload = build_configuration_update(
+                session_id, request_id, expected_revision, validated
+            )
         except ValueError as exc:
             raise HarnessClientError(f"Invalid configuration change: {exc}") from exc
         try:
@@ -952,11 +977,17 @@ class HarnessAcpClient:
         if isinstance(update, AgentPlanContentUpdate):
             plan = update.plan
             if getattr(plan, "type", "") == "items":
-                entries = tuple((entry.content, entry.priority, entry.status) for entry in plan.entries)
+                entries = tuple(
+                    (entry.content, entry.priority, entry.status) for entry in plan.entries
+                )
                 self.bus.publish(PlanChanged(session_id=session_id, entries=entries))
             elif getattr(plan, "type", "") == "markdown":
                 content = str(getattr(plan, "content", ""))
-                entries = tuple((line.strip(), "medium", "pending") for line in content.splitlines() if line.strip())
+                entries = tuple(
+                    (line.strip(), "medium", "pending")
+                    for line in content.splitlines()
+                    if line.strip()
+                )
                 self.bus.publish(PlanChanged(session_id=session_id, entries=entries))
             return
         if isinstance(update, AgentPlanRemovedUpdate):
@@ -1073,7 +1104,12 @@ class HarnessAcpClient:
         return None
 
     async def read_text_file(
-        self, session_id: str, path: str, line: int | None = None, limit: int | None = None, **kwargs: Any
+        self,
+        session_id: str,
+        path: str,
+        line: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
     ) -> Any:
         raise RequestError.method_not_found("fs/read_text_file")  # not advertised by this client
 
@@ -1155,7 +1191,9 @@ class SessionProxy:
     async def cancel(self) -> None:
         await self.client.cancel(self.session_id)
 
-    async def set_config_option(self, config_id: str, value: str | bool) -> tuple[dict[str, Any], ...]:
+    async def set_config_option(
+        self, config_id: str, value: str | bool
+    ) -> tuple[dict[str, Any], ...]:
         options = await self.client.set_config_option(self.session_id, config_id, value)
         self.remember(options)
         return options
@@ -1188,14 +1226,14 @@ class SessionProxy:
     async def list_capabilities(
         self, *, cursor: str | None = None, limit: int | None = None
     ) -> CapabilityListResult:
-        result = await self.client.harness_capabilities(
-            self.session_id, cursor=cursor, limit=limit
-        )
+        result = await self.client.harness_capabilities(self.session_id, cursor=cursor, limit=limit)
         self.bindings = result.bindings
         self.client.bus.publish(
             CapabilitiesListed(
                 session_id=self.session_id,
-                bindings=tuple(binding.model_dump(mode="json", by_alias=True) for binding in result.bindings),
+                bindings=tuple(
+                    binding.model_dump(mode="json", by_alias=True) for binding in result.bindings
+                ),
                 selected_revision=result.selected_revision,
                 policy_revision=result.policy_revision,
                 next_cursor=result.next_cursor,
@@ -1208,7 +1246,9 @@ class SessionProxy:
     ) -> PluginListResult:
         result = await self.client.harness_plugins(cursor=cursor, limit=limit)
         self.plugins = result.plugins
-        self.client.bus.publish(PluginListed(plugins=result.plugins, next_cursor=result.next_cursor))
+        self.client.bus.publish(
+            PluginListed(plugins=result.plugins, next_cursor=result.next_cursor)
+        )
         return result
 
     async def close(self) -> None:

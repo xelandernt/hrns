@@ -1,4 +1,0 @@
-# Resolved environment for researcher 0.9.1 (illustrative example).
-pydantic-ai==1.2.3
-pydantic-ai-harness==0.4.1
-pydantic==2.14.1

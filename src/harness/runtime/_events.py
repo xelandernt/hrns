@@ -92,9 +92,7 @@ def _thinking_event(
     )
 
 
-def translate_event(
-    event: Any, state: TranslationState | None = None
-) -> list[RuntimeEvent]:
+def translate_event(event: Any, state: TranslationState | None = None) -> list[RuntimeEvent]:
     """Project one native stream event into zero or more runtime events.
 
     ``state`` is optional for stateless callers; pass one per turn to decode
@@ -119,11 +117,7 @@ def translate_event(
                 )
             ]
         if isinstance(part, ThinkingPart):
-            details = (
-                dict(part.provider_details)
-                if isinstance(part.provider_details, dict)
-                else {}
-            )
+            details = dict(part.provider_details) if isinstance(part.provider_details, dict) else {}
             text = part.content or _raw_thinking_text(details)
             if state is not None and index is not None:
                 state.thinking[index] = (details, text)
@@ -160,7 +154,7 @@ def translate_event(
                 if text:
                     emitted += text
                 elif current.startswith(emitted):
-                    text = current[len(emitted):]
+                    text = current[len(emitted) :]
                     emitted = current
                 else:
                     text = current
@@ -175,7 +169,7 @@ def translate_event(
             details, emitted = state.thinking.pop(index, ({}, ""))
             final = _raw_thinking_text(event.part.provider_details)
             if final.startswith(emitted):
-                text = final[len(emitted):]
+                text = final[len(emitted) :]
         return [_thinking_event(text, index)] if text else []
     if isinstance(event, FunctionToolCallEvent | OutputToolCallEvent):
         part = event.part
@@ -220,14 +214,18 @@ def translate_event(
         ]
     if isinstance(event, DeferredToolRequestsEvent):
         return [
-            RuntimeEvent(type="deferred_tool_requests", data=deferred_requests_payload(event.requests))
+            RuntimeEvent(
+                type="deferred_tool_requests", data=deferred_requests_payload(event.requests)
+            )
         ]
     if isinstance(event, CustomEvent):
         name = getattr(event, "name", None) or getattr(event, "event_kind", "custom")
         payload = getattr(event, "payload", None)
         if payload is None:
             payload = to_jsonable_python(event, serialize_unknown=True)
-        return [RuntimeEvent(type="custom", data={"name": name, "payload": to_jsonable_python(payload)})]
+        return [
+            RuntimeEvent(type="custom", data={"name": name, "payload": to_jsonable_python(payload)})
+        ]
     if isinstance(event, CapabilityEvent):
         return [
             RuntimeEvent(

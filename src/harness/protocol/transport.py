@@ -66,7 +66,9 @@ def decode_frame(raw: str | bytes) -> dict[str, Any]:
     except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         raise HarnessError("INVALID_FRAME", "Expected a UTF-8 JSON-RPC object") from exc
     if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
-        raise HarnessError("INVALID_FRAME", "Expected one JSON-RPC 2.0 object; batching is unsupported")
+        raise HarnessError(
+            "INVALID_FRAME", "Expected one JSON-RPC 2.0 object; batching is unsupported"
+        )
     if "id" in value and value["id"] is not None and type(value["id"]) not in (int, str):
         raise HarnessError("INVALID_FRAME", "Expected a string or integer JSON-RPC id")
     if "method" in value:
@@ -77,11 +79,16 @@ def decode_frame(raw: str | bytes) -> dict[str, Any]:
         if "params" in value and not isinstance(value["params"], (dict, list)):
             raise HarnessError("INVALID_FRAME", "Expected structured JSON-RPC params")
     elif "id" not in value or ("result" in value) == ("error" in value):
-        raise HarnessError("INVALID_FRAME", "Expected a JSON-RPC method or exactly one response result")
+        raise HarnessError(
+            "INVALID_FRAME", "Expected a JSON-RPC method or exactly one response result"
+        )
     elif "error" in value:
         error = value["error"]
-        if (not isinstance(error, dict) or type(error.get("code")) is not int
-                or not isinstance(error.get("message"), str)):
+        if (
+            not isinstance(error, dict)
+            or type(error.get("code")) is not int
+            or not isinstance(error.get("message"), str)
+        ):
             raise HarnessError("INVALID_FRAME", "Expected a JSON-RPC error code and message")
     return value
 
@@ -94,21 +101,29 @@ def encode_frame(value: dict[str, Any]) -> str:
 
 def canonical_hash(value: Any) -> str:
     return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        ).encode()
     ).hexdigest()
 
 
 T = TypeVar("T")
 
 
-def paginate(items: Sequence[T], cursor: str | None = None, limit: int = 50) -> tuple[list[T], str | None]:
+def paginate(
+    items: Sequence[T], cursor: str | None = None, limit: int = 50
+) -> tuple[list[T], str | None]:
     if not 1 <= limit <= 100:
         raise HarnessError("INVALID_CONFIGURATION", "limit must be between 1 and 100")
     start = 0
     if cursor:
         try:
             decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-            if decoded.get("v") != 1 or type(decoded.get("offset")) is not int or decoded["offset"] < 0:
+            if (
+                decoded.get("v") != 1
+                or type(decoded.get("offset")) is not int
+                or decoded["offset"] < 0
+            ):
                 raise ValueError("Invalid cursor")
             start = decoded["offset"]
         except (ValueError, TypeError, AttributeError) as exc:
@@ -116,5 +131,7 @@ def paginate(items: Sequence[T], cursor: str | None = None, limit: int = 50) -> 
     end = start + limit
     next_cursor = None
     if end < len(items):
-        next_cursor = base64.urlsafe_b64encode(json.dumps({"v": 1, "offset": end}).encode()).decode()
+        next_cursor = base64.urlsafe_b64encode(
+            json.dumps({"v": 1, "offset": end}).encode()
+        ).decode()
     return list(items[start:end]), next_cursor

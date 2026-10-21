@@ -71,6 +71,7 @@ def bundled_catalog_plugins() -> dict[str, PluginDescriptor]:
     _BUNDLED_PLUGINS = plugins
     return plugins
 
+
 CapabilityLifecycleMode = Literal["next_turn", "new_session"]
 CapabilityStateMode = Literal["run", "session", "external"]
 

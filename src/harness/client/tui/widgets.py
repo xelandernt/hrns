@@ -73,7 +73,7 @@ def bounded_user_text(text: str) -> str:
     """Keep a very large user prompt from creating an unbounded Static."""
     if len(text) <= MAX_STREAM_MESSAGE_CHARS:
         return text
-    return "…" + text[-(MAX_STREAM_MESSAGE_CHARS - 1):]
+    return "…" + text[-(MAX_STREAM_MESSAGE_CHARS - 1) :]
 
 
 class Submitted(Message):
@@ -178,7 +178,9 @@ class TopBar(Static):
         text.append("\n")
         text.append(agent_text, style="bold")
         text.append("   ")
-        text.append("connected" if connected else "disconnected", style="bold" if connected else "dim")
+        text.append(
+            "connected" if connected else "disconnected", style="bold" if connected else "dim"
+        )
         if session_id:
             text.append("   session ", style="dim")
             text.append(session_id)
@@ -760,7 +762,9 @@ class ToolCard(Vertical):
                 prefix = f"{full_source}\n\n" if full_source else ""
                 full_source = f"{prefix}input\n{rendered_input}"
         preview_body = self._detail_text(preview_source)
-        full_body = preview_body if full_source == preview_source else self._detail_text(full_source)
+        full_body = (
+            preview_body if full_source == preview_source else self._detail_text(full_source)
+        )
         self._body_text = preview_body or full_body
 
         preview_lines = preview_body.splitlines()
@@ -819,7 +823,9 @@ class StatusBar(Static):
     ) -> None:
         text = Text()
         text.append("● " if connected else "○ ", style="bold" if connected else "dim")
-        text.append("connected" if connected else "disconnected", style="bold" if connected else "dim")
+        text.append(
+            "connected" if connected else "disconnected", style="bold" if connected else "dim"
+        )
         if session_id:
             text.append("   session ")
             text.append(session_id, style="bold")
@@ -893,7 +899,9 @@ def _approval_detail(request: PermissionRequest) -> Text:
     elif raw is not None:
         lines.extend(str(raw).splitlines()[:10])
     if not lines:
-        lines.extend((request.detail or "No additional tool details were provided.").splitlines()[:10])
+        lines.extend(
+            (request.detail or "No additional tool details were provided.").splitlines()[:10]
+        )
 
     text = Text()
     for index, line in enumerate(lines):
@@ -952,7 +960,9 @@ class ApprovalBar(Vertical):
             )
             suffix = f"   ({shortcut})" if shortcut else ""
             label = readable_text(label, limit=120)
-            self._options.add_option(Option(f"{label}{suffix}", id=str(option.get("optionId") or "")))
+            self._options.add_option(
+                Option(f"{label}{suffix}", id=str(option.get("optionId") or ""))
+            )
         kinds = {str(option.get("kind") or "") for option in request.options}
         hints = ["↑/↓ choose"]
         if "allow_once" in kinds:
@@ -1118,15 +1128,25 @@ class CapabilityPanel(Vertical):
             self._order.append(binding_id)
             self._options[binding_id] = raw
             self._list.add_option(Option(self._row_text(summary), id=binding_id))
-        selected = selected_revision if selected_revision is not None else (snapshot or {}).get("selectedRevision")
-        active = active_revision if active_revision is not None else (snapshot or {}).get("activeRevision")
-        policy = policy_revision if policy_revision is not None else (snapshot or {}).get("policyRevision")
+        selected = (
+            selected_revision
+            if selected_revision is not None
+            else (snapshot or {}).get("selectedRevision")
+        )
+        active = (
+            active_revision
+            if active_revision is not None
+            else (snapshot or {}).get("activeRevision")
+        )
+        policy = (
+            policy_revision
+            if policy_revision is not None
+            else (snapshot or {}).get("policyRevision")
+        )
         revision = f"selected v{selected} · active v{active} · policy v{policy}"
         if not self.can_write:
             revision += " · read-only (update not advertised)"
-        self._status.update(
-            Text(f"{len(bindings)} capabilities · {revision}", style="dim")
-        )
+        self._status.update(Text(f"{len(bindings)} capabilities · {revision}", style="dim"))
         self._hint.update(
             "select to inspect · this host does not advertise configuration updates"
             if not self.can_write
@@ -1184,7 +1204,9 @@ class CapabilityPanel(Vertical):
             bits.append("locked")
         elif summary.get("pending"):
             active = summary.get("state") or {}
-            active_on = active.get("enabled") if isinstance(active, dict) else summary.get("activeEnabled")
+            active_on = (
+                active.get("enabled") if isinstance(active, dict) else summary.get("activeEnabled")
+            )
             if active_on is not None and bool(active_on) != summary["enabled"]:
                 bits.append("next turn")
         if summary["changeMode"] == "new_session":
@@ -1197,14 +1219,19 @@ class CapabilityPanel(Vertical):
             return
         lines: list[str] = []
         lines.append(summary["name"])
-        lines.append(f"id {summary['bindingId']}" + (f" · plugin {summary['pluginId']}" if summary["pluginId"] else ""))
+        lines.append(
+            f"id {summary['bindingId']}"
+            + (f" · plugin {summary['pluginId']}" if summary["pluginId"] else "")
+        )
         if summary["description"]:
             lines.append("")
             lines.append(summary["description"])
         lines.append("")
         selected_state = "on" if summary["enabled"] else "off"
         active = summary.get("state") or {}
-        active_enabled = active.get("enabled") if isinstance(active, dict) else summary.get("activeEnabled")
+        active_enabled = (
+            active.get("enabled") if isinstance(active, dict) else summary.get("activeEnabled")
+        )
         active_text = "unknown" if active_enabled is None else ("on" if active_enabled else "off")
         lines.append(f"selected: {selected_state} · active: {active_text}")
         lines.append(f"change: {summary['modeLabel']} · state: {summary['stateMode']}")
@@ -1411,7 +1438,9 @@ class SessionPanel(Vertical):
         super().__init__(**kwargs)
         self._ids: dict[str, str] = {}
         self._cwds: dict[str, str] = {}
-        self._status = Static("Sessions load when you open this panel.", markup=False, classes="panel-status")
+        self._status = Static(
+            "Sessions load when you open this panel.", markup=False, classes="panel-status"
+        )
         self._table = DataTable(id="session-table", cursor_type="row", zebra_stripes=False)
         self._hint = Static(
             "u resumes · d deletes · x closes · n new session · r refreshes",
@@ -1534,7 +1563,9 @@ class ActivityPanel(VerticalScroll):
         self._subagents = Static(
             "No subagent activity reported.", markup=False, classes="activity-section"
         )
-        self._commands = Static("No agent commands advertised.", markup=False, classes="activity-section")
+        self._commands = Static(
+            "No agent commands advertised.", markup=False, classes="activity-section"
+        )
         self._usage = Static("No usage reported.", markup=False, classes="activity-section")
         self._session = Static("", markup=False, classes="activity-section")
         self._subagent_state: dict[str, dict[str, str]] = {}
@@ -1623,7 +1654,9 @@ class ActivityPanel(VerticalScroll):
             self._usage.update("No usage reported.")
             return
         rendered = [
-            f"{key}: {value}" for key, value in summary.items() if key not in {"_meta", "cost"} and not isinstance(value, dict)
+            f"{key}: {value}"
+            for key, value in summary.items()
+            if key not in {"_meta", "cost"} and not isinstance(value, dict)
         ]
         cost = summary.get("cost")
         if isinstance(cost, dict):

@@ -123,8 +123,7 @@ def jsonable_config(config: Mapping[str, Any]) -> dict[str, Any]:
 def changes_payload_hash(changes: Sequence[BindingChange]) -> str:
     """Canonical payload hash used for idempotent retry identity."""
     payload = [
-        change.model_dump(mode="json", by_alias=True, exclude_none=True)
-        for change in changes
+        change.model_dump(mode="json", by_alias=True, exclude_none=True) for change in changes
     ]
     try:
         return canonical_hash(payload)
@@ -311,7 +310,11 @@ class PolicyCatalog:
                 )
         enabled_ids = {o.binding_id for o in enabled}
         for offering in enabled:
-            missing = [req for req in offering.requirements if req in self.offerings and req not in enabled_ids]
+            missing = [
+                req
+                for req in offering.requirements
+                if req in self.offerings and req not in enabled_ids
+            ]
             if missing:
                 raise HarnessError(
                     "INVALID_CONFIGURATION",
@@ -339,7 +342,9 @@ class PolicyCatalog:
             raise
 
     @staticmethod
-    def _effective_policy(descriptor: PluginDescriptor, override: CapabilityPolicy | None) -> CapabilityPolicy:
+    def _effective_policy(
+        descriptor: PluginDescriptor, override: CapabilityPolicy | None
+    ) -> CapabilityPolicy:
         policy = descriptor.default_policy.model_copy(deep=True)
         if "change_mode" not in descriptor.default_policy.model_fields_set:
             policy.change_mode = descriptor.change_mode
@@ -366,7 +371,10 @@ class PolicyCatalog:
     def _validate_graph_references(self) -> None:
         for binding_id, offering in self.offerings.items():
             for requirement in offering.requirements:
-                if requirement in self.offerings or self.definition.resource_requirement(requirement) is not None:
+                if (
+                    requirement in self.offerings
+                    or self.definition.resource_requirement(requirement) is not None
+                ):
                     continue
                 raise HarnessError(
                     "INVALID_CONFIGURATION",
@@ -402,7 +410,11 @@ class PolicyCatalog:
                 "INVALID_CONFIGURATION",
                 f"Configuration for binding {binding_id!r} (plugin {descriptor.plugin_id!r}) is invalid: "
                 f"{errors}",
-                details={"binding_id": binding_id, "plugin_id": descriptor.plugin_id, "errors": errors},
+                details={
+                    "binding_id": binding_id,
+                    "plugin_id": descriptor.plugin_id,
+                    "errors": errors,
+                },
             ) from exc
 
     # --- persistence view ---------------------------------------------
@@ -506,7 +518,9 @@ class PolicyCatalog:
             return fallback
         return BindingState(**self._active_bindings[binding_id])
 
-    def application_status(self, active_revision: int | None, selected_revision: int) -> Literal["applied", "pending"]:
+    def application_status(
+        self, active_revision: int | None, selected_revision: int
+    ) -> Literal["applied", "pending"]:
         if active_revision is None or selected_revision == active_revision:
             return "applied"
         return "pending"
@@ -596,7 +610,11 @@ class PolicyCatalog:
                 "INVALID_CONFIGURATION",
                 "A configuration transaction must contain at least one change.",
             )
-        duplicate_ids = [change.binding_id for change in changes if sum(1 for c in changes if c.binding_id == change.binding_id) > 1]
+        duplicate_ids = [
+            change.binding_id
+            for change in changes
+            if sum(1 for c in changes if c.binding_id == change.binding_id) > 1
+        ]
         if duplicate_ids:
             raise HarnessError(
                 "INVALID_CONFIGURATION",
@@ -622,7 +640,9 @@ class PolicyCatalog:
                     initial_configuration=initial_configuration,
                 )
             else:  # pragma: no cover - the discriminated union prevents this
-                raise HarnessError("INVALID_CONFIGURATION", f"Unsupported change type {type(change).__name__}")
+                raise HarnessError(
+                    "INVALID_CONFIGURATION", f"Unsupported change type {type(change).__name__}"
+                )
         self._validate_graph_states(work, added_descriptors)
         for binding_id, (enabled, config) in work.items():
             descriptor = (
@@ -672,7 +692,10 @@ class PolicyCatalog:
                 raise HarnessError(
                     "CAPABILITY_UNAVAILABLE",
                     f"Binding {offering.binding_id!r} cannot be enabled: {offering.availability_reason}.",
-                    details={"binding_id": offering.binding_id, "reason": offering.availability_reason},
+                    details={
+                        "binding_id": offering.binding_id,
+                        "reason": offering.availability_reason,
+                    },
                 )
             # Initial selections get a lifecycle exception (new_session settings),
             # not a directional-policy exception: host authority still applies.
@@ -808,7 +831,10 @@ class PolicyCatalog:
         # inert conflict declaration.
         for binding_id, descriptor in added.items():
             for requirement in descriptor.requirements:
-                if requirement not in work and self.definition.resource_requirement(requirement) is None:
+                if (
+                    requirement not in work
+                    and self.definition.resource_requirement(requirement) is None
+                ):
                     raise HarnessError(
                         "INVALID_CONFIGURATION",
                         f"Binding {binding_id!r} requires {requirement!r}, which is neither an "
@@ -868,7 +894,9 @@ class PolicyCatalog:
                 requirements = list(added[binding_id].requirements)
             else:  # pragma: no cover - defensive
                 requirements = []
-            pending[binding_id] = {requirement for requirement in requirements if requirement in enabled_ids}
+            pending[binding_id] = {
+                requirement for requirement in requirements if requirement in enabled_ids
+            }
         ready = [binding_id for binding_id, deps in pending.items() if not deps]
         resolved: set[str] = set()
         while ready:

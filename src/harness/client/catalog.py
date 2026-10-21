@@ -157,12 +157,16 @@ class CatalogClient:
             await self._client.aclose()
             self._client = None
 
-    async def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any:
+    async def _request(
+        self, method: str, path: str, *, params: dict[str, Any] | None = None
+    ) -> Any:
         client = await self._client_or_create()
         try:
             response = await client.request(method, self._url(path), params=params)
         except httpx.HTTPError as exc:
-            raise CatalogError(0, "CATALOG_UNREACHABLE", f"Cannot reach the catalog at {self.base_url}: {exc}") from exc
+            raise CatalogError(
+                0, "CATALOG_UNREACHABLE", f"Cannot reach the catalog at {self.base_url}: {exc}"
+            ) from exc
         payload: Any = None
         try:
             payload = response.json() if response.content else None
@@ -171,7 +175,11 @@ class CatalogClient:
         if response.status_code >= 400:
             self._raise_for_error(response.status_code, payload)
         if not isinstance(payload, dict):
-            raise CatalogError(response.status_code, "MALFORMED_RESPONSE", "The catalog returned a non-object response")
+            raise CatalogError(
+                response.status_code,
+                "MALFORMED_RESPONSE",
+                "The catalog returned a non-object response",
+            )
         return payload
 
     @staticmethod
@@ -192,7 +200,9 @@ class CatalogClient:
             raise CatalogError(status, "NOT_FOUND", "The server has no such agent deployment.")
         raise CatalogError(status, "HTTP_ERROR", f"The catalog request failed with HTTP {status}.")
 
-    async def list_agents(self, *, cursor: str | None = None, limit: int = DEFAULT_CATALOG_LIMIT) -> AgentPage:
+    async def list_agents(
+        self, *, cursor: str | None = None, limit: int = DEFAULT_CATALOG_LIMIT
+    ) -> AgentPage:
         if not 1 <= int(limit) <= 100:
             raise ValueError("Catalog limit must be between 1 and 100")
         params: dict[str, Any] = {"limit": int(limit)}
@@ -219,9 +229,9 @@ class CatalogClient:
         """Derive the ACP endpoint URL, preserving test/HTTP schemes."""
         base = self.base_url
         if base.startswith("https://"):
-            base = "wss://" + base[len("https://"):]
+            base = "wss://" + base[len("https://") :]
         elif base.startswith("http://"):
-            base = "ws://" + base[len("http://"):]
+            base = "ws://" + base[len("http://") :]
         return f"{base}/v1/agents/{quote(agent_id, safe='')}/acp"
 
     def resolve(self, reference: str) -> str:

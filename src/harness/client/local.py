@@ -86,9 +86,7 @@ def _load_catalog() -> LocalCatalog:
         models = entry.get("models")
         if not isinstance(name, str) or not name or not isinstance(models, list):
             continue
-        models_by_provider[name] = tuple(
-            str(model) for model in models if isinstance(model, str)
-        )
+        models_by_provider[name] = tuple(str(model) for model in models if isinstance(model, str))
         thinking = entry.get("thinking")
         if isinstance(thinking, dict):
             thinking_by_provider[name] = {

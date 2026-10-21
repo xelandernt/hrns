@@ -123,7 +123,20 @@ class Profile:
 
     @classmethod
     def from_wire(cls, name: str, data: dict[str, Any]) -> Profile:
-        known = {"transport", "command", "args", "cwd", "env", "url", "agent", "token", "remoteCwd", "authMethod", "default", "notes"}
+        known = {
+            "transport",
+            "command",
+            "args",
+            "cwd",
+            "env",
+            "url",
+            "agent",
+            "token",
+            "remoteCwd",
+            "authMethod",
+            "default",
+            "notes",
+        }
         unknown = set(data) - known - {"name"}
         if unknown:
             raise ValueError(f"Profile '{name}' has unknown keys: {', '.join(sorted(unknown))}")
@@ -182,7 +195,7 @@ def _toml_key(name: str) -> str:
         raise ValueError("Profile name cannot be empty")
     if name.replace("-", "").replace("_", "").isalnum():
         return name
-    return '"' + name.replace('"', '') + '"'
+    return '"' + name.replace('"', "") + '"'
 
 
 def profiles_from_toml(text: str) -> tuple[dict[str, Profile], dict[str, Any]]:
@@ -203,7 +216,12 @@ def profiles_from_toml(text: str) -> tuple[dict[str, Profile], dict[str, Any]]:
 class Profiles:
     """Load, save and merge profile documents."""
 
-    def __init__(self, profiles: dict[str, Profile], tui: dict[str, Any] | None = None, sources: list[Path] | None = None):
+    def __init__(
+        self,
+        profiles: dict[str, Profile],
+        tui: dict[str, Any] | None = None,
+        sources: list[Path] | None = None,
+    ):
         self.profiles = profiles
         self.tui = tui or {}
         self.sources: list[Path] = sources or []
@@ -315,7 +333,7 @@ def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | 
             raise SecretMissing(reference, f"environment variable '{name}' is not set")
         return value
     if reference.startswith("keyring:"):
-        remainder = reference[len("keyring:"):]
+        remainder = reference[len("keyring:") :]
         if not remainder:
             raise SecretMissing(reference, "no service named")
         service, _, username = remainder.partition("/")
@@ -341,4 +359,3 @@ def resolve_env_map(env_map: dict[str, str]) -> dict[str, str]:
     for key, ref in env_map.items():
         resolved[key] = secret_value(ref) or ""
     return resolved
-

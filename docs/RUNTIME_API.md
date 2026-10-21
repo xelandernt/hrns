@@ -8,15 +8,30 @@ model.
 ```python
 from harness.runtime import (
     # definition + plugins
-    AgentDefinition, DefinitionBinding, AgentSpec, DefinitionManifest,
-    PluginRegistry, PluginDescriptor, CompatibilityConstraints,
-    ResourceRequirement, ResourceSet,
+    AgentDefinition,
+    DefinitionBinding,
+    AgentSpec,
+    DefinitionManifest,
+    PluginRegistry,
+    PluginDescriptor,
+    CompatibilityConstraints,
+    ResourceRequirement,
+    ResourceSet,
     # runtime + sessions
-    HarnessRuntime, SessionManager, Session,
+    HarnessRuntime,
+    SessionManager,
+    Session,
     # re-exported protocol models used in signatures
-    CapabilityPolicy, EnableChange, ConfigureChange, AddChange,
-    BindingChange, ConfigurationSnapshot, BindingDescriptor, PluginInfo,
-    RuntimeEvent, HarnessError,
+    CapabilityPolicy,
+    EnableChange,
+    ConfigureChange,
+    AddChange,
+    BindingChange,
+    ConfigurationSnapshot,
+    BindingDescriptor,
+    PluginInfo,
+    RuntimeEvent,
+    HarnessError,
 )
 ```
 
@@ -29,30 +44,31 @@ Nothing here imports ACP, Textual, or the server; `harness.runtime.acp` / `.host
 
 ```python
 manager = SessionManager(
-    registry,                      # PluginRegistry
-    store=None,                    # SessionStore (SQLite WAL) or None → host default db
-    definitions=None,              # optional iterable[AgentDefinition]
+    registry,  # PluginRegistry
+    store=None,  # SessionStore (SQLite WAL) or None → host default db
+    definitions=None,  # optional iterable[AgentDefinition]
     allow_local_binding_creation=False,  # host-advertised 'add' permission
     # --- optional managed workspace service (CONCEPT §13) ---
-    workspaces=None,               # configured WorkspaceManager, or...
-    workspace_providers=(),        # ...explicit WorkspaceProvider list (manager built here)
-    workspace_binding=None,        # WorkspaceBinding(provider, mode, name) for new sessions
+    workspaces=None,  # configured WorkspaceManager, or...
+    workspace_providers=(),  # ...explicit WorkspaceProvider list (manager built here)
+    workspace_binding=None,  # WorkspaceBinding(provider, mode, name) for new sessions
 )
-manager.register_definition(definition)          # duplicate (agent_id, version) rejected
+manager.register_definition(definition)  # duplicate (agent_id, version) rejected
 
 opener = manager.open_session(
-    definition,                    # AgentDefinition
+    definition,  # AgentDefinition
     resources=ResourceSet({...}),  # resolved host resources; default empty
-    store=None,                    # optional per-session SessionStore override
+    store=None,  # optional per-session SessionStore override
     principal="local",
     deployment_id="local",
-    initial_configuration=None,    # list[BindingChange] applied against defaults before open
-    session_id=None,               # explicit opaque id; generated otherwise
-    resume=None,                   # stored summary/record (or id) to resume instead
+    initial_configuration=None,  # list[BindingChange] applied against defaults before open
+    session_id=None,  # explicit opaque id; generated otherwise
+    resume=None,  # stored summary/record (or id) to resume instead
 )
-session = await opener             # imperative form
+session = await opener  # imperative form
 # or
-async with manager.open_session(...) as session: ...
+async with manager.open_session(...) as session:
+    ...
 ```
 
 `open_session` returns a dual-mode opener: it is awaitable (→ `Session`) and an async
@@ -72,8 +88,8 @@ Resume after restart, preserving the definition pin and history:
 session = await manager.open_saved_session(
     principal="local",
     session_id=session_id,
-    resources=resources,           # must be supplied again; nothing live is pickled
-    deployment_id=None,           # when given, must match the stored pin
+    resources=resources,  # must be supplied again; nothing live is pickled
+    deployment_id=None,  # when given, must match the stored pin
 )
 ```
 
@@ -92,11 +108,11 @@ session = await manager.open_saved_session(
 Other manager operations:
 
 ```python
-await manager.list_sessions(principal)      # list[SessionSummary], filtered by principal
+await manager.list_sessions(principal)  # list[SessionSummary], filtered by principal
 await manager.delete_session(principal, session_id)
 # removes conversation, owned state rows, retry records; schedules resource cleanup
-manager.store                               # the default SessionStore
-await manager.close()                       # close live sessions + owned store
+manager.store  # the default SessionStore
+await manager.close()  # close live sessions + owned store
 ```
 
 `SessionSummary` fields: `session_id, principal, deployment_id, agent_id,
@@ -212,8 +228,10 @@ effects already applied. `session.jobs.snapshot()` reports active owners and rev
 
 ```python
 snapshot = await session.update_configuration(
-    changes=[EnableChange(binding_id="shell", enabled=False),
-             ConfigureChange(binding_id="web", fields={"max_results": 5})],
+    changes=[
+        EnableChange(binding_id="shell", enabled=False),
+        ConfigureChange(binding_id="web", fields={"max_results": 5}),
+    ],
     request_id="client-chosen-idempotency-key",
     expected_revision=session.snapshot.selected_revision,
 )
@@ -230,6 +248,19 @@ snapshot = await session.update_configuration(
   turn keeps its active revision; the new composition applies to the next turn.
   `ConfigurationSnapshot.bindings` always carries the *selected* state; `active_revision`
   and each descriptor's `active_enabled` reveal what the running turn still uses.
+- Disabled capabilities are not constructed or entered for the next turn. Previously
+  called function tools that are absent from the active composition remain hidden
+  from model requests. If the model calls one from conversation history while bindings
+  are disabled, a refusal handler raises Pydantic AI's `ToolFailed`: the model receives
+  a failed tool result explaining that the tool is unavailable and listing disabled
+  bindings, and ACP reports the call as failed with the same error. The turn can
+  continue; re-enabling a binding restores its tools. This also works after session
+  resume. Unrecognized tool names retain Pydantic AI's native unknown-tool feedback.
+  DeepSeek is an exception to hiding the declarations when no active function or
+  output tools remain: error-only declarations are sent, explicitly described as
+  unavailable. This avoids its [reported DSML leakage when tools are omitted from an
+  existing conversation](https://github.com/deepseek-ai/DeepSeek-V3/issues/1678).
+  These declarations never construct or execute the disabled capability.
 - Idempotent no-ops do not create a revision; they return the current snapshot.
 - Retry identity is `(principal, session_id, request_id)` with a canonical payload hash:
   same body → original committed snapshot (even when the retry still carries its original
@@ -253,12 +284,14 @@ Error codes (from `HarnessError.code`): `POLICY_DENIED`, `INVALID_CONFIGURATION`
 ```python
 from pydantic_ai import Agent
 
+
 def build_agent(*, resources, active_config, managed_capabilities):
     return Agent(
         resources.get("model.default"),
         name="assistant",
-        capabilities=[*managed_capabilities],       # required for self-delegation
+        capabilities=[*managed_capabilities],  # required for self-delegation
     )
+
 
 definition = AgentDefinition(
     agent_id="example.assistant",
@@ -319,16 +352,18 @@ descriptor = PluginDescriptor(
     plugin_id="example.web",
     version="0.3.0",
     description="Web search capability",
-    config_model=WebConfig,                 # pydantic model → JSON schema for editable fields
-    factory=build_web_capability,           # (validated_config, BindingContext) -> native capability
-    requirements=["browser"],               # other binding IDs (or definition resource names)
+    config_model=WebConfig,  # pydantic model → JSON schema for editable fields
+    factory=build_web_capability,  # (validated_config, BindingContext) -> native capability
+    requirements=["browser"],  # other binding IDs (or definition resource names)
     conflicts=["offline"],
-    change_mode="next_turn",                # or "new_session" (default)
-    state_mode="run",                       # run | session | external
+    change_mode="next_turn",  # or "new_session" (default)
+    state_mode="run",  # run | session | external
     presentation=["web.search"],
     default_policy=CapabilityPolicy(
-        available=True, enabled_by_default=False,
-        client_can_enable=True, client_can_disable=True,
+        available=True,
+        enabled_by_default=False,
+        client_can_enable=True,
+        client_can_disable=True,
         editable_fields={"max_results"},
         change_mode="next_turn",
     ),
@@ -336,7 +371,7 @@ descriptor = PluginDescriptor(
 registry = PluginRegistry(allow_local_binding_creation=False)
 registry.register(descriptor)
 registry.register_import("example.lazy", "example.module:factory", version="1.0.0")
-registry.discover()            # harness.capabilities entry points, lazy import refs only
+registry.discover()  # harness.capabilities entry points, lazy import refs only
 registry.instantiate(descriptor, config, BindingContext(...))
 ```
 

@@ -60,7 +60,11 @@ class BridgeSession:
 
     def headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
-        token = self.token if self.token is not None else (secret_value(self.token_ref) if self.token_ref else None)
+        token = (
+            self.token
+            if self.token is not None
+            else (secret_value(self.token_ref) if self.token_ref else None)
+        )
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
@@ -151,7 +155,9 @@ async def run_bridge_pump(
                     code = getattr(received, "code", None)
                     remote_error = f"remote connection closed{f' (code {code})' if code else ''}"
                     if code == 1009:
-                        remote_error = "the server closed with status 1009 after an oversized message"
+                        remote_error = (
+                            "the server closed with status 1009 after an oversized message"
+                        )
                     return
                 if isinstance(message, bytes):
                     report("remote sent a binary WebSocket frame; ACP frames must be text")

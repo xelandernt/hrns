@@ -147,7 +147,11 @@ class ResourceSet:
     ) -> None:
         """Raise the kind-specific availability error for the first missing required resource."""
         for requirement in self.missing(requirements):
-            code = "WORKSPACE_UNAVAILABLE" if requirement.kind == "workspace" else "RESOURCE_UNAVAILABLE"
+            code = (
+                "WORKSPACE_UNAVAILABLE"
+                if requirement.kind == "workspace"
+                else "RESOURCE_UNAVAILABLE"
+            )
             raise HarnessError(
                 code,
                 f"{context} requires {resource_label(requirement)}"

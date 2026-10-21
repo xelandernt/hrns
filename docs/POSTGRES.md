@@ -32,10 +32,8 @@ importing `harness.runtime.postgres` does not fail.
 from harness.runtime import AgentDefinition, PluginRegistry, SessionManager
 from harness.runtime.postgres import PostgresSessionStore
 
-store = PostgresSessionStore(
-    "postgresql://harness:secret@db.example/harness?sslmode=require"
-)
-await store.initialize()          # optional; the first operation does this lazily
+store = PostgresSessionStore("postgresql://harness:secret@db.example/harness?sslmode=require")
+await store.initialize()  # optional; the first operation does this lazily
 
 manager = SessionManager(PluginRegistry(), store=store)
 session = await manager.open_session(
@@ -94,53 +92,29 @@ file.
 
 ## Host integration
 
-The runtime now selects the backend from `HARNESS_STORE` / `--store` at the process
-boundary with `harness.runtime.host.build_store`:
+Configure the embedded FastAPI server with a store instance:
 
 ```python
-from harness.runtime.host import build_store
+from harness.runtime.postgres import PostgresSessionStore
+from harness.server import AgentServer
 
-store = build_store("postgresql://harness:secret@db.example/harness")
-manager = SessionManager(registry, store=store)
+agents = AgentServer(store=PostgresSessionStore(database_url))
+agents.add_agent(definition)
+agents.mount(app)
 ```
 
-`SessionManager(..., store="postgresql://…")` also coerces a PostgreSQL DSN directly. The
-host's per-session ACP sidecar (cwd/model) is SQLite-file based; with PostgreSQL, the
-authoritative cwd comes from the runtime session record and the model falls back to the
-deployment default on a cold load. The server passes `server.store_url` to every worker;
-the same DSN is never exposed in catalog responses. Integration notes:
+`AgentServer` initializes the database through the FastAPI lifespan, shares it across
+registered agents and connection-local managers, then closes it at application shutdown.
+Conversation history and ACP metadata (cwd, selected model and reasoning effort) live in
+the same backend, so no local sidecar directory is needed for network sessions. The DSN
+is never included in the catalog or ACP messages.
 
-- `SessionManager` treats an explicitly supplied `SessionStore` instance as
-  caller-owned, so `manager.close()` does **not** close it. Keep a reference and call
-  `await store.close()` at application shutdown.
-- The host's `HostMetadataStore` still expects a local filesystem path (or `None` for
-  in-memory metadata); do **not** pass a `postgresql://` DSN as `HostBundle.store_path`.
-  The runtime store now records the authoritative `cwd` (`summary.cwd`), which the host
-  prefers on reload, so `None` is a valid minimal choice. Keep a separate local sidecar
-  directory if the host-selected model must survive worker restarts.
-- The existing `build_local_bundle` / `harness.runtime.session.build_host_bundle`
-  helpers call `str(store.path)`. A PostgreSQL store has no filesystem path, so those
-  builders need the selector branch and an explicit metadata path (or `None`) rather than
-  reusing the DSN.
-- The store's `load_record`, `list_records`, and `delete_record` aliases provide the same
-  host-facing record shape as SQLite (`SessionSummary` plus transcript).
-- If the runtime prefers lazy initialization, no explicit `await store.initialize()` is
-  needed before use. It is safe to call explicitly, including concurrently.
-
-A generic selector can also pass a keyword DSN directly; `is_postgres_dsn` only recognises
-URI prefixes because a libpq keyword DSN is ambiguous with other configuration strings.
-Use `PostgresSessionStore(...)` explicitly for those.
-
-Server-side plumbing needs the same branch in two places:
-
-- `HarnessState.worker_store_path()` currently appends `<agent_id>.sqlite3` to
-  `server.store_path`. For a database DSN it should return the DSN unchanged (all
-  deployments may share one database; sessions carry their own deployment/agent pins).
-- The server startup check that treats `store_path` as a directory (`Path(...).mkdir`)
-  must be skipped when the value is a PostgreSQL DSN. Likewise, do not run the
-  `HostMetadataStore` path derivation on the DSN; choose a local sidecar or `None`.
-
-No protocol or ACP wire changes are involved.
+Python callers that construct a `SessionManager(registry, store=store)` directly still
+own the supplied store and must close it themselves. The stdio host can select a backend
+from `HARNESS_STORE` / `--store` via `harness.runtime.host.build_store`. PostgreSQL URIs
+are recognized by that selector; pass `PostgresSessionStore(...)` explicitly for libpq
+keyword DSNs. `HostMetadataStore(store=store)` provides backend-persisted ACP metadata
+when composing your own host bundle.
 
 ## Schema
 
@@ -150,6 +124,7 @@ unrelated application's generic `sessions` table. A dedicated database (or dedic
 
 | Table | Contents |
 | --- | --- |
+| `harness_acp_metadata` | ACP working directory, selected model and reasoning effort |
 | `harness_store_schema` | applied migration versions |
 | `harness_sessions` | ownership pins, title, `cwd`, managed-workspace flag, status, timestamps |
 | `harness_session_control` | one live owner token per session, plus owner PID/host for safe local crash reclamation |
@@ -166,7 +141,8 @@ as `harness.runtime.postgres.SCHEMA_VERSION`. A database whose schema is newer t
 runtime supports fails with `DEPLOYMENT_UNAVAILABLE` rather than being modified. Schema
 v2 adds the nullable `owner_pid`/`owner_host` columns to existing v1 control tables with
 `ADD COLUMN IF NOT EXISTS`; v3 adds `harness_workspace_records`; v4 adds the
-`workspace_managed` session flag. Fresh databases apply v1 through v4.
+`workspace_managed` session flag; v5 adds managed plugin state; v6 adds ACP metadata.
+Fresh databases apply all six migrations.
 
 Most child tables use `ON DELETE CASCADE`; workspace records have no foreign key but are
 removed explicitly. Deleting a session removes its control, revisions, retry records,

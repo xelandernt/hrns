@@ -1,6 +1,0 @@
-# Resolved environment for coder 1.2.0 (illustrative example).
-# Generate the real file when building the dedicated deployment environment,
-# for example with `uv pip compile pyproject.toml -o coder-1.2.0.lock`.
-pydantic-ai==1.2.3
-pydantic-ai-harness==0.4.1
-pydantic==2.14.1

@@ -372,13 +372,17 @@ def effort_option(
     return None
 
 
-def model_option(options: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> dict[str, Any] | None:
+def model_option(
+    options: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> dict[str, Any] | None:
     """Find the option that selects the model, if the agent exposes one."""
     candidates: list[dict[str, Any]] = []
     for option in options:
         if not isinstance(option, dict) or option.get("type") != "select":
             continue
-        key = f"{option.get('id', '')} {option.get('name', '')} {option.get('category', '')}".lower()
+        key = (
+            f"{option.get('id', '')} {option.get('name', '')} {option.get('category', '')}".lower()
+        )
         if "model" in key:
             candidates.append(option)
     for preferred in ("model", "models"):
@@ -423,10 +427,15 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
         "reason": binding.get("availabilityReason") or binding.get("availability_reason") or "",
         "canEnable": bool(policy.get("clientCanEnable", policy.get("client_can_enable", False))),
         "canDisable": bool(policy.get("clientCanDisable", policy.get("client_can_disable", False))),
-        "changeMode": binding.get("changeMode") or binding.get("change_mode") or policy.get("changeMode") or "new_session",
+        "changeMode": binding.get("changeMode")
+        or binding.get("change_mode")
+        or policy.get("changeMode")
+        or "new_session",
         "requires": tuple(binding.get("requires") or ()),
         "conflicts": tuple(binding.get("conflicts") or ()),
-        "editableFields": tuple(policy.get("editableFields") or policy.get("editable_fields") or ()),
+        "editableFields": tuple(
+            policy.get("editableFields") or policy.get("editable_fields") or ()
+        ),
         "configSchema": binding.get("configSchema") or binding.get("config_schema") or {},
         "config": config,
         "defaults": dict(binding.get("defaults") or {}),
@@ -466,7 +475,10 @@ def pending_application_text(binding: dict[str, Any], snapshot: dict[str, Any] |
         return f"Selected {wanted} for the next turn; still {current} in the active revision."
     return ""
 
-def build_form_fields(schema: dict[str, Any], current: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+
+def build_form_fields(
+    schema: dict[str, Any], current: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """Describe form fields from a JSON Schema subset used by config/elicitation."""
     properties = (schema or {}).get("properties") or {}
     required = set((schema or {}).get("required") or [])
@@ -569,7 +581,9 @@ class Settings:
             mode = "ask"
         return cls(
             theme=str(mapping.get("theme", "harness")),
-            auto_expand_tools=bool(mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))),
+            auto_expand_tools=bool(
+                mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))
+            ),
             show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
             side_panel=bool(mapping.get("sidePanel", mapping.get("side_panel", True))),
             permission_mode=mode,

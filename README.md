@@ -54,6 +54,24 @@ uv run hrns connect --stdio -- /path/to/agent --acp
 See [client usage](docs/CLIENT_API.md) for headless execution, profiles, approvals
 and the bridge.
 
+## Serve agents in your FastAPI app
+
+```python
+from fastapi import FastAPI
+from harness.runtime import SessionStore
+from harness.server import AgentServer
+
+app = FastAPI()
+agents = AgentServer(store=SessionStore("./sessions.sqlite3"))
+agents.add_agent(definition)
+agents.mount(app)
+```
+
+Install the `server` extra, register your `AgentDefinition` objects, and run the app
+with Uvicorn. Connect using `hrns connect --url http://127.0.0.1:8080 --agent AGENT_ID`.
+PostgreSQL and optional FastAPI authentication dependencies use the same API.
+See [server embedding](docs/SERVER.md) and [the runnable example](examples/fastapi_app.py).
+
 ## Layout
 
 Harness is one distribution with optional extras. Protocol and local settings
@@ -65,15 +83,15 @@ ship by default; the runtime, terminal, and server dependencies are opt-in.
 | `harness.config` | base | Shared local settings using pydantic-settings |
 | `harness.runtime` | `runtime` | Native agent definitions, plugin management, sessions, `harness-host` and `harness-local` |
 | `harness.client` | `client` | Textual terminal, scripted ACP runner and stdio bridge |
-| `harness.server` | `server` | Authenticated deployment catalog and WebSocket worker hosting |
+| `harness.server` | `server` | FastAPI agent registration and in-process WebSocket ACP |
 
 Install only what you need, for example `pip install 'harness[client]'`,
 `pip install 'harness[openai]'`, or `pip install 'harness[all]'`.
 
 The `harness.client` module does not import Pydantic AI or installed agent
 plugins, and installing `harness[client]` alone does not install the runtime.
-Local agents run in a separate process. Hosted deployments launch the executable
-from their own resolved Python environment.
+Local stdio agents run in a separate process. Network agents run inside an existing
+FastAPI application through `AgentServer`, sharing an explicit SQLite or PostgreSQL store.
 
 ## Design essentials
 
@@ -91,7 +109,7 @@ from their own resolved Python environment.
 - [Extension protocol and wire examples](docs/PROTOCOL.md)
 - [Runtime Python API](docs/RUNTIME_API.md)
 - [ACP host](docs/ACP.md) and [client usage](docs/CLIENT_API.md)
-- [Remote server configuration](docs/SERVER.md)
+- [Embed agents in FastAPI](docs/SERVER.md)
 - [Capability catalog and integration coverage](docs/CATALOG.md)
 - [Workspace lifecycle](docs/WORKSPACES.md)
 - [Security model](docs/SECURITY.md)

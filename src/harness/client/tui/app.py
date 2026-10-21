@@ -593,9 +593,7 @@ class HarnessApp(App[int]):
         with contextlib.suppress(Exception):
             await screen._notice(f"Auto-approved {kind}: {request.summary()}", "info")
 
-    async def _ask_permission_dialog(
-        self, request: PermissionRequest
-    ) -> PermissionDecision:
+    async def _ask_permission_dialog(self, request: PermissionRequest) -> PermissionDecision:
         future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()
 
         def done(result: str | None) -> None:

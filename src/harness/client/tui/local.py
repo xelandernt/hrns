@@ -76,6 +76,7 @@ def effort_choices(provider: str, model: str) -> list[dict[str, str]]:
         for value in effort_values(support)
     ]
 
+
 #: Used only when ``harness-local`` is unavailable; the runtime normally supplies
 #: the provider list from the pinned Pydantic AI version.
 _FALLBACK_PROVIDERS = (
@@ -140,9 +141,7 @@ class LocalModelDialog(FormDialog):
         selected_provider = current_provider if provider_known else ""
         models = self._models_for(selected_provider)
         model_known = bool(settings.model) and settings.model in models
-        model_value = (
-            settings.model if model_known else ("" if not models else Select.NULL)
-        )
+        model_value = settings.model if model_known else ("" if not models else Select.NULL)
         model_custom = ""
         model_options = self._model_options(selected_provider)
 
@@ -331,9 +330,7 @@ class LocalModelDialog(FormDialog):
         values.setdefault("base_url", "")
         values.setdefault("api_key_env", "")
         try:
-            configured = LocalSettings(
-                config_file=None, **{**self.settings.model_dump(), **values}
-            )
+            configured = LocalSettings(config_file=None, **{**self.settings.model_dump(), **values})
             configured = with_thinking(configured, effort)
             configured.require_model()
             path = configured.save(self.settings.config_file)
@@ -342,13 +339,10 @@ class LocalModelDialog(FormDialog):
             return
         if api_key:
             api_key_ref = (
-                store_api_key(configured.provider, configured.api_key_env, api_key)
-                or api_key
+                store_api_key(configured.provider, configured.api_key_env, api_key) or api_key
             )
         else:
-            api_key_ref = stored_api_key_ref(
-                configured.provider, configured.api_key_env
-            )
+            api_key_ref = stored_api_key_ref(configured.provider, configured.api_key_env)
         self.dismiss(
             LocalModelResult(
                 path=path,

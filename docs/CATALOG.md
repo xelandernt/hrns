@@ -11,8 +11,8 @@ integration, and what the pinned upstream releases do not ship.
 ```python
 from harness.runtime.catalog import build_catalog_registry, entry, iter_plugins
 
-registry = build_catalog_registry()   # 92 reviewed capability plugins + the bundled example plugin
-registry.discover()                   # plus installed harness.capabilities entry points
+registry = build_catalog_registry()  # 92 reviewed capability plugins + the bundled example plugin
+registry.discover()  # plus installed harness.capabilities entry points
 ```
 
 Importing the catalog imports **no** integration: factories load `pydantic_ai_harness` and

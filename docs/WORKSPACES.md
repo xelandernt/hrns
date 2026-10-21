@@ -96,9 +96,11 @@ from harness.runtime.workspaces import (
 
 smol = SmolSandbox(image="python:3.12-alpine")
 
+
 async def release_smol(backend) -> None:
     # Stop the VM so smolvm flushes its disk; this is not a delete.
     await (await backend.get_sandbox()).stop()
+
 
 smol_provider = WorkspaceProvider(
     descriptor=SMOL_SANDBOX_DESCRIPTOR,
@@ -164,10 +166,10 @@ create a second store. The four callbacks may be synchronous or asynchronous:
 from harness.runtime.workspaces import WorkspaceManager, WorkspaceRecordCallbacks
 
 records = WorkspaceRecordCallbacks(
-    get=session_store.get_workspace_record,       # (session_id) -> WorkspaceRecord | None
-    save=session_store.save_workspace_record,     # (record) -> None
-    delete=session_store.delete_workspace_record, # (session_id) -> None
-    records=session_store.list_workspace_records, # () -> Iterable[WorkspaceRecord]
+    get=session_store.get_workspace_record,  # (session_id) -> WorkspaceRecord | None
+    save=session_store.save_workspace_record,  # (record) -> None
+    delete=session_store.delete_workspace_record,  # (session_id) -> None
+    records=session_store.list_workspace_records,  # () -> Iterable[WorkspaceRecord]
 )
 manager = WorkspaceManager(providers=[...], record_store=records)
 ```
@@ -205,7 +207,7 @@ from harness.runtime.workspaces import DEFAULT_EPHEMERAL_TTL_SECONDS, WorkspaceM
 manager = WorkspaceManager(
     providers=[...],
     record_store=records,
-    clock=lambda: 1_000.0,             # inject a fake clock in tests
+    clock=lambda: 1_000.0,  # inject a fake clock in tests
     ephemeral_ttl=DEFAULT_EPHEMERAL_TTL_SECONDS,  # 24 hours; deployment override
 )
 report = await manager.cleanup(now=1_000.0 + 24 * 60 * 60)
@@ -270,7 +272,7 @@ workspace_manager = WorkspaceManager(
 # Before composing a session's resources:
 lease = await workspace_manager.acquire(
     session_id,
-    provider=configured_provider,   # deployment binding, not client input
+    provider=configured_provider,  # deployment binding, not client input
     mode=configured_mode,
     name=configured_name,
 )

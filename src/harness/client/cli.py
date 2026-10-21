@@ -56,7 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     connect = sub.add_parser("connect", help="Open the full-screen terminal")
     _add_target_flags(connect, enable_stdio=True)
-    connect.add_argument("--session", metavar="SESSION_ID", help="Load this session after connecting")
+    connect.add_argument(
+        "--session", metavar="SESSION_ID", help="Load this session after connecting"
+    )
     connect.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     run = sub.add_parser("run", help="Run one prompt headlessly and print the result")
@@ -79,7 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     agents_list = agents_sub.add_parser("list", help="List accessible agent deployments")
     agents_list.add_argument("--server", metavar="PROFILE", help="Server profile name (or URL)")
     agents_list.add_argument("--url", help="Server base URL when no profile is saved")
-    agents_list.add_argument("--token", metavar="REF", help="Bearer token reference (env:NAME or keyring:service/user)")
+    agents_list.add_argument(
+        "--token", metavar="REF", help="Bearer token reference (env:NAME or keyring:service/user)"
+    )
     agents_list.add_argument("--limit", type=int, default=50)
     agents_list.add_argument("--cursor")
     agents_list.add_argument("--all", action="store_true", help="Follow pagination to the end")
@@ -96,7 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     bridge.add_argument("--url", help="Server base URL when no profile is saved")
     bridge.add_argument("--token", metavar="REF")
     bridge.add_argument("--agent", required=False, metavar="AGENT")
-    bridge.add_argument("--remote-cwd", metavar="PATH", help="Replace the local cwd with this remote directory")
+    bridge.add_argument(
+        "--remote-cwd", metavar="PATH", help="Replace the local cwd with this remote directory"
+    )
     bridge.add_argument("--profile", metavar="NAME")
 
     profiles = sub.add_parser("profiles", help="Manage saved connection profiles")
@@ -105,10 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
     profiles_sub.add_parser("path", help="Print the user profile file path")
     add = profiles_sub.add_parser("add", help="Add or replace a profile")
     add.add_argument("name")
-    add.add_argument("--stdio", action="store_true", help="Define a local launch; put the command after --")
+    add.add_argument(
+        "--stdio", action="store_true", help="Define a local launch; put the command after --"
+    )
     add.add_argument("--server", metavar="URL", help="Define a hosted server profile")
     add.add_argument("--agent", help="Default agent id for a server profile")
-    add.add_argument("--token", metavar="REF", help="Token secret reference (env:NAME or keyring:service/user)")
+    add.add_argument(
+        "--token", metavar="REF", help="Token secret reference (env:NAME or keyring:service/user)"
+    )
     add.add_argument("--cwd")
     add.add_argument("--remote-cwd")
     add.add_argument("--default", action="store_true", help="Mark as the preferred profile")
@@ -120,9 +130,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_target_flags(parser: argparse.ArgumentParser, *, enable_stdio: bool) -> None:
     if enable_stdio:
-        parser.add_argument("--stdio", action="store_true", help="Launch a local ACP agent; put argv after --")
-    parser.add_argument("--local", action="store_true", help="Run the configured local developer agent (default)")
-    parser.add_argument("--local-config", type=Path, metavar="PATH", help="Local model settings TOML (implies --local)")
+        parser.add_argument(
+            "--stdio", action="store_true", help="Launch a local ACP agent; put argv after --"
+        )
+    parser.add_argument(
+        "--local", action="store_true", help="Run the configured local developer agent (default)"
+    )
+    parser.add_argument(
+        "--local-config",
+        type=Path,
+        metavar="PATH",
+        help="Local model settings TOML (implies --local)",
+    )
     parser.add_argument("--server", metavar="PROFILE", help="Use a saved server profile (or a URL)")
     parser.add_argument("--agent", metavar="AGENT", help="Agent deployment id or catalog name")
     parser.add_argument("--profile", metavar="NAME", help="Use a saved profile by name")
@@ -208,7 +227,9 @@ def _split_stdio_remainder(
 
 def _stdio_profile(name: str, command: list[str], cwd: str | None) -> Profile:
     if not command:
-        raise HarnessClientError("--stdio needs a command after `--`, e.g. `hrns connect --stdio -- my-agent --acp`.")
+        raise HarnessClientError(
+            "--stdio needs a command after `--`, e.g. `hrns connect --stdio -- my-agent --acp`."
+        )
     return Profile(
         name=name,
         transport="stdio",
@@ -228,12 +249,9 @@ async def _resolve_target(
     """Apply CLI precedence: explicit stdio > explicit remote > local model."""
     cwd_override = getattr(args, "cwd", None)
     explicit_remote = any(
-        getattr(args, name, None)
-        for name in ("server", "url", "profile", "agent", "token")
+        getattr(args, name, None) for name in ("server", "url", "profile", "agent", "token")
     )
-    local_requested = bool(
-        getattr(args, "local", False) or getattr(args, "local_config", None)
-    )
+    local_requested = bool(getattr(args, "local", False) or getattr(args, "local_config", None))
     if local_requested or not (getattr(args, "stdio", False) or explicit_remote):
         if local_requested and (getattr(args, "stdio", False) or explicit_remote):
             raise HarnessClientError(
@@ -250,9 +268,17 @@ async def _resolve_target(
     command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
     if getattr(args, "stdio", False):
         profile = _stdio_profile("cli", command, cwd_override)
-        return ConnectionTarget(name="cli", kind="local", profile=profile, agent=None, cwd=local_cwd(profile, cwd_override))
+        return ConnectionTarget(
+            name="cli",
+            kind="local",
+            profile=profile,
+            agent=None,
+            cwd=local_cwd(profile, cwd_override),
+        )
     if command:
-        raise HarnessClientError("A command was supplied without --stdio. Use `--stdio -- CMD ARGS`.")
+        raise HarnessClientError(
+            "A command was supplied without --stdio. Use `--stdio -- CMD ARGS`."
+        )
     profile = _profile_from_args(profiles, args)
     if profile is None:
         raise HarnessClientError(
@@ -315,8 +341,8 @@ async def _command_run(args: argparse.Namespace) -> int:
     prompt = " ".join(prompt_words).strip()
     if not prompt:
         raise HarnessClientError(
-            "No prompt supplied. Usage: `hrns run --stdio -- CMD ARGS -- \"your prompt\"` or "
-            "`hrns run --server team --agent research-assistant \"your prompt\"`."
+            'No prompt supplied. Usage: `hrns run --stdio -- CMD ARGS -- "your prompt"` or '
+            '`hrns run --server team --agent research-assistant "your prompt"`.'
         )
     target = await _resolve_target(profiles, args, remainder=target_remainder)
     policy_name = "allow" if args.allow_all else "deny" if args.deny_all else "required"
@@ -383,7 +409,9 @@ async def _command_bridge(args: argparse.Namespace) -> int:
     profiles = _profiles(args)
     profile = _profile_from_args(profiles, args)
     if profile is None:
-        raise HarnessClientError("Pass --server PROFILE (or --url URL) to bridge to a hosted agent.")
+        raise HarnessClientError(
+            "Pass --server PROFILE (or --url URL) to bridge to a hosted agent."
+        )
     if profile.transport != "server":
         raise HarnessClientError(f"Profile '{profile.name}' is not a server profile.")
     agent = await resolve_agent(profile, args.agent)
@@ -408,7 +436,11 @@ def _command_profiles(args: argparse.Namespace) -> int:
         for name in sorted(profiles.profiles):
             profile = profiles.profiles[name]
             marker = "*" if profile.default_for_server else " "
-            details = profile.url + f" · {profile.agent}" if profile.is_remote else profile.describe_location()
+            details = (
+                profile.url + f" · {profile.agent}"
+                if profile.is_remote
+                else profile.describe_location()
+            )
             print(f"{marker} {name:20} {profile.transport:7} {details}")
         if profiles.sources:
             print(f"\nLoaded from: {', '.join(str(path) for path in profiles.sources)}")
@@ -432,7 +464,9 @@ def _command_profiles(args: argparse.Namespace) -> int:
                 remote_cwd=args.remote_cwd or "",
             )
         else:
-            raise HarnessClientError("`profiles add` needs --stdio (with `-- CMD`) or --server URL.")
+            raise HarnessClientError(
+                "`profiles add` needs --stdio (with `-- CMD`) or --server URL."
+            )
         profiles.upsert(profile, set_default=args.default)
         path = profiles.save(profiles.sources[0])
         print(f"Saved profile '{profile.name}' to {path}")

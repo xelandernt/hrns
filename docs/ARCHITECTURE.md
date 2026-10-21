@@ -3,11 +3,14 @@
 ```text
 Python application ──────────────────────────────┐
                                                 ▼
-Textual / headless client ── ACP stdio ──► harness-host ──► Pydantic AI Agent
-         │                                      ▲         + native capabilities
-         └── harness.acp.v1 WebSocket ──► server ─┘         + bound workspace
-                                          │
-                                 dedicated worker environment
+Textual / headless client ── ACP stdio ──► harness-host ──► SessionManager
+         │                                                  │
+         └── harness.acp.v1 WebSocket ──► existing FastAPI    │
+                                          + AgentServer ────┘
+                                                            ▼
+                                                  Pydantic AI Agent
+                                                  + native capabilities
+                                                  + bound workspace
 ```
 
 ## One distribution, five modules
@@ -18,9 +21,9 @@ Textual / headless client ── ACP stdio ──► harness-host ──► Pyda
 | `harness.config` | Shared local settings using pydantic-settings | AI runtime, terminal, network hosting |
 | `harness.runtime` | Definitions, plugins, policy, execution, persistence, ACP worker | Terminal and server |
 | `harness.client` | ACP connections, profiles, terminal, headless runner, stdio bridge | Native agent code and provider SDKs |
-| `harness.server` | Authentication, deployment discovery, connection worker supervision | Terminal and installed agent plugins |
+| `harness.server` | FastAPI registration, optional authentication, discovery, in-process ACP | Terminal |
 
-Installing the `client` extra does not install Pydantic AI. The server forwards protocol messages to the configured deployment executable rather than importing agent packages. Worker process separation allows different deployments to use incompatible Python dependencies; it is not sandboxing of plugin Python code.
+Installing the `client` extra does not install Pydantic AI. The `server` extra includes the runtime: native agent definitions execute in the existing FastAPI process. Each connection has its own ACP host and session manager; the server owns one explicit shared SQLite or PostgreSQL store. Application authentication is an optional FastAPI dependency.
 
 ## Native behavior stays native
 
@@ -40,13 +43,13 @@ An idempotent state selection does not require permission for a transition that 
 
 ## State ownership
 
-Canonical history and configuration live on the runtime host. Session access is scoped by principal and immutable deployment ID. Workers must release control only after active work is drained. SQLite WAL and short transactions coordinate connection workers. A saved transcript is distinct from model history and from live capability instances; live objects are never pickled.
+Canonical history and configuration live on the runtime host. Session access is scoped by principal and the registered agent ID/definition version. Connections release control after active work is drained. SQLite WAL or PostgreSQL transactions coordinate session ownership. ACP working directory and selected model/effort are persisted alongside conversation state for network connections. A saved transcript is distinct from model history and from live capability instances; live objects are never pickled.
 
 Attachments can use `harness.runtime.blobs.FileBlobStore`: bounded, content-addressed files outside ephemeral workspaces, with owner/session namespaces and integrity checks. A digest alone does not grant another session access.
 
 ## Execution locations
 
-The workspace is a named host resource, not a directory inferred from the client machine. Hosted workers validate `cwd` against their configured allowed directories. A requested sandbox that cannot be constructed fails explicitly. Local workspace execution is non-isolated; isolated command execution requires an explicitly installed and bound upstream sandbox backend. Plugins and provider clients remain in the worker process.
+The workspace is a named host resource, not a directory inferred from the client machine. Network ACP hosts validate `cwd` against the roots passed during Python registration. A requested sandbox that cannot be constructed fails explicitly. Local workspace execution is non-isolated; isolated command execution requires an explicitly installed and bound upstream sandbox backend. Plugins and provider clients run in the application process for network agents, or the launched process for stdio agents.
 
 ## Protocol versions
 

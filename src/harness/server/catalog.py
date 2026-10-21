@@ -6,12 +6,11 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
 from typing import Any, Iterable
 
-from .config import DeploymentConfig
 from .errors import ACP_SUBPROTOCOL, MAX_MESSAGE_BYTES, ApiError
+from .models import RegisteredAgent
 
 __all__ = [
     "DEFAULT_LIMIT",
@@ -19,7 +18,7 @@ __all__ = [
     "MIN_LIMIT",
     "CursorCodec",
     "agent_descriptor",
-    "paginate_deployments",
+    "paginate_agents",
     "parse_limit",
 ]
 
@@ -121,45 +120,35 @@ def parse_limit(raw: str | None) -> int:
     return value
 
 
-def agent_descriptor(deployment: DeploymentConfig) -> dict[str, Any]:
-    """Catalog descriptor for one immutable deployment revision."""
-
-    lockfile: dict[str, Any] | None = None
-    if deployment.lockfile_path is not None:
-        # The catalog identifies the lockfile by content (digest) and name;
-        # the server's absolute filesystem layout stays private.
-        lockfile = {
-            "name": os.path.basename(deployment.lockfile_path),
-            "sha256": deployment.lockfile_sha256,
-        }
-
+def agent_descriptor(agent: RegisteredAgent, *, prefix: str = "") -> dict[str, Any]:
+    """Catalog descriptor compatible with the Harness network client."""
     return {
-        "agentId": deployment.id,
-        "name": deployment.name,
-        "version": deployment.version,
-        "description": deployment.description,
-        "recommended": deployment.recommended,
-        "defaultWorkspace": deployment.default_cwd,
-        "allowedWorkspaces": list(deployment.allowed_cwds),
-        "lockfile": lockfile,
+        "agentId": agent.id,
+        "name": agent.definition.name,
+        "version": agent.definition.definition_version,
+        "description": agent.definition.description,
+        "recommended": True,
+        "defaultWorkspace": agent.default_cwd,
+        "allowedWorkspaces": list(agent.allowed_cwds),
         "connection": {
-            "url": f"/v1/agents/{deployment.id}/acp",
+            "url": f"{prefix}/v1/agents/{agent.id}/acp",
             "subprotocol": ACP_SUBPROTOCOL,
             "maxMessageBytes": MAX_MESSAGE_BYTES,
         },
     }
 
 
-def paginate_deployments(
-    deployments: Iterable[DeploymentConfig],
+def paginate_agents(
+    agents: Iterable[RegisteredAgent],
     *,
     limit: int,
     cursor: str | None,
     codec: CursorCodec,
+    prefix: str = "",
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Return one descriptor page plus the next opaque cursor (if any)."""
 
-    ordered = list(deployments)
+    ordered = list(agents)
     offset = codec.decode(cursor) if cursor else 0
     if offset > len(ordered):
         raise ApiError(
@@ -170,4 +159,4 @@ def paginate_deployments(
     page = ordered[offset : offset + limit]
     next_offset = offset + len(page)
     next_cursor = codec.encode(next_offset) if next_offset < len(ordered) else None
-    return [agent_descriptor(item) for item in page], next_cursor
+    return [agent_descriptor(item, prefix=prefix) for item in page], next_cursor

@@ -62,7 +62,9 @@ class EventBus:
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
-    def connection(self, state: str, detail: str = "", location: dict[str, str] | None = None) -> ConnectionEvent:
+    def connection(
+        self, state: str, detail: str = "", location: dict[str, str] | None = None
+    ) -> ConnectionEvent:
         event = ConnectionEvent(state=state, detail=detail, location=location or {})
         self.publish(event)
         return event

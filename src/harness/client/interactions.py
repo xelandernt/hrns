@@ -167,7 +167,9 @@ class HeadlessInteractions:
 
     async def choose_permission(self, request: PermissionRequest) -> PermissionDecision:
         if self.policy == "required":
-            raise InteractionRequired("permission", request.summary(), session_id=request.session_id)
+            raise InteractionRequired(
+                "permission", request.summary(), session_id=request.session_id
+            )
         if self.policy == "allow":
             option = request.first_of_kind("allow_once", "allow_always")
             if option is None:
@@ -190,7 +192,11 @@ class HeadlessInteractions:
         if self.policy == "deny":
             return ElicitationAnswer(action="decline")
         if request.kind == "url":
-            return ElicitationAnswer(action="accept") if self.accept_url else ElicitationAnswer(action="decline")
+            return (
+                ElicitationAnswer(action="accept")
+                if self.accept_url
+                else ElicitationAnswer(action="decline")
+            )
         content: dict[str, Any] = {}
         for name, prop in request.properties.items():
             if name in self.answers:
