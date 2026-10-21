@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Backwards Compatibility
+
+!Important! No Backwards Compatability needs to be supported unless explicitly requested.
+
 ## Test
 
 Do not write any tests unless explicity asked to do so.
