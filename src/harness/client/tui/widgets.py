@@ -1066,7 +1066,7 @@ class CapabilityPanel(Vertical):
 
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=False),
-        Binding("e", "edit", "Configure", show=False),
+        Binding("e", "edit", "edit", show=False),
         Binding("space", "toggle_binding", "Toggle", show=False),
         Binding("a", "add", "Add local capability", show=False),
     ]
@@ -1085,16 +1085,16 @@ class CapabilityPanel(Vertical):
         self._detail = Static("Select a capability to inspect it.", markup=False)
         self._detail.add_class("panel-detail")
         self._hint = Static(
-            "space or ←/→ toggles · e edits fields · a adds a local plugin · r refreshes",
+            "e edit · Space/←/→ toggle · a add plugin · r refresh",
             markup=False,
             classes="panel-hint",
         )
 
     def compose(self) -> ComposeResult:
         yield self._status
+        yield self._hint
         yield self._list
         yield self._detail
-        yield self._hint
 
     # ------------------------------------------------------------------ data
 
@@ -1150,7 +1150,7 @@ class CapabilityPanel(Vertical):
         self._hint.update(
             "select to inspect · this host does not advertise configuration updates"
             if not self.can_write
-            else "space or ←/→ toggles · e edits fields · a adds a local plugin · r refreshes"
+            else "e edit · Space/←/→ toggle · a add plugin · r refresh"
         )
         if self._list.option_count:
             index = self._highlight_index(previous)
@@ -1183,7 +1183,7 @@ class CapabilityPanel(Vertical):
                 style="dim",
             )
         )
-        self._hint.update("←/→ changes values · Enter opens the full chooser · r refreshes")
+        self._hint.update("←/→ change value · Enter open chooser · r refresh")
         if self._list.option_count:
             index = self._highlight_index(previous)
             self._list.highlighted = index
@@ -1246,10 +1246,7 @@ class CapabilityPanel(Vertical):
         if summary["locked"]:
             lines.append(f"locked: {summary['reason'] or 'not available in this deployment'}")
         else:
-            permissions = []
-            permissions.append("enable allowed" if summary["canEnable"] else "enable locked")
-            permissions.append("disable allowed" if summary["canDisable"] else "disable locked")
-            lines.append(" · ".join(permissions))
+            lines.append("toggle allowed" if summary["canToggle"] else "toggle locked")
         if summary["requires"]:
             lines.append(f"requires: {', '.join(summary['requires'])}")
         if summary["conflicts"]:
@@ -1443,7 +1440,7 @@ class SessionPanel(Vertical):
         )
         self._table = DataTable(id="session-table", cursor_type="row", zebra_stripes=False)
         self._hint = Static(
-            "u resumes · d deletes · x closes · n new session · r refreshes",
+            "u resume · d delete · x close · n new session · r refresh",
             markup=False,
             classes="panel-hint",
         )
@@ -1486,7 +1483,7 @@ class SessionPanel(Vertical):
         delete_note = "" if can_delete else " · delete not advertised"
         close_note = "" if can_close else " · close not advertised"
         resume_note = "" if can_resume else " · resume not advertised"
-        more = " · m loads more pages" if next_cursor else ""
+        more = " · m load more pages" if next_cursor else ""
         self._status.update(
             Text(
                 f"{len(self._ids)} sessions{more}{delete_note}{close_note}{resume_note}",
@@ -1495,14 +1492,14 @@ class SessionPanel(Vertical):
         )
         actions = [] if can_load else ["load unavailable"]
         if can_resume:
-            actions.append("u resumes")
+            actions.append("u resume")
         if can_delete:
-            actions.append("d deletes")
+            actions.append("d delete")
         if can_close:
-            actions.append("x closes")
+            actions.append("x close")
         if next_cursor:
             actions.append("m more")
-        actions.extend(("n new session", "r refreshes"))
+        actions.extend(("n new session", "r refresh"))
         self._hint.update(Text(" · ".join(actions), style="dim"))
 
     def selected_session_id(self) -> str | None:

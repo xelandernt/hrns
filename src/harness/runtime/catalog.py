@@ -1092,8 +1092,7 @@ class CatalogEntry(BaseModel):
         return CapabilityPolicy(
             available=self.tier is not CatalogTier.UNAVAILABLE,
             enabled_by_default=False,
-            client_can_enable=True,
-            client_can_disable=True,
+            client_can_toggle=True,
             editable_fields=editable,
             change_mode=self.change_mode,
         )

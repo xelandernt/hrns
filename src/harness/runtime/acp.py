@@ -570,12 +570,7 @@ def _binding_toggle_option(
         or descriptor.availability_reason is not None
     ):
         return None
-    # Directional permission applies to a real transition: an enabled binding is editable
-    # only when the client may disable it, and vice versa.
-    editable = (descriptor.enabled and policy.client_can_disable) or (
-        not descriptor.enabled and policy.client_can_enable
-    )
-    if not editable:
+    if not policy.client_can_toggle:
         return None
     option_id = f"{BINDING_OPTION_PREFIX}{descriptor.binding_id}"
     description = (

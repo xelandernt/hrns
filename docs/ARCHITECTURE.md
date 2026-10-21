@@ -34,7 +34,7 @@ The upstream experimental ACP session factory runs once per session, which canno
 ## Configuration is a transaction
 
 1. The client sends explicit changes with an expected selected revision and stable request ID.
-2. The controller validates the complete candidate selection against schemas, directional permissions, lifecycle, dependencies, conflicts, and resource requirements.
+2. The controller validates the complete candidate selection against schemas, toggle permissions, lifecycle, dependencies, conflicts, and resource requirements.
 3. The store commits the selection and retry result before acknowledgment.
 4. A turn captures an immutable active selection. Changes during execution affect the next turn.
 5. Failed preparation blocks the new turn; it does not silently execute with the old selection.

@@ -425,8 +425,7 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
         "available": available,
         "locked": not available,
         "reason": binding.get("availabilityReason") or binding.get("availability_reason") or "",
-        "canEnable": bool(policy.get("clientCanEnable", policy.get("client_can_enable", False))),
-        "canDisable": bool(policy.get("clientCanDisable", policy.get("client_can_disable", False))),
+        "canToggle": bool(policy.get("clientCanToggle", policy.get("client_can_toggle", False))),
         "changeMode": binding.get("changeMode")
         or binding.get("change_mode")
         or policy.get("changeMode")

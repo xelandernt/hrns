@@ -94,8 +94,7 @@ def plugin_descriptor() -> PluginDescriptor:
         default_policy=CapabilityPolicy(
             available=True,
             enabled_by_default=True,
-            client_can_enable=True,
-            client_can_disable=True,
+            client_can_toggle=True,
             editable_fields={"style"},
             change_mode="next_turn",
         ),

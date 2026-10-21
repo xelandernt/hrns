@@ -41,9 +41,8 @@ Only simple, actual transitions are exposed as standard options:
 
 * **Capability toggle** — `binding:<bindingId>` (boolean when the client advertises
   `clientCapabilities.session.configOptions.boolean`, otherwise a select with `on`/`off`).
-  A binding appears only when it is `next_turn`, available, and the client may make the
-  transition it would make now (enabled ⇒ `clientCanDisable`; disabled ⇒
-  `clientCanEnable`). Mandatory bindings, unavailable bindings, and `new_session`
+  A binding appears only when it is `next_turn`, available, and the client has
+  toggle permission (`clientCanToggle`). Mandatory bindings, unavailable bindings, and `new_session`
   bindings are not editable standard options; they are visible through the extension,
   with their policy and reasons.
 * **Model** — `model` select, advertised only when the deployment explicitly offers
@@ -110,7 +109,7 @@ Application status is in the snapshot; model selection is exposed through the st
 Binding descriptors carry identity, name/description, JSON configuration schema,
 non-secret current values and defaults, availability reason, requires/conflicts,
 lifecycle (`changeMode`) and state mode, presentation ids, and the policy
-(`available`, `enabledByDefault`, `clientCanEnable`, `clientCanDisable`,
+(`available`, `enabledByDefault`, `clientCanToggle`,
 `editableFields`). Descriptors never contain executable code, imports, or credentials.
 
 Transactions are atomic: all changes validate against current policy, schemas,

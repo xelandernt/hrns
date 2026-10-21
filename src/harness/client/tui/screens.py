@@ -167,7 +167,7 @@ class ConnectScreen(Screen[None]):
                 yield self._detail
         yield self._status
         yield Static(
-            "l configures a local model · n adds a target · / filters · r refreshes · q quits",
+            "l configure local model · n add target · / filter · r refresh · q quit",
             markup=False,
             classes="panel-hint",
             id="connect-hint",
@@ -808,7 +808,7 @@ class ChatScreen(Screen[None]):
         self._update_chrome()
         hint = (
             "/ commands · Ctrl+K palette · F2 capabilities · F3 sessions "
-            "· F4 activity · Esc stops the turn · Ctrl+R reconnects · Ctrl+T transcript"
+            "· F4 activity · Esc stop turn · Ctrl+R reconnect · Ctrl+T transcript"
         )
         self.query_one("#hintbar", HintBar).show(hint)
         self.query_one("#composer", Composer).focus()
@@ -1608,11 +1608,8 @@ class ChatScreen(Screen[None]):
         summary = panel.binding(binding_id)
         if summary is None:
             return
-        if enabled and not summary["canEnable"]:
-            panel.show_message(f"{summary['name']} cannot be enabled from this client.")
-            return
-        if not enabled and not summary["canDisable"]:
-            panel.show_message(f"{summary['name']} cannot be disabled from this client.")
+        if not summary["canToggle"]:
+            panel.show_message(f"{summary['name']} cannot be toggled from this client.")
             return
         try:
             snapshot = await self.session.update_configuration(

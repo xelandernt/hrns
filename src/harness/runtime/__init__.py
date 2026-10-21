@@ -51,6 +51,8 @@ from .registry import (
     ENTRY_POINT_GROUP,
     BindingContext,
     CompatibilityConstraints,
+    EditableField,
+    NonEditableField,
     PluginDescriptor,
     PluginRegistry,
 )
@@ -110,6 +112,8 @@ __all__ = [
     "BindingContext",
     "CompatibilityConstraints",
     "ENTRY_POINT_GROUP",
+    "EditableField",
+    "NonEditableField",
     "PluginDescriptor",
     "PluginRegistry",
     # policy

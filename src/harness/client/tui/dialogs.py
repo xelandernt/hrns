@@ -106,7 +106,7 @@ class PermissionDialog(_DialogBase):
             yield self._options
             yield self._error
             yield Static(
-                "↑/↓ choose · 1–9 quick select · Esc cancels",
+                "↑/↓ choose · 1–9 quick select · Esc cancel",
                 markup=False,
                 classes="dialog-hint",
             )
@@ -409,7 +409,7 @@ class ChoiceDialog(_DialogBase):
                 self._list.add_option(Option(text, id=choice.get("value", "")))
             yield self._list
             yield self._error
-            yield Static("Esc closes", markup=False, classes="dialog-hint")
+            yield Static("Esc close", markup=False, classes="dialog-hint")
 
     def on_mount(self) -> None:
         self._list.focus()
@@ -526,7 +526,7 @@ class InfoDialog(_DialogBase):
         with Vertical(classes="dialog dialog-tall"):
             yield from self.dialog_header()
             yield Markdown(self.body)
-            yield Static("Esc closes", markup=False, classes="dialog-hint")
+            yield Static("Esc close", markup=False, classes="dialog-hint")
 
     def on_mount(self) -> None:
         self.query_one(Vertical).focus()
@@ -543,7 +543,7 @@ class HelpDialog(_DialogBase):
         with Vertical(classes="dialog dialog-tall"):
             yield from self.dialog_header()
             yield Markdown(self.body)
-            yield Static("Esc closes", markup=False, classes="dialog-hint")
+            yield Static("Esc close", markup=False, classes="dialog-hint")
 
     def on_mount(self) -> None:
         self.query_one(Vertical).focus()

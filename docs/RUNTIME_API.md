@@ -75,7 +75,7 @@ async with manager.open_session(...) as session:
 context manager whose exit closes the session. Opening validates resources, plugins,
 policy defaults, and the initial configuration **before** any session row or revision is
 written. Initial selections receive the same lifecycle exception for `new_session`
-settings, but host directional policy still applies: they cannot enable or disable a
+settings, but host toggle policy still applies: they cannot enable or disable a
 binding the client would not be allowed to transition later. Definition revisions are
 immutable: registering a second object under an existing `(agent_id, version)` with
 different behavior is rejected rather than silently replacing the pin. Initial configuration uses the same change shapes and policy rules as later
@@ -331,8 +331,7 @@ bindings:
     policy:
       available: true
       enabled_by_default: true
-      client_can_enable: true
-      client_can_disable: true
+      client_can_toggle: true
       editable_fields: [max_results]
       change_mode: next_turn
 resources:
@@ -346,6 +345,27 @@ Export with `definition.to_manifest()`; non-portable fields (factory, fixed Pyth
 capabilities) raise `INVALID_CONFIGURATION` with `details.non_portable`.
 
 ## 5. Plugins
+
+Use `EditableField[T]` to mark top-level configuration fields that clients may edit:
+
+```python
+from pydantic import BaseModel
+from harness.runtime import EditableField, NonEditableField
+
+class WebConfig(BaseModel):
+    max_results: EditableField[int] = 10
+    endpoint: NonEditableField[str] = "https://example.com/search"
+    timeout: int = 30  # unmarked fields are also non-editable by default
+```
+
+When `default_policy.editable_fields` is omitted, the descriptor derives it from these
+annotations; unmarked fields stay non-editable. An explicit set (including an empty set)
+overrides inference, preserving existing policies. `NonEditableField[T]` explicitly locks
+a field and its descendants even if an explicit policy includes them. If both markers
+are present, `NonEditableField` wins. Definition policy overrides can only
+narrow the descriptor's editable set. Runtime-added bindings use the same descriptor
+permissions. The server sends the effective set to the TUI through `policy.editable_fields`;
+the annotation does not change validation or the field's value type.
 
 ```python
 descriptor = PluginDescriptor(
@@ -362,9 +382,7 @@ descriptor = PluginDescriptor(
     default_policy=CapabilityPolicy(
         available=True,
         enabled_by_default=False,
-        client_can_enable=True,
-        client_can_disable=True,
-        editable_fields={"max_results"},
+        client_can_toggle=True,
         change_mode="next_turn",
     ),
 )

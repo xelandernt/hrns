@@ -18,9 +18,10 @@ import importlib
 import importlib.metadata
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal, TypeAlias, TypeVar, cast
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_core import to_jsonable_python
 
@@ -31,7 +32,9 @@ from .resources import ResourceSet
 __all__ = [
     "BindingContext",
     "CompatibilityConstraints",
+    "EditableField",
     "ENTRY_POINT_GROUP",
+    "NonEditableField",
     "PluginDescriptor",
     "PluginRegistry",
 ]
@@ -76,6 +79,23 @@ CapabilityLifecycleMode = Literal["next_turn", "new_session"]
 CapabilityStateMode = Literal["run", "session", "external"]
 
 
+@dataclass(frozen=True)
+class _Editable:
+    """Metadata marking a config field as client-editable by default."""
+
+
+@dataclass(frozen=True)
+class _NonEditable:
+    """Metadata preventing a config field from being exposed for client edits."""
+
+
+_ConfigValue = TypeVar("_ConfigValue")
+EditableField: TypeAlias = Annotated[_ConfigValue, _Editable()]
+"""Mark a top-level config field as client-editable, preserving its underlying type."""
+NonEditableField: TypeAlias = Annotated[_ConfigValue, _NonEditable()]
+"""Explicitly lock a top-level config field and its descendants against client edits."""
+
+
 class CompatibilityConstraints(BaseModel):
     """Runtime/upstream version range and platform constraints for a plugin."""
 
@@ -108,8 +128,11 @@ class PluginDescriptor(BaseModel):
     description: str = ""
     config_model: type[BaseModel] | None = None
     """Optional Pydantic model producing the JSON schema for editable, non-secret fields."""
-    factory: Callable[..., Any] | str | None = None
-    """Factory callable (or ``module:attr`` import reference evaluated lazily)."""
+    factory: Callable[[Any, BindingContext], AgentCapability] | str | None = None
+    """Synchronous factory taking validated config and binding context, returning a native
+    capability (or a ``module:attr`` import reference evaluated lazily). The config type
+    depends on ``config_model``; without one, factories receive a ``CapabilityShim``.
+    """
     instructions: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
     """``binding_id`` (or resource) names required when this plugin is enabled."""
@@ -124,7 +147,32 @@ class PluginDescriptor(BaseModel):
     local_hint: dict[str, Any] = Field(default_factory=dict)
     """Non-executable discovery metadata from entry points (name, dist info)."""
 
-    def resolved_factory(self) -> Callable[..., Any]:
+    @model_validator(mode="after")
+    def _editable_defaults(self) -> PluginDescriptor:
+        """Infer editable defaults and honor explicit non-editable annotations."""
+        if self.config_model is None:
+            return self
+        fields = self.config_model.model_fields
+        if "editable_fields" in self.default_policy.model_fields_set:
+            editable = set(self.default_policy.editable_fields)
+        else:
+            editable = {
+                name
+                for name, field in fields.items()
+                if any(isinstance(metadata, _Editable) for metadata in field.metadata)
+            }
+        locked = {
+            name
+            for name, field in fields.items()
+            if any(isinstance(metadata, _NonEditable) for metadata in field.metadata)
+        }
+        editable = {path for path in editable if path.split(".", 1)[0] not in locked}
+        self.default_policy = self.default_policy.model_copy(
+            update={"editable_fields": editable}, deep=True
+        )
+        return self
+
+    def resolved_factory(self) -> Callable[[Any, BindingContext], AgentCapability]:
         """Return the factory callable, importing it lazily from ``module:attr`` if needed."""
         target = self.factory
         if target is None:
@@ -156,7 +204,7 @@ class PluginDescriptor(BaseModel):
                     f"Plugin {self.plugin_id!r} import reference {target!r} is not callable.",
                     details={"plugin_id": self.plugin_id},
                 )
-            return factory
+            return cast(Callable[[Any, BindingContext], AgentCapability], factory)
         return target
 
     def config_schema(self) -> dict[str, Any]:
@@ -332,7 +380,7 @@ class PluginRegistry:
     def register_capability(
         self,
         plugin_id: str,
-        factory: Callable[..., Any],
+        factory: Callable[[Any, BindingContext], AgentCapability],
         *,
         version: str = "0.0.0",
         **kwargs: Any,
@@ -464,7 +512,7 @@ class PluginRegistry:
     ) -> AgentCapability:
         """Validate ``config`` and call the plugin factory, returning the native capability."""
         self.check_compatibility(descriptor)
-        validated_config: Any
+        validated_config: BaseModel | CapabilityShim
         if descriptor.config_model is not None:
             try:
                 validated_config = descriptor.config_model.model_validate(dict(config))
