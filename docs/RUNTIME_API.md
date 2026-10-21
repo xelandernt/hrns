@@ -352,6 +352,7 @@ Use `EditableField[T]` to mark top-level configuration fields that clients may e
 from pydantic import BaseModel
 from harness.runtime import EditableField, NonEditableField
 
+
 class WebConfig(BaseModel):
     max_results: EditableField[int] = 10
     endpoint: NonEditableField[str] = "https://example.com/search"
