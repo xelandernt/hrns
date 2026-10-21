@@ -164,3 +164,9 @@ class SessionsListed:
 
     sessions: tuple[dict[str, Any], ...] = ()
     next_cursor: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionInfoChanged:
+    session_id: str
+    title: str | None = None

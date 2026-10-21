@@ -215,3 +215,18 @@ uses the same settings for headless execution. Use `--local-config PATH` to sele
 a TOML file, or press **l** in the connection picker to configure the provider and
 model. See [local setup](LOCAL.md) for DeepSeek, local model servers, credentials,
 approvals, and configuration precedence.
+
+## Session names and totals
+
+Use `/rename <name>` in the terminal, or `await session.rename(name)` on a
+`SessionProxy`, to set a persistent session name. `/rename` without an argument
+opens a dialog. The runtime provides a first-request title and a
+`set_session_title` agent tool for a concise generated title. Manual names always
+take precedence, including after reopening a session.
+
+The status bar shows session cost first, then input/output and cache-read/write
+tokens. Totals include persisted completed, failed, and cancelled turns and are
+restored on load. Prices come from Pydantic AI and are estimates, not invoices.
+Missing pricing displays as unavailable; incomplete totals are marked partial.
+DeepSeek cache-hit tokens count as cache reads; cache misses remain ordinary input,
+not cache writes.

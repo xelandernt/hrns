@@ -86,6 +86,7 @@ from .events import (
     ModesUpdated,
     PlanChanged,
     PluginListed,
+    SessionInfoChanged,
     SessionsListed,
     ToolEvent,
     TurnCompleted,
@@ -397,7 +398,7 @@ class HarnessAcpClient:
         self.connection_state = "ready"
         self._publish_connection(
             "ready",
-            f"{self.agent_title} {self.agent_version} · {self.extension.describe()}",
+            f"{self.agent_title} {self.agent_version}",
         )
         return response
 
@@ -1017,8 +1018,12 @@ class HarnessAcpClient:
             self.bus.publish(ConfigOptionsUpdated(session_id=session_id, options=options))
             return
         if isinstance(update, SessionInfoUpdate):
-            payload = update.model_dump(mode="json", by_alias=True, exclude_none=True)
-            self.bus.publish(SessionsListed(sessions=(payload,)))
+            self.bus.publish(SessionInfoChanged(session_id=session_id, title=update.title))
+            harness_meta = raw_meta.get("harness", {})
+            if isinstance(harness_meta, dict):
+                usage = harness_meta.get("sessionUsage")
+                if isinstance(usage, dict):
+                    self.bus.publish(UsageUpdated(session_id=session_id, summary=usage))
             return
         if isinstance(update, UsageUpdate):
             summary = update.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -1201,6 +1206,14 @@ class SessionProxy:
     async def set_mode(self, mode_id: str) -> None:
         await self.client.set_mode(self.session_id, mode_id)
         self.current_mode_id = mode_id
+
+    async def rename(self, title: str) -> str:
+        """Set a persistent manual name for this session."""
+        from harness.protocol.models import SessionTitleUpdate
+
+        request = SessionTitleUpdate(session_id=self.session_id, title=title)
+        result = await self.client._ext_request("_harness/session/rename", request.to_wire())
+        return SessionTitleUpdate.model_validate(result).title
 
     async def configuration(self) -> ConfigurationSnapshot:
         snapshot = await self.client.harness_configuration(self.session_id)

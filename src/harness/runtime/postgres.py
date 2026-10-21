@@ -625,6 +625,15 @@ class PostgresSessionStore(SessionStore):
 
         return await self._run(operation)
 
+    async def set_session_title(self, session_id: str, title: str) -> None:
+        async def operation(connection: Any) -> None:
+            await connection.execute(
+                "UPDATE harness_sessions SET title = %s, last_active_at = %s WHERE session_id = %s",
+                (title, now_ms(), session_id),
+            )
+
+        await self._run(operation)
+
     async def list_sessions(
         self,
         principal: str | None = None,

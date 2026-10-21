@@ -391,6 +391,17 @@ class SessionStore:
         )
         return _summary(row) if row is not None else None
 
+    async def set_session_title(self, session_id: str, title: str) -> None:
+        await self._run(self._set_session_title_sync, session_id, title)
+
+    def _set_session_title_sync(self, session_id: str, title: str) -> None:
+        connection = self._connect()
+        with connection:
+            connection.execute(
+                "UPDATE sessions SET title = ?, last_active_at = ? WHERE session_id = ?",
+                (title, now_ms(), session_id),
+            )
+
     async def list_sessions(
         self,
         principal: str | None = None,

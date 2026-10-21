@@ -38,6 +38,7 @@ from ..events import (
     ConnectionEvent,
     ModesUpdated,
     PlanChanged,
+    SessionInfoChanged,
     ToolEvent,
     TurnCompleted,
     TurnStarted,
@@ -210,12 +211,6 @@ class ConnectScreen(Screen[None]):
         text = Text()
         text.append("harness", style="bold")
         text.append("  a terminal for ACP agents", style="dim")
-        text.append("\n")
-        text.append(
-            "Local agents run as separate processes over stdio; hosted agents speak "
-            "harness.acp.v1 over WebSocket.",
-            style="dim",
-        )
         self._banner.update(text)
 
     # ------------------------------------------------------------------ entries
@@ -769,6 +764,7 @@ class ChatScreen(Screen[None]):
         self.connected = client.connected
         self.busy = False
         self._usage: dict[str, Any] | None = None
+        self._session_title: str | None = None
         self._plan: tuple[tuple[str, str, str], ...] = ()
         self._commands: tuple[dict[str, Any], ...] = ()
         self._bindings_raw: list[dict[str, Any]] = []
@@ -883,7 +879,7 @@ class ChatScreen(Screen[None]):
 
     def _update_chrome(self) -> None:
         session_id = self.session.session_id if self.session else None
-        extension = self.client.extension.describe() if self.client else "not connected"
+        extension = ""
         model = ""
         option = model_option(self.session.config_options)
         if option:
@@ -897,7 +893,7 @@ class ChatScreen(Screen[None]):
             target_text=self.target.location_text(),
             agent_text=f"{self.client.agent_title} {self.client.agent_version}".strip(),
             extension_text=extension,
-            session_id=session_id,
+            session_id=self._session_title or session_id,
             connected=self.connected,
         )
         self.query_one("#statusbar", StatusBar).show(
@@ -950,6 +946,7 @@ class ChatScreen(Screen[None]):
     def _reset_activity(self) -> None:
         """Drop activity that belongs to the previous session or connection."""
         self._usage = None
+        self._session_title = None
         self._plan = ()
         self._commands = ()
         self._bindings_raw = []
@@ -1094,7 +1091,7 @@ class ChatScreen(Screen[None]):
         if isinstance(event, TurnCompleted):
             await pane.finish_message()
             self._set_busy(False)
-            if event.usage:
+            if event.usage and (not self._usage or self._usage.get("scope") != "session"):
                 self._usage = event.usage
                 self.query_one("#side-panel", SidePanel).activity.set_usage(event.usage)
             if event.stop_reason not in {"end_turn", ""}:
@@ -1146,7 +1143,20 @@ class ChatScreen(Screen[None]):
             self.session.current_mode_id = event.current_mode_id
             self._update_chrome()
             return
+        if isinstance(event, SessionInfoChanged):
+            if event.title:
+                self._session_title = event.title
+                self._update_chrome()
+                if not self._loading_session:
+                    self.refresh_sessions()
+            return
         if isinstance(event, UsageUpdated):
+            if (
+                self._usage
+                and self._usage.get("scope") == "session"
+                and event.summary.get("scope") != "session"
+            ):
+                return
             self._usage = event.summary
             self.query_one("#side-panel", SidePanel).activity.set_usage(event.summary)
             self._update_chrome()
@@ -1512,6 +1522,8 @@ class ChatScreen(Screen[None]):
             await self.app.choose_agent(self)  # type: ignore[attr-defined]
         elif name == "agents":
             await self._show_subagents()
+        elif name == "rename":
+            await self._rename_session(rest)
         elif name == "sessions":
             self.action_show_sessions()
         elif name == "plugins":
@@ -1527,6 +1539,43 @@ class ChatScreen(Screen[None]):
             self._show_settings()
         elif name == "help":
             self.action_help()
+
+    async def _rename_session(self, title: str) -> None:
+        if not self.client.extension.supports("_harness/session/rename"):
+            await self._notice("This agent does not support session renaming.", "warning")
+            return
+        if not title.strip():
+
+            def apply(values: dict[str, Any] | None) -> None:
+                if values:
+                    asyncio.create_task(self._rename_session(str(values["title"])))
+
+            self.app.push_screen(
+                FormDialog(
+                    "Rename session",
+                    "Choose a name for this conversation.",
+                    [
+                        {
+                            "name": "title",
+                            "title": "Session name",
+                            "kind": "string",
+                            "required": True,
+                            "default": self._session_title or "",
+                        }
+                    ],
+                ),
+                apply,
+            )
+            return
+        try:
+            renamed = await self.session.rename(title.strip())
+        except (HarnessClientError, ValueError) as exc:
+            await self._notice(str(exc), "error")
+            return
+        self._session_title = renamed
+        self._update_chrome()
+        self.refresh_sessions()
+        await self._notice(f"Session renamed to {self._session_title}.", "success")
 
     async def _stage_attachment(self, argument: str) -> None:
         """Stage or clear local files for the next prompt (explicit user action only)."""
@@ -1972,7 +2021,7 @@ class ChatScreen(Screen[None]):
         self.session = loaded
         self.app.session = loaded  # type: ignore[attr-defined]
         self._update_chrome()
-        await self._notice(f"Loaded session {session_id}. History came from the agent.", "success")
+        await self._notice(f"Loaded session {session_id}.", "success")
         self.query_one("#composer", Composer).focus()
         self._refresh_panels()
 
@@ -2369,7 +2418,7 @@ class ChatScreen(Screen[None]):
                     f" · effort {effort_label(result.effort)}" if result.effort is not None else ""
                 )
                 await self._notice(
-                    f"Model set to {wanted}{suffix}; it applies to the next message.",
+                    f"Model: {wanted}{suffix}",
                     "success",
                 )
                 return

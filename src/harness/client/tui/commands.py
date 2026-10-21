@@ -51,6 +51,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
         aliases=("capabilities",),
     ),
     LocalCommand("agents", "Inspect configured subagents and recent delegation"),
+    LocalCommand("rename", "Rename the current session", takes_argument=True),
     LocalCommand("sessions", "List, load, resume, close or delete sessions"),
     LocalCommand("permissions", "Choose how tool approvals are answered"),
     LocalCommand("settings", "Terminal preferences"),

@@ -19,6 +19,7 @@ EXTENSION_METHODS = (
     "_harness/configuration/get",
     "_harness/configuration/update",
     "_harness/configuration/changed",
+    "_harness/session/rename",
 )
 
 

@@ -602,7 +602,23 @@ class HostedSession:
                 f"The agent turn failed: {exc}",
                 {"type": type(exc).__name__},
             ) from exc
+        finally:
+            try:
+                await self.send_session_state()
+            except Exception:
+                _LOG.exception("failed to send session totals for %s", self.session_id)
         return schema.PromptResponse(stop_reason=stop_reason, usage=usage)
+
+    async def send_session_state(self) -> None:
+        summary = await self.host.manager.store.get_session(self.session_id)
+        usage = await self.runtime.usage_summary()
+        await self._send(
+            schema.SessionInfoUpdate(
+                session_update="session_info_update",
+                title=summary.title if summary else None,
+                field_meta={"harness": {"sessionUsage": usage}},
+            )
+        )
 
     def _stream(
         self, prompt: Any, deferred_results: DeferredToolResults | None
@@ -1125,6 +1141,7 @@ class HarnessHostAgent:
             self._sessions[session_id] = state
             await state.persist_meta()
             await self._replay_transcript(state)
+            await state.send_session_state()
             return schema.LoadSessionResponse(config_options=await self._standard_options(state))
         except HarnessError as exc:
             raise acp_map.harness_rpc_error(exc) from exc
@@ -1286,6 +1303,16 @@ class HarnessHostAgent:
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
+            if method == "harness/session/rename":
+                from harness.protocol.models import SessionTitleUpdate
+
+                request = SessionTitleUpdate.model_validate(params)
+                state = self._sessions.get(request.session_id)
+                if state is None:
+                    raise HarnessError("SESSION_CLOSED", "Load the session before renaming it.")
+                data = await state.runtime.set_title(request.title)
+                await state.send_session_state()
+                return {"sessionId": request.session_id, "title": data["title"]}
             if method == "harness/capabilities/list":
                 return await self._ext_capabilities_list(params or {})
             if method == "harness/plugins/list":

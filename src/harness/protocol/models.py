@@ -152,3 +152,10 @@ class ExtensionAdvertisement(WireModel):
 class RuntimeEvent(WireModel):
     type: str
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionTitleUpdate(WireModel):
+    """Idempotently replace the name of an open session."""
+
+    session_id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=120)

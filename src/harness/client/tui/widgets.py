@@ -826,9 +826,11 @@ class StatusBar(Static):
         text.append(
             "connected" if connected else "disconnected", style="bold" if connected else "dim"
         )
+        if usage:
+            text.append(f"   {usage}")
         if session_id:
             text.append("   session ")
-            text.append(session_id, style="bold")
+            text.append(session_id[:10], style="bold")
         if mode:
             text.append(f"   mode {mode}")
         if permission:
@@ -838,8 +840,6 @@ class StatusBar(Static):
             text.append(f"   model {model}")
         if effort:
             text.append(f"   effort {effort}")
-        if usage:
-            text.append(f"   {usage}")
         if busy:
             text.append("   working…", style="bold")
         if detail:
@@ -1650,15 +1650,9 @@ class ActivityPanel(VerticalScroll):
         if not summary:
             self._usage.update("No usage reported.")
             return
-        rendered = [
-            f"{key}: {value}"
-            for key, value in summary.items()
-            if key not in {"_meta", "cost"} and not isinstance(value, dict)
-        ]
-        cost = summary.get("cost")
-        if isinstance(cost, dict):
-            rendered.append(f"cost: {cost.get('amount')} {cost.get('currency', '')}".strip())
-        self._usage.update("\n".join(rendered) or "No usage reported.")
+        from .state import format_usage
+
+        self._usage.update("Session total\n" + format_usage(summary).replace(" · ", "\n"))
 
     def set_session(self, lines: list[str]) -> None:
         self._session.update("\n".join(lines))
