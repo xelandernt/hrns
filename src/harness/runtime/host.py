@@ -321,6 +321,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._turn_usage: dict[str, dict[str, Any]] = {}
         self._config_requests: dict[str, dict[str, tuple[str, ConfigurationSnapshot]]] = {}
         self._command_tasks: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
+        self._command_active: set[str] = set()
         self._command_results: dict[str, OrderedDict[str, tuple[str, dict[str, Any]]]] = {}
         self._command_locks: dict[str, asyncio.Lock] = {}
         self._pending_initial: list[Any] | None = None
@@ -367,15 +368,21 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self, session_id: str, **kwargs: Any
     ) -> schema.CloseSessionResponse | None:
         response = await super().close_session(session_id, **kwargs)
+        cancelled: list[asyncio.Task[dict[str, Any]]] = []
         for key, task in list(self._command_tasks.items()):
             if key[0] == session_id:
                 task.cancel()
+                cancelled.append(task)
                 self._command_tasks.pop(key, None)
+        for task in cancelled:
+            with contextlib.suppress(BaseException):
+                await task
         self._compositions.pop(session_id, None)
         self._turn_locks.pop(session_id, None)
         self._config_requests.pop(session_id, None)
         self._command_results.pop(session_id, None)
         self._command_locks.pop(session_id, None)
+        self._command_active.discard(session_id)
         return response
 
     def _turn_lock(self, session_id: str) -> asyncio.Lock:
@@ -888,13 +895,44 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                     )
                 return cached[1]
             existing = self._command_tasks.get(key)
-            task = existing or asyncio.create_task(
-                self._execute_command(request, digest), name=f"harness-command-{key[1]}"
-            )
             if existing is None:
+                if request.session_id in self._command_active:
+                    raise HarnessError(
+                        "COMMAND_BUSY",
+                        "The session is already running another plugin command.",
+                        details={"sessionId": request.session_id},
+                    )
+                if self._turn_lock(request.session_id).locked():
+                    raise HarnessError(
+                        "COMMAND_BUSY",
+                        "The session is already running a turn.",
+                        details={"sessionId": request.session_id},
+                    )
+                task = asyncio.create_task(
+                    self._execute_command(request, digest),
+                    name=f"harness-command-{key[1]}",
+                )
                 self._command_tasks[key] = task
-                task.add_done_callback(lambda _: self._command_tasks.pop(key, None))
-        return await asyncio.shield(task)
+                self._command_active.add(request.session_id)
+
+                def _finished(_: Any, *, key: tuple[str, str] = key) -> None:
+                    self._command_tasks.pop(key, None)
+                    if not any(item[0] == key[0] for item in self._command_tasks):
+                        self._command_active.discard(key[0])
+
+                task.add_done_callback(_finished)
+            else:
+                task = existing
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise HarnessError(
+                    "COMMAND_CANCELLED",
+                    "The command was cancelled before it completed.",
+                    details={"sessionId": request.session_id, "requestId": request.request_id},
+                ) from None
+            raise
 
     async def _execute_command(self, request: CommandInvokeRequest, digest: str) -> dict[str, Any]:
         session_id = request.session_id

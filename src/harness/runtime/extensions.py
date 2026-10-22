@@ -136,7 +136,11 @@ class Command(Generic[ArgsT]):
 
     @property
     def takes_arguments(self) -> bool:
-        return self.args_model is not TextArguments or bool(self.arguments_hint)
+        return (
+            self.args_model is not TextArguments
+            or bool(self.arguments_hint)
+            or self.parser is not None
+        )
 
     def parse_text(self, text: str) -> dict[str, Any]:
         """Turn slash-tail text into a mapping for ``args_model``."""
