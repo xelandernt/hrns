@@ -94,9 +94,13 @@ class HarnessApp(App[int]):
 
     /* ------------------------------------------------------- chat layout */
 
-    #main { height: 1fr; }
+    #main {
+        height: 1fr;
+        layers: base drawer;
+    }
 
     #transcript {
+        layer: base;
         width: 1fr;
         padding: 1 2;
         scrollbar-size-vertical: 1;
@@ -168,6 +172,9 @@ class HarnessApp(App[int]):
     /* --------------------------------------------------------- side panel */
 
     #side-panel {
+        layer: drawer;
+        dock: right;
+        height: 1fr;
         width: 46%;
         min-width: 36;
         max-width: 76;
@@ -194,12 +201,6 @@ class HarnessApp(App[int]):
         height: auto;
         max-height: 4;
     }
-    .panel-detail {
-        padding: 1;
-        color: $foreground;
-        height: auto;
-        max-height: 16;
-    }
     .panel-hint {
         padding: 0 1 1 1;
         color: $text-muted;
@@ -210,6 +211,10 @@ class HarnessApp(App[int]):
         height: auto;
         max-height: 14;
         scrollbar-size-vertical: 1;
+    }
+    #binding-list {
+        height: 1fr;
+        max-height: 1fr;
     }
     #binding-list:focus, #choice-list:focus, #command-list:focus, #permission-options:focus,
     #approval-options:focus {

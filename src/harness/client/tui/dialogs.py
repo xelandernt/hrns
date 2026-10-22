@@ -816,12 +816,6 @@ class SettingsDialog(_FormMixin, _DialogBase):
                     "default": settings.show_thoughts,
                 },
                 {
-                    "name": "panel",
-                    "title": "Show side panel",
-                    "kind": "boolean",
-                    "default": settings.side_panel,
-                },
-                {
                     "name": "permission",
                     "title": "Tool approvals",
                     "kind": "select",
@@ -856,7 +850,6 @@ class SettingsDialog(_FormMixin, _DialogBase):
                 theme=str(rows["theme"].value()),
                 auto_expand_tools=bool(rows["expand"].value()),
                 show_thoughts=bool(rows["thoughts"].value()),
-                side_panel=bool(rows["panel"].value()),
                 permission_mode=str(rows["permission"].value()),
             )
         )

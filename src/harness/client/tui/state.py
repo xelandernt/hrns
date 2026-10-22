@@ -27,7 +27,6 @@ __all__ = [
     "merge_tool_event",
     "model_option",
     "option_values",
-    "pending_application_text",
     "permission_mode_label",
     "presentation_payload",
     "tool_args_preview",
@@ -565,19 +564,6 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
     return state
 
 
-def pending_application_text(binding: dict[str, Any], snapshot: dict[str, Any] | None) -> str:
-    if not binding.get("pending"):
-        return ""
-    active = binding.get("activeEnabled")
-    if active is None:
-        return "Selected change applies at the next turn."
-    if bool(active) != bool(binding["enabled"]):
-        wanted = "on" if binding["enabled"] else "off"
-        current = "on" if active else "off"
-        return f"Selected {wanted} for the next turn; still {current} in the active revision."
-    return ""
-
-
 def build_form_fields(
     schema: dict[str, Any], current: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
@@ -671,7 +657,6 @@ class Settings:
     theme: str = "harness"
     auto_expand_tools: bool = False
     show_thoughts: bool = False
-    side_panel: bool = True
     permission_mode: str = "ask"
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -687,7 +672,6 @@ class Settings:
                 mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))
             ),
             show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
-            side_panel=bool(mapping.get("sidePanel", mapping.get("side_panel", True))),
             permission_mode=mode,
         )
 
@@ -696,6 +680,5 @@ class Settings:
             "theme": self.theme,
             "auto_expand_tools": self.auto_expand_tools,
             "show_thoughts": self.show_thoughts,
-            "side_panel": self.side_panel,
             "permission_mode": self.permission_mode,
         }
