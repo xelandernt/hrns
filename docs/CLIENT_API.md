@@ -31,7 +31,7 @@ Type `@` in the composer to fuzzy-find and attach a client-side workspace file. 
 
 Submitting while a turn runs queues a follow-up with its own attachments (up to 20 pending messages). Use **Edit** or **Remove** on the selected queue item. Successful turns send pending messages in order; cancellation, errors, and restored sessions pause the queue until **Resume queue** is selected. Editing requires an empty composer so it cannot overwrite a draft. Prompts, drafts, attachments, and pending queues are kept per session in memory for the lifetime of the app; `Up`/`Down` at editor boundaries recall submitted prompts and restore the unfinished draft.
 
-Scrolling upward pauses transcript following. The **New output** button or `Ctrl+End` jumps to the latest output and resumes following. `Alt+Up`/`Alt+Down` jump between user messages. `Ctrl+F` or `/find QUERY` searches retained messages, tool details, and reasoning; selecting a result jumps to its block. `/copy` copies the latest completed assistant response; completed responses also offer **Copy response** and **Copy code** actions. Clipboard copying uses the terminal's clipboard support. In the sessions panel, `/` focuses the title/workspace filter, `Enter` returns to the results, and `Esc` clears the filter. The current session is marked with `●`, and timestamps show relative ages.
+Scrolling upward pauses transcript following. The **New output** button or `Ctrl+End` jumps to the latest output and resumes following. `Alt+Up`/`Alt+Down` jump between user messages. `Ctrl+F` or `/find QUERY` searches retained messages, tool details, and reasoning; selecting a result jumps to its block. `/copy` copies the latest completed assistant response; every completed response also fades in a right-aligned **Copy response** action. Clipboard copying uses the terminal's clipboard support. In the sessions panel, `/` focuses the title/workspace filter, `Enter` returns to the results, and `Esc` clears the filter. The current session is marked with `●`, and timestamps show relative ages.
 
 The plugins panel displays host-policy state, dependencies, lifecycle mode, and locked reasons. A Harness host advertises revision-checked configuration updates: `Space` toggles an offered binding, `e` edits allowed fields, and successful edits apply at the next turn boundary. Model and reasoning-effort changes use standard ACP configuration options. `Ctrl+B` shows or hides the side panel, `F2`/`F3`/`F4` jump to plugins, sessions, or activity, and `Tab`/`Shift+Tab` cycle those panels while focus is inside the side panel.
 
@@ -187,12 +187,19 @@ hrns run --server team --agent form-agent \
 
 ## Local renderers
 
-`RendererRegistry` resolves versioned presentation payloads against locally installed
-`harness.renderers` entry points named `<rendererId>@<schemaVersion>`. A remote peer supplies
-only an ID, version, JSON data and readable fallback — never an import path or widget code.
-Unknown versions, missing adapters and adapter exceptions all return the sanitized fallback.
-Rendered text strips terminal escapes, control characters and bidi overrides and is bounded.
-Generic ACP activity rendering remains available without any renderer installed.
+`RendererRegistry` resolves versioned presentation identifiers against locally installed
+`harness.renderers` entry points named `<rendererId>@<schemaVersion>`. Each entry point is a
+provider object with optional, independent `command_view` and `tool_view` factories. A remote
+peer supplies only an ID, version, JSON data and readable fallback — never an import path or
+widget code. Unknown versions, missing factories and factory/apply exceptions all return the
+sanitized fallback. Rendered fallback text strips terminal escapes, control characters and
+bidi overrides and is bounded. Generic ACP activity rendering remains available without any
+provider installed. See [EXTENSIONS.md](EXTENSIONS.md).
+
+Plugin commands are discovered with `_harness/commands/list` and invoked with
+`_harness/commands/invoke`; direct output renders as a distinct inline command block. The
+client-side SDK exposes `SessionProxy.list_commands`, `invoke_command`, `cancel_command` and
+`presentations`.
 
 ## Bridge and SSH
 

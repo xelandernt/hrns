@@ -13,9 +13,7 @@ from pydantic import Field, JsonValue, model_validator
 
 from .models import BindingId, PresentationPayload, WireModel
 
-CommandName = Annotated[
-    str, Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
-]
+CommandName = Annotated[str, Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")]
 """Local command name; a namespace separator is supplied by the binding id."""
 
 #: Conversation operations this protocol version can actually perform.

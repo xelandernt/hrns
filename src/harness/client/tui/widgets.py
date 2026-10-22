@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections import deque
@@ -41,6 +42,7 @@ from .state import (
     binding_summary,
     config_option_value,
     is_subagent_tool,
+    merge_presentation,
     merge_tool_event,
     pending_application_text,
     presentation_payload,
@@ -396,6 +398,8 @@ class TranscriptPane(VerticalScroll):
         # loop, which is where the tool-card registry is kept consistent.
         self._blocks: deque[Any] = deque()
         self._tools: dict[str, "ToolCard"] = {}
+        # Supplemental snapshots can arrive before the standard ACP tool-call start.
+        self._pending_presentations: dict[str, Any] = {}
         self._stream: "MessageBlock | None" = None
         self._stream_buffer = ""
         self._thought: "ReasoningBlock | None" = None
@@ -404,6 +408,8 @@ class TranscriptPane(VerticalScroll):
         self._replay = False
         self._replay_entries: list[tuple[str, Any]] = []
         self.auto_expand_tools = False
+        #: Session-scoped context for explicit plugin-widget actions.
+        self.view_context: Any = None
         #: Expand reasoning text (the Thinking/Thought row appears either way).
         self.show_thoughts = False
         self._ticker: Any = None
@@ -508,6 +514,7 @@ class TranscriptPane(VerticalScroll):
             data,
             auto_expand=self.auto_expand_tools,
             renderer=self.renderers,
+            view_context=self.view_context,
         )
 
     # ------------------------------------------------------------- mounting
@@ -520,6 +527,7 @@ class TranscriptPane(VerticalScroll):
             if isinstance(oldest, ToolCard):
                 # Evicted cards must not linger in the update registry.
                 self._tools.pop(oldest.tool_call_id, None)
+                self._pending_presentations.pop(oldest.tool_call_id, None)
             if oldest is self._stream or oldest is self._thought:
                 self._blocks.append(oldest)
                 break
@@ -548,6 +556,20 @@ class TranscriptPane(VerticalScroll):
             return
         self._end_thought()
         self._end_agent_stream()
+        if view is None and self.view_context is not None:
+            from .extensions import CommandViewState, build_view
+
+            payload = data.get("presentation")
+            if payload is not None:
+                state = CommandViewState(
+                    session_id=str(data.get("sessionId") or ""),
+                    binding_id=str(data.get("bindingId") or ""),
+                    command_name=str(data.get("commandName") or ""),
+                    presentation=payload if isinstance(payload, dict) else None,
+                    fallback=str(data.get("fallback") or ""),
+                    request_id=data.get("requestId"),
+                )
+                view = build_view(self.renderers, payload, "command", state, self.view_context)
         await self._mount_block(CommandResultBlock(data, view=view))
 
     def command_blocks(self) -> list[CommandResultBlock]:
@@ -621,6 +643,9 @@ class TranscriptPane(VerticalScroll):
         self._end_thought()
         self._end_agent_stream()
         merged = merge_tool_event(None, event)
+        snapshot = self._pending_presentations.pop(merged["toolCallId"], None)
+        if snapshot is not None:
+            merged = merge_presentation(merged, snapshot)
         card = self._tool_card(merged)
         self._tools[merged["toolCallId"]] = card
         await self._mount_block(card)
@@ -641,7 +666,11 @@ class TranscriptPane(VerticalScroll):
         if card is None:
             await self.start_tool(event)
             return
-        card.update_from(merge_tool_event(card.data, event))
+        merged = merge_tool_event(card.data, event)
+        snapshot = self._pending_presentations.pop(event.tool_call_id, None)
+        if snapshot is not None:
+            merged = merge_presentation(merged, snapshot)
+        card.update_from(merged)
         self._output_updated()
 
     def _replay_tool(self, tool_call_id: str) -> dict[str, Any] | None:
@@ -664,6 +693,35 @@ class TranscriptPane(VerticalScroll):
         self._tools[data.get("toolCallId", "")] = card
         await self._mount_block(card)
 
+    async def apply_presentation(self, snapshot: Any) -> None:
+        """Merge a supplemental snapshot into the matching live or replayed tool card."""
+        tool_id = getattr(snapshot, "tool_call_id", "")
+        if not tool_id:
+            return
+        if self._replay:
+            for index in range(len(self._replay_entries) - 1, -1, -1):
+                kind, payload = self._replay_entries[index]
+                if kind == "tool" and payload.get("toolCallId") == tool_id:
+                    self._replay_entries[index] = (
+                        "tool",
+                        merge_presentation(payload, snapshot),
+                    )
+                    return
+            self._pending_presentations[tool_id] = snapshot
+            self._bound_pending()
+            return
+        card = self._tools.get(tool_id)
+        if card is not None:
+            card.update_from(merge_presentation(card.data, snapshot))
+            self._output_updated()
+            return
+        self._pending_presentations[tool_id] = snapshot
+        self._bound_pending()
+
+    def _bound_pending(self) -> None:
+        while len(self._pending_presentations) > UI_MAX_TRANSCRIPT_BLOCKS:
+            self._pending_presentations.pop(next(iter(self._pending_presentations)))
+
     async def clear_transcript(self) -> None:
         self._stream = None
         self._thought = None
@@ -674,6 +732,7 @@ class TranscriptPane(VerticalScroll):
         self.anchor()
         self.post_message(OutputPending(False))
         self._tools.clear()
+        self._pending_presentations.clear()
         self._blocks.clear()
         await self.remove_children()
 
@@ -706,6 +765,14 @@ class TranscriptPane(VerticalScroll):
 
     def replay_entries(self) -> list[tuple[str, Any]]:
         return list(self._replay_entries)
+
+    def retained_tool_ids(self) -> list[str]:
+        """Tool-call ids retained in the transcript, for passive presentation replay."""
+        ids: list[str] = []
+        for block in self._blocks:
+            if isinstance(block, ToolCard) and block.tool_call_id:
+                ids.append(block.tool_call_id)
+        return ids
 
 
 class MessageBlock(Vertical):
@@ -948,10 +1015,14 @@ class ToolCard(Vertical):
         *,
         auto_expand: bool = False,
         renderer: RendererRegistry | None = None,
+        view_context: Any = None,
     ) -> None:
         super().__init__()
         self.data = dict(data)
         self.renderer = renderer
+        self.view_context = view_context
+        self._view: Any = None
+        self._view_built = False
         self._expanded = bool(auto_expand)
         self._started = time.monotonic()
         self._finished: float | None = None
@@ -965,10 +1036,35 @@ class ToolCard(Vertical):
         self._full = Static("", markup=False)
         self._full.add_class("tool-output-expanded")
         self.add_class("tool-card")
+        self._build_view()
         self._refresh()
+
+    def _build_view(self) -> None:
+        from .extensions import build_view
+
+        if self._view_built or self.renderer is None or self.view_context is None:
+            return
+        self._view_built = True
+        payload = (
+            self.data.get("presentationOutput")
+            or self.data.get("presentationInput")
+            or self.data.get("presentationProgress")
+            or presentation_payload(self.data)
+        )
+        if payload is None:
+            return
+        self._view = build_view(
+            self.renderer,
+            payload,
+            "tool",
+            self._view_state(),
+            self.view_context,
+        )
 
     def compose(self) -> ComposeResult:
         yield self._header
+        if self._view is not None:
+            yield self._view.widget
         yield self._preview
         yield self._full
 
@@ -979,6 +1075,43 @@ class ToolCard(Vertical):
 
     def on_unmount(self) -> None:
         self._stop_spinner()
+        self._view = None
+
+    def _view_state(self) -> Any:
+        from .extensions import ToolViewState
+
+        return ToolViewState(
+            session_id=str(self.data.get("sessionId") or ""),
+            tool_call_id=self.tool_call_id,
+            title=str(self.data.get("title") or ""),
+            kind=str(self.data.get("kind") or ""),
+            status=str(self.data.get("status") or ""),
+            raw_input=self.data.get("raw_input"),
+            raw_output=self.data.get("raw_output"),
+            input=self.data.get("presentationInput"),
+            output=self.data.get("presentationOutput"),
+            progress=self.data.get("presentationProgress"),
+            fallback=str(self.data.get("presentationFallback") or ""),
+            revision=int(self.data.get("presentationRevision") or 0),
+            live=self._is_pending(),
+            binding_id=self.data.get("bindingId"),
+        )
+
+    def _apply_view(self) -> bool:
+        if self._view is None:
+            return False
+        if not self.is_mounted:
+            return True
+        try:
+            self._view.apply(self._view_state())
+        except Exception:
+            # A failing plugin widget degrades to the generic tool body; the outer
+            # identity, status and approval handling stay usable.
+            with contextlib.suppress(Exception):
+                self._view.widget.display = False
+            self._view = None
+            return False
+        return True
 
     @property
     def tool_call_id(self) -> str:
@@ -1057,18 +1190,12 @@ class ToolCard(Vertical):
 
     def _detail_text(self, source: str) -> str:
         generic = readable_text(source).strip()
-        rendered = generic
         payload = presentation_payload(self.data)
         if payload is not None:
-            if self.renderer is None:
-                fallback = payload.get("fallback")
-                rendered = readable_text(fallback) if fallback else generic
-            else:
-                candidate = dict(payload)
-                if not candidate.get("fallback"):
-                    candidate["fallback"] = generic
-                rendered = self.renderer.render(candidate, fallback=generic or "Activity")
-        return rendered.strip()
+            fallback = self.data.get("presentationFallback") or payload.get("fallback")
+            if fallback:
+                return readable_text(fallback).strip()
+        return generic
 
     def _render_header(self) -> None:
         self._header.update(self._header_text())
@@ -1096,6 +1223,7 @@ class ToolCard(Vertical):
     def _render_body(self) -> None:
         # The preview is the result only, while the expanded view also carries
         # the full argument payload when the peer supplies one.
+        custom = self._apply_view()
         preview_source = self.data.get("result") or self.data.get("detail") or ""
         full_source = self.data.get("detail") or self.data.get("result") or ""
         raw_input = self.data.get("raw_input")
@@ -1115,8 +1243,10 @@ class ToolCard(Vertical):
         self._preview.update(self._render_lines(preview_lines, limit=TOOL_PREVIEW_LINES))
         self._full.update(self._render_lines(full_lines, limit=None))
 
-        preview_visible = bool(preview_lines) and not self._expanded and not self._is_pending()
-        full_visible = bool(full_lines) and self._expanded
+        preview_visible = (
+            bool(preview_lines) and not self._expanded and not self._is_pending() and not custom
+        )
+        full_visible = bool(full_lines) and self._expanded and not custom
         self._preview.set_class(preview_visible, "visible")
         self._full.set_class(full_visible, "visible")
 

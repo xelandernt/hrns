@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harness-example-status"
+version = "0.1.0"
+description = "Example Harness plugin: user-only commands and an independent tool view"
+requires-python = ">=3.11"
+dependencies = ["harness[runtime]"]
+
+[project.optional-dependencies]
+ui = ["harness[client]"]
+
+[project.entry-points."harness.capabilities"]
+example_status = "example_status:descriptor"
+
+[project.entry-points."harness.renderers"]
+"example.git.status@1" = "example_status.tui:provider"
+"example.echo@1" = "example_status.tui:provider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/example_status"]

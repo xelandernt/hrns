@@ -127,6 +127,11 @@ transcript, and selected model.
 
 `SessionRecord` carries host metadata: `cwd`, `title`, `effort`, `model`, selected `bindings`,
 usage totals, and timestamps. The current `ConfigurationSnapshot` and binding descriptors are
+Commands contributed by a binding are defined with `Command`/`CommandContext` from
+`harness.runtime` (see [EXTENSIONS.md](EXTENSIONS.md)). They are user-only application
+actions: the runtime validates arguments and the active revision, then runs the handler under
+the session's existing turn lock without creating a model request or tool event.
+
 served through the `_harness` extension; updates are applied in memory and persisted through
 the `bindings` column.
 
