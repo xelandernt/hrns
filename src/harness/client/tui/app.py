@@ -401,27 +401,58 @@ class HarnessApp(App[int]):
     .dialog-error {
         color: $error;
         height: auto;
-        padding: 0 0 1 0;
     }
     .form-scroll {
         height: auto;
-        max-height: 18;
+        max-height: 16;
         scrollbar-size-vertical: 1;
     }
-    .field-label {
-        padding-top: 1;
+    .field-row {
+        height: 1;
+    }
+    .field-row:focus,
+    .field-row:focus-within {
+        background: $boost 35%;
+    }
+    .field-gutter {
+        width: 2;
+        color: $text-muted;
+    }
+    .field-row:focus .field-gutter,
+    .field-row:focus-within .field-gutter {
+        color: $accent;
         text-style: bold;
     }
-    .field-help {
+    .field-name {
+        width: 26;
+        padding-right: 1;
+        color: $text-muted;
+    }
+    .field-row:focus .field-name,
+    .field-row:focus-within .field-name {
+        color: $text;
+    }
+    .field-value {
+        width: 1fr;
+        color: $text;
+    }
+    .field-row Input {
+        width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0;
+        background: transparent;
+    }
+    .field-row Input:focus {
+        border: none;
+        background: transparent;
+    }
+    .field-focus-help {
         color: $text-muted;
         height: auto;
-    }
-    .button-row {
-        height: auto;
+        max-height: 3;
         padding-top: 1;
-        align-horizontal: right;
     }
-    .button-row Button { margin-left: 1; }
     .permission-detail {
         height: auto;
         max-height: 8;

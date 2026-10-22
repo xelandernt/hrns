@@ -3071,6 +3071,10 @@ class ChatScreen(Screen[None]):
 | `F3` | sessions panel |
 | `F4` | activity panel |
 | `Tab` / `Shift+Tab` inside the side panel | switch between plugins, sessions and activity |
+| `Up` / `Down` or `Tab` in a form | move between fields |
+| `Left` / `Right` in a form | change a choice or toggle a switch |
+| `Enter` in a form | save and close |
+| `Esc` in a form | cancel without saving |
 | `Ctrl+T` | focus the transcript for scrolling; `Esc` returns to the composer |
 | `Ctrl+F` | find text in retained messages, tools, and reasoning |
 | `Alt+Up` / `Alt+Down` | jump to the previous / next user message |

@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from textual.widgets import Input, Select
-
 from harness.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
@@ -135,14 +133,12 @@ class LocalModelDialog(FormDialog):
         if current_provider and current_provider not in providers:
             providers.insert(0, current_provider)
         provider_known = current_provider in providers
-        provider_value = current_provider if provider_known else Select.NULL
-        provider_custom = ""
+        provider_value = current_provider if provider_known else ""
 
         selected_provider = current_provider if provider_known else ""
         models = self._models_for(selected_provider)
         model_known = bool(settings.model) and settings.model in models
-        model_value = settings.model if model_known else ("" if not models else Select.NULL)
-        model_custom = ""
+        model_value = settings.model if model_known else ""
         model_options = self._model_options(selected_provider)
 
         fields = [
@@ -161,7 +157,7 @@ class LocalModelDialog(FormDialog):
                 "provider_custom",
                 "Override provider (optional)",
                 description="Takes precedence over the provider list.",
-                default=provider_custom,
+                default="",
             ),
             _field(
                 "model",
@@ -178,7 +174,7 @@ class LocalModelDialog(FormDialog):
                 "model_custom",
                 "Override model (optional)",
                 description="Takes precedence over the model list.",
-                default=model_custom,
+                default="",
             ),
             _field(
                 "effort",
@@ -234,6 +230,7 @@ class LocalModelDialog(FormDialog):
                 "Runs file tools and commands on this machine, with approval prompts. "
                 "HARNESS_LOCAL_* environment variables override saved settings."
             ),
+            on_change=self._field_changed,
         )
 
     def _models_for(self, provider: str) -> tuple[str, ...]:
@@ -251,50 +248,38 @@ class LocalModelDialog(FormDialog):
         return [(model, model) for model in models]
 
     def _refresh_models(self, provider: str) -> None:
-        select = self._widgets.get("model")
-        if not isinstance(select, Select):
+        row = self._rows_by_name.get("model")
+        if row is None:
             return
         models = self._models_for(provider)
-        current = select.value if isinstance(select.value, str) else ""
-        select.set_options(self._model_options(provider))
-        if current and current in models:
-            select.value = current
-        else:
-            select.value = "" if not models else Select.NULL
+        current = str(row.value() or "")
+        row.set_choices(self._model_options(provider), selected=current if current in models else "")
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select is not self._widgets.get("provider"):
-            return
-        provider = event.value if isinstance(event.value, str) else ""
-        if provider == self._current_provider:
+    def _field_changed(self, row: Any, rows: dict[str, Any]) -> None:
+        if row.field_name == "provider":
+            provider = str(row.value() or "")
+            if provider == self._current_provider:
+                self._refresh_models(provider)
+                return
+            self._current_provider = provider
+            self._reset_provider_fields()
             self._refresh_models(provider)
-            return
-        self._current_provider = provider
-        self._reset_provider_fields()
-        self._refresh_models(provider)
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input is not self._widgets.get("provider_custom"):
-            return
-        self._reset_provider_fields(include_custom=False)
-        provider = event.value.strip()
-        if not provider:
-            selected = self._widgets.get("provider")
-            value = selected.value if isinstance(selected, Select) else ""
-            provider = value if isinstance(value, str) else ""
-        self._refresh_models(provider)
+        elif row.field_name == "provider_custom":
+            self._reset_provider_fields(include_custom=False)
+            provider = str(row.value() or "").strip() or str(rows["provider"].value() or "")
+            self._refresh_models(provider)
 
     def _reset_provider_fields(self, *, include_custom: bool = True) -> None:
         names = ["model_custom", "api_key", "api_key_env", "base_url"]
         if include_custom:
             names.append("provider_custom")
         for name in names:
-            widget = self._widgets.get(name)
-            if isinstance(widget, Input):
-                widget.value = ""
+            row = self._rows_by_name.get(name)
+            if row is not None:
+                row.set_value("")
 
     def action_accept_form(self) -> None:
-        values, error = _collect_fields(self.fields, self._widgets)
+        values, error = _collect_fields(self.fields, self._rows_by_name)
         if error or values is None:
             self.show_error(error or "The form has no values.")
             return
