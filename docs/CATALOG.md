@@ -202,7 +202,8 @@ tool name (`web_search`) collides with Exa/You.com search; use one per agent or 
 | Pydantic AI docs | `harness.pydantic_ai_docs` | `pydantic_ai_harness.pydantic_ai_docs:PydanticAIDocs` | verified | `PydanticAIDocsConfig` | opt. `workspace` | next_turn/run |
 
 `harness.skills` is verified because the `harness[runtime]` extra already depends on PyYAML; the upstream
-`[skills]` extra exists for other distributions. Memory content and skill bodies are
+`[skills]` extra exists for other distributions. Skill directories must be a nonempty list
+of nonblank paths. Memory content and skill bodies are
 model-visible untrusted data: bind trusted stores and libraries only.
 
 ### Interaction and controls
@@ -352,6 +353,10 @@ objects, not standalone managed capabilities; the managed surface is the core
 Both starters are ordinary `AgentDefinition` objects in `harness.runtime.starters`; the editable
 YAML copies live in `examples/starters/`. Manifest loading validates every plugin id and
 configuration against this catalog.
+
+The developer starter enables `list_files` and `grep`, limits file reads to 16,000 characters,
+and permits three file-tool retries. See [file editing and skills](EDITING.md) for the editing
+workflow, managed limits, and comparison with Codex.
 
 | Binding | Developer default | Research default | Notes |
 | --- | --- | --- | --- |

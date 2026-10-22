@@ -100,6 +100,18 @@ _DEVELOPER_INSTRUCTIONS = """\
 You are a software engineering agent working in the bound workspace.
 
 - Read the repository before changing it; follow AGENTS.md / CLAUDE.md guidance.
+- Use list_files and grep to locate code, then read_file to inspect it. Read any nested
+  repository instructions before editing files in that directory.
+- Prefer edit_file for existing files and write_file for new files. Copy old_text exactly
+  from a read, without line-number prefixes, and include enough context to match once.
+  Use replacements for several edits to one file; they apply in order and are written only
+  after every replacement matches. This does not make changes across files atomic.
+- When content hashes are available, pass the latest hash as expected_hash on edits and
+  overwrites. On a conflict or failed match, reread the file and adjust the edit.
+- Preserve unrelated user changes. Inspect the resulting diff before reporting completion.
+- Load an available skill with load_capability when the user names it (including $skill-name)
+  or its description matches the task. Follow its instructions, resolve bundled references
+  and scripts from the skill's directory, and read only the supporting files needed.
 - Plan multi-step work and keep the plan current while you work.
 - Prefer small, verifiable changes and run the project's tests before reporting success.
 - Use shell commands deliberately: the workspace is the only execution location.
@@ -206,7 +218,26 @@ def developer_bindings() -> list[DefinitionBinding]:
             enabled=True,
             client_can_toggle=False,
         ),
-        _binding("filesystem", "harness.filesystem", {"read_only": False}, enabled=True),
+        _binding(
+            "filesystem",
+            "harness.filesystem",
+            {
+                "read_only": False,
+                "max_read_chars": 16_000,
+                "max_retries": 3,
+                "tools": [
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "list_directory",
+                    "list_files",
+                    "grep",
+                    "create_directory",
+                    "file_info",
+                ],
+            },
+            enabled=True,
+        ),
         _binding("shell", "harness.shell", {"default_timeout": 30.0}, enabled=True),
         _binding("planning", "harness.planning", {"enable_subtasks": True}, enabled=True),
         _binding("repo_context", "harness.repo_context", {"nested_traversal": True}, enabled=True),

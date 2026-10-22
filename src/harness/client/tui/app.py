@@ -102,6 +102,11 @@ class HarnessApp(App[int]):
         scrollbar-size-vertical: 1;
     }
     #transcript:focus { border: none; }
+    #new-output {
+        height: 1; min-height: 1; border: none; margin: 0 2; width: auto;
+    }
+    .navigation-target { background: $accent 10%; }
+    #transcript-results { height: 1fr; min-height: 4; }
 
     .role-you,
     .role-agent {
@@ -522,20 +527,27 @@ class HarnessApp(App[int]):
             else:
                 await screen.session.prompt(text)
         except InteractionRequired as exc:
+            screen._queue_paused = True
             if screen in self.screen_stack:
                 await screen._notice(exc.message, "error")
         except asyncio.CancelledError:
+            screen._queue_paused = True
             raise
         except HarnessClientError as exc:
+            screen._queue_paused = True
             if screen in self.screen_stack and screen.connected:
                 await screen._notice(f"Turn failed: {exc.message}", "error")
         except Exception as exc:  # protocol/transport surprises must be recoverable
+            screen._queue_paused = True
             logging.getLogger(__name__).exception("turn failed")
             if screen in self.screen_stack:
                 await screen._notice(f"Turn failed: {exc}", "error")
         finally:
             if screen in self.screen_stack:
+                await screen._events.join()
                 screen._set_busy(False)
+                screen._refresh_queue()
+                self.call_later(screen.send_next_queued)
 
     async def choose_agent(self, screen: ChatScreen) -> None:
         if screen.busy:
@@ -560,14 +572,12 @@ class HarnessApp(App[int]):
         """
         decision = auto_permission(self.settings.permission_mode, request)
         if decision is not None:
-            await self._audit_permission(request)
             return decision
 
         async with self._approval_lock:
             # The mode may have changed while this request waited for the lock.
             decision = auto_permission(self.settings.permission_mode, request)
             if decision is not None:
-                await self._audit_permission(request)
                 return decision
             if not self.screen_stack:
                 return PermissionDecision(option_id=None)
@@ -584,14 +594,6 @@ class HarnessApp(App[int]):
             if isinstance(screen, ChatScreen):
                 return screen
         return None
-
-    async def _audit_permission(self, request: PermissionRequest) -> None:
-        screen = self._chat_screen()
-        if screen is None:
-            return
-        kind = request.kind or "tool"
-        with contextlib.suppress(Exception):
-            await screen._notice(f"Auto-approved {kind}: {request.summary()}", "info")
 
     async def _ask_permission_dialog(self, request: PermissionRequest) -> PermissionDecision:
         future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()

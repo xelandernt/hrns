@@ -13,6 +13,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from acp import schema
@@ -34,6 +35,13 @@ __all__ = [
 ]
 
 _MESSAGES = TypeAdapter(list[ModelMessage])
+
+#: Priced amount for a usage total, kept as a decimal string so JSON round-trips exactly.
+USAGE_COST = "cost"
+#: Display status derived in :func:`finalize_usage`.
+USAGE_STATUS = "cost_status"
+#: Counter an earlier build wrote next to the price; dropped on merge and on emit.
+_LEGACY_UNPRICED = "unpriced_requests"
 
 #: Public ``session/update`` payload classes, keyed by their discriminator value.
 _UPDATE_TYPES: dict[str, type[Any]] = {
@@ -110,7 +118,7 @@ class SessionRecord:
     effort: str | None = None
     model: str | None = None
     bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
-    usage: dict[str, int] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
     created_at: int = 0
     last_active_at: int = 0
 
@@ -152,7 +160,7 @@ class SessionStore(ABC):
         title: str | None = None,
         effort: str | None = None,
         bindings: Mapping[str, Mapping[str, Any]] | None = None,
-        usage: Mapping[str, int] | None = None,
+        usage: Mapping[str, Any] | None = None,
         touch: bool = False,
     ) -> None: ...
 
@@ -209,7 +217,7 @@ class ScopedSessionStore:
         title: str | None = None,
         effort: str | None = None,
         bindings: Mapping[str, Mapping[str, Any]] | None = None,
-        usage: Mapping[str, int] | None = None,
+        usage: Mapping[str, Any] | None = None,
         touch: bool = False,
     ) -> None:
         await self.backend.update(
@@ -240,11 +248,30 @@ def record_from_mapping(data: Mapping[str, Any]) -> SessionRecord:
     )
 
 
-def merge_usage(current: Mapping[str, int], increment: Mapping[str, int]) -> dict[str, int]:
-    """Add two usage totals without dropping unknown provider counters."""
-    total = {str(key): int(value) for key, value in current.items()}
+def merge_usage(current: Mapping[str, Any], increment: Mapping[str, Any]) -> dict[str, Any]:
+    """Add two usage totals without dropping unknown provider counters or the price."""
+    # `cost_status` is derived on emit, and an earlier build also wrote an
+    # `unpriced_requests` counter that no longer means anything; drop both.
+    total = {str(key): value for key, value in current.items()}
+    total.pop(USAGE_STATUS, None)
+    total.pop(_LEGACY_UNPRICED, None)
     for key, value in increment.items():
-        total[str(key)] = total.get(str(key), 0) + int(value)
+        name = str(key)
+        if name in (USAGE_STATUS, _LEGACY_UNPRICED):
+            continue
+        if name == USAGE_COST:
+            cost = _add_costs(total.get(USAGE_COST), value)
+            if cost is None:
+                total.pop(USAGE_COST, None)
+            else:
+                total[USAGE_COST] = cost
+            continue
+        try:
+            total[name] = int(total.get(name, 0)) + int(value)
+        except (TypeError, ValueError):
+            # Older stores kept non-counter payloads (e.g. per-tool details) alongside
+            # counters; carry them through untouched instead of failing the turn.
+            total[name] = value
     return total
 
 
@@ -263,11 +290,16 @@ def deserialize_bindings(value: str | None) -> dict[str, dict[str, Any]]:
     }
 
 
-def usage_payload(usage: Any) -> dict[str, int]:
-    """Serialize an upstream ``RunUsage``/ACP usage object into plain counters."""
+def usage_payload(usage: Any) -> dict[str, Any]:
+    """Serialize an upstream ``RunUsage``/ACP usage object into plain counters and its price.
+
+    ``cost`` is kept as a decimal string, and only when the provider path priced the response.
+    A missing ``cost`` means "not priced", never "free", which is what
+    :func:`finalize_usage` turns into the status the client renders.
+    """
     if usage is None:
         return {}
-    result: dict[str, int] = {}
+    result: dict[str, Any] = {}
     for name in (
         "input_tokens",
         "output_tokens",
@@ -278,9 +310,53 @@ def usage_payload(usage: Any) -> dict[str, int]:
         "tool_calls",
     ):
         value = getattr(usage, name, None)
+        if name in {"cache_read_tokens", "cache_write_tokens"} and value is None:
+            value = getattr(usage, name.replace("cache_", "cached_"), None)
         if isinstance(value, int) and not isinstance(value, bool):
             result[name] = value
+    cost = _cost_text(getattr(usage, USAGE_COST, None))
+    if cost is not None:
+        result[USAGE_COST] = cost
     return result
+
+
+def finalize_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
+    """Add the price status the client renders next to the amount."""
+    payload = {str(key): value for key, value in usage.items()}
+    payload.pop(_LEGACY_UNPRICED, None)
+    cost = _cost_text(payload.pop(USAGE_COST, None))
+    if cost is not None:
+        payload[USAGE_COST] = cost
+    payload[USAGE_STATUS] = "estimated" if cost is not None else "unavailable"
+    return payload
+
+
+def _cost_text(value: Any) -> str | None:
+    """Render a priced amount as a stable decimal string, rejecting NaN/inf and junk."""
+    if value is None:
+        return None
+    try:
+        cost = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+    if not cost.is_finite():
+        return None
+    text = format(cost, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _add_costs(left: Any, right: Any) -> str | None:
+    """Add two priced amounts exactly, keeping the decimal string form."""
+    total = Decimal(0)
+    priced = False
+    for value in (left, right):
+        text = _cost_text(value)
+        if text is not None:
+            total += Decimal(text)
+            priced = True
+    return _cost_text(total) if priced else None
 
 
 def list_result(

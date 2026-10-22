@@ -21,17 +21,23 @@ hrns connect --stdio -- my-agent --acp    # any stdio ACP agent
 hrns connect --server team --agent research-assistant
 ```
 
-The full-screen application has a streaming transcript, multiline composer, session list, capability/configuration panel, activity panel, inline approval bar, and structured elicitation dialog. `Ctrl+Q` or `Ctrl+C` quits. Narrow terminals collapse the side panel; preserve the transcript rather than resizing into unreadable columns. Unsupported ACP features are absent, not shown as broken controls. In every enumerated control, `Left`/`Right` changes the value in place: binary controls toggle, longer lists step and wrap, and pick lists move the highlight. Text fields keep the arrows for cursor movement.
+The full-screen application has a streaming transcript, multiline composer, session list, plugin/configuration panel, activity panel, inline approval bar, and structured elicitation dialog. `Ctrl+Q` or `Ctrl+C` quits. Narrow terminals collapse the side panel; preserve the transcript rather than resizing into unreadable columns. Unsupported ACP features are absent, not shown as broken controls. In every enumerated control, `Left`/`Right` changes the value in place: binary controls toggle, longer lists step and wrap, and pick lists move the highlight. Text fields keep the arrows for cursor movement.
 
-Tool approvals are non-modal: a bar above the composer shows the tool call and the agent's options while the transcript stays visible. `y` allows once, `a` always allows that exact call, `n` rejects once, and `Esc` stops the turn and returns focus to the composer so the next message can redirect the agent. An agent's `allow_always` is scoped to the same tool and arguments; it is narrower than a command-prefix rule. `/permissions` selects `ask` (every request), `reads` (auto-approve read, search and think; ask for everything else), or `all` (auto-approve any offered allow option; this is **not** a sandbox). The status bar always shows the active mode, and every automatic decision is noted in the transcript.
+Tool approvals are non-modal: a bar above the composer shows the tool call and the agent's options while the transcript stays visible. `y` allows once, `a` always allows that exact call, `n` rejects once, and `Esc` stops the turn and returns focus to the composer so the next message can redirect the agent. An agent's `allow_always` is scoped to the same tool and arguments; it is narrower than a command-prefix rule. `/permissions` selects `ask` (every request), `reads` (auto-approve read, search and think; ask for everything else), or `all` (auto-approve any offered allow option; this is **not** a sandbox). The status bar always shows the active mode; an automatic decision adds no transcript banner, because the tool card already names the call that ran.
 
 Stage explicit file attachments with `/attach PATH`; `/attach list` shows staged files and `/attach clear` removes them. They are sent as content with the next message and the transcript labels the attachment names. `/attach` never grants the agent a local filesystem path.
 
-The capability panel displays host-policy state, dependencies, lifecycle mode, and locked reasons. A Harness host advertises revision-checked configuration updates: `Space` toggles an offered binding, `e` edits allowed fields, and successful edits apply at the next turn boundary. Model and reasoning-effort changes use standard ACP configuration options.
+Type `@` in the composer to fuzzy-find and attach a client-side workspace file. Local connections use the session workspace; remote connections use the client's working directory. File discovery honors ripgrep ignore rules when available and is capped at 10,000 entries. Staged files remain visible with size and media type; select one to remove it. Relative `/attach` paths use the same client-side workspace.
 
-In the capability panel, `a` adds a binding only when the peer advertises `_harness/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
+Submitting while a turn runs queues a follow-up with its own attachments (up to 20 pending messages). Use **Edit** or **Remove** on the selected queue item. Successful turns send pending messages in order; cancellation, errors, and restored sessions pause the queue until **Resume queue** is selected. Editing requires an empty composer so it cannot overwrite a draft. Prompts, drafts, attachments, and pending queues are kept per session in memory for the lifetime of the app; `Up`/`Down` at editor boundaries recall submitted prompts and restore the unfinished draft.
 
-Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/agents`, `/sessions`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
+Scrolling upward pauses transcript following. The **New output** button or `Ctrl+End` jumps to the latest output and resumes following. `Alt+Up`/`Alt+Down` jump between user messages. `Ctrl+F` or `/find QUERY` searches retained messages, tool details, and reasoning; selecting a result jumps to its block. `/copy` copies the latest completed assistant response; completed responses also offer **Copy response** and **Copy code** actions. Clipboard copying uses the terminal's clipboard support. In the sessions panel, `/` focuses the title/workspace filter, `Enter` returns to the results, and `Esc` clears the filter. The current session is marked with `●`, and timestamps show relative ages.
+
+The plugins panel displays host-policy state, dependencies, lifecycle mode, and locked reasons. A Harness host advertises revision-checked configuration updates: `Space` toggles an offered binding, `e` edits allowed fields, and successful edits apply at the next turn boundary. Model and reasoning-effort changes use standard ACP configuration options. `Ctrl+B` shows or hides the side panel, `F2`/`F3`/`F4` jump to plugins, sessions, or activity, and `Tab`/`Shift+Tab` cycle those panels while focus is inside the side panel.
+
+In the plugins panel, `a` adds a binding only when the peer advertises `_harness/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
+
+Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/agents`, `/sessions`, `/find`, `/copy`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
 
 ## CLI
 
@@ -225,9 +231,11 @@ opens a dialog. The host falls back to the first prompt text as a title; there i
 model-generated title tool. Manual names always take precedence, including after
 reopening a session.
 
-The status bar shows the current turn's token usage. The adapter returns usage on
-each prompt response; Harness also accumulates counters in session metadata, but the
-client does not reconstruct a historical cost ledger from the old runtime journal.
+For Harness hosts, the status bar and activity panel show cumulative session token usage,
+updated after every completed model response, including intermediate responses before
+tool execution. Turn completion reconciles and persists the counters without adding the
+same tokens twice. Other ACP agents can publish usage updates or return usage with the
+prompt response. The client does not reconstruct a historical cost ledger from the old runtime journal.
 Prices come from Pydantic AI and are estimates, not invoices. Missing pricing
 displays as unavailable. DeepSeek cache-hit tokens count as cache reads; cache
 misses remain ordinary input, not cache writes.

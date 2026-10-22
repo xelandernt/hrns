@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import shlex
 import uuid
 from dataclasses import dataclass, replace
@@ -16,7 +17,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Input, ListItem, ListView, Static
+from textual.widgets import Button, Input, ListItem, ListView, Static
 
 from harness.config import (
     EFFORT_DEFAULT,
@@ -51,6 +52,7 @@ from ..local import local_model_catalog, local_target, local_thinking_support
 from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow, stepped_value
 from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
+from .completion import matching_files, workspace_files
 from .dialogs import (
     ChoiceDialog,
     CommandPaletteDialog,
@@ -59,6 +61,7 @@ from .dialogs import (
     HelpDialog,
     InfoDialog,
     SettingsDialog,
+    TranscriptSearchDialog,
 )
 from .local import LocalModelResult, effort_choices, effort_label
 from .state import (
@@ -75,6 +78,8 @@ from .state import (
 from .widgets import (
     ApprovalBar,
     ApprovalDecided,
+    AttachmentBar,
+    AttachmentRemoved,
     BindingEditRequested,
     BindingToggleRequested,
     CapabilityAddRequested,
@@ -84,7 +89,11 @@ from .widgets import (
     Composer,
     ConfigOptionRequested,
     ConfigOptionStepRequested,
+    CopyCodeRequested,
     HintBar,
+    OutputPending,
+    PromptQueue,
+    QueueAction,
     SessionCloseRequested,
     SessionDeleteRequested,
     SessionLoadRequested,
@@ -731,10 +740,14 @@ class ChatScreen(Screen[None]):
 
     BINDINGS = [
         Binding("f1", "help", "Help", show=False),
-        Binding("f2", "show_capabilities", "Capabilities", show=False),
+        Binding("f2", "show_capabilities", "Plugins", show=False),
         Binding("f3", "show_sessions", "Sessions", show=False),
         Binding("f4", "show_activity", "Activity", show=False),
         Binding("ctrl+t", "focus_transcript", "Transcript", show=False),
+        Binding("ctrl+f", "find_transcript", "Find text", show=False, priority=True),
+        Binding("alt+up", "previous_message", "Previous prompt", show=False),
+        Binding("alt+down", "next_message", "Next prompt", show=False),
+        Binding("ctrl+end", "latest_output", "Latest output", show=False, priority=True),
         Binding("ctrl+b", "toggle_panel", "Panel", show=False),
         Binding("ctrl+k", "command_palette", "Commands", show=False, priority=True),
         Binding("ctrl+n", "new_session", "New session", show=False),
@@ -776,6 +789,10 @@ class ChatScreen(Screen[None]):
         self._panel_forced: bool | None = None
         self._turns_started = 0
         self._attachments: list[str] = []
+        self._drafts: dict[str, tuple[str, list[str], list[tuple[str, list[str]]]]] = {}
+        self._prompt_history: dict[str, list[str]] = {}
+        self._queued_prompts: list[tuple[str, list[str]]] = []
+        self._queue_paused = False
         self._session_rows: list[dict[str, Any]] = []
         self._session_cursor: str | None = None
         self._approval_future: asyncio.Future[PermissionDecision] | None = None
@@ -783,6 +800,10 @@ class ChatScreen(Screen[None]):
         self._suggestion_items: list[dict[str, Any]] = []
         self._suggestion_index = 0
         self._suggestion_signature: tuple[str, ...] = ()
+        self._workspace_files: list[str] = []
+        self._workspace_root = Path.cwd()
+        if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
+            self._workspace_root = Path(target.cwd).resolve()
 
     # --------------------------------------------------------------- structure
 
@@ -791,19 +812,25 @@ class ChatScreen(Screen[None]):
         with Horizontal(id="main"):
             yield TranscriptPane(id="transcript")
             yield SidePanel()
+        yield Button("New output ↓ · Ctrl+End", id="new-output")
+        yield PromptQueue(id="prompt-queue")
         yield ApprovalBar(id="approval")
         yield CommandSuggestions(id="command-suggestions")
+        yield AttachmentBar(id="attachments", markup=False)
         yield Composer(id="composer")
         yield HintBar(id="hintbar")
         yield StatusBar(id="statusbar")
 
     def on_mount(self) -> None:
+        self.query_one("#new-output").display = False
+        self._restore_draft()
+        self._index_workspace()
         self._apply_settings()
         self._apply_layout()
         self._subscribe()
         self._update_chrome()
         hint = (
-            "/ commands · Ctrl+K palette · F2 capabilities · F3 sessions "
+            "/ commands · Ctrl+K palette · F2 plugins · F3 sessions "
             "· F4 activity · Esc stop turn · Ctrl+R reconnect · Ctrl+T transcript"
         )
         self.query_one("#hintbar", HintBar).show(hint)
@@ -879,6 +906,7 @@ class ChatScreen(Screen[None]):
 
     def _update_chrome(self) -> None:
         session_id = self.session.session_id if self.session else None
+        self.query_one("#side-panel", SidePanel).sessions.mark_current(session_id)
         extension = ""
         model = ""
         option = model_option(self.session.config_options)
@@ -935,7 +963,7 @@ class ChatScreen(Screen[None]):
             [
                 f"session: {session_id or '(none)'}",
                 "attached: yes" if attached else "attached: no (reconnected without replay)",
-                "selected/active revisions: available from the capabilities panel when negotiated",
+                "selected/active revisions: available from the plugins panel when negotiated",
                 f"user messages sent this run: {self._turns_started}",
             ]
         )
@@ -983,7 +1011,7 @@ class ChatScreen(Screen[None]):
         if self.session.client is not self.client:
             panel.show_message(
                 "This session is not attached to the reconnected client. "
-                "Start a new session to change capabilities."
+                "Start a new session to change plugins."
             )
             return
         if self.client.extension.supports(
@@ -1000,7 +1028,6 @@ class ChatScreen(Screen[None]):
                     snapshot.to_wire(),
                     active_revision=snapshot.active_revision,
                     selected_revision=snapshot.selected_revision,
-                    policy_revision=snapshot.policy_revision,
                     can_write=self.client.extension.supports("_harness/configuration/update"),
                 )
                 return
@@ -1089,8 +1116,10 @@ class ChatScreen(Screen[None]):
             self._set_busy(True, detail="working…")
             return
         if isinstance(event, TurnCompleted):
+            if event.stop_reason not in {"end_turn", ""}:
+                self._queue_paused = True
+            self._refresh_queue()
             await pane.finish_message()
-            self._set_busy(False)
             if event.usage and (not self._usage or self._usage.get("scope") != "session"):
                 self._usage = event.usage
                 self.query_one("#side-panel", SidePanel).activity.set_usage(event.usage)
@@ -1168,6 +1197,8 @@ class ChatScreen(Screen[None]):
                 await self._notice(f"configuration update was malformed: {exc}", "error")
             return
         if isinstance(event, ConnectionEvent) and event.state == "lost":
+            self._queue_paused = True
+            self._refresh_queue()
             self.connected = False
             self._set_busy(False)
             await pane.finish_message()
@@ -1191,7 +1222,6 @@ class ChatScreen(Screen[None]):
                 snapshot.to_wire(),
                 active_revision=snapshot.active_revision,
                 selected_revision=snapshot.selected_revision,
-                policy_revision=snapshot.policy_revision,
                 can_write=self.client.extension.supports("_harness/configuration/update"),
             )
 
@@ -1291,11 +1321,50 @@ class ChatScreen(Screen[None]):
         if getattr(event, "text_area", None) is composer:
             self._sync_command_suggestions()
 
+    def on_text_area_selection_changed(self, event: Any) -> None:
+        composer = self.query_one("#composer", Composer)
+        if getattr(event, "text_area", None) is composer and composer.has_focus:
+            self._sync_command_suggestions()
+
+    @work(group="file-index", exclusive=True)
+    async def _index_workspace(self) -> None:
+        self._workspace_files = await asyncio.to_thread(workspace_files, self._workspace_root)
+        self._sync_command_suggestions()
+
+    def _sync_file_suggestions(self) -> None:
+        composer = self.query_one("#composer", Composer)
+        row, column = composer.cursor_location
+        line = composer.document.get_line(row)[:column]
+        match = re.search(r"(?<!\S)@([^\s@]*)$", line)
+        if match is None or not composer.has_focus:
+            self._hide_command_suggestions()
+            return
+        items = [
+            {
+                "kind": "file",
+                "name": path,
+                "label": f"@{path}",
+                "start": (row, match.start()),
+                "end": (row, column),
+            }
+            for path in matching_files(self._workspace_files, match.group(1))
+        ]
+        if not items:
+            self._hide_command_suggestions()
+            return
+        signature = tuple(item["name"] for item in items)
+        if signature != self._suggestion_signature:
+            self._suggestion_index = 0
+            self._suggestion_signature = signature
+        self._suggestion_items = items
+        self._render_command_suggestions()
+        composer.suggestions_open = True
+
     def _sync_command_suggestions(self) -> None:
         composer = self.query_one("#composer", Composer)
         raw = composer.text
         if not raw.startswith("/") or "\n" in raw:
-            self._hide_command_suggestions()
+            self._sync_file_suggestions()
             return
         body = raw[1:]
         if " " in body or "\t" in body:
@@ -1409,6 +1478,9 @@ class ChatScreen(Screen[None]):
         item = self._suggestion_items[self._suggestion_index]
         composer = self.query_one("#composer", Composer)
         self._hide_command_suggestions()
+        if item["kind"] == "file":
+            self._complete_file(item)
+            return
         if item["kind"] == "local":
             command = item["command"]
             if complete_only or command.takes_argument:
@@ -1423,6 +1495,14 @@ class ChatScreen(Screen[None]):
         composer.load_text(f"{prefix}{item['name']} ")
         composer.focus()
 
+    @work(group="attach-file", exclusive=False)
+    async def _complete_file(self, item: dict[str, Any]) -> None:
+        path = str(self._workspace_root / item["name"])
+        if await self._stage_attachment(path):
+            composer = self.query_one("#composer", Composer)
+            composer.replace(f"@{item['name']} ", item["start"], item["end"])
+            composer.focus()
+
     async def on_submitted(self, event: Submitted) -> None:
         self._hide_command_suggestions()
         text = event.text.strip()
@@ -1433,10 +1513,12 @@ class ChatScreen(Screen[None]):
             return
         await self._start_prompt(text)
 
-    async def _start_prompt(self, text: str) -> None:
+    async def _start_prompt(
+        self, text: str, *, attachments: list[str] | None = None, from_queue: bool = False
+    ) -> bool:
         if not self.connected:
             await self._notice("Not connected. Press Ctrl+R to reconnect.", "error")
-            return
+            return False
         if self.session.client is not self.client:
             await self._notice(
                 "This session is not attached to the current connection. "
@@ -1444,28 +1526,38 @@ class ChatScreen(Screen[None]):
                 "warning",
             )
             self.query_one("#composer", Composer).focus()
-            return
+            return False
         if self._loading_session or self._replay_target is not None:
             await self._notice(
                 "Wait for the session to finish loading; the prompt was kept in the composer.",
                 "warning",
             )
             self.query_one("#composer", Composer).focus()
-            return
+            return False
         if self.busy:
-            await self._notice(
-                "A turn is already running. Press Esc to cancel it first.", "warning"
-            )
-            return
-        attachments = list(self._attachments)
+            if len(self._queued_prompts) >= 20:
+                await self._notice(
+                    "The queue is full (20 follow-ups). Edit or remove an item.", "warning"
+                )
+                return False
+            self._queued_prompts.append((text, list(self._attachments)))
+            self._remember_prompt(text)
+            self._attachments.clear()
+            self.query_one("#composer", Composer).clear_composer()
+            self._refresh_queue()
+            return True
+        attachments = list(self._attachments) if attachments is None else attachments
         try:
             blocks = build_prompt_blocks(text, attachments) if attachments else None
         except HarnessClientError as exc:
             await self._notice(exc.message, "error")
-            self.query_one("#composer", Composer).load_text(text)
-            return
+            if not from_queue:
+                self.query_one("#composer", Composer).load_text(text)
+            return False
         composer = self.query_one("#composer", Composer)
-        composer.clear_composer()
+        if not from_queue:
+            self._remember_prompt(text)
+            composer.clear_composer()
         pane = self.query_one("#transcript", TranscriptPane)
         await pane.finish_message()
         display = text
@@ -1473,9 +1565,91 @@ class ChatScreen(Screen[None]):
             names = ", ".join(item["name"] for item in attachment_summary(attachments))
             display = f"{text}\n\nattached: {names}"
         await pane.add_user(display)
-        self._attachments.clear()
+        if not from_queue:
+            self._attachments.clear()
+            self._refresh_queue()
         self._set_busy(True, detail="working…")
         self.app.start_turn(self, text, blocks)  # type: ignore[attr-defined]
+        return True
+
+    def _remember_prompt(self, text: str) -> None:
+        history = self._prompt_history.setdefault(self.session.session_id, [])
+        if not history or history[-1] != text:
+            history.append(text)
+            del history[:-100]
+        self.query_one("#composer", Composer).prompt_history = history
+
+    def _save_draft(self) -> None:
+        self._drafts[self.session.session_id] = (
+            self.query_one("#composer", Composer).text,
+            list(self._attachments),
+            list(self._queued_prompts),
+        )
+
+    def _restore_draft(self) -> None:
+        if self.target.location().get("kind") == "local":
+            root = Path(self.session.cwd).resolve()
+            if root.is_dir() and root != self._workspace_root:
+                self._workspace_root = root
+                self._workspace_files = []
+                self._index_workspace()
+        text, attachments, queue = self._drafts.get(self.session.session_id, ("", [], []))
+        composer = self.query_one("#composer", Composer)
+        composer.clear_composer()
+        composer.load_text(text)
+        composer.prompt_history = self._prompt_history.setdefault(self.session.session_id, [])
+        self._attachments = list(attachments)
+        self._queued_prompts = list(queue)
+        self._queue_paused = bool(queue)
+        self._refresh_queue()
+
+    def _refresh_queue(self) -> None:
+        self.query_one(PromptQueue).show_prompts(self._queued_prompts, paused=self._queue_paused)
+        self.query_one(AttachmentBar).show_files(attachment_summary(self._attachments))
+
+    def on_attachment_removed(self, event: AttachmentRemoved) -> None:
+        if 0 <= event.index < len(self._attachments):
+            self._attachments.pop(event.index)
+            self._refresh_queue()
+            self.query_one("#composer", Composer).focus()
+
+    async def on_queue_action(self, event: QueueAction) -> None:
+        if event.action == "resume":
+            self._queue_paused = False
+            self._refresh_queue()
+            await self.send_next_queued()
+        elif 0 <= event.index < len(self._queued_prompts):
+            if event.action == "edit":
+                composer = self.query_one("#composer", Composer)
+                if composer.text.strip() or self._attachments:
+                    await self._notice(
+                        "Send or clear the current draft before editing a queued message.",
+                        "warning",
+                    )
+                    return
+                text, self._attachments = self._queued_prompts.pop(event.index)
+                composer.load_text(text)
+                composer.focus()
+            elif event.action == "remove":
+                self._queued_prompts.pop(event.index)
+            self._refresh_queue()
+
+    async def send_next_queued(self) -> None:
+        if (
+            self not in self.app.screen_stack
+            or self.busy
+            or self._queue_paused
+            or not self._queued_prompts
+            or not self.connected
+            or self._loading_session
+        ):
+            return
+        text, attachments = self._queued_prompts[0]
+        if await self._start_prompt(text, attachments=attachments, from_queue=True):
+            self._queued_prompts.pop(0)
+        else:
+            self._queue_paused = True
+        self._refresh_queue()
 
     async def _handle_command(self, text: str) -> None:
         body = text[1:].strip()
@@ -1526,6 +1700,15 @@ class ChatScreen(Screen[None]):
             await self._rename_session(rest)
         elif name == "sessions":
             self.action_show_sessions()
+        elif name == "find":
+            self._find_transcript(rest)
+        elif name == "copy":
+            response = self.query_one("#transcript", TranscriptPane).latest_response()
+            if response is None:
+                self.app.notify("No completed assistant response to copy")
+            else:
+                self.app.copy_to_clipboard(response._text)
+                self.app.notify("Response copied")
         elif name == "plugins":
             self.action_show_capabilities()
             self.refresh_capabilities()
@@ -1577,7 +1760,7 @@ class ChatScreen(Screen[None]):
         self.refresh_sessions()
         await self._notice(f"Session renamed to {self._session_title}.", "success")
 
-    async def _stage_attachment(self, argument: str) -> None:
+    async def _stage_attachment(self, argument: str) -> bool:
         """Stage or clear local files for the next prompt (explicit user action only)."""
         argument = argument.strip()
         if argument.lower() in {"", "list"}:
@@ -1588,12 +1771,13 @@ class ChatScreen(Screen[None]):
                     "Staged: " + ", ".join(Path(item).name for item in self._attachments),
                     "info",
                 )
-            return
+            return False
         if argument.lower() in {"clear", "none"}:
             count = len(self._attachments)
             self._attachments.clear()
+            self._refresh_queue()
             await self._notice(f"Cleared {count} staged attachment(s).", "info")
-            return
+            return False
         capabilities = getattr(
             getattr(self.client.initialized, "agent_capabilities", None),
             "prompt_capabilities",
@@ -1605,12 +1789,15 @@ class ChatScreen(Screen[None]):
                 "attachments cannot be sent. Paste the relevant text instead.",
                 "warning",
             )
-            return
+            return False
         try:
-            path = validate_attachment(argument)
+            candidate = Path(argument).expanduser()
+            path = validate_attachment(
+                candidate if candidate.is_absolute() else self._workspace_root / candidate
+            )
         except HarnessClientError as exc:
             await self._notice(exc.message, "error")
-            return
+            return False
         if str(path) in self._attachments:
             await self._notice(f"{path.name} is already staged.", "info")
         else:
@@ -1621,7 +1808,9 @@ class ChatScreen(Screen[None]):
                 "success",
             )
         composer = self.query_one("#composer", Composer)
+        self._refresh_queue()
         composer.focus()
+        return True
 
     async def _send_agent_command(self, name: str, arguments: str) -> None:
         if not name:
@@ -1792,7 +1981,7 @@ class ChatScreen(Screen[None]):
 
         self.app.push_screen(
             ChoiceDialog(
-                "Add a local capability",
+                "Add a local plugin",
                 "Only plugins the host advertises for local binding creation are listed.",
                 choices,
             ),
@@ -1852,10 +2041,10 @@ class ChatScreen(Screen[None]):
             subtitle += " " + plugin.constraint
         self.app.push_screen(
             FormDialog(
-                "Add a local capability",
+                "Add a local plugin",
                 subtitle,
                 fields,
-                accept_label="Add capability",
+                accept_label="Add plugin",
             ),
             apply,
         )
@@ -2018,7 +2207,9 @@ class ChatScreen(Screen[None]):
         await pane.end_replay()
         self._replay_target = None
         self._loading_session = False
+        self._save_draft()
         self.session = loaded
+        self._restore_draft()
         self.app.session = loaded  # type: ignore[attr-defined]
         self._update_chrome()
         await self._notice(f"Loaded session {session_id}.", "success")
@@ -2071,7 +2262,9 @@ class ChatScreen(Screen[None]):
         except HarnessClientError as exc:
             await self._notice(f"Could not create a session: {exc.message}", "error")
             return
+        self._save_draft()
         self.session = session
+        self._restore_draft()
         self.app.session = session  # type: ignore[attr-defined]
         self._reset_activity()
         await self.query_one("#transcript", TranscriptPane).clear_transcript()
@@ -2455,7 +2648,7 @@ class ChatScreen(Screen[None]):
         ]
         if not self.client.extension.supports("_harness/capabilities/list"):
             lines.append(
-                "This connection does not advertise the capability catalog, "
+                "This connection does not advertise the plugin catalog, "
                 "so configured subagents cannot be inspected."
             )
         elif not summaries:
@@ -2575,20 +2768,10 @@ class ChatScreen(Screen[None]):
         panel = self.query_one("#side-panel", SidePanel)
         panel.display = True
         self._panel_forced = True
-
-        def activate() -> None:
-            # TabbedContent resolves its private ContentTabs by immediate-child
-            # lookup. Assigning ``active`` before compose has mounted it raises
-            # NoMatches, so wait until the show/refresh cycle has run.
-            panel.active = tab
-            if tab == "capabilities":
-                panel.capabilities._list.focus()
-            elif tab == "sessions":
-                panel.sessions._table.focus()
-            else:
-                panel.activity.focus()
-
-        self.call_after_refresh(activate)
+        # TabbedContent resolves its private ContentTabs by immediate-child
+        # lookup. Assigning ``active`` before compose has mounted it raises
+        # NoMatches, so wait until the show/refresh cycle has run.
+        self.call_after_refresh(panel.activate, tab)
 
     def action_toggle_panel(self) -> None:
         panel = self.query_one("#side-panel", SidePanel)
@@ -2654,10 +2837,15 @@ class ChatScreen(Screen[None]):
 | `Ctrl+Enter` | send the prompt (works from any panel or the transcript) |
 | `Ctrl+K` | command palette (local and agent sections) |
 | `F1` | this help |
-| `F2` | capabilities panel |
+| `F2` | plugins panel |
 | `F3` | sessions panel |
 | `F4` | activity panel |
+| `Tab` / `Shift+Tab` inside the side panel | switch between plugins, sessions and activity |
 | `Ctrl+T` | focus the transcript for scrolling; `Esc` returns to the composer |
+| `Ctrl+F` | find text in retained messages, tools, and reasoning |
+| `Alt+Up` / `Alt+Down` | jump to the previous / next user message |
+| `Ctrl+End` | jump to latest output and resume following |
+| `Up` / `Down` at editor boundaries | recall prompts and restore the unfinished draft |
 | `Esc` (idle) | focus the composer |
 | `Ctrl+B` | show or hide the side panel |
 | `Ctrl+N` | new session |
@@ -2668,6 +2856,12 @@ class ChatScreen(Screen[None]):
 ## Local commands
 
 {chr(10).join(local_lines)}
+
+Type `@` to find and attach a local workspace file; select a staged file to remove it.
+Submitting during a running turn queues a follow-up with its attachments. Use the queue's
+Edit and Remove controls to revise pending messages. Cancellation or errors pause the queue.
+Drafts, prompt history, attachments, and queues stay with their session while this app is open.
+Use `/` in the sessions panel to filter titles and workspaces; `Esc` clears the filter.
 
 ## Agent commands
 
@@ -2751,11 +2945,70 @@ invents commands the agent did not advertise.
     def action_focus_transcript(self) -> None:
         self.query_one("#transcript", TranscriptPane).focus()
 
+    def action_find_transcript(self) -> None:
+        self._find_transcript()
+
+    def _find_transcript(self, query: str = "") -> None:
+        pane = self.query_one("#transcript", TranscriptPane)
+        entries = pane.search_entries()
+
+        def reveal(index: int | None) -> None:
+            if index is not None and entries[index][0].is_mounted:
+                pane.reveal(entries[index][0])
+
+        self.app.push_screen(
+            TranscriptSearchDialog([(role, text) for _, role, text in entries], query),
+            reveal,
+        )
+
+    def on_copy_code_requested(self, event: CopyCodeRequested) -> None:
+        def copy(value: str | None) -> None:
+            if value is not None:
+                self.app.copy_to_clipboard(event.codes[int(value)])
+                self.app.notify("Code copied")
+
+        if len(event.codes) == 1:
+            copy("0")
+        else:
+            self.app.push_screen(
+                ChoiceDialog(
+                    "Copy code block",
+                    "Choose a fenced code block from this response.",
+                    [
+                        {
+                            "value": str(index),
+                            "name": f"Block {index + 1}",
+                            "description": code[:160],
+                        }
+                        for index, code in enumerate(event.codes)
+                    ],
+                ),
+                copy,
+            )
+
+    def on_output_pending(self, event: OutputPending) -> None:
+        self.query_one("#new-output").display = event.pending
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "new-output":
+            self.action_latest_output()
+
+    def action_latest_output(self) -> None:
+        self.query_one("#transcript", TranscriptPane).jump_to_latest()
+
+    def action_previous_message(self) -> None:
+        self.query_one("#transcript", TranscriptPane).jump_user(-1)
+
+    def action_next_message(self) -> None:
+        self.query_one("#transcript", TranscriptPane).jump_user(1)
+
     def action_focus_composer(self) -> None:
         self.query_one("#composer", Composer).focus()
 
     @work(group="cancel", exclusive=False)
     async def _cancel_turn(self) -> None:
+        self._queue_paused = True
+        self._refresh_queue()
         try:
             await self.session.cancel()
         except HarnessClientError as exc:

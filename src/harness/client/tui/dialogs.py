@@ -424,6 +424,69 @@ class ChoiceDialog(_DialogBase):
         self.dismiss(event.option_id)
 
 
+class TranscriptSearchDialog(_DialogBase):
+    """Search retained conversation messages and return the chosen message index."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close", show=False),
+        Binding("down", "focus_results", "Results", show=False),
+    ]
+
+    def __init__(self, entries: list[tuple[str, str]], query: str = "") -> None:
+        super().__init__(
+            "Find in conversation", "Searches messages currently retained in the view."
+        )
+        self.entries = entries
+        self._filter = Input(value=query, placeholder="Find text…", id="transcript-filter")
+        self._list = OptionList(id="transcript-results", markup=False)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog dialog-tall"):
+            yield from self.dialog_header()
+            yield self._filter
+            yield self._list
+            yield self._error
+            yield Static("↓ results · Enter jump · Esc close", classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self._filter.focus()
+        self._render_results()
+
+    def _render_results(self) -> None:
+        self._list.clear_options()
+        needle = self._filter.value.casefold()
+        count = 0
+        for index, (role, text) in enumerate(self.entries):
+            location = text.casefold().find(needle)
+            if location < 0:
+                continue
+            start = max(0, location - 35)
+            snippet = " ".join(text[start : start + 160].split())
+            self._list.add_option(Option(f"{role}: {snippet}", id=str(index)))
+            count += 1
+        self._error.update(f"{count} matching messages")
+        if count:
+            self._list.highlighted = 0
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._render_results()
+
+    def action_focus_results(self) -> None:
+        self._list.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        if self._list.option_count:
+            option = self._list.get_option_at_index(self._list.highlighted or 0)
+            self.dismiss(int(str(option.id)))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if event.option_id is not None:
+            self.dismiss(int(event.option_id))
+
+
 class CommandPaletteDialog(_DialogBase):
     """Local commands and agent-advertised commands in separate sections."""
 

@@ -47,6 +47,7 @@ bearer authentication.
 
 ```python
 from harness.runtime import SQLiteSessionStore
+
 agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
 ```
 
@@ -55,6 +56,7 @@ PostgreSQL (`harness[postgres]`):
 ```python
 import os
 from harness.runtime.postgres import PostgresSessionStore
+
 agents = AgentServer(store=PostgresSessionStore(os.environ["DATABASE_URL"]))
 ```
 

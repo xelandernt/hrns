@@ -397,7 +397,6 @@ def format_usage(usage: dict[str, Any] | None) -> str:
     if not usage:
         return "Cost unavailable"
     cost = usage.get("cost")
-    status = usage.get("cost_status", "estimated")
     currency = "USD"
     if isinstance(cost, dict):
         currency = cost.get("currency", "USD")
@@ -406,7 +405,7 @@ def format_usage(usage: dict[str, Any] | None) -> str:
         amount = Decimal(str(cost))
         if not amount.is_finite():
             raise ValueError("Non-finite cost")
-        parts = [f"{currency} {amount:.6f} ({status})"]
+        parts = [f"{currency} {amount:.6f}"]
     except (InvalidOperation, ValueError, TypeError):
         parts = ["Cost unavailable"]
     for camel, snake, label in (

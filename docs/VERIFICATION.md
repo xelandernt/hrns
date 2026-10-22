@@ -78,6 +78,18 @@ Using the custom managed capability from `examples/custom_capability.py` against
 The runtime did not add a durable revision table. Revisions and request-id idempotency are
 in-memory for the live session.
 
+## Disabled tools and DeepSeek DSML
+
+When a capability that previously contributed a tool is disabled, the host reads native
+function-tool names from the stored native `StoredSession` history and injects an error-only
+`UnavailableTools` declaration. The stub is hidden when active tools exist, kept visible for
+DeepSeek when no active tools remain, and raises `ToolFailed` if the model calls it. This
+avoids DeepSeek leaking raw `｜｜DSML｜｜` markup after a tool disappears mid-conversation.
+
+Checked against a synthetic managed tool: after one turn that called `ping`, disabling the
+binding produced revision 2 with one `UnavailableTools` capability whose remembered set was
+`{"ping"}`. Real DeepSeek output was not re-run with credentials in this environment.
+
 ## Persistence
 
 SQLite round-trip was exercised through the real adapter: create, prompt, close, load
@@ -101,7 +113,7 @@ is enabled. `harness.client` does not import `harness.runtime` or Pydantic AI;
 
 A repository search found no remaining imports or calls to `SessionManager`, `Session`,
 `HostedSession`, `HarnessHostAgent`, `SessionJobManager`, `WorkspaceManager`,
-`WorkspaceLease`, `_events`, `runtime.session`, or `_unavailable_tools`. The old SQL tables
+`WorkspaceLease`, `_events`, or `runtime.session`. The old SQL tables
 and runtime event journal are not created or read.
 
 ## Outstanding limitations

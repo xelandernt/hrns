@@ -45,7 +45,7 @@ If the selected model is already advertised by `harness-local`, `/models` applie
 to the next message without restarting the agent. Changing provider (or entering a new
 key) saves the configuration and restarts `harness-local`, then reloads the current
 session. Use `/connect` to return to the connection picker, or `/effort` to change
-reasoning effort live. `/plugins` opens the live capability panel: toggle, configure,
+reasoning effort live. `/plugins` opens the live plugins panel: toggle, configure,
 or add bindings; `next_turn` changes apply to the next message, while `new_session`
 bindings still require a new session.
 

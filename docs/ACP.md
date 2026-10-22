@@ -49,6 +49,9 @@ Managed configuration is live again and applied on the next turn boundary:
   enable it; embedded hosted connections leave it disabled.
 - Revisions and request-id idempotency are kept in memory for the live session. They are not
   stored in the database; reload starts a fresh revision sequence.
+- If a disabled capability previously contributed function tools, the host keeps error-only
+  declarations for those names from native history. Calling one returns `ToolFailed`; this
+  prevents DeepSeek from leaking raw DSML markup when a tool disappears mid-conversation.
 - `session/set_config_option` offers `model` when the deployment advertises models, and
   `effort` when the selected model can reason. Both apply from the next request. Effort is
   implemented by a native capability whose `get_model_settings` reads the current session
@@ -119,9 +122,16 @@ scoped metadata row; a foreign session is never leaked. Delete closes active wor
 
 ## Usage and titles
 
-Per-turn usage comes from `PromptResponse.usage`, which the standard client displays. The
-host accumulates totals in metadata. The first prompt supplies a fallback title; clients may
-rename a session through `_harness/session/rename`. There is no model-generated title tool.
+Per-turn usage comes from `PromptResponse.usage`. After each model response, the host also
+publishes cumulative session usage in `SessionInfoUpdate._meta.harness.sessionUsage` with
+`scope: "session"`, so clients can refresh token counts while tools and further model
+requests are still running. The payload also carries `cost` (a decimal string, present only
+when Pydantic AI priced the response) and a derived `cost_status`: `estimated` when the total
+includes a price, `unavailable` when the model has no known price. A missing price is never
+reported as free. Final usage is reconciled once and persisted in metadata; measured tokens
+and priced work remain counted if the turn is cancelled or fails. The first prompt supplies a
+fallback title; clients may rename a session through `_harness/session/rename`. There is no
+model-generated title tool.
 
 ## Stdio CLI
 
