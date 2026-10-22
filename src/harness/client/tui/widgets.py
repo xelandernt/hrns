@@ -1,4 +1,4 @@
-"""Terminal widgets: transcript, composer, status, capability/session/activity panels."""
+"""Terminal widgets: transcript, composer, status, todo/capability/session/activity panels."""
 
 from __future__ import annotations
 
@@ -71,6 +71,7 @@ __all__ = [
     "SidePanelCloseRequested",
     "SessionPanel",
     "StatusBar",
+    "TodoPanel",
     "TranscriptPane",
 ]
 
@@ -1781,6 +1782,10 @@ class AskUserBar(Vertical):
         Binding("shift+tab", "previous_question", "Previous question", show=False, priority=True),
         Binding("ctrl+enter", "submit", "Submit", show=False, priority=True),
         Binding("ctrl+j", "submit", "Submit", show=False, priority=True),
+        # Ctrl+Enter and Ctrl+J only reach us when the terminal reports modified
+        # keys (kitty keyboard protocol). Ctrl+S is a plain control byte, so it
+        # works everywhere.
+        Binding("ctrl+s", "submit", "Submit", show=False, priority=True),
         Binding("escape", "decline", "Decline", show=False, priority=True),
     ]
 
@@ -1826,7 +1831,7 @@ class AskUserBar(Vertical):
         self._error.update("")
         self._hint.update(
             "Tab/Shift+Tab question · ↑/↓ option · 1–9 pick · Enter choose · "
-            "Ctrl+Enter submit · Esc decline"
+            "Enter on Submit or Ctrl+S submits · Esc decline"
         )
         self._input.display = False
         self._input.value = ""
@@ -1900,6 +1905,7 @@ class AskUserBar(Vertical):
                 id="custom",
             )
         )
+        options.append(Option(Text("↵ Submit answers", style="bold"), id="submit"))
         self._options.set_options(options)
         if highlight is not None:
             self._options.highlighted = max(0, min(highlight, len(options) - 1))
@@ -1984,6 +1990,9 @@ class AskUserBar(Vertical):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         option_id = event.option_id or ""
+        if option_id == "submit":
+            self.action_submit()
+            return
         if option_id == "custom":
             self._begin_edit()
             return
@@ -2265,9 +2274,9 @@ class SidePanelCloseRequested(Message):
 
 
 class SidePanel(TabbedContent):
-    """Plugins, MCP servers, sessions and activity, opened on demand as a right drawer."""
+    """Todos, plugins, MCP servers, sessions and activity, opened as a right drawer."""
 
-    PANE_ORDER: tuple[str, ...] = ("capabilities", "mcp", "sessions", "activity")
+    PANE_ORDER: tuple[str, ...] = ("todos", "capabilities", "mcp", "sessions", "activity")
 
     BINDINGS = [
         Binding("tab", "next_pane", "Next panel", show=False),
@@ -2277,6 +2286,7 @@ class SidePanel(TabbedContent):
 
     def __init__(self) -> None:
         super().__init__(initial="capabilities", id="side-panel")
+        self.todos = TodoPanel(id="todo-panel")
         self.capabilities = CapabilityPanel(id="capability-panel")
         self.mcp = McpPanel(id="mcp-panel")
         self.sessions = SessionPanel(id="session-panel")
@@ -2285,6 +2295,7 @@ class SidePanel(TabbedContent):
         # Overriding compose() here would omit ContentTabs entirely.
         self._tab_content.extend(
             [
+                TabPane("Todos", self.todos, id="todos"),
                 TabPane("Plugins", self.capabilities, id="capabilities"),
                 TabPane("MCP", self.mcp, id="mcp"),
                 TabPane("Sessions", self.sessions, id="sessions"),
@@ -2298,8 +2309,14 @@ class SidePanel(TabbedContent):
         # The pane is only focusable once the switch has been laid out.
         self.call_after_refresh(self._focus_pane, tab)
 
+    def select(self, tab: str) -> None:
+        """Show ``tab`` without taking focus away from the composer."""
+        self.active = tab
+
     def _focus_pane(self, tab: str) -> None:
-        if tab == "capabilities":
+        if tab == "todos":
+            self.todos.focus()
+        elif tab == "capabilities":
             self.capabilities._list.focus()
         elif tab == "mcp":
             self.mcp._list.focus()
@@ -2820,12 +2837,11 @@ class SessionPanel(Vertical):
 
 
 class ActivityPanel(VerticalScroll):
-    """Plan, commands, usage and connection details in one scroll."""
+    """Commands, usage and connection details in one scroll."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._connection = Static("Not connected.", markup=False, classes="activity-section")
-        self._plan = Static("No plan reported yet.", markup=False, classes="activity-section")
         self._commands = Static(
             "No agent commands advertised.", markup=False, classes="activity-section"
         )
@@ -2835,8 +2851,6 @@ class ActivityPanel(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Label("Connection", classes="section-title")
         yield self._connection
-        yield Label("Plan", classes="section-title")
-        yield self._plan
         yield Label("Agent commands", classes="section-title")
         yield self._commands
         yield Label("Usage", classes="section-title")
@@ -2846,16 +2860,6 @@ class ActivityPanel(VerticalScroll):
 
     def set_connection(self, lines: list[str]) -> None:
         self._connection.update("\n".join(lines))
-
-    def set_plan(self, entries: tuple[tuple[str, str, str], ...], *, cleared: bool = False) -> None:
-        if cleared or not entries:
-            self._plan.update("No plan reported yet.")
-            return
-        rendered = []
-        for content, priority, status in entries[:50]:
-            mark = {"pending": "○", "in_progress": "◐", "completed": "●"}.get(status, "○")
-            rendered.append(f"{mark} {content}   ({priority})")
-        self._plan.update("\n".join(rendered))
 
     def set_commands(self, commands: tuple[dict[str, Any], ...]) -> None:
         if not commands:
@@ -2878,3 +2882,55 @@ class ActivityPanel(VerticalScroll):
 
     def set_session(self, lines: list[str]) -> None:
         self._session.update("\n".join(lines))
+
+
+class TodoPanel(VerticalScroll):
+    """The current session's plan, as reported by the agent."""
+
+    can_focus = True
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._summary = Static("No plan yet.", markup=False, classes="todo-summary")
+        self._list = Static("", markup=False, classes="todo-list")
+        self._entries: tuple[tuple[str, str, str], ...] = ()
+
+    def compose(self) -> ComposeResult:
+        yield self._summary
+        yield self._list
+
+    def set_plan(
+        self,
+        entries: tuple[tuple[str, str, str], ...],
+        *,
+        cleared: bool = False,
+    ) -> None:
+        """Replace the visible plan with a complete agent snapshot."""
+        self._entries = () if cleared else entries
+        if not self._entries:
+            self._summary.update("No plan yet.")
+            self._list.update("")
+            return
+        done = sum(1 for _, _, status in self._entries if status == "completed")
+        total = len(self._entries)
+        self._summary.update(f"{done} of {total} done")
+        self._list.update(self._render_plan(self._entries))
+
+    @staticmethod
+    def _render_plan(entries: tuple[tuple[str, str, str], ...]) -> Text:
+        body = Text()
+        for content, priority, status in entries:
+            if status == "completed":
+                marker, style = "●", "dim"
+            elif status == "in_progress":
+                marker, style = "◐", "bold"
+            elif status == "cancelled":
+                marker, style = "✕", "dim strike"
+            else:
+                marker, style = "○", ""
+            body.append(f"{marker} ", style="bold" if status == "in_progress" else "dim")
+            body.append(content, style=style)
+            if priority == "high":
+                body.append("  high", style="bold yellow")
+            body.append("\n")
+        return body

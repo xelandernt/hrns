@@ -237,6 +237,21 @@ class HarnessApp(App[int]):
     }
     #session-panel { height: 1fr; }
     #capability-panel { height: 1fr; }
+    #todo-panel {
+        padding: 0 1 1 1;
+        height: 1fr;
+    }
+    .todo-summary {
+        color: $text-muted;
+        padding: 0 1;
+        height: auto;
+        text-style: bold;
+    }
+    .todo-list {
+        color: $foreground;
+        padding: 0 1;
+        height: auto;
+    }
     #activity-panel {
         padding: 0 1 1 1;
         height: 1fr;

@@ -221,12 +221,16 @@ def _local_models(settings: LocalSettings) -> tuple[str, ...]:
 
 
 def local_definition(settings: LocalSettings) -> AgentDefinition:
-    """The built-in local definition: coder tools, Agent Skills, and configured MCP servers."""
+    """The built-in local definition: coder tools, Todo, Agent Skills, and MCP servers."""
     token_path = settings.mcp.token_store_path or str(default_token_store_path())
     bindings = [
         DefinitionBinding(
             plugin_id="harness.coder",
             binding_id="coder",
+        ),
+        DefinitionBinding(
+            plugin_id="harness.todo",
+            binding_id="todo",
         ),
         DefinitionBinding(
             plugin_id="harness.skills",
@@ -257,6 +261,11 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             kind="workspace",
             description="Working directory the bundled tools act on.",
         ),
+        ResourceRequirement(
+            name="plan_events",
+            kind="service",
+            description="Session-scoped plan channel that streams todos to the connected client.",
+        ),
     ]
     if settings.capabilities.ask_user:
         bindings.append(
@@ -276,8 +285,8 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
         agent_id="harness.local",
         name=f"Local · {settings.provider}:{settings.model}",
         description=(
-            "Local coding agent with bundled file, search, and shell tools, Agent Skills, "
-            "and structured user questions."
+            "Local coding agent with bundled file, search, and shell tools, a live Todo "
+            "plan, Agent Skills, and structured user questions."
         ),
         spec=AgentSpec(instructions=_LOCAL_INSTRUCTIONS),
         resources=resources,

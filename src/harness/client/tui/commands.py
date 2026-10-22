@@ -51,6 +51,11 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
         aliases=("capabilities",),
     ),
     LocalCommand("mcp", "Show MCP servers, tools and connection state"),
+    LocalCommand(
+        "todo",
+        "Show the session's plan and progress",
+        aliases=("todos",),
+    ),
     LocalCommand("rename", "Rename the current session", takes_argument=True),
     LocalCommand("sessions", "List, load, resume, close or delete sessions"),
     LocalCommand("find", "Find text in the retained conversation", takes_argument=True),
