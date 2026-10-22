@@ -91,7 +91,17 @@ class CommandRegistry:
             session_id=request.session_id,
             history_reader=history_reader,
         )
-        result = await binding.command.handler(context, arguments)
+        try:
+            result = await binding.command.handler(context, arguments)
+        except HarnessError:
+            raise
+        except Exception as exc:
+            raise HarnessError(
+                "COMMAND_FAILED",
+                f"Command '/{binding.binding_id}:{binding.command_name}' failed: "
+                f"{type(exc).__name__}: {exc}",
+                details={"binding_id": binding.binding_id},
+            ) from exc
         if not isinstance(result, CommandResult):
             raise HarnessError(
                 "COMMAND_FAILED",

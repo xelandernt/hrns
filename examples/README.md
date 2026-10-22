@@ -102,6 +102,20 @@ uv run hrns connect --url http://127.0.0.1:8080 --agent example.house_style
 `EXAMPLE_MODEL=test` selects the offline structural model. Authentication and PostgreSQL
 are Python dependencies described in [SERVER.md](../docs/SERVER.md).
 
+## 6. Installable plugin example
+
+`examples/plugins/example_status` is a complete package: a native echo tool, independent
+user-only `status`/`ask` commands, and optional Textual views installed separately under
+`harness.renderers`.
+
+```sh
+uv pip install -e examples/plugins/example_status
+uv pip install -e "examples/plugins/example_status[ui]"
+```
+
+See [its README](plugins/example_status/README.md) and
+[EXTENSIONS.md](../docs/EXTENSIONS.md). No Harness source change is needed to recognize it.
+
 ## Integration prerequisites
 
 | Capability | Requirement |
