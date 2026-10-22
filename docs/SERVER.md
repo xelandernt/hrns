@@ -112,9 +112,10 @@ revision; sandbox/lease management is deployment-owned and never silently falls 
 execution.
 
 Pass `registry=your_registry` for custom plugins. The default registry contains the bundled
-`harness.coder` plugin and installed `harness.capabilities` entry points; a definition still
-has to bind and enable a plugin before a session can use it. Embedded connections can edit
-existing next-turn bindings; remote clients cannot add local plugins or supply MCP commands.
+`harness.coder` and `harness.skills` plugins and installed `harness.capabilities` entry points; a
+definition still has to bind and enable a plugin before a session can use it. Embedded
+connections can edit existing next-turn bindings; remote clients cannot add local plugins or
+supply MCP commands.
 
 ## Routes and client connection
 

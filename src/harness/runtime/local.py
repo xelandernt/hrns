@@ -216,7 +216,7 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
     definition = AgentDefinition(
         agent_id="harness.local",
         name=f"Local · {settings.provider}:{settings.model}",
-        description="Local coding agent with bundled file, search, and shell tools.",
+        description="Local coding agent with bundled file, search, and shell tools plus Agent Skills.",
         spec=AgentSpec(instructions=_LOCAL_INSTRUCTIONS),
         resources=[
             ResourceRequirement(
@@ -234,7 +234,11 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             DefinitionBinding(
                 plugin_id="harness.coder",
                 binding_id="coder",
-            )
+            ),
+            DefinitionBinding(
+                plugin_id="harness.skills",
+                binding_id="skills",
+            ),
         ],
     )
     definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))

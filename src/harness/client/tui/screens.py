@@ -54,7 +54,7 @@ from ..local import local_model_catalog, local_target, local_thinking_support
 from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow, stepped_value
 from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
-from .completion import matching_files, workspace_files
+from .completion import matching_files, matching_skills, workspace_files
 from .dialogs import (
     ChoiceDialog,
     CommandPaletteDialog,
@@ -807,6 +807,8 @@ class ChatScreen(Screen[None]):
         self._suggestion_signature: tuple[str, ...] = ()
         self._workspace_files: list[str] = []
         self._workspace_root = Path.cwd()
+        self._skills: list[dict[str, Any]] = []
+        self._skills_loading = False
         if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
             self._workspace_root = Path(target.cwd).resolve()
 
@@ -1067,6 +1069,7 @@ class ChatScreen(Screen[None]):
                     selected_revision=snapshot.selected_revision,
                     can_write=self.client.extension.supports("_harness/configuration/update"),
                 )
+                await self._refresh_skills()
                 return
             except ExtensionUnavailable:
                 pass
@@ -1075,6 +1078,7 @@ class ChatScreen(Screen[None]):
                 return
         panel.show_message("Loading standard configuration…")
         panel.set_standard_options(list(self.session.config_options))
+        await self._refresh_skills()
 
     async def _refresh_sessions(self, *, load_more: bool = False) -> None:
         panel = self.query_one("#side-panel", SidePanel).sessions
@@ -1368,6 +1372,42 @@ class ChatScreen(Screen[None]):
         self._workspace_files = await asyncio.to_thread(workspace_files, self._workspace_root)
         self._sync_command_suggestions()
 
+    def _sync_skill_suggestions(self) -> bool:
+        composer = self.query_one("#composer", Composer)
+        row, column = composer.cursor_location
+        line = composer.document.get_line(row)[:column]
+        match = re.search(r"(?<!\S)\$([A-Za-z0-9-]*)$", line)
+        if match is None or not composer.has_focus:
+            return False
+        items = [
+            {
+                "kind": "skill",
+                "name": str(skill.get("name", "")),
+                "label": (
+                    f"${skill.get('name', '')}   {str(skill.get('description', ''))[:80]}"
+                ).rstrip(),
+                "start": (row, match.start()),
+                "end": (row, column),
+            }
+            for skill in matching_skills(
+                (skill for skill in self._skills if bool(skill.get("user_invocable", True))),
+                match.group(1),
+            )
+            if skill.get("name")
+        ]
+        if not items:
+            if match.group(1):
+                self._hide_command_suggestions()
+            return False
+        signature = tuple(item["name"] for item in items)
+        if signature != self._suggestion_signature:
+            self._suggestion_index = 0
+            self._suggestion_signature = signature
+        self._suggestion_items = items
+        self._render_command_suggestions()
+        composer.suggestions_open = True
+        return True
+
     def _sync_file_suggestions(self) -> None:
         composer = self.query_one("#composer", Composer)
         row, column = composer.cursor_location
@@ -1401,7 +1441,8 @@ class ChatScreen(Screen[None]):
         composer = self.query_one("#composer", Composer)
         raw = composer.text
         if not raw.startswith("/") or "\n" in raw:
-            self._sync_file_suggestions()
+            if not self._sync_skill_suggestions():
+                self._sync_file_suggestions()
             return
         body = raw[1:]
         if " " in body or "\t" in body:
@@ -1548,6 +1589,10 @@ class ChatScreen(Screen[None]):
         self._hide_command_suggestions()
         if item["kind"] == "file":
             self._complete_file(item)
+            return
+        if item["kind"] == "skill":
+            composer.replace(f"${item['name']} ", item["start"], item["end"])
+            composer.focus()
             return
         if item["kind"] == "local":
             command = item["command"]
@@ -1811,6 +1856,8 @@ class ChatScreen(Screen[None]):
             else:
                 self.app.copy_to_clipboard(response._text)
                 self.app.notify("Response copied")
+        elif name == "skills":
+            await self._show_skills(rest)
         elif name == "plugins":
             self.action_show_capabilities()
             self.refresh_capabilities()
@@ -1824,6 +1871,67 @@ class ChatScreen(Screen[None]):
             self._show_settings()
         elif name == "help":
             self.action_help()
+
+    async def _show_skills(self, query: str = "") -> None:
+        await self._refresh_skills()
+        available = [skill for skill in self._skills if bool(skill.get("user_invocable", True))]
+        if not available:
+            await self._notice(
+                "No skills discovered. Add skill packages under `.agents/skills`, or enable "
+                "the skills plugin in /plugins and set its directories.",
+                "info",
+            )
+            return
+        composer = self.query_one("#composer", Composer)
+        composer.load_text(f"${query.strip().replace(' ', '-')}")
+        composer.focus()
+        self._sync_skill_suggestions()
+
+    async def _refresh_skills(self) -> None:
+        """Fetch the runtime's skill catalog for the `$` picker; discovery is host-side."""
+        if self._skills_loading:
+            return
+        self._skills_loading = True
+        try:
+            binding_id = await self._skills_binding_id()
+            self._skills = [] if binding_id is None else await self._fetch_skill_catalog(binding_id)
+        finally:
+            self._skills_loading = False
+
+    async def _skills_binding_id(self) -> str | None:
+        for binding in self._bindings_raw:
+            plugin_id = str(binding.get("pluginId") or binding.get("plugin_id") or "")
+            binding_id = str(binding.get("bindingId") or binding.get("binding_id") or "")
+            if plugin_id == "harness.skills" and binding_id and binding.get("enabled", True):
+                return binding_id
+        # `capabilities/list` may not be negotiated; the catalog command name is unique.
+        for command in self._plugin_commands:
+            name = str(command.get("commandName") or command.get("command_name") or "")
+            binding_id = str(command.get("bindingId") or command.get("binding_id") or "")
+            if name == "catalog" and binding_id:
+                return binding_id
+        return None
+
+    async def _fetch_skill_catalog(self, binding_id: str) -> list[dict[str, Any]]:
+        if not self.client.extension.supports("_harness/commands/invoke"):
+            return []
+        if self._find_plugin_command(f"{binding_id}:catalog") is None:
+            return []
+        try:
+            response = await self.session.invoke_command(
+                binding_id,
+                "catalog",
+                expected_revision=self._plugin_revision,
+                request_id=f"ui-{uuid.uuid4().hex}",
+            )
+        except (ExtensionUnavailable, HarnessClientError):
+            return []
+        presentation = response.result.presentation
+        data = presentation.data if presentation is not None else {}
+        skills = data.get("skills") if isinstance(data, dict) else None
+        if not isinstance(skills, list):
+            return []
+        return [skill for skill in skills if isinstance(skill, dict)]
 
     async def _rename_session(self, title: str) -> None:
         if not self.client.extension.supports("_harness/session/rename"):
