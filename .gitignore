@@ -10,3 +10,5 @@ build/
 *.db-wal
 .env
 .idea
+test.py
+var

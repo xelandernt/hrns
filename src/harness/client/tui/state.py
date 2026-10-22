@@ -7,6 +7,7 @@ application.
 from __future__ import annotations
 
 import difflib
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -22,7 +23,6 @@ __all__ = [
     "config_option_value",
     "format_usage",
     "format_usage_compact",
-    "is_subagent_tool",
     "merge_presentation",
     "merge_tool_event",
     "model_option",
@@ -74,6 +74,15 @@ def tool_args_preview(data: dict[str, Any], *, limit: int = 80) -> str:
     unknown falls back to the first two ``key=value`` pairs.
     """
     raw = data.get("raw_input")
+    if isinstance(raw, str):
+        decoded = raw.strip()
+        if decoded.startswith("{"):
+            try:
+                parsed = json.loads(decoded)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                raw = parsed
     if isinstance(raw, str):
         return _one_line(raw, limit)
     if not isinstance(raw, dict):
@@ -228,8 +237,6 @@ def tool_detail_text(event: Any, *, limit: int = UI_MAX_TOOL_CONTENT_CHARS) -> s
 
 
 def _render_json(value: Any) -> str:
-    import json
-
     try:
         rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
     except Exception:
@@ -339,35 +346,6 @@ def presentation_payload(data: dict[str, Any]) -> dict[str, Any] | None:
         if candidate.get("rendererId") or candidate.get("renderer_id"):
             return candidate
     return None
-
-
-_SUBAGENT_MARKERS = (
-    "delegate_task",
-    "delegate task",
-    "delegation",
-    "subagent",
-    "sub-agent",
-    "spawn agent",
-    "spawn_agent",
-)
-
-
-def is_subagent_tool(data: dict[str, Any]) -> bool:
-    """Whether an ordinary tool activity represents delegated child-agent work.
-
-    ACP has no subagent update type. A peer that delegates exposes it as a tool
-    call; classify only explicit delegation names so unrelated tools never
-    become a fabricated "subagent" view.
-    """
-    parts = [
-        str(data.get("title") or ""),
-        str(data.get("kind") or ""),
-    ]
-    raw = data.get("raw_input")
-    if isinstance(raw, dict):
-        parts.extend(str(key) for key in raw)
-    haystack = " ".join(parts).lower()
-    return any(marker in haystack for marker in _SUBAGENT_MARKERS)
 
 
 def config_option_value(option: dict[str, Any]) -> str:

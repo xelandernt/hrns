@@ -160,6 +160,11 @@ class HarnessApp(App[int]):
         display: block;
     }
 
+    .tool-card .tool-view {
+        padding: 0 0 0 3;
+        height: auto;
+    }
+
     /* --------------------------------------------------------- side panel */
 
     #side-panel {

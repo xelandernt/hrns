@@ -19,6 +19,7 @@ from pydantic_ai.providers import infer_provider_class
 from harness.config import LocalSettings, thinking_from_settings
 from harness.protocol import HarnessError
 
+from .definitions import AgentDefinition, AgentSpec, DefinitionBinding
 from .host import (
     HarnessACPAgent,
     HostBundle,
@@ -27,7 +28,20 @@ from .host import (
     build_store,
 )
 from .registry import PluginRegistry
-from .starters import developer_definition
+from .resources import ResourceRequirement
+
+_LOCAL_INSTRUCTIONS = """\
+You are a local Harness agent connected through ACP, working in the user's project.
+
+The bundled coder capability provides file tools, content search, and a shell in the
+workspace. Read before you edit, keep commands non-interactive, and confirm changes with a
+command instead of assuming they work. Answer directly when no tool is needed.
+"""
+
+#: Tools that only read the workspace; everything else needs explicit approval.
+_READ_ONLY_TOOLS = frozenset(
+    {"read_file", "list_files", "grep", "list_directory", "search_files", "find_files"}
+)
 
 #: Frequently used provider ids are shown first in the terminal picker.
 _PROVIDER_PRIORITY = (
@@ -176,7 +190,13 @@ def configured_model(settings: LocalSettings, model_id: str | None = None) -> Mo
 
 
 async def _require_tool_approval(_ctx: Any, tools: list[Any]) -> list[Any]:
-    return [replace(tool, kind="unapproved") for tool in tools]
+    """Approve workspace reads; ask before anything that writes or runs a command."""
+    return [
+        tool
+        if getattr(tool, "name", None) in _READ_ONLY_TOOLS
+        else replace(tool, kind="unapproved")
+        for tool in tools
+    ]
 
 
 def _local_models(settings: LocalSettings) -> tuple[str, ...]:
@@ -191,6 +211,36 @@ def _local_models(settings: LocalSettings) -> tuple[str, ...]:
     return (current,)
 
 
+def local_definition(settings: LocalSettings) -> AgentDefinition:
+    """The built-in local definition: bundled coder tools in the working directory."""
+    definition = AgentDefinition(
+        agent_id="harness.local",
+        name=f"Local · {settings.provider}:{settings.model}",
+        description="Local coding agent with bundled file, search, and shell tools.",
+        spec=AgentSpec(instructions=_LOCAL_INSTRUCTIONS),
+        resources=[
+            ResourceRequirement(
+                name="model.default",
+                kind="model",
+                description="Agent model (provider string or native Model instance).",
+            ),
+            ResourceRequirement(
+                name="workspace",
+                kind="workspace",
+                description="Working directory the bundled tools act on.",
+            ),
+        ],
+        bindings=[
+            DefinitionBinding(
+                plugin_id="harness.coder",
+                binding_id="coder",
+            )
+        ],
+    )
+    definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))
+    return definition
+
+
 def build_local_agent(
     settings: LocalSettings,
     *,
@@ -202,10 +252,7 @@ def build_local_agent(
     if not workspace.is_dir():
         raise ValueError("The local working directory must be a directory.")
     model = model if model is not None else configured_model(settings)
-    definition = developer_definition()
-    definition.agent_id = "harness.local"
-    definition.name = f"Local · {settings.provider}:{settings.model}"
-    definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))
+    definition = local_definition(settings)
     registry = PluginRegistry()
     registry.discover()
     store = build_store(str(settings.store.expanduser()))
@@ -224,7 +271,7 @@ def build_local_agent(
             default_cwd=str(workspace),
             models=models,
             default_model=f"{settings.provider}:{settings.model}",
-            resources={"model.default": model},
+            resources={"model.default": model, "workspace": str(workspace)},
             thinking_models=thinking_support(models),
             default_effort=thinking_from_settings(settings),
             model_settings=settings.model_settings,

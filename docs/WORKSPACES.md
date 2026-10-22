@@ -39,11 +39,11 @@ records, named persistent leases, or workspace state tables in the ACP store.
 
 A local workspace is **not a sandbox**. Function tools such as filesystem and shell execute in
 the host process under its user's permissions. Isolation requires an explicitly installed and
-bound upstream backend (for example an SSH or cloud workspace from the catalog); a requested
-unavailable backend fails rather than falling back to local execution.
+bound upstream backend (for example an SSH or cloud workspace supplied by an installed
+plugin); a requested unavailable backend fails rather than falling back to local execution.
 
-## Catalog capabilities
+## Workspace-dependent capabilities
 
-Catalog entries that need a workspace derive their working directory from the bound resource.
+Capabilities that need a workspace derive their working directory from the bound resource.
 They do not inspect the client machine. A definition that enables such a binding must declare
 and receive the workspace resource, or session composition fails before any turn starts.

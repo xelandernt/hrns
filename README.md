@@ -35,16 +35,17 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
-`uv run hrns` starts a session in the current directory using that model. The agent
-works on files and runs commands with approval prompts. Configuration uses
-pydantic-settings. See [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints,
-local inference, other Pydantic AI providers, and headless execution.
+`uv run hrns` starts a session in the current directory using that model. The bundled
+`harness.coder` capability gives it file tools, content search, and a shell in that
+directory: reads are automatic, while writes, edits, and commands ask for approval first.
+Configuration uses pydantic-settings. See
+[local setup](docs/LOCAL.md) for OpenAI-compatible endpoints, local inference, other
+Pydantic AI providers, and headless execution.
 
 Useful slash commands include `/connect` (switch or add a target), `/models`
 (configure or select the local model), `/effort` (change reasoning effort live),
-`/plugins` (toggle, configure, or add plugins), and `/agents` (inspect
-subagents). Typing `/` shows an inline filtered list. The older `/model` and
-`/capabilities` names remain aliases.
+and `/plugins` (toggle, configure, or add plugins). Typing `/` shows an inline
+filtered list. The older `/model` and `/capabilities` names remain aliases.
 
 Any independent ACP agent can still be launched explicitly:
 
@@ -111,7 +112,7 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 - [Runtime Python API](docs/RUNTIME_API.md)
 - [ACP host](docs/ACP.md) and [client usage](docs/CLIENT_API.md)
 - [Embed agents in FastAPI](docs/SERVER.md)
-- [Capability catalog and integration coverage](docs/CATALOG.md)
+- [Included capability inventory for rework](CAPABILITIES.md)
 - [Workspace lifecycle](docs/WORKSPACES.md)
 - [Security model](docs/SECURITY.md)
 - [Concept compliance matrix](docs/COMPLIANCE.md)
