@@ -1,6 +1,24 @@
 """Shared contracts. This package deliberately imports neither AI nor UI libraries."""
 
 from .errors import HarnessError
+from .extensions import (
+    SUPPORTED_CONVERSATION_OPERATIONS,
+    CommandCancelRequest,
+    CommandCancelResponse,
+    CommandCatalogChanged,
+    CommandDescriptor,
+    CommandInvokeRequest,
+    CommandInvokeResponse,
+    CommandListRequest,
+    CommandListResponse,
+    CommandName,
+    CommandResult,
+    PresentationListRequest,
+    PresentationListResponse,
+    PresentationUpdated,
+    StartTurn,
+    ToolPresentationSnapshot,
+)
 from .models import (
     AddChange,
     BindingChange,
@@ -36,6 +54,22 @@ from .transport import (
 )
 
 __all__ = [
+    "SUPPORTED_CONVERSATION_OPERATIONS",
+    "CommandCancelRequest",
+    "CommandCancelResponse",
+    "CommandCatalogChanged",
+    "CommandDescriptor",
+    "CommandInvokeRequest",
+    "CommandInvokeResponse",
+    "CommandListRequest",
+    "CommandListResponse",
+    "CommandName",
+    "CommandResult",
+    "PresentationListRequest",
+    "PresentationListResponse",
+    "PresentationUpdated",
+    "StartTurn",
+    "ToolPresentationSnapshot",
     "AddChange",
     "BindingChange",
     "BindingDescriptor",
