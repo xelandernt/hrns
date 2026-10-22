@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import warnings
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,7 +39,7 @@ from pydantic import ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
@@ -47,14 +48,27 @@ from pydantic_ai_harness.experimental.acp import (
 
 from harness.config import EFFORT_DEFAULT
 from harness.protocol import (
+    EXTENSION_METHODS,
     AddChange,
     BindingListResponse,
+    CommandCancelRequest,
+    CommandCancelResponse,
+    CommandCatalogChanged,
+    CommandInvokeRequest,
+    CommandInvokeResponse,
+    CommandListRequest,
+    CommandListResponse,
     ConfigurationSnapshot,
     ConfigurationUpdate,
     ExtensionAdvertisement,
     HarnessError,
     ListRequest,
     PluginListResponse,
+    PresentationListRequest,
+    PresentationListResponse,
+    PresentationUpdated,
+    ToolPresentationSnapshot,
+    canonical_hash,
     paginate,
 )
 
@@ -74,6 +88,7 @@ from .definitions import (
     manifest_from_file,
 )
 from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
+from .presentation import snapshot_from_metadata
 from .registry import PluginRegistry
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
@@ -94,14 +109,8 @@ __all__ = [
 
 _LOG = logging.getLogger("harness.runtime.host")
 
-_EXTENSION_METHODS = (
-    "_harness/capabilities/list",
-    "_harness/plugins/list",
-    "_harness/configuration/get",
-    "_harness/configuration/update",
-    "_harness/configuration/changed",
-    "_harness/session/rename",
-)
+_EXTENSION_METHODS = tuple(EXTENSION_METHODS)
+_COMMAND_CACHE_PER_SESSION = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +320,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self._turn_usage: dict[str, dict[str, Any]] = {}
         self._config_requests: dict[str, dict[str, tuple[str, ConfigurationSnapshot]]] = {}
+        self._command_tasks: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
+        self._command_results: dict[str, OrderedDict[str, tuple[str, dict[str, Any]]]] = {}
+        self._command_locks: dict[str, asyncio.Lock] = {}
         self._pending_initial: list[Any] | None = None
         self._pending_effort: str | None = None
         self._new_lock = asyncio.Lock()
@@ -355,9 +367,15 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self, session_id: str, **kwargs: Any
     ) -> schema.CloseSessionResponse | None:
         response = await super().close_session(session_id, **kwargs)
+        for key, task in list(self._command_tasks.items()):
+            if key[0] == session_id:
+                task.cancel()
+                self._command_tasks.pop(key, None)
         self._compositions.pop(session_id, None)
         self._turn_locks.pop(session_id, None)
         self._config_requests.pop(session_id, None)
+        self._command_results.pop(session_id, None)
+        self._command_locks.pop(session_id, None)
         return response
 
     def _turn_lock(self, session_id: str) -> asyncio.Lock:
@@ -682,6 +700,42 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             if method == "harness/configuration/update":
                 request = ConfigurationUpdate.model_validate(dict(params))
                 return await self._update_configuration(request)
+            if method == "harness/commands/list":
+                request = CommandListRequest.model_validate(dict(params))
+                composition = self._require_composition(request.session_id)
+                page, next_cursor = paginate(
+                    composition.commands.descriptors(),
+                    cursor=request.cursor,
+                    limit=request.limit,
+                )
+                return CommandListResponse(
+                    commands=page,
+                    selected_revision=composition.snapshot.selected_revision,
+                    active_revision=composition.snapshot.active_revision,
+                    supported_operations=sorted(composition.commands.supported_operations),
+                    next_cursor=next_cursor,
+                ).to_wire()
+            if method == "harness/commands/invoke":
+                request = CommandInvokeRequest.model_validate(dict(params))
+                return await self._invoke_command(request)
+            if method == "harness/commands/cancel":
+                request = CommandCancelRequest.model_validate(dict(params))
+                if await self.store.get(request.session_id) is None:
+                    raise HarnessError(
+                        "SESSION_CLOSED", "Load the session before cancelling a command."
+                    )
+                task = self._command_tasks.get((request.session_id, request.request_id))
+                if task is None or task.done():
+                    return CommandCancelResponse(finished=task is not None).to_wire()
+                task.cancel()
+                return CommandCancelResponse(cancelled=True).to_wire()
+            if method == "harness/presentation/get":
+                request = PresentationListRequest.model_validate(dict(params))
+                self._require_composition(request.session_id)
+                snapshots = await self._presentation_snapshots(
+                    request.session_id, request.tool_call_ids
+                )
+                return PresentationListResponse(snapshots=snapshots).to_wire()
             raise RequestError.method_not_found(f"_{method}")
         except HarnessError as exc:
             raise acp_map.harness_rpc_error(exc) from exc
@@ -754,6 +808,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                     composition.effort.model or self._default_model
                 ),
                 deps=composition.deps,
+                presentation_sink=self._presentation_sink(session_id),
             )
             refreshed.effort.model = composition.effort.model or self._default_model
             snapshot = refreshed.catalog.snapshot(
@@ -782,6 +837,8 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             composition.effort = refreshed.effort
             composition.config = refreshed.config
             composition.capabilities = refreshed.capabilities
+            composition.commands = refreshed.commands
+            composition.presentation = refreshed.presentation
             composition.workspace = refreshed.workspace
             composition.deps = refreshed.deps
             await self._apply_unavailable_tools(session_id, composition)
@@ -790,7 +847,112 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 snapshot,
             )
             await self._send_configuration_changed(snapshot)
+            await self._send_commands_changed(session_id, composition)
             return snapshot.to_wire()
+
+    def _command_lock(self, session_id: str) -> asyncio.Lock:
+        return self._command_locks.setdefault(session_id, asyncio.Lock())
+
+    @staticmethod
+    def _command_hash(request: CommandInvokeRequest) -> str:
+        return canonical_hash(request.model_dump(mode="json", by_alias=True, exclude_none=True))
+
+    async def _invoke_command(self, request: CommandInvokeRequest) -> dict[str, Any]:
+        """Run one user-only command under the session's existing turn lock.
+
+        Duplicate request ids with an identical payload share one execution; reusing an id
+        for different arguments is rejected. A session that is running a turn or another
+        plugin command rejects the new invocation instead of building another work queue.
+        """
+        if await self.store.get(request.session_id) is None:
+            raise HarnessError("SESSION_CLOSED", "Load the session before invoking a command.")
+        digest = self._command_hash(request)
+        cached = self._command_results.get(request.session_id, {}).get(request.request_id)
+        if cached is not None:
+            if cached[0] != digest:
+                raise HarnessError(
+                    "INVALID_CONFIGURATION",
+                    "A request id cannot be reused with different command arguments.",
+                    details={"requestId": request.request_id},
+                )
+            return cached[1]
+        key = (request.session_id, request.request_id)
+        async with self._command_lock(request.session_id):
+            cached = self._command_results.get(request.session_id, {}).get(request.request_id)
+            if cached is not None:
+                if cached[0] != digest:
+                    raise HarnessError(
+                        "INVALID_CONFIGURATION",
+                        "A request id cannot be reused with different command arguments.",
+                        details={"requestId": request.request_id},
+                    )
+                return cached[1]
+            existing = self._command_tasks.get(key)
+            task = existing or asyncio.create_task(
+                self._execute_command(request, digest), name=f"harness-command-{key[1]}"
+            )
+            if existing is None:
+                self._command_tasks[key] = task
+                task.add_done_callback(lambda _: self._command_tasks.pop(key, None))
+        return await asyncio.shield(task)
+
+    async def _execute_command(
+        self, request: CommandInvokeRequest, digest: str
+    ) -> dict[str, Any]:
+        session_id = request.session_id
+        composition = self._require_composition(session_id)
+        if request.expected_revision != composition.snapshot.selected_revision:
+            raise HarnessError(
+                "REVISION_CONFLICT",
+                "The configuration changed since the client's expected revision.",
+                details={
+                    "expectedRevision": request.expected_revision,
+                    "selectedRevision": composition.snapshot.selected_revision,
+                },
+            )
+        binding = composition.commands.resolve(request.binding_id, request.command_name)
+        unsupported = set(binding.command.required_operations) - set(
+            composition.commands.supported_operations
+        )
+        if unsupported:
+            raise HarnessError(
+                "UNSUPPORTED_OPERATION",
+                "This command needs a conversation operation this host does not support.",
+                details={"operations": sorted(unsupported)},
+            )
+        lock = self._turn_lock(session_id)
+        if lock.locked():
+            raise HarnessError(
+                "COMMAND_BUSY",
+                "The session is already running a turn or another command.",
+                details={"sessionId": session_id},
+            )
+        async with lock:
+            # Configuration updates take the same lock, so the binding/revision cannot
+            # change between the checks above and the handler call.
+            refreshed = self._require_composition(session_id)
+            if refreshed.snapshot.selected_revision != request.expected_revision:
+                raise HarnessError(
+                    "REVISION_CONFLICT",
+                    "The configuration changed before the command started.",
+                    details={"expectedRevision": request.expected_revision},
+                )
+            result = await composition.commands.invoke(
+                binding,
+                request,
+                history_reader=lambda: self.session_history(session_id),
+            )
+        response = CommandInvokeResponse(
+            request_id=request.request_id,
+            binding_id=request.binding_id,
+            command_name=request.command_name,
+            result=result,
+        ).to_wire()
+        cache = self._command_results.setdefault(session_id, OrderedDict())
+        cache[request.request_id] = (digest, response)
+        while len(cache) > _COMMAND_CACHE_PER_SESSION:
+            cache.popitem(last=False)
+        return response
 
     def _bindings_payload(self, outcome: ChangeOutcome) -> dict[str, dict[str, Any]]:
         added = {binding_id: plugin_id for binding_id, plugin_id, _, _ in outcome.added}
@@ -809,6 +971,54 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         with contextlib.suppress(Exception):
             await self._client_conn.ext_notification(
                 "harness/configuration/changed", snapshot.to_wire()
+            )
+
+    def _presentation_sink(self, session_id: str) -> Any:
+        async def publish(snapshot: ToolPresentationSnapshot) -> None:
+            if self._client_conn is None:
+                return
+            with contextlib.suppress(Exception):
+                await self._client_conn.ext_notification(
+                    "harness/presentation/updated",
+                    PresentationUpdated(snapshots=[snapshot]).to_wire(),
+                )
+
+        del session_id
+        return publish
+
+    async def _presentation_snapshots(
+        self, session_id: str, tool_call_ids: Sequence[str]
+    ) -> list[ToolPresentationSnapshot]:
+        stored = await self.store.load(session_id)
+        if stored is None:
+            return []
+        wanted = set(tool_call_ids)
+        snapshots: dict[str, ToolPresentationSnapshot] = {}
+        for message in stored.messages:
+            for part in getattr(message, "parts", ()):
+                if not isinstance(part, ToolReturnPart):
+                    continue
+                if part.tool_call_id not in wanted:
+                    continue
+                snapshot = snapshot_from_metadata(
+                    session_id, part.tool_call_id, getattr(part, "metadata", None)
+                )
+                if snapshot is not None:
+                    snapshots[part.tool_call_id] = snapshot
+        return [snapshots[item] for item in tool_call_ids if item in snapshots]
+
+    async def _send_commands_changed(self, session_id: str, composition: Composition) -> None:
+        if self._client_conn is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._client_conn.ext_notification(
+                "harness/commands/changed",
+                CommandCatalogChanged(
+                    session_id=session_id,
+                    selected_revision=composition.snapshot.selected_revision,
+                    commands=composition.commands.descriptors(),
+                    supported_operations=sorted(composition.commands.supported_operations),
+                ).to_wire(),
             )
 
     async def _remembered_tool_names(self, session_id: str) -> frozenset[str]:
@@ -901,6 +1111,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             model_settings=self.policy.model_settings,
             effort=effort,
             effort_support=support,
+            presentation_sink=self._presentation_sink(session.session_id),
         )
         composition.effort.model = model
         self._compositions[session.session_id] = composition

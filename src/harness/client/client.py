@@ -54,8 +54,12 @@ from acp.schema import (
 
 from harness.protocol import (
     BindingDescriptor,
+    CommandCatalogChanged,
+    CommandInvokeResponse,
     ConfigurationSnapshot,
     PluginInfo,
+    PresentationUpdated,
+    ToolPresentationSnapshot,
 )
 
 from .bus import EventBus
@@ -85,10 +89,12 @@ from .events import (
     ConnectionEvent,
     ModesUpdated,
     PlanChanged,
+    PluginCommandsListed,
     PluginListed,
     SessionInfoChanged,
     SessionsListed,
     ToolEvent,
+    ToolPresentationUpdated,
     TurnCompleted,
     TurnStarted,
     UsageUpdated,
@@ -96,14 +102,18 @@ from .events import (
 )
 from .extension import (
     CapabilityListResult,
+    CommandListResult,
     HarnessExtension,
     PluginListResult,
     advertisement_meta,
     build_configuration_update,
     parse_advertisement,
     parse_capability_list,
+    parse_command_list,
+    parse_command_response,
     parse_configuration_snapshot,
     parse_plugin_list,
+    parse_presentation_list,
     strip_prefix,
     validate_changes,
 )
@@ -885,6 +895,79 @@ class HarnessAcpClient:
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"configuration/update returned malformed data: {exc}") from exc
 
+    async def harness_commands(
+        self, session_id: str, *, cursor: str | None = None, limit: int | None = None
+    ) -> CommandListResult:
+        payload: dict[str, Any] = {"sessionId": session_id}
+        if cursor:
+            payload["cursor"] = cursor
+        checked_limit = _checked_limit(limit)
+        if checked_limit is not None:
+            payload["limit"] = checked_limit
+        try:
+            raw = await self._ext_request("_harness/commands/list", payload)
+            return parse_command_list(raw)
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"commands/list returned malformed data: {exc}") from exc
+
+    async def harness_invoke_command(
+        self,
+        session_id: str,
+        binding_id: str,
+        command_name: str,
+        *,
+        text: str | None = None,
+        arguments: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
+        request_id: str | None = None,
+    ) -> CommandInvokeResponse:
+        if text is not None and arguments is not None:
+            raise HarnessClientError(
+                "Provide either raw command text or structured arguments, not both."
+            )
+        if expected_revision is None:
+            expected_revision = (await self.harness_commands(session_id)).selected_revision
+        request_id = request_id or f"command-{uuid.uuid4().hex}"
+        payload: dict[str, Any] = {
+            "sessionId": session_id,
+            "bindingId": binding_id,
+            "commandName": command_name,
+            "requestId": request_id,
+            "expectedRevision": expected_revision,
+        }
+        if arguments is not None:
+            payload["arguments"] = arguments
+        else:
+            payload["text"] = text or ""
+        try:
+            raw = await self._ext_request("_harness/commands/invoke", payload)
+            return parse_command_response(raw)
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"commands/invoke returned malformed data: {exc}") from exc
+
+    async def harness_cancel_command(
+        self, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        try:
+            return await self._ext_request(
+                "_harness/commands/cancel",
+                {"sessionId": session_id, "requestId": request_id},
+            )
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"commands/cancel returned malformed data: {exc}") from exc
+
+    async def harness_presentations(
+        self, session_id: str, tool_call_ids: list[str]
+    ) -> tuple[ToolPresentationSnapshot, ...]:
+        if not tool_call_ids:
+            return ()
+        payload = {"sessionId": session_id, "toolCallIds": tool_call_ids[:200]}
+        try:
+            raw = await self._ext_request("_harness/presentation/get", payload)
+            return parse_presentation_list(raw).snapshots
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"presentation/get returned malformed data: {exc}") from exc
+
     async def _raw_request(self, method: str, params: dict[str, Any]) -> Any:
         """Send one request through the SDK connection's public JSON-RPC layer."""
         conn = getattr(self.bundle.conn, "_conn", None)
@@ -1129,7 +1212,8 @@ class HarnessAcpClient:
         raise RequestError.method_not_found(f"_{method.lstrip('_')}")
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        if method in {"harness/configuration/changed", "_harness/configuration/changed"}:
+        name = method.lstrip("_")
+        if name == "harness/configuration/changed":
             try:
                 snapshot = parse_configuration_snapshot(params)
             except Exception:
@@ -1137,6 +1221,27 @@ class HarnessAcpClient:
             self.bus.publish(
                 ConfigurationChanged(session_id=snapshot.session_id, snapshot=snapshot)
             )
+            return
+        if name == "harness/commands/changed":
+            try:
+                changed = CommandCatalogChanged.model_validate(params)
+            except Exception:
+                return
+            self.bus.publish(
+                PluginCommandsListed(
+                    session_id=changed.session_id,
+                    commands=tuple(changed.commands),
+                    selected_revision=changed.selected_revision,
+                    supported_operations=tuple(changed.supported_operations),
+                )
+            )
+            return
+        if name == "harness/presentation/updated":
+            try:
+                updated = PresentationUpdated.model_validate(params)
+            except Exception:
+                return
+            self.bus.publish(ToolPresentationUpdated(snapshots=tuple(updated.snapshots)))
             return
         return None
 
@@ -1261,6 +1366,46 @@ class SessionProxy:
             PluginListed(plugins=result.plugins, next_cursor=result.next_cursor)
         )
         return result
+
+    async def list_commands(self, *, cursor: str | None = None) -> CommandListResult:
+        result = await self.client.harness_commands(self.session_id, cursor=cursor)
+        self.client.bus.publish(
+            PluginCommandsListed(
+                session_id=self.session_id,
+                commands=tuple(result.commands),
+                selected_revision=result.selected_revision,
+                supported_operations=tuple(result.supported_operations),
+            )
+        )
+        return result
+
+    async def invoke_command(
+        self,
+        binding_id: str,
+        command_name: str,
+        *,
+        text: str | None = None,
+        arguments: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
+        request_id: str | None = None,
+    ) -> CommandInvokeResponse:
+        return await self.client.harness_invoke_command(
+            self.session_id,
+            binding_id,
+            command_name,
+            text=text,
+            arguments=arguments,
+            expected_revision=expected_revision,
+            request_id=request_id,
+        )
+
+    async def cancel_command(self, request_id: str) -> dict[str, Any]:
+        return await self.client.harness_cancel_command(self.session_id, request_id)
+
+    async def presentations(
+        self, tool_call_ids: list[str]
+    ) -> tuple[ToolPresentationSnapshot, ...]:
+        return await self.client.harness_presentations(self.session_id, tool_call_ids)
 
     async def close(self) -> None:
         await self.client.close_session(self.session_id)

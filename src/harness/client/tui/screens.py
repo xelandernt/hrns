@@ -39,6 +39,7 @@ from ..events import (
     ConnectionEvent,
     ModesUpdated,
     PlanChanged,
+    PluginCommandsListed,
     SessionInfoChanged,
     ToolEvent,
     TurnCompleted,
@@ -66,11 +67,12 @@ from .dialogs import (
 from .local import LocalModelResult, effort_choices, effort_label
 from .state import (
     Settings,
+    activity_label,
     binding_summary,
     build_form_fields,
     config_option_value,
     effort_option,
-    format_usage,
+    format_usage_compact,
     model_option,
     option_values,
     permission_mode_label,
@@ -89,8 +91,6 @@ from .widgets import (
     Composer,
     ConfigOptionRequested,
     ConfigOptionStepRequested,
-    CopyCodeRequested,
-    HintBar,
     OutputPending,
     PromptQueue,
     QueueAction,
@@ -776,10 +776,15 @@ class ChatScreen(Screen[None]):
         self.initial_load = initial_load
         self.connected = client.connected
         self.busy = False
+        self._activity = ""
+        self._hint_note = ""
         self._usage: dict[str, Any] | None = None
         self._session_title: str | None = None
         self._plan: tuple[tuple[str, str, str], ...] = ()
         self._commands: tuple[dict[str, Any], ...] = ()
+        self._plugin_commands: tuple[dict[str, Any], ...] = ()
+        self._plugin_revision = 0
+        self._consumed_command_actions: set[tuple[str, str]] = set()
         self._bindings_raw: list[dict[str, Any]] = []
         self._loading_session = False
         self._replay_target: str | None = None
@@ -817,8 +822,9 @@ class ChatScreen(Screen[None]):
         yield ApprovalBar(id="approval")
         yield CommandSuggestions(id="command-suggestions")
         yield AttachmentBar(id="attachments", markup=False)
-        yield Composer(id="composer")
-        yield HintBar(id="hintbar")
+        with Horizontal(id="composer-row"):
+            yield Static("›", id="composer-prompt", markup=False)
+            yield Composer(id="composer")
         yield StatusBar(id="statusbar")
 
     def on_mount(self) -> None:
@@ -829,11 +835,6 @@ class ChatScreen(Screen[None]):
         self._apply_layout()
         self._subscribe()
         self._update_chrome()
-        hint = (
-            "/ commands · Ctrl+K palette · F2 plugins · F3 sessions "
-            "· F4 activity · Esc stop turn · Ctrl+R reconnect · Ctrl+T transcript"
-        )
-        self.query_one("#hintbar", HintBar).show(hint)
         self.query_one("#composer", Composer).focus()
         self._run_bootstrap()
 
@@ -890,7 +891,6 @@ class ChatScreen(Screen[None]):
         if self._panel_forced is not None:
             visible = self._panel_forced
         panel.display = visible
-        self.query_one("#hintbar").display = width >= 60
         screen_class = "narrow" if width < 96 else "wide"
         if screen_class not in self.classes:
             self.add_class(screen_class)
@@ -908,15 +908,6 @@ class ChatScreen(Screen[None]):
         session_id = self.session.session_id if self.session else None
         self.query_one("#side-panel", SidePanel).sessions.mark_current(session_id)
         extension = ""
-        model = ""
-        option = model_option(self.session.config_options)
-        if option:
-            model = config_option_value(option)
-        effort = ""
-        reasoning = effort_option(self.session.config_options)
-        if reasoning:
-            effort = config_option_value(reasoning)
-        mode = self.session.current_mode_id or ""
         self.query_one("#topbar", TopBar).show(
             target_text=self.target.location_text(),
             agent_text=f"{self.client.agent_title} {self.client.agent_version}".strip(),
@@ -924,17 +915,7 @@ class ChatScreen(Screen[None]):
             session_id=self._session_title or session_id,
             connected=self.connected,
         )
-        self.query_one("#statusbar", StatusBar).show(
-            connected=self.connected,
-            session_id=session_id,
-            model=model,
-            effort=effort,
-            mode=mode,
-            usage=format_usage(self._usage),
-            busy=self.busy,
-            detail="client " + CLIENT_VERSION,
-            permission=permission_mode_label(self.settings.permission_mode),
-        )
+        self._refresh_status()
         activity = self.query_one("#side-panel", SidePanel).activity
         location = self.target.location()
         lines = [
@@ -968,15 +949,43 @@ class ChatScreen(Screen[None]):
             ]
         )
 
+    def _refresh_status(self) -> None:
+        """Push the current session state into the one-line status band."""
+        session = self.session
+        option = model_option(session.config_options) if session else None
+        reasoning = effort_option(session.config_options) if session else None
+        self.query_one("#statusbar", StatusBar).show(
+            connected=self.connected,
+            model=config_option_value(option) if option else "",
+            effort=config_option_value(reasoning) if reasoning else "",
+            mode=(session.current_mode_id or "") if session else "",
+            usage=format_usage_compact(self._usage),
+            busy=self.busy,
+            activity=self._activity,
+            permission=permission_mode_label(self.settings.permission_mode),
+            hint=self._hint_text(),
+        )
+
+    def _hint_text(self) -> str:
+        if self._hint_note:
+            return self._hint_note
+        if self.busy:
+            return "esc to stop"
+        return ""
+
     async def _notice(self, text: str, severity: str = "info") -> None:
         await self.query_one("#transcript", TranscriptPane).add_notice(text, severity=severity)
 
     def _reset_activity(self) -> None:
         """Drop activity that belongs to the previous session or connection."""
         self._usage = None
+        self._activity = ""
+        self._hint_note = ""
         self._session_title = None
         self._plan = ()
         self._commands = ()
+        self._plugin_commands = ()
+        self._plugin_revision = 0
         self._bindings_raw = []
         self._turns_started = 0
         panel = self.query_one("#side-panel", SidePanel)
@@ -984,6 +993,7 @@ class ChatScreen(Screen[None]):
         panel.activity.clear_subagents()
         panel.activity.set_commands(())
         panel.activity.set_usage(None)
+        self._refresh_status()
 
     # ---------------------------------------------------------------- bootstrap
 
@@ -1006,8 +1016,30 @@ class ChatScreen(Screen[None]):
     async def refresh_sessions(self) -> None:
         await self._refresh_sessions()
 
+    def _set_plugin_commands(self, commands: tuple[Any, ...], *, revision: int) -> None:
+        self._plugin_commands = tuple(
+            command.model_dump(mode="json", by_alias=True)
+            if hasattr(command, "model_dump")
+            else dict(command)
+            for command in commands
+        )
+        self._plugin_revision = revision
+        self._sync_command_suggestions()
+
+    async def _refresh_plugin_commands(self) -> None:
+        if not self.client.extension.supports("_harness/commands/list"):
+            self._set_plugin_commands((), revision=0)
+            return
+        try:
+            result = await self.session.list_commands()
+        except (ExtensionUnavailable, HarnessClientError):
+            self._set_plugin_commands((), revision=0)
+            return
+        self._set_plugin_commands(result.commands, revision=result.selected_revision)
+
     async def _refresh_capabilities(self) -> None:
         panel = self.query_one("#side-panel", SidePanel).capabilities
+        await self._refresh_plugin_commands()
         if self.session.client is not self.client:
             panel.show_message(
                 "This session is not attached to the reconnected client. "
@@ -1110,10 +1142,15 @@ class ChatScreen(Screen[None]):
                     "raw_input": event.raw_input,
                 }
             )
+            if event.status in {"pending", "in_progress"}:
+                self._activity = activity_label(event.kind, event.title)
+            elif self.busy:
+                self._activity = "working"
+            self._refresh_status()
             return
         if isinstance(event, TurnStarted):
             self._turns_started += 1
-            self._set_busy(True, detail="working…")
+            self._set_busy(True)
             return
         if isinstance(event, TurnCompleted):
             if event.stop_reason not in {"end_turn", ""}:
@@ -1147,6 +1184,9 @@ class ChatScreen(Screen[None]):
             self._commands = event.commands
             self.query_one("#side-panel", SidePanel).activity.set_commands(event.commands)
             self._sync_command_suggestions()
+            return
+        if isinstance(event, PluginCommandsListed):
+            self._set_plugin_commands(event.commands, revision=event.selected_revision)
             return
         if isinstance(event, PlanChanged):
             self._plan = event.entries
@@ -1225,31 +1265,22 @@ class ChatScreen(Screen[None]):
                 can_write=self.client.extension.supports("_harness/configuration/update"),
             )
 
-    def _set_busy(self, busy: bool, detail: str = "") -> None:
+    def _set_busy(self, busy: bool) -> None:
         self.busy = busy
-        session_id = self.session.session_id if self.session else None
-        option = model_option(self.session.config_options) if self.session else None
-        reasoning = effort_option(self.session.config_options) if self.session else None
-        effort = config_option_value(reasoning) if reasoning else ""
-        self.query_one("#statusbar", StatusBar).show(
-            connected=self.connected,
-            session_id=session_id,
-            model=config_option_value(option) if option else "",
-            effort=effort,
-            mode=self.session.current_mode_id or "" if self.session else "",
-            usage=format_usage(self._usage),
-            busy=busy,
-            detail=detail,
-            permission=permission_mode_label(self.settings.permission_mode),
-        )
+        if not busy:
+            self._activity = ""
+        else:
+            self._hint_note = ""
+            if not self._activity:
+                self._activity = "working"
+        self._refresh_status()
         if not busy:
             if self._approval_future is not None:
                 self._resolve_approval(None)
             if self._redirect_after_turn:
                 self._redirect_after_turn = False
-                self.query_one("#hintbar", HintBar).show(
-                    "Turn stopped · type a new instruction for the agent"
-                )
+                self._hint_note = "Turn stopped · type a new instruction for the agent"
+                self._refresh_status()
                 self.query_one("#composer", Composer).focus()
 
     # --------------------------------------------------------------- approvals
@@ -1396,6 +1427,23 @@ class ChatScreen(Screen[None]):
             agent.sort(
                 key=lambda command: 0 if needle == str(command.get("name", "")).lower() else 1
             )
+        plugins = []
+        for command in self._plugin_commands:
+            display = self._plugin_command_display(command)
+            if (
+                not needle
+                or needle in display.lower()
+                or needle in str(command.get("description", "")).lower()
+            ):
+                plugins.append(command)
+        if needle:
+            plugins.sort(
+                key=lambda command: (
+                    0
+                    if needle == self._plugin_command_display(command).lower()
+                    else 1
+                )
+            )
 
         items: list[dict[str, Any]] = []
         for command in local:
@@ -1422,6 +1470,22 @@ class ChatScreen(Screen[None]):
                     "name": name,
                     "label": label,
                     "collision": collision,
+                }
+            )
+        for command in plugins[:100]:
+            display = self._plugin_command_display(command)
+            description = str(command.get("description", ""))
+            hint = str(command.get("argumentsHint") or command.get("arguments_hint") or "")
+            label = f"/{display}   {description}".rstrip()
+            if hint:
+                label += f"   ({hint})"
+            items.append(
+                {
+                    "kind": "plugin",
+                    "name": display,
+                    "bindingId": command.get("bindingId") or command.get("binding_id"),
+                    "commandName": command.get("commandName") or command.get("command_name"),
+                    "label": label,
                 }
             )
         if not items:
@@ -1490,6 +1554,30 @@ class ChatScreen(Screen[None]):
             composer.clear_composer()
             composer.focus()
             asyncio.create_task(self._run_local_command(command.name))
+            return
+        if item["kind"] == "plugin":
+            descriptor = next(
+                (
+                    command
+                    for command in self._plugin_commands
+                    if self._plugin_command_display(command) == item["name"]
+                ),
+                {},
+            )
+            takes_arguments = bool(
+                descriptor.get("takesArguments", descriptor.get("takes_arguments"))
+            )
+            if complete_only or takes_arguments:
+                composer.load_text(f"/{item['name']} ")
+                composer.focus()
+                return
+            composer.clear_composer()
+            composer.focus()
+            asyncio.create_task(
+                self._run_plugin_command(
+                    str(item["bindingId"]), str(item["commandName"]), ""
+                )
+            )
             return
         prefix = "/agent " if item.get("collision") else "/"
         composer.load_text(f"{prefix}{item['name']} ")
@@ -1568,7 +1656,7 @@ class ChatScreen(Screen[None]):
         if not from_queue:
             self._attachments.clear()
             self._refresh_queue()
-        self._set_busy(True, detail="working…")
+        self._set_busy(True)
         self.app.start_turn(self, text, blocks)  # type: ignore[attr-defined]
         return True
 
@@ -1661,6 +1749,20 @@ class ChatScreen(Screen[None]):
         rest = rest.strip()
         local = resolve_local_command(name)
         agent_names = {str(command.get("name", "")) for command in self._commands}
+        if ":" in name:
+            descriptor = self._find_plugin_command(name)
+            if descriptor is None:
+                await self._notice(
+                    f"Unknown plugin command '/{name}'. Press Ctrl+K to see available commands.",
+                    "warning",
+                )
+                return
+            await self._run_plugin_command(
+                str(descriptor.get("bindingId") or descriptor.get("binding_id")),
+                str(descriptor.get("commandName") or descriptor.get("command_name")),
+                rest,
+            )
+            return
         if name == "agent":
             if not rest:
                 await self._notice("Usage: /agent <agent-command> [arguments]", "warning")
@@ -1811,6 +1913,91 @@ class ChatScreen(Screen[None]):
         self._refresh_queue()
         composer.focus()
         return True
+
+    @staticmethod
+    def _plugin_command_display(command: dict[str, Any]) -> str:
+        binding = str(command.get("bindingId") or command.get("binding_id") or "")
+        name = str(command.get("commandName") or command.get("command_name") or "")
+        return f"{binding}:{name}" if binding else name
+
+    def _find_plugin_command(self, display: str) -> dict[str, Any] | None:
+        # A binding id may itself contain colons; the displayed name ends at the final one.
+        for command in self._plugin_commands:
+            if self._plugin_command_display(command) == display:
+                return command
+        return None
+
+    async def _run_plugin_command(
+        self, binding_id: str, command_name: str, arguments: str
+    ) -> None:
+        """Dispatch a user-only command without creating a model turn or tool call."""
+        if not self.client.extension.supports("_harness/commands/invoke"):
+            await self._notice(
+                "This agent does not negotiate Harness plugin commands.", "warning"
+            )
+            return
+        if self.busy:
+            await self._notice("Stop the running turn before running a plugin command.", "warning")
+            return
+        session = self.session
+        composer = self.query_one("#composer", Composer)
+        composer.clear_composer()
+        request_id = f"ui-{uuid.uuid4().hex}"
+        try:
+            response = await session.invoke_command(
+                binding_id,
+                command_name,
+                text=arguments,
+                expected_revision=self._plugin_revision,
+                request_id=request_id,
+            )
+        except (ExtensionUnavailable, HarnessClientError) as exc:
+            await self._notice(f"Command failed: {exc}", "error")
+            return
+        if self.session is not session:
+            # The user switched sessions while the handler ran; stale output must not be
+            # presented in, or start a turn for, a different conversation.
+            return
+        result = response.result
+        fallback = (
+            result.presentation.fallback
+            if result.presentation is not None
+            else "Command completed."
+        )
+        await self.query_one("#transcript", TranscriptPane).add_command(
+            {
+                "bindingId": response.binding_id,
+                "commandName": response.command_name,
+                "fallback": fallback,
+                "presentation": (
+                    result.presentation.to_wire()
+                    if result.presentation is not None
+                    else None
+                ),
+            }
+        )
+        action = result.conversation
+        if action is None:
+            return
+        key = (session.session_id, request_id)
+        if key in self._consumed_command_actions:
+            return
+        self._consumed_command_actions.add(key)
+        if len(self._consumed_command_actions) > 200:
+            self._consumed_command_actions.clear()
+            self._consumed_command_actions.add(key)
+        if getattr(action, "type", "") != "start_turn":
+            await self._notice(
+                f"Command '/{binding_id}:{command_name}' requested an unsupported "
+                "conversation action.",
+                "warning",
+            )
+            return
+        await self._start_prompt(
+            action.prompt,
+            attachments=[],
+            from_queue=True,
+        )
 
     async def _send_agent_command(self, name: str, arguments: str) -> None:
         if not name:
@@ -2798,6 +2985,31 @@ class ChatScreen(Screen[None]):
                     composer.focus()
                 elif command is not None:
                     asyncio.create_task(self._run_local_command(command.name))
+            elif kind == "plugin":
+                descriptor = self._find_plugin_command(name)
+                if descriptor is not None:
+                    composer = self.query_one("#composer", Composer)
+                    takes_arguments = bool(
+                        descriptor.get("takesArguments")
+                        or descriptor.get("takes_arguments")
+                    )
+                    if takes_arguments:
+                        composer.load_text(f"/{name} ")
+                        composer.focus()
+                    else:
+                        asyncio.create_task(
+                            self._run_plugin_command(
+                                str(
+                                    descriptor.get("bindingId")
+                                    or descriptor.get("binding_id")
+                                ),
+                                str(
+                                    descriptor.get("commandName")
+                                    or descriptor.get("command_name")
+                                ),
+                                "",
+                            )
+                        )
             elif kind == "agent":
                 composer = self.query_one("#composer", Composer)
                 # Always route through /agent so collisions cannot hijack the
@@ -2805,8 +3017,20 @@ class ChatScreen(Screen[None]):
                 composer.load_text(f"/agent {name} ")
                 composer.focus()
 
+        plugin_entries = [
+            {
+                "display": self._plugin_command_display(command),
+                "description": str(command.get("description", "")),
+            }
+            for command in self._plugin_commands
+        ]
         self.app.push_screen(
-            CommandPaletteDialog(LOCAL_COMMANDS, agent_commands, collision_names=collisions),
+            CommandPaletteDialog(
+                LOCAL_COMMANDS,
+                agent_commands,
+                collision_names=collisions,
+                plugin_commands=plugin_entries,
+            ),
             apply,
         )
 
@@ -2828,6 +3052,14 @@ class ChatScreen(Screen[None]):
                 else ""
             )
             local_lines.append(f"- `/{command.name}` — {command.description}{aliases}")
+        plugin_lines = [
+            f"- `/{self._plugin_command_display(command)}` — "
+            f"{command.get('description', '')}"
+            for command in self._plugin_commands
+        ]
+        plugin_section = (
+            "\n## Plugin commands\n\n" + "\n".join(plugin_lines) if plugin_lines else ""
+        )
         body = f"""# Harness terminal
 
 ## Keys
@@ -2856,6 +3088,7 @@ class ChatScreen(Screen[None]):
 ## Local commands
 
 {chr(10).join(local_lines)}
+{plugin_section}
 
 Type `@` to find and attach a local workspace file; select a staged file to remove it.
 Submitting during a running turn queues a follow-up with its attachments. Use the queue's
@@ -2960,31 +3193,6 @@ invents commands the agent did not advertise.
             TranscriptSearchDialog([(role, text) for _, role, text in entries], query),
             reveal,
         )
-
-    def on_copy_code_requested(self, event: CopyCodeRequested) -> None:
-        def copy(value: str | None) -> None:
-            if value is not None:
-                self.app.copy_to_clipboard(event.codes[int(value)])
-                self.app.notify("Code copied")
-
-        if len(event.codes) == 1:
-            copy("0")
-        else:
-            self.app.push_screen(
-                ChoiceDialog(
-                    "Copy code block",
-                    "Choose a fenced code block from this response.",
-                    [
-                        {
-                            "value": str(index),
-                            "name": f"Block {index + 1}",
-                            "description": code[:160],
-                        }
-                        for index, code in enumerate(event.codes)
-                    ],
-                ),
-                copy,
-            )
 
     def on_output_pending(self, event: OutputPending) -> None:
         self.query_one("#new-output").display = event.pending

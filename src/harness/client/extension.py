@@ -15,10 +15,13 @@ from typing import Any
 
 from harness.protocol import (
     BindingDescriptor,
+    CommandDescriptor,
+    CommandInvokeResponse,
     ConfigurationSnapshot,
     ConfigurationUpdate,
     ExtensionAdvertisement,
     PluginInfo,
+    PresentationListResponse,
     changes_adapter,
 )
 
@@ -26,6 +29,7 @@ from .constants import EXTENSION_METHODS, EXTENSION_VERSION
 
 __all__ = [
     "CapabilityListResult",
+    "CommandListResult",
     "HarnessExtension",
     "PluginListResult",
     "advertisement_meta",
@@ -212,6 +216,51 @@ def parse_plugin_list(payload: dict[str, Any]) -> PluginListResult:
         plugins=tuple(_lenient_validate(PluginInfo, item) for item in raw_plugins),
         next_cursor=payload.get("nextCursor", payload.get("next_cursor")),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CommandListResult:
+    commands: tuple[CommandDescriptor, ...] = ()
+    selected_revision: int = 0
+    active_revision: int | None = None
+    supported_operations: tuple[str, ...] = ()
+    next_cursor: str | None = None
+
+    def by_name(self) -> dict[tuple[str, str], CommandDescriptor]:
+        return {(item.binding_id, item.command_name): item for item in self.commands}
+
+
+def parse_command_list(payload: dict[str, Any]) -> CommandListResult:
+    if not isinstance(payload, dict):
+        raise ValueError("commands/list result must be an object")
+    raw_commands = payload.get("commands")
+    if raw_commands is None:
+        raw_commands = []
+    if not isinstance(raw_commands, list):
+        raise ValueError("'commands' must be a list")
+    commands = tuple(_lenient_validate(CommandDescriptor, item) for item in raw_commands)
+    selected = payload.get("selectedRevision", payload.get("selected_revision", 0))
+    active = payload.get("activeRevision", payload.get("active_revision"))
+    operations = payload.get("supportedOperations", payload.get("supported_operations", []))
+    return CommandListResult(
+        commands=commands,
+        selected_revision=int(selected or 0),
+        active_revision=None if active is None else int(active),
+        supported_operations=tuple(str(item) for item in operations or ()),
+        next_cursor=payload.get("nextCursor", payload.get("next_cursor")),
+    )
+
+
+def parse_command_response(payload: dict[str, Any]) -> CommandInvokeResponse:
+    if not isinstance(payload, dict):
+        raise ValueError("commands/invoke result must be an object")
+    return CommandInvokeResponse.model_validate(payload)
+
+
+def parse_presentation_list(payload: dict[str, Any]) -> PresentationListResponse:
+    if not isinstance(payload, dict):
+        raise ValueError("presentation/get result must be an object")
+    return PresentationListResponse.model_validate(payload)
 
 
 def parse_configuration_snapshot(payload: dict[str, Any]) -> ConfigurationSnapshot:

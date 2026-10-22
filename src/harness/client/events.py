@@ -89,6 +89,23 @@ class CommandsUpdated:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginCommandsListed:
+    """User-only commands contributed by enabled Harness plugin bindings."""
+
+    session_id: str
+    commands: tuple[Any, ...] = ()
+    selected_revision: int = 0
+    supported_operations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPresentationUpdated:
+    """Supplemental presentation snapshots keyed by session and tool-call id."""
+
+    snapshots: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ModesUpdated:
     """Session mode state changed."""
 

@@ -22,6 +22,7 @@ from harness.config import EFFORT_OFF, THINKING_LEVELS
 from harness.protocol import BindingChange, ConfigurationSnapshot, HarnessError
 
 from ._model_usage import normalize_model_usage
+from .commands import CommandRegistry, build_command_registry
 from .definitions import (
     AGENT_FACTORY_PARAM,
     AgentDefinition,
@@ -30,6 +31,7 @@ from .definitions import (
     factory_managed_param,
 )
 from .policy import PolicyCatalog
+from .presentation import PresentationObserver
 from .registry import PluginRegistry
 from .resources import ResourceSet, resolve_workspace_value
 
@@ -103,6 +105,8 @@ class Composition:
     effort: EffortState
     config: Any
     capabilities: list[AbstractCapability[Any]] = field(default_factory=list)
+    commands: CommandRegistry = field(default_factory=CommandRegistry)
+    presentation: PresentationObserver | None = None
     workspace: Any = None
     deps: Any = None
 
@@ -279,6 +283,7 @@ async def compose_definition(
     effort: str | None = None,
     effort_support: str | None = None,
     deps: Any = None,
+    presentation_sink: Any = None,
 ) -> Composition:
     """Compose a definition into a native agent and an ACP session configuration.
 
@@ -350,7 +355,24 @@ async def compose_definition(
         principal=principal,
         deployment_id=deployment_id,
     )
-    capabilities = [_EffortCapability(state=effort_state), *run_capabilities]
+    commands = build_command_registry(
+        registry=registry,
+        enabled=catalog.enabled_ordered(),
+        resources=resource_set,
+        snapshot=snapshot,
+        session_id=session_id,
+        principal=principal,
+        deployment_id=deployment_id,
+        revision=snapshot.selected_revision,
+    )
+    observer: PresentationObserver | None = None
+    if presentation_sink is not None:
+        observer = PresentationObserver(session_id=session_id, publish=presentation_sink)
+    capabilities = [
+        _EffortCapability(state=effort_state),
+        *([observer] if observer is not None else []),
+        *run_capabilities,
+    ]
     workspace = _workspace_value(definition, resource_set)
     config = AcpSessionConfig(
         deps=None,
@@ -366,6 +388,8 @@ async def compose_definition(
         effort=effort_state,
         config=config,
         capabilities=capabilities,
+        commands=commands,
+        presentation=observer,
         workspace=workspace,
         deps=deps,
     )

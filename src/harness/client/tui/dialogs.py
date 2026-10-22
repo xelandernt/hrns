@@ -501,12 +501,16 @@ class CommandPaletteDialog(_DialogBase):
         agent_commands: list[dict[str, Any]],
         *,
         collision_names: set[str] | None = None,
+        plugin_commands: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(
-            "Commands", "Local commands run in the terminal. Agent commands are sent to the agent."
+            "Commands",
+            "Local commands run in the terminal. Plugin commands are user-only; agent "
+            "commands are sent to the agent.",
         )
         self.local_commands = local_commands
         self.agent_commands = agent_commands
+        self.plugin_commands = plugin_commands or []
         self.collisions = collision_names or set()
         self._filter = Input(placeholder="Filter commands", id="command-filter")
         self._list = OptionList(id="command-list", markup=False)
@@ -543,6 +547,21 @@ class CommandPaletteDialog(_DialogBase):
                 self._list.add_option(
                     Option(command_suggestion_text(command), id=f"local:{command.name}")
                 )
+        plugins = [
+            command
+            for command in self.plugin_commands
+            if needle in str(command.get("display", "")).lower()
+            or needle in str(command.get("description", "")).lower()
+        ]
+        if plugins:
+            self._list.add_option(Option("Plugin commands", id="__plugin_header", disabled=True))
+            for command in plugins[:100]:
+                self._list.add_option(
+                    Option(
+                        f"/{command.get('display', '')}   {command.get('description', '')}".rstrip(),
+                        id=f"plugin:{command.get('display', '')}",
+                    )
+                )
         agent = [
             command
             for command in self.agent_commands
@@ -558,7 +577,7 @@ class CommandPaletteDialog(_DialogBase):
                 self._list.add_option(
                     Option(f"/{name}   {description}{suffix}", id=f"agent:{name}")
                 )
-        if not local and not agent:
+        if not local and not agent and not plugins:
             self._list.add_option(Option("No matching commands", id="__none", disabled=True))
         if self._list.option_count:
             self._list.highlighted = 0

@@ -259,18 +259,25 @@ class HarnessApp(App[int]):
     }
     #approval-options:focus { border: none; }
 
-    #composer {
+    #composer-row {
         dock: bottom;
         height: 6;
         min-height: 4;
         max-height: 10;
-        margin: 0 1;
-        padding: 0 1;
-        background: $surface;
-        border: solid $accent 35%;
+        padding: 1 2;
+        background: $panel;
     }
-    #composer:focus {
-        border: solid $accent;
+    #composer-prompt {
+        width: 2;
+        height: 1;
+        color: $accent 70%;
+    }
+    #composer {
+        width: 1fr;
+        height: 1fr;
+        padding: 0;
+        border: none;
+        background: transparent;
     }
     #command-suggestions {
         dock: bottom;
@@ -284,22 +291,15 @@ class HarnessApp(App[int]):
         scrollbar-size-vertical: 1;
     }
     #command-suggestions:focus { border: solid $accent 35%; }
-    #hintbar {
-        dock: bottom;
-        height: 1;
-        padding: 0 2;
-        color: $text-muted;
-        background: $surface;
-    }
     #statusbar {
         dock: bottom;
         height: 1;
         padding: 0 2;
-        background: $panel;
+        background: $background;
         color: $text-muted;
     }
     .narrow #topbar { padding: 0 1; }
-    .narrow #composer { margin: 0; }
+    .narrow #composer-row { padding: 1 1; }
     .narrow .message-role { margin-top: 0; }
 
     /* --------------------------------------------------------- picker */

@@ -15,11 +15,13 @@ from ..constants import UI_MAX_TOOL_CONTENT_CHARS
 from ..interactions import PERMISSION_MODES
 
 __all__ = [
+    "activity_label",
     "build_form_fields",
     "binding_summary",
     "coerce_value",
     "config_option_value",
     "format_usage",
+    "format_usage_compact",
     "is_subagent_tool",
     "merge_tool_event",
     "model_option",
@@ -418,6 +420,75 @@ def format_usage(usage: dict[str, Any] | None) -> str:
         if isinstance(value, int):
             parts.append(f"{label} {value:,}")
     return " · ".join(parts)
+
+
+def _token_count(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
+COST_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£"}
+
+
+def format_usage_compact(usage: dict[str, Any] | None) -> str:
+    """One-glance usage for the status band.
+
+    The band has a few dozen cells for this, so the full ``format_usage``
+    sentence is condensed to cost plus token counts, and an unreported
+    session renders as an empty string instead of "Cost unavailable".
+    """
+    if not usage:
+        return ""
+    parts: list[str] = []
+    cost = usage.get("cost")
+    currency = "USD"
+    if isinstance(cost, dict):
+        currency = cost.get("currency", "USD")
+        cost = cost.get("amount")
+    try:
+        amount = Decimal(str(cost))
+        if not amount.is_finite():
+            raise ValueError("Non-finite cost")
+        symbol = COST_SYMBOLS.get(currency.upper(), f"{currency} ")
+        digits = 2 if amount >= Decimal("0.01") else 4
+        parts.append(f"{symbol}{amount:.{digits}f}")
+    except (InvalidOperation, ValueError, TypeError):
+        pass
+    for camel, snake, label in (
+        ("inputTokens", "input_tokens", "in"),
+        ("outputTokens", "output_tokens", "out"),
+    ):
+        value = usage.get(camel, usage.get(snake))
+        if isinstance(value, int) and value:
+            parts.append(f"{_token_count(value)} {label}")
+    cached = usage.get("cachedReadTokens", usage.get("cache_read_tokens"))
+    if isinstance(cached, int) and cached:
+        parts.append(f"{_token_count(cached)} cached")
+    return " · ".join(parts)
+
+
+ACTIVITY_VERBS = {
+    "read": "reading",
+    "edit": "editing",
+    "execute": "running",
+    "search": "searching",
+    "fetch": "fetching",
+    "think": "thinking",
+    "delete": "deleting",
+    "move": "moving",
+}
+
+
+def activity_label(kind: str | None, title: str | None, *, limit: int = 42) -> str:
+    """Short "what is happening now" phrase for the status band."""
+    verb = ACTIVITY_VERBS.get((kind or "").lower(), "")
+    subject = _one_line(title, limit) if title else ""
+    if verb and subject:
+        return f"{verb} {subject}"
+    return verb or subject or "working"
 
 
 def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) -> dict[str, Any]:

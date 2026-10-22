@@ -139,6 +139,8 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     capability (or a ``module:attr`` import reference evaluated lazily). The config type
     depends on ``config_model``; without one, factories receive a ``CapabilityShim``.
     """
+    commands: list[Any] = Field(default_factory=list)
+    """User-only application commands contributed by this plugin (never agent tools)."""
     instructions: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
     """``binding_id`` (or resource) names required when this plugin is enabled."""
@@ -151,6 +153,21 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     compatibility: CompatibilityConstraints = Field(default_factory=CompatibilityConstraints)
     local_hint: dict[str, Any] = Field(default_factory=dict)
     """Non-executable discovery metadata from entry points (name, dist info)."""
+
+    @model_validator(mode="after")
+    def _validate_commands(self) -> PluginDescriptor:
+        """Reject ambiguous command tables before a binding can expose them."""
+        seen: set[str] = set()
+        for command in self.commands:
+            name = getattr(command, "name", None)
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"Plugin {self.plugin_id!r} has a command without a name.")
+            if not callable(getattr(command, "handler", None)):
+                raise ValueError(f"Plugin command {name!r} has no async handler.")
+            if name in seen:
+                raise ValueError(f"Plugin {self.plugin_id!r} declares duplicate command {name!r}.")
+            seen.add(name)
+        return self
 
     @model_validator(mode="after")
     def _editable_defaults(self) -> PluginDescriptor:
@@ -329,6 +346,7 @@ class PluginRegistry:
         use_bundled_catalog: bool = True,
     ) -> None:
         self._plugins: dict[str, PluginDescriptor] = {}
+        self._providers: dict[str, Any] = {}
         self._entry_point_source: str | None = None
         self.allow_local_binding_creation = allow_local_binding_creation
         self.use_bundled_catalog = use_bundled_catalog
@@ -398,11 +416,12 @@ class PluginRegistry:
     def discover(self, *, entry_point_group: str = ENTRY_POINT_GROUP) -> int:
         """Scan installed entry points lazily and register any new plugins.
 
-        Only entry-point *metadata* is read here: the descriptor's factory is the import
-        reference ``entry_point.module:entry_point.attr``, so plugin modules load on first
-        composition. Returns the number of newly registered plugins. Import failures are
-        recorded per plugin id and surfaced with ``registration_error``; they are never
-        resolved by import order.
+        An installed entry point is a zero-argument *descriptor provider*: loading it must
+        not import Textual or an optional provider SDK. Only entry-point metadata is read
+        here; the provider is invoked when its descriptor is first needed. Its native
+        factory may itself remain a ``module:attr`` reference. Import failures are recorded
+        per plugin id and surfaced with ``registration_error``; they are never resolved by
+        import order.
         """
         newly = 0
         try:
@@ -412,26 +431,59 @@ class PluginRegistry:
             selected = []
         for entry_point in selected:
             plugin_id = entry_point.name
-            if plugin_id in self._plugins or plugin_id in self._bundled():
+            if (
+                plugin_id in self._plugins
+                or plugin_id in self._providers
+                or plugin_id in self._bundled()
+            ):
                 continue
-            try:
-                self._plugins[plugin_id] = self._descriptor_from_entry_point(entry_point)
-            except HarnessError as exc:
-                self._discovery_errors[plugin_id] = exc.message
-                continue
+            self._providers[plugin_id] = entry_point
             newly += 1
         if newly:
             self._entry_point_source = entry_point_group
         return newly
 
-    def _descriptor_from_entry_point(self, entry_point: Any) -> PluginDescriptor:
-        return PluginDescriptor(
-            plugin_id=entry_point.name,
-            factory=f"{entry_point.module}:{entry_point.attr}",
-            version=_entry_point_version(entry_point),
-            description=_entry_point_summary(entry_point),
-            local_hint={"source": "entry_point", "group": entry_point.group},
-        )
+    def _resolve_provider(self, plugin_id: str) -> PluginDescriptor | None:
+        entry_point = self._providers.get(plugin_id)
+        if entry_point is None:
+            return None
+        try:
+            provider = entry_point.load()
+            descriptor = provider() if callable(provider) else provider
+            if isinstance(descriptor, Mapping):
+                descriptor = PluginDescriptor.model_validate(dict(descriptor))
+        except Exception as exc:
+            self._discovery_errors[plugin_id] = f"{type(exc).__name__}: {exc}"
+            self._providers.pop(plugin_id, None)
+            return None
+        if not isinstance(descriptor, PluginDescriptor):
+            self._discovery_errors[plugin_id] = (
+                f"Entry point provider returned {type(descriptor).__name__}, "
+                "not a PluginDescriptor."
+            )
+            self._providers.pop(plugin_id, None)
+            return None
+        if descriptor.plugin_id != plugin_id:
+            self._discovery_errors[plugin_id] = (
+                f"Entry point {plugin_id!r} returned descriptor for "
+                f"{descriptor.plugin_id!r}."
+            )
+            self._providers.pop(plugin_id, None)
+            return None
+        if descriptor.version == "0.0.0":
+            descriptor = descriptor.model_copy(
+                update={
+                    "version": _entry_point_version(entry_point),
+                    "description": descriptor.description or _entry_point_summary(entry_point),
+                    "local_hint": {
+                        "source": "entry_point",
+                        "group": entry_point.group,
+                    },
+                }
+            )
+        self._plugins[plugin_id] = descriptor
+        self._providers.pop(plugin_id, None)
+        return descriptor
 
     def registration_error(self, plugin_id: str) -> str | None:
         """Discovery failure message for a plugin id, when one was recorded."""
@@ -451,6 +503,8 @@ class PluginRegistry:
         if plugin_id is None:
             return None
         descriptor = self._plugins.get(plugin_id)
+        if descriptor is None:
+            descriptor = self._resolve_provider(plugin_id)
         if descriptor is not None:
             return descriptor
         return self._bundled().get(plugin_id)
@@ -464,7 +518,10 @@ class PluginRegistry:
         """
         if plugin_id is None:
             return None
-        return self._plugins.get(plugin_id)
+        descriptor = self._plugins.get(plugin_id)
+        if descriptor is not None:
+            return descriptor
+        return self._resolve_provider(plugin_id)
 
     def require(self, plugin_id: str) -> PluginDescriptor:
         """Return the resolved descriptor or raise ``CAPABILITY_UNAVAILABLE``."""
@@ -489,7 +546,14 @@ class PluginRegistry:
         return [descriptor.to_info() for descriptor in self.ordered()]
 
     def ordered(self) -> list[PluginDescriptor]:
-        """Explicitly registered descriptors in stable registration order."""
+        """Explicitly registered descriptors in stable registration order.
+
+        Installed providers are resolved here because a catalog listing needs their full
+        descriptors; resolving a provider still does not import the plugin's capability
+        module or Textual.
+        """
+        for plugin_id in list(self._providers):
+            self._resolve_provider(plugin_id)
         return list(self._plugins.values())
 
     def reload(self) -> int:
@@ -507,6 +571,34 @@ class PluginRegistry:
         _check_min_python(descriptor)
         _validate_required_extras(descriptor)
 
+    def validated_config(
+        self,
+        descriptor: PluginDescriptor,
+        config: Mapping[str, Any],
+        context: BindingContext,
+    ) -> Any:
+        """Return the validated configuration model shared by tools and commands."""
+        self.check_compatibility(descriptor)
+        if descriptor.config_model is None:
+            return CapabilityShim(dict(config))
+        try:
+            return descriptor.config_model.model_validate(dict(config))
+        except ValidationError as exc:
+            errors = _simple_errors(exc)
+            rendered = "; ".join(
+                f"{'.'.join(error['loc'])}: {error['msg']}" for error in errors
+            )
+            raise HarnessError(
+                "INVALID_CONFIGURATION",
+                f"Invalid configuration for binding {context.binding_id!r} "
+                f"(plugin {descriptor.plugin_id!r}): {rendered}",
+                details={
+                    "binding_id": context.binding_id,
+                    "plugin_id": descriptor.plugin_id,
+                    "errors": errors,
+                },
+            ) from exc
+
     def instantiate(
         self,
         descriptor: PluginDescriptor,
@@ -514,29 +606,7 @@ class PluginRegistry:
         context: BindingContext,
     ) -> AgentCapability:
         """Validate ``config`` and call the plugin factory, returning the native capability."""
-        self.check_compatibility(descriptor)
-        validated_config: BaseModel | CapabilityShim
-        if descriptor.config_model is not None:
-            try:
-                validated_config = descriptor.config_model.model_validate(dict(config))
-            except ValidationError as exc:
-                errors = _simple_errors(exc)
-                rendered = "; ".join(
-                    f"{'.'.join(error['loc'])}: {error['msg']}" for error in errors
-                )
-                raise HarnessError(
-                    "INVALID_CONFIGURATION",
-                    f"Invalid configuration for binding {context.binding_id!r} "
-                    f"(plugin {descriptor.plugin_id!r}): {rendered}",
-                    details={
-                        "binding_id": context.binding_id,
-                        "plugin_id": descriptor.plugin_id,
-                        "errors": errors,
-                    },
-                ) from exc
-        else:
-            unknown = dict(config)
-            validated_config = CapabilityShim(unknown)
+        validated_config = self.validated_config(descriptor, config, context)
         factory = descriptor.resolved_factory()
         try:
             capability = factory(validated_config, context)
