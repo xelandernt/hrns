@@ -39,7 +39,8 @@ api_key_env = "DEEPSEEK_API_KEY"
 `harness.coder` capability gives it file tools, content search, and a shell in that
 directory: reads are automatic, while writes, edits, and commands ask for approval first.
 `harness.ask_user` lets the model ask structured multiple-choice questions in the terminal;
-disable it with `[capabilities] ask_user = false` for headless runs.
+disable it with `[capabilities] ask_user = false` for headless runs. `harness.todo` gives
+the model a session-scoped plan and shows it in the **Todos** tab of the right drawer.
 Configuration uses pydantic-settings. See
 [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints, local inference, other
 Pydantic AI providers, and headless execution.
@@ -47,7 +48,7 @@ Pydantic AI providers, and headless execution.
 Useful slash commands include `/connect` (switch or add a target), `/models`
 (configure or select the local model), `/effort` (change reasoning effort live),
 `/plugins` (toggle, configure, or add plugins), `/mcp` (list MCP servers and their
-tools), and `/skills` (browse Agent Skills).
+tools), `/skills` (browse Agent Skills), and `/todo` (open the session's plan).
 Typing `/` shows an inline filtered list. Type `$` in the composer to find a skill and
 insert a `$skill-name` reference, which runs that skill for the message. The older
 `/model` and `/capabilities` names remain aliases.

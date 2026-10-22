@@ -5,7 +5,8 @@ The client launches `harness-local` over ACP. The bundled `harness.coder` capabi
 by the built-in local definition and enabled by default: it provides file tools, content
 search, and a shell in the launch directory. Reading the workspace needs no approval; writes,
 edits, and commands are approved per call. The bundled `harness.skills` capability is bound
-next to it for Agent Skills. Installed plugins remain available to explicit
+next to it for Agent Skills, and `harness.todo` keeps a session-scoped plan visible in the
+terminal. Installed plugins remain available to explicit
 `AgentDefinition` objects; managed bindings are selected when a session is created and stay
 fixed for that conversation.
 
@@ -35,7 +36,7 @@ file. OAuth tokens are written to JSON files under the user data directory
 (`~/Library/Application Support/harness/mcp-auth` on macOS); set
 `[mcp] token_store = "keyring"` to use the operating-system keychain instead.
 
-In the terminal, `/mcp` opens the **MCP** tab next to **Plugins** and **Sessions**. It shows
+In the terminal, `/mcp` opens the **MCP** tab next to **Todos**, **Plugins** and **Sessions**. It shows
 each server's connection state, target, and the tools it discovered; **Space** enables or
 disables a server for the next turn. Adding, authenticating, and removing servers stay in
 the CLI, so the panel never hides filesystem access behind a form.
@@ -115,6 +116,12 @@ the skills binding's `directories` in `/plugins` for a different library. Type `
 pick a skill and insert a `$skill-name` reference, or `/skills` to open the same picker.
 The reference is resolved by the runtime, so it works in pasted prompts and headless
 runs too; a name with no matching skill is left as plain text.
+
+The bundled `harness.todo` capability is enabled in the local definition. The model uses
+`write_plan`, `read_plan`, and the task tools to keep a checklist for multi-step work. The
+first plan of a session opens the **Todos** tab in the right drawer; later updates refresh
+it in place. Close the drawer with `Esc` or `Ctrl+B`; `/todo` opens it again. The list is
+scoped to the session and is not persisted across a runtime restart.
 
 DeepSeek's native provider uses its OpenAI-compatible Chat Completions API and
 provider-specific model behavior. See the [Pydantic AI DeepSeek documentation](https://pydantic.dev/docs/ai/models/deepseek/).

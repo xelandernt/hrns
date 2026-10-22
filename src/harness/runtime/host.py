@@ -45,6 +45,7 @@ from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
 )
+from pydantic_ai_harness.planning import PlanItem, PlanStore, SqlitePlanStore
 
 from harness.config import EFFORT_DEFAULT
 from harness.protocol import (
@@ -91,6 +92,7 @@ from .definitions import (
 from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
 from .presentation import snapshot_from_metadata
 from .registry import PluginRegistry
+from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
@@ -325,6 +327,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._command_active: set[str] = set()
         self._command_results: dict[str, OrderedDict[str, tuple[str, dict[str, Any]]]] = {}
         self._command_locks: dict[str, asyncio.Lock] = {}
+        self._plan_channels: dict[str, PlanChannel] = {}
         self._pending_initial: list[Any] | None = None
         self._pending_effort: str | None = None
         self._new_lock = asyncio.Lock()
@@ -385,6 +388,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._config_requests.pop(session_id, None)
         self._command_results.pop(session_id, None)
         self._command_locks.pop(session_id, None)
+        self._plan_channels.pop(session_id, None)
         self._command_active.discard(session_id)
         return response
 
@@ -532,6 +536,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             )
         await self.close_session(session_id)
         await self.store.delete(session_id)
+        database = self._plan_database()
+        if database is not None:
+            await asyncio.to_thread(forget_plan, database, session_id)
         return DeleteSessionResponse()
 
     # --- prompts, effort, and metadata -----------------------------------
@@ -807,7 +814,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             refreshed = await compose_definition(
                 self.definition,
                 self.bundle.registry,
-                resources=self._resources(self.policy.validate_cwd(record.cwd)),
+                resources=self._resources(self.policy.validate_cwd(record.cwd), session_id),
                 session_id=session_id,
                 principal=self.policy.principal,
                 deployment_id=self.policy.deployment_id,
@@ -1111,9 +1118,44 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
 
     # --- composition ------------------------------------------------------
 
-    def _resources(self, cwd: str) -> dict[str, Any]:
+    def _plan_channel(self, session_id: str) -> PlanChannel:
+        channel = self._plan_channels.get(session_id)
+        if channel is None:
+            channel = PlanChannel(
+                session_id, self._publish_plan, store=self._plan_store(session_id)
+            )
+            self._plan_channels[session_id] = channel
+        return channel
+
+    def _plan_database(self) -> str | None:
+        """The SQLite file that can hold plans, or ``None`` for Postgres/in-memory stores."""
+        path = getattr(self.store.backend, "path", None)
+        if path is None or str(path) == ":memory:":
+            return None
+        return str(path)
+
+    def _plan_store(self, session_id: str) -> PlanStore | None:
+        """Persist plans in the session database so a reload shows the last plan."""
+        database = self._plan_database()
+        if database is None:
+            return None
+        return SqlitePlanStore(database, session=session_id, table=PLAN_TABLE)
+
+    async def _publish_plan(self, session_id: str, items: list[PlanItem]) -> None:
+        connection = self._client_conn
+        if connection is None:
+            return
+        with contextlib.suppress(Exception):
+            await connection.session_update(
+                session_id=session_id,
+                update=plan_update(items),
+            )
+
+    def _resources(self, cwd: str, session_id: str | None = None) -> dict[str, Any]:
         values = dict(self.policy.resources)
         values.setdefault("user_answers", self.question_channel)
+        if session_id is not None:
+            values.setdefault("plan_events", self._plan_channel(session_id))
         model = self._default_model
         if model is not None:
             values.setdefault("model.default", model)
@@ -1142,7 +1184,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         composition = await compose_definition(
             self.definition,
             self.bundle.registry,
-            resources=self._resources(cwd),
+            resources=self._resources(cwd, session.session_id),
             session_id=session.session_id,
             principal=self.policy.principal,
             deployment_id=self.policy.deployment_id,
@@ -1181,6 +1223,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             workspace=composition.config.workspace,
         )
         await self._apply_unavailable_tools(session.session_id, composition)
+        channel = self._plan_channels.get(session.session_id)
+        if channel is not None:
+            await channel.publish_current()
         return composition.config
 
     def _require_composition(self, session_id: str) -> Composition:

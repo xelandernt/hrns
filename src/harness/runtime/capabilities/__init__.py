@@ -23,10 +23,12 @@ def bundled_descriptors() -> list[PluginDescriptor]:
     from .coder import descriptor as coder_descriptor
     from .mcp import descriptor as mcp_descriptor
     from .skills import descriptor as skills_descriptor
+    from .todo import descriptor as todo_descriptor
 
     return [
         ask_user_descriptor(),
         coder_descriptor(),
         mcp_descriptor(),
         skills_descriptor(),
+        todo_descriptor(),
     ]

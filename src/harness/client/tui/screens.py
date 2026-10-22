@@ -763,6 +763,7 @@ class ChatScreen(Screen[None]):
         Binding("ctrl+n", "new_session", "New session", show=False),
         Binding("ctrl+r", "reconnect", "Reconnect", show=False),
         Binding("ctrl+enter", "submit_composer", "Send", show=False, priority=True),
+        Binding("ctrl+s", "submit_question", "Submit answer", show=False, priority=True),
         Binding("escape", "interrupt_or_focus", "Stop", show=False),
         Binding("ctrl+q", "quit_app", "Quit", show=False, priority=True),
     ]
@@ -791,6 +792,7 @@ class ChatScreen(Screen[None]):
         self._usage: dict[str, Any] | None = None
         self._session_title: str | None = None
         self._plan: tuple[tuple[str, str, str], ...] = ()
+        self._todo_auto_opened_for: str | None = None
         self._commands: tuple[dict[str, Any], ...] = ()
         self._plugin_commands: tuple[dict[str, Any], ...] = ()
         self._plugin_revision = 0
@@ -1011,9 +1013,10 @@ class ChatScreen(Screen[None]):
         self._bindings_raw = []
         self._turns_started = 0
         panel = self.query_one("#side-panel", SidePanel)
-        panel.activity.set_plan((), cleared=True)
+        panel.todos.set_plan((), cleared=True)
         panel.activity.set_commands(())
         panel.activity.set_usage(None)
+        self._todo_auto_opened_for = None
         self._refresh_status()
 
     # ---------------------------------------------------------------- bootstrap
@@ -1209,9 +1212,17 @@ class ChatScreen(Screen[None]):
             return
         if isinstance(event, PlanChanged):
             self._plan = event.entries
-            self.query_one("#side-panel", SidePanel).activity.set_plan(
-                event.entries, cleared=event.cleared
-            )
+            panel = self.query_one("#side-panel", SidePanel)
+            panel.todos.set_plan(event.entries, cleared=event.cleared)
+            session_id = self._replay_target or (self.session.session_id if self.session else None)
+            if (
+                not event.cleared
+                and event.entries
+                and session_id is not None
+                and self._todo_auto_opened_for != session_id
+            ):
+                self._todo_auto_opened_for = session_id
+                self._show_panel("todos", focus=False)
             return
         if isinstance(event, ConfigOptionsUpdated):
             self.session.remember(event.options)
@@ -1897,6 +1908,8 @@ class ChatScreen(Screen[None]):
                 self.app.notify("Response copied")
         elif name == "skills":
             await self._show_skills(rest)
+        elif name == "todo":
+            self.action_show_todos()
         elif name == "plugins":
             self.action_show_capabilities()
             self.refresh_capabilities()
@@ -3203,6 +3216,9 @@ class ChatScreen(Screen[None]):
     def action_show_capabilities(self) -> None:
         self._show_panel("capabilities")
 
+    def action_show_todos(self) -> None:
+        self._show_panel("todos")
+
     def action_show_mcp(self) -> None:
         self._show_panel("mcp")
         self._refresh_mcp()
@@ -3214,14 +3230,17 @@ class ChatScreen(Screen[None]):
     def action_show_activity(self) -> None:
         self._show_panel("activity")
 
-    def _show_panel(self, tab: str) -> None:
+    def _show_panel(self, tab: str, *, focus: bool = True) -> None:
         panel = self.query_one("#side-panel", SidePanel)
         self._panel_open = True
         panel.display = True
         # TabbedContent resolves its private ContentTabs by immediate-child
         # lookup. Assigning ``active`` before compose has mounted it raises
         # NoMatches, so wait until the show/refresh cycle has run.
-        self.call_after_refresh(panel.activate, tab)
+        if focus:
+            self.call_after_refresh(panel.activate, tab)
+        else:
+            self.call_after_refresh(panel.select, tab)
 
     def _close_panel(self) -> None:
         panel = self.query_one("#side-panel", SidePanel)
@@ -3454,6 +3473,15 @@ invents commands the agent did not advertise.
             composer.focus()
             return
         composer.action_submit()
+
+    def action_submit_question(self) -> None:
+        """Submit a pending agent question; a no-op otherwise.
+
+        Ctrl+Enter and Ctrl+J need terminal support for modified keys, so
+        Ctrl+S is the reliable fallback for the question bar.
+        """
+        if self._answers_future is not None:
+            self.query_one("#ask-user", AskUserBar).action_submit()
 
     def action_focus_transcript(self) -> None:
         self.query_one("#transcript", TranscriptPane).focus()
