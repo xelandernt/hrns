@@ -62,7 +62,17 @@ hrns agents show --server team research-assistant
 hrns profiles list
 hrns profiles add local --stdio -- /usr/bin/my-agent --acp
 hrns profiles add team --server https://agents.example --agent research-assistant --token env:HARNESS_TOKEN
+
+# Delete local session history (asks first; --dry-run previews, --yes skips)
+hrns clean
 ```
+
+`hrns clean` removes the local developer agent's session database and the host
+runtime's default SQLite store, together with their WAL sidecars. It never
+touches saved profiles, local model settings, or sessions hosted on a remote
+server. The command lists what it will delete and asks for confirmation; use
+`--dry-run` to only list, or `--yes` in scripts. A PostgreSQL `HARNESS_STORE` is
+left untouched.
 
 `hrns run` accepts multiple text prompt words. An explicit `--stdio` target uses
 `-- CMD ARGS -- PROMPT`; local-model and remote targets treat the remainder as the
