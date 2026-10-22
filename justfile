@@ -6,6 +6,7 @@ _:
 # update dependencies
 upgrade:
     uv lock --upgrade
+    @just install
 
 # install dependencies
 install:
