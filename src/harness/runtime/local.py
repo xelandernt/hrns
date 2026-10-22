@@ -17,6 +17,7 @@ from pydantic_ai.models import Model, infer_model
 from pydantic_ai.providers import infer_provider_class
 
 from harness.config import LocalSettings, thinking_from_settings
+from harness.config.mcp import McpServerConfig, default_token_store_path
 from harness.protocol import HarnessError
 
 from .definitions import AgentDefinition, AgentSpec, DefinitionBinding
@@ -220,7 +221,8 @@ def _local_models(settings: LocalSettings) -> tuple[str, ...]:
 
 
 def local_definition(settings: LocalSettings) -> AgentDefinition:
-    """The built-in local definition: bundled coder tools in the working directory."""
+    """The built-in local definition: coder tools, Agent Skills, and configured MCP servers."""
+    token_path = settings.mcp.token_store_path or str(default_token_store_path())
     bindings = [
         DefinitionBinding(
             plugin_id="harness.coder",
@@ -230,6 +232,19 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             plugin_id="harness.skills",
             binding_id="skills",
         ),
+        *[
+            DefinitionBinding(
+                plugin_id="harness.mcp",
+                binding_id=f"mcp.{name}",
+                config=McpServerConfig(
+                    **server.model_dump(mode="json"),
+                    token_store=settings.mcp.token_store,
+                    token_store_path=token_path,
+                ).model_dump(mode="json"),
+                enabled=server.enabled,
+            )
+            for name, server in settings.mcp.servers.items()
+        ],
     ]
     resources = [
         ResourceRequirement(

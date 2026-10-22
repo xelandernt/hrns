@@ -46,7 +46,8 @@ Pydantic AI providers, and headless execution.
 
 Useful slash commands include `/connect` (switch or add a target), `/models`
 (configure or select the local model), `/effort` (change reasoning effort live),
-`/plugins` (toggle, configure, or add plugins), and `/skills` (browse Agent Skills).
+`/plugins` (toggle, configure, or add plugins), `/mcp` (list MCP servers and their
+tools), and `/skills` (browse Agent Skills).
 Typing `/` shows an inline filtered list. Type `$` in the composer to find a skill and
 insert a `$skill-name` reference, which runs that skill for the message. The older
 `/model` and `/capabilities` names remain aliases.

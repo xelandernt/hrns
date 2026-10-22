@@ -13,6 +13,8 @@ from platformdirs import user_config_path, user_data_path
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
 
+from .mcp import McpSettings
+
 #: Unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
 THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
 
@@ -65,6 +67,7 @@ class LocalSettings(BaseSettings):
     provider_options: dict[str, Any] = Field(default_factory=dict)
     model_settings: dict[str, Any] = Field(default_factory=dict)
     capabilities: CapabilitiesSettings = Field(default_factory=CapabilitiesSettings)
+    mcp: McpSettings = Field(default_factory=McpSettings)
     store: Path = Field(default_factory=lambda: user_data_path("harness") / "local-sessions.db")
 
     @field_validator("base_url")
@@ -125,11 +128,11 @@ class LocalSettings(BaseSettings):
             return value
         return None
 
-    def save(self, path: Path | None = None) -> Path:
+    def save(self, path: Path | None = None, *, exclude_defaults: bool = False) -> Path:
         """Atomically save non-secret settings; do not change the existing file on failure."""
         target = (path or self.config_file or default_local_config_path()).expanduser().absolute()
         target.parent.mkdir(parents=True, exist_ok=True)
-        payload = self.model_dump(mode="json")
+        payload = self.model_dump(mode="json", exclude_defaults=exclude_defaults)
         with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
             temporary = Path(stream.name)
             try:

@@ -211,17 +211,23 @@ class HarnessApp(App[int]):
         color: $text-muted;
         height: auto;
     }
-    #binding-list, #choice-list, #command-list, #permission-options, #approval-options {
+    .panel-detail {
+        padding: 1 1;
+        color: $text-muted;
+        height: auto;
+        max-height: 12;
+    }
+    #binding-list, #mcp-list, #choice-list, #command-list, #permission-options, #approval-options {
         background: transparent;
         height: auto;
         max-height: 14;
         scrollbar-size-vertical: 1;
     }
-    #binding-list {
+    #binding-list, #mcp-list {
         height: 1fr;
         max-height: 1fr;
     }
-    #binding-list:focus, #choice-list:focus, #command-list:focus, #permission-options:focus,
+    #binding-list:focus, #mcp-list:focus, #choice-list:focus, #command-list:focus, #permission-options:focus,
     #approval-options:focus {
         border: none;
     }

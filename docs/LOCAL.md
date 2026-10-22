@@ -9,6 +9,62 @@ next to it for Agent Skills. Installed plugins remain available to explicit
 `AgentDefinition` objects; managed bindings are selected when a session is created and stay
 fixed for that conversation.
 
+## MCP servers
+
+The local agent can use [Model Context Protocol](https://modelcontextprotocol.io) servers.
+Servers live in `harness.local.toml` under `[mcp.servers.<name>]` and are managed from the
+terminal, in the same shape as Codex and OpenCode:
+
+```sh
+# stdio: everything after -- is the launcher
+hrns mcp add playwright -- npx -y @playwright/mcp@latest
+
+# streamable HTTP / SSE, with a token from the environment
+hrns mcp add github --url https://api.githubcopilot.com/mcp/ \
+  --header 'Authorization=Bearer {env:GH_TOKEN}'
+
+hrns mcp list
+hrns mcp auth github      # OAuth 2.1 with dynamic client registration
+hrns mcp logout github
+hrns mcp disable github
+hrns mcp remove github
+```
+
+`{env:NAME}` references are expanded at connection time, so tokens stay out of the TOML
+file. OAuth tokens are written to JSON files under the user data directory
+(`~/Library/Application Support/harness/mcp-auth` on macOS); set
+`[mcp] token_store = "keyring"` to use the operating-system keychain instead.
+
+In the terminal, `/mcp` opens the **MCP** tab next to **Plugins** and **Sessions**. It shows
+each server's connection state, target, and the tools it discovered; **Space** enables or
+disables a server for the next turn. Adding, authenticating, and removing servers stay in
+the CLI, so the panel never hides filesystem access behind a form.
+
+Every server is one capability binding, enabled for new sessions by default. Its tools are
+loaded eagerly; pass `--defer` (or `defer_loading = true` in the TOML) to keep them out of
+the prompt until the model asks for them. MCP tool calls follow the same approval flow as
+the coder's write and shell tools, and an unreachable server is reported in `/mcp` instead
+of failing the whole turn.
+
+The first `npx` launch may spend time downloading the package, so give those servers a
+generous timeout (`--timeout 60`, or `timeout = 60.0` in the TOML). Later starts reuse the
+local npm cache and are near-instant.```toml
+[mcp]
+token_store = "file"
+
+[mcp.servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+timeout = 20.0
+
+[mcp.servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+defer_loading = true
+
+[mcp.servers.github.headers]
+Authorization = "Bearer {env:GH_TOKEN}"
+```
+
 ## Start with DeepSeek
 
 Install the OpenAI extra (also used by DeepSeek):

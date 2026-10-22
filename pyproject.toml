@@ -23,13 +23,15 @@ client = [
     "httpx>=0.28,<1",
     "websockets>=15,<18",
     "keyring>=25",
+    "fastmcp-slim[client]>=3.3,<5",
 ]
 runtime = [
-    "pydantic-ai-slim==2.57.0",
+    "pydantic-ai-slim[mcp]==2.57.0",
     "pydantic-ai-harness[acp]==0.57.0",
     "PyYAML>=6,<7",
     "packaging>=24",
     "pydantic-ai-skills>=2.1,<3",
+    "keyring>=25",
 ]
 server = [
     "harness[runtime]",

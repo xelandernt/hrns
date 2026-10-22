@@ -10,6 +10,15 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+from ..config import LocalSettings, McpOAuthConfig, McpServerSettings, default_local_config_path
+from ..config.mcp import (
+    MCP_NAME_PATTERN,
+    build_client,
+    build_token_store,
+    clear_tokens,
+    default_token_store_path,
+    server_target,
+)
 from ._version import __version__
 from .catalog import AgentDeployment
 from .client import HarnessAcpClient
@@ -131,6 +140,91 @@ def build_parser() -> argparse.ArgumentParser:
     clean.add_argument(
         "-n", "--dry-run", action="store_true", help="Show what would be deleted, then exit"
     )
+
+    mcp = sub.add_parser("mcp", help="Manage MCP servers for the local agent")
+    mcp.add_argument(
+        "--local-config",
+        type=Path,
+        metavar="PATH",
+        default=argparse.SUPPRESS,
+        help="Local settings TOML file that holds the MCP servers",
+    )
+    mcp_sub = mcp.add_subparsers(dest="mcp_command")
+    mcp.set_defaults(mcp_parser=mcp)
+
+    def mcp_parser(
+        name: str, help_text: str, *, aliases: tuple[str, ...] = ()
+    ) -> argparse.ArgumentParser:
+        child = mcp_sub.add_parser(name, help=help_text, aliases=list(aliases))
+        child.add_argument(
+            "--local-config",
+            type=Path,
+            metavar="PATH",
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
+        return child
+
+    mcp_add = mcp_parser("add", "Add or replace an MCP server")
+    mcp_add.add_argument("name", metavar="NAME")
+    mcp_add.add_argument("--url", metavar="URL", help="Streamable HTTP or SSE endpoint")
+    mcp_add.add_argument(
+        "--command",
+        dest="stdio_command",
+        metavar="CMD",
+        help="stdio executable (or put it after --)",
+    )
+    mcp_add.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
+    mcp_add.add_argument("--cwd", metavar="DIR")
+    mcp_add.add_argument("--header", action="append", default=[], metavar="KEY=VALUE")
+    mcp_add.add_argument("--oauth-client-id")
+    mcp_add.add_argument("--oauth-client-secret")
+    mcp_add.add_argument("--oauth-scope", action="append", default=[], metavar="SCOPE")
+    mcp_add.add_argument("--oauth-callback-port", type=int)
+    mcp_add.add_argument("--no-oauth", action="store_true", help="Never attempt OAuth")
+    mcp_add.add_argument(
+        "--defer",
+        action="store_true",
+        help="Load this server's tools on demand instead of putting them in every turn",
+    )
+    mcp_add.add_argument(
+        "--tool", dest="include_tools", action="append", default=[], metavar="NAME"
+    )
+    mcp_add.add_argument(
+        "--exclude-tool", dest="exclude_tools", action="append", default=[], metavar="NAME"
+    )
+    mcp_add.add_argument("--timeout", type=float, default=10.0, metavar="SECONDS")
+    mcp_add.add_argument("--disabled", action="store_true", help="Save the server disabled")
+    mcp_add.add_argument("--force", action="store_true", help="Replace an existing server")
+    mcp_add.add_argument(
+        "command_words",
+        nargs="*",
+        metavar="-- COMMAND ARGS",
+        help="stdio command and arguments, after `--`",
+    )
+
+    mcp_list = mcp_parser("list", "List configured MCP servers")
+    mcp_list.add_argument("--json", action="store_true")
+
+    mcp_get = mcp_parser("get", "Show one configured MCP server")
+    mcp_get.add_argument("name")
+    mcp_get.add_argument("--json", action="store_true")
+
+    mcp_remove = mcp_parser("remove", "Remove a configured MCP server")
+    mcp_remove.add_argument("name")
+
+    for verb, verb_help in (
+        ("enable", "Enable a server for new sessions"),
+        ("disable", "Disable a server without removing its configuration"),
+    ):
+        child = mcp_parser(verb, verb_help)
+        child.add_argument("name")
+
+    mcp_auth = mcp_parser("auth", "Authenticate with an MCP server using OAuth", aliases=("login",))
+    mcp_auth.add_argument("name")
+
+    mcp_logout = mcp_parser("logout", "Forget stored OAuth tokens for an MCP server")
+    mcp_logout.add_argument("name")
     return parser
 
 
@@ -544,6 +638,261 @@ def _print_agent_detail(item: AgentDeployment) -> None:
         print(f"workspace: {workspace}")
 
 
+# ----------------------------------------------------------------------- mcp
+
+
+def _mcp_config(args: argparse.Namespace) -> tuple[LocalSettings, Path]:
+    """Load the local settings that own MCP servers, allowing a new file to be created."""
+    explicit = getattr(args, "local_config", None)
+    if explicit is not None:
+        path = Path(explicit).expanduser().absolute()
+        settings = (
+            LocalSettings(config_file=path) if path.is_file() else LocalSettings(config_file=None)
+        )
+        return settings, path
+    settings = LocalSettings()
+    return settings, Path(settings.config_file or default_local_config_path())
+
+
+def _mcp_pairs(values: Sequence[str], flag: str) -> dict[str, str]:
+    pairs: dict[str, str] = {}
+    for item in values:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise HarnessClientError(f"{flag} expects KEY=VALUE, got '{item}'.")
+        pairs[key.strip()] = value
+    return pairs
+
+
+def _mcp_server(name: str, args: argparse.Namespace) -> McpServerSettings:
+    if not MCP_NAME_PATTERN.fullmatch(name):
+        raise HarnessClientError(
+            f"Invalid MCP server name '{name}': use letters, digits, '_' or '-' "
+            "and start with a letter or digit."
+        )
+    command = list(args.command_words)
+    if args.url and (args.stdio_command or command):
+        raise HarnessClientError("Pass either --url or a stdio command, not both.")
+    if args.stdio_command and command:
+        raise HarnessClientError("Pass the command either with --command or after `--`, not both.")
+
+    if args.url:
+        url = args.url
+        executable = ""
+        arguments: list[str] = []
+    elif command:
+        url = ""
+        executable = command[0]
+        arguments = command[1:]
+    elif args.stdio_command:
+        url = ""
+        executable = args.stdio_command
+        arguments = []
+    else:
+        raise HarnessClientError(
+            "An MCP server needs a transport: `hrns mcp add NAME -- npx -y PKG` "
+            "or `hrns mcp add NAME --url https://example.com/mcp`."
+        )
+
+    oauth_flags = (
+        args.oauth_client_id
+        or args.oauth_client_secret
+        or args.oauth_scope
+        or args.oauth_callback_port is not None
+    )
+    if args.no_oauth and oauth_flags:
+        raise HarnessClientError("--no-oauth cannot be combined with OAuth client options.")
+    if oauth_flags:
+        oauth: McpOAuthConfig | bool = McpOAuthConfig(
+            client_id=args.oauth_client_id or "",
+            client_secret=args.oauth_client_secret or "",
+            scopes=list(args.oauth_scope),
+            callback_port=args.oauth_callback_port,
+        )
+    else:
+        oauth = False if args.no_oauth else True
+
+    return McpServerSettings(
+        command=executable,
+        args=arguments,
+        env=_mcp_pairs(args.env, "--env"),
+        cwd=args.cwd or "",
+        url=url,
+        headers=_mcp_pairs(args.header, "--header"),
+        enabled=not args.disabled,
+        defer_loading=args.defer,
+        include_tools=list(args.include_tools),
+        exclude_tools=list(args.exclude_tools),
+        timeout=args.timeout,
+        oauth=oauth,
+    )
+
+
+def _mcp_server_or_error(settings: LocalSettings, name: str) -> McpServerSettings:
+    try:
+        return settings.mcp.servers[name]
+    except KeyError:
+        known = ", ".join(sorted(settings.mcp.servers)) or "(none)"
+        raise HarnessClientError(f"No MCP server named '{name}'. Configured: {known}.") from None
+
+
+def _mcp_list(args: argparse.Namespace) -> int:
+    settings, path = _mcp_config(args)
+    servers = settings.mcp.servers
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "configFile": str(path),
+                    "tokenStore": settings.mcp.token_store,
+                    "tokenStorePath": settings.mcp.token_store_path
+                    or str(default_token_store_path()),
+                    "servers": {
+                        name: server.model_dump(mode="json")
+                        for name, server in sorted(servers.items())
+                    },
+                },
+                indent=2,
+            )
+        )
+        return EXIT_OK
+    if not servers:
+        print("No MCP servers configured.")
+        print("Add one with: hrns mcp add NAME -- npx -y PACKAGE")
+        return EXIT_OK
+    name_width = max(len(name) for name in servers)
+    print(f"{'NAME':<{name_width}}  {'TRANSPORT':<9}  {'STATUS':<8}  MODE      TARGET")
+    for name, server in sorted(servers.items()):
+        status = "enabled" if server.enabled else "disabled"
+        mode = "deferred" if server.defer_loading else "eager"
+        print(
+            f"{name:<{name_width}}  {server.transport:<9}  {status:<8}  {mode:<9} "
+            f"{server_target(server)}"
+        )
+    print(f"\nConfig: {path}")
+    store = settings.mcp.token_store_path or str(default_token_store_path())
+    print(f"Tokens: {settings.mcp.token_store}:{store}")
+    return EXIT_OK
+
+
+def _mcp_get(args: argparse.Namespace) -> int:
+    settings, path = _mcp_config(args)
+    server = _mcp_server_or_error(settings, args.name)
+    if args.json:
+        print(json.dumps(server.model_dump(mode="json"), indent=2))
+        return EXIT_OK
+    print(f"{args.name} ({server.transport}, {'enabled' if server.enabled else 'disabled'})")
+    print(f"target: {server_target(server)}")
+    if server.cwd:
+        print(f"cwd: {server.cwd}")
+    if server.env:
+        print("env: " + ", ".join(sorted(server.env)))
+    if server.headers:
+        print("headers: " + ", ".join(sorted(server.headers)))
+    print(f"tools: {'deferred' if server.defer_loading else 'eager'}")
+    if server.include_tools:
+        print("include: " + ", ".join(server.include_tools))
+    if server.exclude_tools:
+        print("exclude: " + ", ".join(server.exclude_tools))
+    if server.is_http:
+        print(f"oauth: {'disabled' if server.oauth is False else 'enabled'}")
+    print(f"timeout: {server.timeout:g}s")
+    print(f"config: {path}")
+    return EXIT_OK
+
+
+async def _mcp_auth(args: argparse.Namespace) -> int:
+    settings, _path = _mcp_config(args)
+    server = _mcp_server_or_error(settings, args.name)
+    if not server.is_http:
+        raise HarnessClientError(
+            "OAuth only applies to HTTP MCP servers; stdio servers use env vars."
+        )
+    if server.oauth_config() is None:
+        raise HarnessClientError(
+            f"OAuth is disabled for '{args.name}'. Pass credentials with --header instead."
+        )
+    store = build_token_store(settings.mcp.token_store, settings.mcp.token_store_path)
+    print(f"Authorizing '{args.name}' (a browser opens only if the server needs OAuth)…")
+    try:
+        client = build_client(server, store=store, interactive=True)
+        async with client:
+            tools = await client.list_tools()
+    except Exception as exc:  # noqa: BLE001 - reported to the operator verbatim
+        raise HarnessClientError(f"Authentication failed: {exc}") from exc
+    location = settings.mcp.token_store_path or str(default_token_store_path())
+    print(f"Authenticated '{args.name}': {len(tools)} tool(s). Tokens: {location}")
+    return EXIT_OK
+
+
+async def _mcp_logout(args: argparse.Namespace) -> int:
+    settings, _path = _mcp_config(args)
+    server = _mcp_server_or_error(settings, args.name)
+    store = build_token_store(settings.mcp.token_store, settings.mcp.token_store_path)
+    try:
+        await clear_tokens(server, store)
+    except Exception as exc:  # noqa: BLE001 - reported to the operator verbatim
+        raise HarnessClientError(f"Cannot clear tokens for '{args.name}': {exc}") from exc
+    print(f"Removed stored OAuth tokens for '{args.name}'.")
+    return EXIT_OK
+
+
+def _mcp_add(args: argparse.Namespace) -> int:
+    settings, path = _mcp_config(args)
+    if args.name in settings.mcp.servers and not args.force:
+        raise HarnessClientError(
+            f"MCP server '{args.name}' already exists; pass --force to replace it."
+        )
+    server = _mcp_server(args.name, args)
+    settings.mcp.servers[args.name] = server
+    settings.save(path, exclude_defaults=True)
+    print(f"Saved MCP server '{args.name}' ({server.transport}) to {path}")
+    if server.is_http and server.oauth is not False:
+        print(f"Authorize it with: hrns mcp auth {args.name}")
+    return EXIT_OK
+
+
+def _mcp_remove(args: argparse.Namespace) -> int:
+    settings, path = _mcp_config(args)
+    _mcp_server_or_error(settings, args.name)
+    del settings.mcp.servers[args.name]
+    settings.save(path, exclude_defaults=True)
+    print(f"Removed MCP server '{args.name}' from {path}")
+    return EXIT_OK
+
+
+def _mcp_set_enabled(args: argparse.Namespace, enabled: bool) -> int:
+    settings, path = _mcp_config(args)
+    server = _mcp_server_or_error(settings, args.name)
+    server.enabled = enabled
+    settings.save(path, exclude_defaults=True)
+    print(f"{'Enabled' if enabled else 'Disabled'} MCP server '{args.name}'.")
+    return EXIT_OK
+
+
+def _command_mcp(args: argparse.Namespace) -> int:
+    if not getattr(args, "mcp_command", None):
+        args.mcp_parser.print_help()
+        return EXIT_OK
+    if args.mcp_command == "add":
+        return _mcp_add(args)
+    if args.mcp_command == "list":
+        return _mcp_list(args)
+    if args.mcp_command == "get":
+        return _mcp_get(args)
+    if args.mcp_command == "remove":
+        return _mcp_remove(args)
+    if args.mcp_command == "enable":
+        return _mcp_set_enabled(args, True)
+    if args.mcp_command == "disable":
+        return _mcp_set_enabled(args, False)
+    if args.mcp_command in {"auth", "login"}:
+        return asyncio.run(_mcp_auth(args))
+    if args.mcp_command == "logout":
+        return asyncio.run(_mcp_logout(args))
+    return EXIT_USAGE
+
+
 # --------------------------------------------------------------------- main
 
 
@@ -580,6 +929,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_command_bridge(args))
         if args.command == "profiles":
             return _command_profiles(args)
+        if args.command == "mcp":
+            return _command_mcp(args)
         if args.command == "clean":
             from .clean import clean
 
@@ -593,6 +944,9 @@ def main(argv: list[str] | None = None) -> int:
     except InteractionRequired as exc:
         print(f"harness: interaction-required: {exc.message}", file=sys.stderr)
         return 3
+    except (ValueError, OSError) as exc:
+        print(f"harness: error: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
     parser.print_help()
     return EXIT_USAGE
 
