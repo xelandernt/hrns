@@ -180,6 +180,8 @@ class CommandBinding:
     resources: ResourceSet | None
     configuration: ConfigurationSnapshot | None
     supported_operations: frozenset[str] = _CONVERSATION_OPERATIONS
+    principal: str = ""
+    deployment_id: str = ""
 
     @property
     def command_name(self) -> str:
@@ -196,16 +198,16 @@ class CommandBinding:
         self,
         *,
         session_id: str,
-        principal: str,
-        deployment_id: str,
+        principal: str | None = None,
+        deployment_id: str | None = None,
         history_reader: Callable[[], Any] | None = None,
     ) -> CommandContext:
         return CommandContext(
             binding_id=self.binding_id,
             plugin_id=self.plugin_id,
             session_id=session_id,
-            principal=principal,
-            deployment_id=deployment_id,
+            principal=principal if principal is not None else self.principal,
+            deployment_id=deployment_id if deployment_id is not None else self.deployment_id,
             config=self.config,
             resources=self.resources,
             configuration=self.configuration,
