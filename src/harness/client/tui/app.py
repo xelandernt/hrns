@@ -33,20 +33,22 @@ __all__ = ["HarnessApp", "run_terminal"]
 
 HARNESS_THEME = Theme(
     name="harness",
-    primary="#c9a86a",
-    secondary="#6f8f8a",
-    accent="#c9a86a",
-    foreground="#d9dee3",
-    background="#0e1114",
-    surface="#151a1e",
-    panel="#1a2026",
-    success="#7fa77f",
-    warning="#cf9f5f",
-    error="#c77b7b",
+    primary="#b79cff",
+    secondary="#b79cff",
+    accent="#b79cff",
+    foreground="#e4e0ea",
+    background="#0c0b0f",
+    surface="#141218",
+    panel="#1a171f",
+    success="#7fb98c",
+    warning="#d9a561",
+    error="#d47c7c",
     dark=True,
     variables={
-        "text-muted": "#8b93a3",
-        "block-cursor-background": "#c9a86a",
+        "text-muted": "#8d8798",
+        "border": "#2d2933",
+        "block-cursor-background": "#b79cff",
+        "block-cursor-foreground": "#0c0b0f",
     },
 )
 
@@ -80,18 +82,6 @@ class HarnessApp(App[int]):
         color: $foreground;
     }
 
-    /* ------------------------------------------------------------ header */
-
-    #topbar {
-        dock: top;
-        height: auto;
-        max-height: 5;
-        padding: 1 2 1 2;
-        background: $surface;
-        border-bottom: solid $accent 30%;
-    }
-    #topbar :focus { background: $surface; }
-
     /* ------------------------------------------------------- chat layout */
 
     #main {
@@ -117,12 +107,13 @@ class HarnessApp(App[int]):
         height: auto;
     }
     .message-role {
-        color: $accent;
         margin-top: 1;
         text-style: bold;
     }
+    .role-you .message-role { color: $accent; }
+    .role-agent .message-role { color: $text-muted; }
     .role-you .message-body {
-        border-left: thick $accent;
+        border-left: tall $accent;
         padding-left: 1;
     }
     .role-agent .message-body {
@@ -136,7 +127,8 @@ class HarnessApp(App[int]):
     .notice {
         margin: 0 0 1 0;
         padding: 0 1;
-        border-left: thick $secondary;
+        background: $surface 60%;
+        border-left: thick $border;
         color: $text-muted;
     }
     .notice-warning { border-left: thick $warning; color: $foreground; }
@@ -144,13 +136,13 @@ class HarnessApp(App[int]):
     .notice-success { border-left: thick $success; color: $foreground; }
 
     .tool-card {
-        background: transparent;
-        border-left: tall $secondary 40%;
+        background: $surface 65%;
+        border-left: tall $accent 35%;
         padding: 0 1;
         margin: 0 0 1 1;
         height: auto;
     }
-    .tool-card:focus { background: transparent; }
+    .tool-card:focus { background: $surface 85%; }
     .tool-card .tool-header { height: auto; }
     .tool-card .tool-output,
     .tool-card .tool-output-expanded {
@@ -179,10 +171,15 @@ class HarnessApp(App[int]):
         min-width: 36;
         max-width: 76;
         background: $panel;
-        border-left: solid $accent 25%;
+        border: round $border;
+        border-left: solid $accent 60%;
     }
     #side-panel Tabs {
         background: $panel;
+    }
+    #side-panel Tab.-active {
+        color: $accent;
+        text-style: bold;
     }
     #side-panel TabPane {
         padding: 0;
@@ -193,7 +190,7 @@ class HarnessApp(App[int]):
     .section-title {
         color: $text-muted;
         padding: 1 1 0 1;
-        text-style: italic;
+        text-style: bold;
     }
     .panel-status {
         padding: 0 1;
@@ -238,13 +235,18 @@ class HarnessApp(App[int]):
 
     /* ----------------------------------------------------------- composer */
 
+    #approval-dock {
+        height: auto;
+        padding: 0 2;
+        background: transparent;
+    }
     #approval {
         height: auto;
         max-height: 16;
-        margin: 0 1;
+        margin: 0;
         padding: 0 1;
         background: $surface;
-        border: solid $warning;
+        border: round $warning 75%;
     }
     #approval .approval-header {
         height: auto;
@@ -274,18 +276,30 @@ class HarnessApp(App[int]):
     }
     #approval-options:focus { border: none; }
 
-    #composer-row {
+    #composer-dock {
         dock: bottom;
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 0 2;
+        background: transparent;
+    }
+    #composer-row {
+        width: 1fr;
         height: 6;
-        min-height: 4;
+        min-height: 6;
         max-height: 10;
-        padding: 1 2;
-        background: $panel;
+        padding: 0 1;
+        background: $surface;
+        border: round $border;
+    }
+    #composer-row:focus-within {
+        border: round $accent 75%;
     }
     #composer-prompt {
         width: 2;
         height: 1;
-        color: $accent 70%;
+        color: $accent;
+        text-style: bold;
     }
     #composer {
         width: 1fr;
@@ -294,18 +308,27 @@ class HarnessApp(App[int]):
         border: none;
         background: transparent;
     }
-    #command-suggestions {
+    #composer .text-area--placeholder {
+        color: $text-muted;
+    }
+    #suggestions-dock {
         dock: bottom;
-        offset: 0 -6;
+        offset: 0 -8;
+        height: auto;
+        padding: 0 2;
+        background: transparent;
+    }
+    #command-suggestions {
+        width: 1fr;
         height: auto;
         max-height: 10;
-        margin: 0 1;
+        margin: 0;
         padding: 0 1;
         background: $panel;
-        border: solid $accent 35%;
+        border: round $accent 45%;
         scrollbar-size-vertical: 1;
     }
-    #command-suggestions:focus { border: solid $accent 35%; }
+    #command-suggestions:focus { border: round $accent 45%; }
     #statusbar {
         dock: bottom;
         height: 1;
@@ -313,8 +336,9 @@ class HarnessApp(App[int]):
         background: $background;
         color: $text-muted;
     }
-    .narrow #topbar { padding: 0 1; }
-    .narrow #composer-row { padding: 1 1; }
+    .narrow #composer-dock,
+    .narrow #approval-dock,
+    .narrow #suggestions-dock { padding: 0 1; }
     .narrow .message-role { margin-top: 0; }
 
     /* --------------------------------------------------------- picker */
@@ -325,36 +349,40 @@ class HarnessApp(App[int]):
         border-bottom: solid $accent 35%;
         height: auto;
     }
-    #connect-body { height: 1fr; }
+    #connect-body { height: 1fr; padding: 0 1; }
     #connect-list-wrap {
         width: 46%;
         min-width: 32;
         max-width: 70;
-        border-right: solid $accent 20%;
-        padding: 0 0 1 1;
+        margin: 0 1 0 0;
+        padding: 0 1 1 1;
+        background: $surface;
+        border: round $border;
     }
     #target-list {
         height: 1fr;
         background: transparent;
     }
     #connect-filter {
-        margin: 0 1;
+        margin: 0 0 1 0;
         background: $surface;
-        border: solid $accent 30%;
+        border: round $border;
     }
-    #connect-filter:focus { border: solid $accent; }
+    #connect-filter:focus { border: round $accent 75%; }
     #target-list:focus { border: none; }
     #target-list ListItem {
         padding: 0 1;
         background: transparent;
     }
     #target-list ListItem.-highlight {
-        background: $boost;
+        background: $accent 12%;
         border-left: thick $accent;
     }
     #connect-detail {
         width: 1fr;
         padding: 1 2;
+        background: $surface;
+        border: round $border;
     }
     #connect-status {
         height: auto;
@@ -382,10 +410,11 @@ class HarnessApp(App[int]):
         max-height: 90%;
         padding: 1 2;
         background: $surface;
-        border: thick $accent 60%;
+        border: round $accent 65%;
     }
     .dialog-tall { height: 70%; }
     .dialog-title {
+        color: $accent;
         text-style: bold;
         padding-bottom: 0;
     }

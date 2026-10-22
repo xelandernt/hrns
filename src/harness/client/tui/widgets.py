@@ -62,7 +62,6 @@ __all__ = [
     "SessionPanel",
     "StatusBar",
     "TranscriptPane",
-    "TopBar",
 ]
 
 # One monochrome marker per tool call; status carries the meaning while it
@@ -279,36 +278,6 @@ class PromptQueue(Vertical):
         event.stop()
         action = (event.button.id or "").removeprefix("queue-")
         self.post_message(QueueAction(action, self.query_one(OptionList).highlighted or 0))
-
-
-class TopBar(Static):
-    """Location and connection summary; text labels, never color alone."""
-
-    def show(
-        self,
-        *,
-        target_text: str,
-        agent_text: str,
-        extension_text: str,
-        session_id: str | None,
-        connected: bool,
-    ) -> None:
-        text = Text()
-        text.append("harness", style="bold")
-        text.append("  ")
-        text.append(target_text or "no connection", style="dim")
-        text.append("\n")
-        text.append(agent_text, style="bold")
-        text.append("   ")
-        text.append(
-            "connected" if connected else "disconnected", style="bold" if connected else "dim"
-        )
-        if session_id:
-            text.append("   session ", style="dim")
-            text.append(session_id)
-        text.append("   ", style="dim")
-        text.append(extension_text, style="dim")
-        self.update(text)
 
 
 class OutputPending(Message):
@@ -1313,6 +1282,7 @@ class _Palette(NamedTuple):
     accent: Color | None = None
     foreground: Color | None = None
     muted: Color | None = None
+    success: Color | None = None
     warning: Color | None = None
     error: Color | None = None
 
@@ -1328,6 +1298,7 @@ def _palette(widget: Static) -> _Palette:
         accent=_parse_color(theme.accent or theme.primary),
         foreground=_parse_color(theme.foreground),
         muted=_parse_color(variables.get("text-muted")),
+        success=_parse_color(theme.success),
         warning=_parse_color(theme.warning),
         error=_parse_color(theme.error),
     )
@@ -1377,6 +1348,7 @@ class StatusBar(Static):
         self._permission = ""
         self._activity = ""
         self._hint = ""
+        self._context_line = ""
         self._busy = False
         self._phase = 0
         self._timer: Any = None
@@ -1393,6 +1365,7 @@ class StatusBar(Static):
         activity: str = "",
         permission: str = "",
         hint: str = "",
+        context: str = "",
     ) -> None:
         self._connected = connected
         self._model = model
@@ -1402,6 +1375,7 @@ class StatusBar(Static):
         self._permission = permission
         self._activity = activity
         self._hint = hint
+        self._context_line = context
         self._set_busy(busy)
         self.refresh()
 
@@ -1453,7 +1427,9 @@ class StatusBar(Static):
 
     def _left(self, budget: int) -> Text:
         if not self._busy:
-            return Text(self._hint, style="dim")
+            if self._hint:
+                return Text(self._hint, style="dim")
+            return self._context_text()
         label = self._activity or "working"
         text = self._sweep(label)
         # The hint is an extra, never a truncated fragment; it appears only when
@@ -1462,15 +1438,33 @@ class StatusBar(Static):
             text.append(f"   {self._hint}", style="dim")
         return text
 
+    def _context_text(self) -> Text:
+        if not self._context_line:
+            return Text()
+        palette = _palette(self)
+        color = palette.success if self._connected else palette.error
+        text = Text()
+        text.append("● ", style=Style(color=color))
+        text.append(self._context_line, style=Style(color=palette.muted))
+        return text
+
     def _right(self, budget: int) -> Text:
         palette = _palette(self)
         model = (
-            Text(self._model, style=Style(color=palette.foreground or palette.accent, bold=True))
+            Text(self._model, style=Style(color=palette.accent or palette.foreground, bold=True))
             if self._model
             else None
         )
-        mode = Text(self._mode) if self._mode else None
-        effort = Text(self._effort) if self._effort else None
+        mode = (
+            Text(self._mode, style=Style(color=palette.foreground))
+            if self._mode
+            else None
+        )
+        effort = (
+            Text(self._effort, style=Style(color=palette.muted or palette.foreground))
+            if self._effort
+            else None
+        )
         permission = (
             Text(self._permission, style=Style(color=palette.warning, bold=True))
             if self._permission and self._permission != "ask"
