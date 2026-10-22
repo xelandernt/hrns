@@ -104,7 +104,6 @@ from .widgets import (
     SidePanelCloseRequested,
     StatusBar,
     Submitted,
-    TopBar,
     TranscriptPane,
 )
 
@@ -217,9 +216,10 @@ class ConnectScreen(Screen[None]):
         self.query_one("#connect-hint").display = width >= 60
 
     def _render_banner(self) -> None:
+        theme = self.app.current_theme
         text = Text()
-        text.append("harness", style="bold")
-        text.append("  a terminal for ACP agents", style="dim")
+        text.append("harness", style=f"bold {theme.accent or theme.primary}")
+        text.append("  a terminal for ACP agents", style=theme.variables.get("text-muted", "dim"))
         self._banner.update(text)
 
     # ------------------------------------------------------------------ entries
@@ -813,18 +813,20 @@ class ChatScreen(Screen[None]):
     # --------------------------------------------------------------- structure
 
     def compose(self) -> ComposeResult:
-        yield TopBar(id="topbar")
         with Horizontal(id="main"):
             yield TranscriptPane(id="transcript")
             yield SidePanel()
         yield Button("New output ↓ · Ctrl+End", id="new-output")
         yield PromptQueue(id="prompt-queue")
-        yield ApprovalBar(id="approval")
-        yield CommandSuggestions(id="command-suggestions")
+        with Horizontal(id="approval-dock"):
+            yield ApprovalBar(id="approval")
+        with Horizontal(id="suggestions-dock"):
+            yield CommandSuggestions(id="command-suggestions")
         yield AttachmentBar(id="attachments", markup=False)
-        with Horizontal(id="composer-row"):
-            yield Static("›", id="composer-prompt", markup=False)
-            yield Composer(id="composer")
+        with Horizontal(id="composer-dock"):
+            with Horizontal(id="composer-row"):
+                yield Static("›", id="composer-prompt", markup=False)
+                yield Composer(placeholder="Send a message…", id="composer")
         yield StatusBar(id="statusbar")
 
     def on_mount(self) -> None:
@@ -910,14 +912,6 @@ class ChatScreen(Screen[None]):
     def _update_chrome(self) -> None:
         session_id = self.session.session_id if self.session else None
         self.query_one("#side-panel", SidePanel).sessions.mark_current(session_id)
-        extension = ""
-        self.query_one("#topbar", TopBar).show(
-            target_text=self.target.location_text(),
-            agent_text=f"{self.client.agent_title} {self.client.agent_version}".strip(),
-            extension_text=extension,
-            session_id=self._session_title or session_id,
-            connected=self.connected,
-        )
         self._refresh_status()
         activity = self.query_one("#side-panel", SidePanel).activity
         location = self.target.location()
@@ -967,7 +961,16 @@ class ChatScreen(Screen[None]):
             activity=self._activity,
             permission=permission_mode_label(self.settings.permission_mode),
             hint=self._hint_text(),
+            context=self._status_context(),
         )
+
+    def _status_context(self) -> str:
+        agent = f"{self.client.agent_title} {self.client.agent_version}".strip()
+        location = self.target.location()
+        where = str(location.get("cwd") or location.get("server") or "")
+        where = _short_path(where, 48) if where else ""
+        session = self._session_title or (self.session.session_id if self.session else "")
+        return " · ".join(part for part in (agent, where, session) if part)
 
     def _hint_text(self) -> str:
         if self._hint_note:
