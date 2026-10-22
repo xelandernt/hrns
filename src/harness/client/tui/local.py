@@ -253,7 +253,9 @@ class LocalModelDialog(FormDialog):
             return
         models = self._models_for(provider)
         current = str(row.value() or "")
-        row.set_choices(self._model_options(provider), selected=current if current in models else "")
+        row.set_choices(
+            self._model_options(provider), selected=current if current in models else ""
+        )
 
     def _field_changed(self, row: Any, rows: dict[str, Any]) -> None:
         if row.field_name == "provider":

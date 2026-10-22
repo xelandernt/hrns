@@ -40,6 +40,11 @@ from .events import (
 from .interactions import (
     PERMISSION_MODES,
     READ_ONLY_KINDS,
+    AskUserAnswer,
+    AskUserOption,
+    AskUserQuestion,
+    AskUserRequest,
+    AskUserResponse,
     ElicitationAnswer,
     ElicitationRequest,
     HeadlessInteractions,
@@ -47,7 +52,9 @@ from .interactions import (
     PermissionDecision,
     PermissionRequest,
     RequireInteractions,
+    ask_user_payload,
     auto_permission,
+    parse_ask_user_request,
 )
 from .profiles import Profile, Profiles, default_profiles_path, secret_value
 from .renderers import RendererRegistry, readable_text
@@ -58,6 +65,11 @@ __all__ = [
     "AgentDeployment",
     "AgentPage",
     "AgentTextChunk",
+    "AskUserAnswer",
+    "AskUserOption",
+    "AskUserQuestion",
+    "AskUserRequest",
+    "AskUserResponse",
     "CapabilitiesListed",
     "CatalogClient",
     "CatalogError",
@@ -97,7 +109,9 @@ __all__ = [
     "TurnStarted",
     "UsageUpdated",
     "UserMessageReplayed",
+    "ask_user_payload",
     "auto_permission",
+    "parse_ask_user_request",
     "WebSocketAgentTransport",
     "default_profiles_path",
     "readable_text",

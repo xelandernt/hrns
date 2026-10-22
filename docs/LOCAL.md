@@ -110,6 +110,15 @@ Use environment-based authentication for secrets instead of putting them in
 `provider_options`. Unsupported constructor options fail at startup; custom
 OpenAI-compatible endpoints should use `openai-chat`.
 
+The local agent also bundles the Ask User capability, so the model can put structured
+multiple-choice questions to you mid-run. It is on by default; turn it off for headless
+runs, where nobody is there to answer:
+
+```toml
+[capabilities]
+ask_user = false
+```
+
 ## Configuration and execution
 
 The shared `harness.config` module uses **pydantic-settings** without importing
@@ -130,10 +139,11 @@ uv run hrns connect --local-config /path/to/model.toml --cwd /absolute/project
 uv run hrns run --local --allow-all "Run the project tests"
 ```
 
-Local mode inherits your shell environment for provider authentication. All function
-tools request permission through the existing ACP controls, including reads, edits,
-and commands. In the terminal, `/permissions` can auto-approve read-only kinds
-(`reads`) or every offered allow option (`all`); `ask` remains the safe default.
+Local mode inherits your shell environment for provider authentication. File edits and
+shell commands request permission through the existing ACP controls; reads are automatic,
+and asking a question is not a workspace change. In the terminal, `/permissions` can
+auto-approve read-only kinds (`reads`) or every offered allow option (`all`); `ask`
+remains the safe default.
 Headless execution requires `--allow-all`, `--deny-all`, or reports that interaction
 is required. The local workspace starts at the selected project; it is **not a
 sandbox**. Approved commands execute with your user's permissions.
