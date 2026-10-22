@@ -44,7 +44,6 @@ from .state import (
     config_option_value,
     merge_presentation,
     merge_tool_event,
-    pending_application_text,
     presentation_payload,
     tool_args_preview,
 )
@@ -59,6 +58,7 @@ __all__ = [
     "CommandSuggestions",
     "Composer",
     "SidePanel",
+    "SidePanelCloseRequested",
     "SessionPanel",
     "StatusBar",
     "TranscriptPane",
@@ -1763,14 +1763,19 @@ class ApprovalBar(Vertical):
 # --------------------------------------------------------------- side panels
 
 
+class SidePanelCloseRequested(Message):
+    """The user asked to dismiss the on-demand side panel."""
+
+
 class SidePanel(TabbedContent):
-    """Plugins, sessions and activity. Hidden in narrow terminals."""
+    """Plugins, sessions and activity, opened on demand as a right drawer."""
 
     PANE_ORDER: tuple[str, ...] = ("capabilities", "sessions", "activity")
 
     BINDINGS = [
         Binding("tab", "next_pane", "Next panel", show=False),
         Binding("shift+tab", "previous_pane", "Previous panel", show=False),
+        Binding("escape", "close", "Close panel", show=False),
     ]
 
     def __init__(self) -> None:
@@ -1807,6 +1812,9 @@ class SidePanel(TabbedContent):
 
     def action_previous_pane(self) -> None:
         self._cycle_pane(-1)
+
+    def action_close(self) -> None:
+        self.post_message(SidePanelCloseRequested())
 
     def _cycle_pane(self, step: int) -> None:
         order = self.PANE_ORDER
@@ -1868,14 +1876,11 @@ class CapabilityPanel(Vertical):
         self._summary: dict[str, dict[str, Any]] = {}
         self._order: list[str] = []
         self._options: dict[str, dict[str, Any]] = {}
-        self._snapshot: dict[str, Any] | None = None
         self._status = Static("Loading plugins…", markup=False)
         self._status.add_class("panel-status")
         self._list = OptionList(id="binding-list", markup=False)
-        self._detail = Static("Select a plugin to inspect it.", markup=False)
-        self._detail.add_class("panel-detail")
         self._hint = Static(
-            "e edit · Space/←/→ toggle · a add plugin · r refresh",
+            "e edit · Space toggle · a add · r refresh · Esc close",
             markup=False,
             classes="panel-hint",
         )
@@ -1884,7 +1889,6 @@ class CapabilityPanel(Vertical):
         yield self._status
         yield self._hint
         yield self._list
-        yield self._detail
 
     # ------------------------------------------------------------------ data
 
@@ -1902,7 +1906,6 @@ class CapabilityPanel(Vertical):
     ) -> None:
         self.extension_mode = True
         self.can_write = bool(can_write)
-        self._snapshot = snapshot
         previous = self.current_binding_id()
         self._summary = {}
         self._order = []
@@ -1935,16 +1938,12 @@ class CapabilityPanel(Vertical):
             notes.append("read-only")
         self._status.update(Text(" · ".join(notes), style="dim"))
         self._hint.update(
-            "select to inspect · this host does not advertise configuration updates"
+            "read-only · r refresh · Esc close"
             if not self.can_write
-            else "e edit · Space/←/→ toggle · a add plugin · r refresh"
+            else "e edit · Space toggle · a add · r refresh · Esc close"
         )
         if self._list.option_count:
-            index = self._highlight_index(previous)
-            self._list.highlighted = index
-            self._show_detail(self._order[index])
-        else:
-            self._detail.update("No plugins offered by this agent.")
+            self._list.highlighted = self._highlight_index(previous)
 
     def set_standard_options(self, options: list[dict[str, Any]]) -> None:
         self.extension_mode = False
@@ -1970,13 +1969,11 @@ class CapabilityPanel(Vertical):
                 style="dim",
             )
         )
-        self._hint.update("←/→ change value · Enter open chooser · r refresh")
+        self._hint.update("←/→ change · Enter chooser · r refresh · Esc close")
         if self._list.option_count:
-            index = self._highlight_index(previous)
-            self._list.highlighted = index
-            self._show_standard_detail(self._order[index])
+            self._list.highlighted = self._highlight_index(previous)
         else:
-            self._detail.update("This agent advertises no configuration options.")
+            self.show_message("This agent advertises no configuration options.")
 
     def _highlight_index(self, previous: str | None) -> int:
         """Keep the edited row selected instead of jumping back to the top."""
@@ -2000,81 +1997,7 @@ class CapabilityPanel(Vertical):
             bits.append("new session")
         return "   ".join(bits)
 
-    def _show_detail(self, binding_id: str) -> None:
-        summary = self._summary.get(binding_id)
-        if not summary:
-            return
-        lines: list[str] = []
-        lines.append(summary["name"])
-        lines.append(
-            f"id {summary['bindingId']}"
-            + (f" · plugin {summary['pluginId']}" if summary["pluginId"] else "")
-        )
-        if summary["description"]:
-            lines.append("")
-            lines.append(summary["description"])
-        lines.append("")
-        selected_state = "on" if summary["enabled"] else "off"
-        active = summary.get("state") or {}
-        active_enabled = (
-            active.get("enabled") if isinstance(active, dict) else summary.get("activeEnabled")
-        )
-        active_text = "unknown" if active_enabled is None else ("on" if active_enabled else "off")
-        lines.append(f"selected: {selected_state} · active: {active_text}")
-        lines.append(f"change: {summary['modeLabel']} · state: {summary['stateMode']}")
-        default_state = "on" if summary.get("enabledByDefault") else "off"
-        if summary.get("defaults"):
-            rendered_defaults = ", ".join(
-                f"{key}={value}" for key, value in list(summary["defaults"].items())[:8]
-            )
-            lines.append(f"default: {default_state} · {rendered_defaults}")
-        else:
-            lines.append(f"default: {default_state}")
-        if summary["locked"]:
-            lines.append(f"locked: {summary['reason'] or 'not available in this deployment'}")
-        else:
-            lines.append("toggle allowed" if summary["canToggle"] else "toggle locked")
-        if summary["requires"]:
-            lines.append(f"requires: {', '.join(summary['requires'])}")
-        if summary["conflicts"]:
-            lines.append(f"conflicts: {', '.join(summary['conflicts'])}")
-        if summary["editableFields"]:
-            lines.append(f"editable: {', '.join(summary['editableFields'])}")
-        pending = pending_application_text(summary, self._snapshot)
-        if pending:
-            lines.append("")
-            lines.append(pending)
-        if summary["config"]:
-            lines.append("")
-            lines.append("configuration")
-            for key, value in list(summary["config"].items())[:12]:
-                lines.append(f"  {key}: {value}")
-        self._detail.update("\n".join(lines))
-
-    def _show_standard_detail(self, option_id: str) -> None:
-        option = self._options.get(option_id) or {}
-        lines = [
-            str(option.get("name") or option_id),
-            f"id {option_id} · type {option.get('type', '?')}",
-            "",
-            str(option.get("description") or "No description supplied."),
-        ]
-        if option.get("category"):
-            lines.append(f"category: {option['category']}")
-        current = config_option_value(option)
-        lines.append("")
-        lines.append(f"current: {current}")
-        self._detail.update("\n".join(lines))
-
     # --------------------------------------------------------------- events
-
-    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if event.option_id is None:
-            return
-        if self.extension_mode:
-            self._show_detail(event.option_id)
-        else:
-            self._show_standard_detail(event.option_id)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option_id
@@ -2108,7 +2031,6 @@ class CapabilityPanel(Vertical):
         if summary is None:
             return
         if not self.can_write:
-            self._show_detail(binding_id)
             self.show_message("This host advertises a read-only plugin catalog.")
             return
         if summary["locked"]:
@@ -2232,7 +2154,7 @@ class SessionPanel(Vertical):
         )
         self._table = DataTable(id="session-table", cursor_type="row", zebra_stripes=False)
         self._hint = Static(
-            "u resume · d delete · x close · n new session · r refresh",
+            "u resume · d delete · x close · n new · r refresh · Esc close",
             markup=False,
             classes="panel-hint",
         )

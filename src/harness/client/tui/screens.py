@@ -101,6 +101,7 @@ from .widgets import (
     SessionRefreshRequested,
     SessionResumeRequested,
     SidePanel,
+    SidePanelCloseRequested,
     StatusBar,
     Submitted,
     TopBar,
@@ -790,7 +791,7 @@ class ChatScreen(Screen[None]):
         self._events: asyncio.Queue[Any] = asyncio.Queue()
         self._consumer: asyncio.Task[None] | None = None
         self._unsubscribe = None
-        self._panel_forced: bool | None = None
+        self._panel_open = False
         self._turns_started = 0
         self._attachments: list[str] = []
         self._drafts: dict[str, tuple[str, list[str], list[tuple[str, list[str]]]]] = {}
@@ -892,10 +893,7 @@ class ChatScreen(Screen[None]):
     def _apply_layout(self) -> None:
         width = self.app.size.width
         panel = self.query_one("#side-panel", SidePanel)
-        visible = self.settings.side_panel and width >= 96
-        if self._panel_forced is not None:
-            visible = self._panel_forced
-        panel.display = visible
+        panel.display = self._panel_open
         screen_class = "narrow" if width < 96 else "wide"
         if screen_class not in self.classes:
             self.add_class(screen_class)
@@ -2957,17 +2955,29 @@ class ChatScreen(Screen[None]):
 
     def _show_panel(self, tab: str) -> None:
         panel = self.query_one("#side-panel", SidePanel)
+        self._panel_open = True
         panel.display = True
-        self._panel_forced = True
         # TabbedContent resolves its private ContentTabs by immediate-child
         # lookup. Assigning ``active`` before compose has mounted it raises
         # NoMatches, so wait until the show/refresh cycle has run.
         self.call_after_refresh(panel.activate, tab)
 
-    def action_toggle_panel(self) -> None:
+    def _close_panel(self) -> None:
         panel = self.query_one("#side-panel", SidePanel)
-        panel.display = not panel.display
-        self._panel_forced = panel.display
+        self._panel_open = False
+        panel.display = False
+        self.query_one("#composer", Composer).focus()
+
+    def on_side_panel_close_requested(self, event: SidePanelCloseRequested) -> None:
+        event.stop()
+        self._close_panel()
+
+    def action_toggle_panel(self) -> None:
+        if self._panel_open:
+            self._close_panel()
+            return
+        self._panel_open = True
+        self.query_one("#side-panel", SidePanel).display = True
 
     def action_command_palette(self) -> None:
         agent_commands = list(self._commands)
@@ -3071,6 +3081,7 @@ class ChatScreen(Screen[None]):
 | `F3` | sessions panel |
 | `F4` | activity panel |
 | `Tab` / `Shift+Tab` inside the side panel | switch between plugins, sessions and activity |
+| `Esc` inside the side panel | close it and return to the composer |
 | `Up` / `Down` or `Tab` in a form | move between fields |
 | `Left` / `Right` in a form | change a choice or toggle a switch |
 | `Enter` in a form | save and close |
@@ -3096,7 +3107,7 @@ Type `@` to find and attach a local workspace file; select a staged file to remo
 Submitting during a running turn queues a follow-up with its attachments. Use the queue's
 Edit and Remove controls to revise pending messages. Cancellation or errors pause the queue.
 Drafts, prompt history, attachments, and queues stay with their session while this app is open.
-Use `/` in the sessions panel to filter titles and workspaces; `Esc` clears the filter.
+Use `/` in the sessions panel to filter titles and workspaces. `Esc` closes the panel.
 
 ## Agent commands
 
