@@ -54,6 +54,11 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
     LocalCommand("sessions", "List, load, resume, close or delete sessions"),
     LocalCommand("find", "Find text in the retained conversation", takes_argument=True),
     LocalCommand("copy", "Copy the latest completed assistant response"),
+    LocalCommand(
+        "skills",
+        "Browse discovered skills and insert a $reference",
+        takes_argument=True,
+    ),
     LocalCommand("permissions", "Choose how tool approvals are answered"),
     LocalCommand("settings", "Terminal preferences"),
     LocalCommand("attach", "Stage a local file for the next message", takes_argument=True),

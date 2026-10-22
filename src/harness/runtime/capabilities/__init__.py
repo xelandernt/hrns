@@ -20,5 +20,6 @@ def bundled_descriptors() -> list[PluginDescriptor]:
     until a binding is composed.
     """
     from .coder import descriptor as coder_descriptor
+    from .skills import descriptor as skills_descriptor
 
-    return [coder_descriptor()]
+    return [coder_descriptor(), skills_descriptor()]

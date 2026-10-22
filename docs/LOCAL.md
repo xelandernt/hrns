@@ -4,7 +4,8 @@ Run the local agent on your machine with a cloud API or a locally served model.
 The client launches `harness-local` over ACP. The bundled `harness.coder` capability is bound
 by the built-in local definition and enabled by default: it provides file tools, content
 search, and a shell in the launch directory. Reading the workspace needs no approval; writes,
-edits, and commands are approved per call. Installed plugins remain available to explicit
+edits, and commands are approved per call. The bundled `harness.skills` capability is bound
+next to it for Agent Skills. Installed plugins remain available to explicit
 `AgentDefinition` objects; managed bindings are selected when a session is created and stay
 fixed for that conversation.
 
@@ -51,6 +52,13 @@ session. Use `/connect` to return to the connection picker, or `/effort` to chan
 reasoning effort live. `/plugins` opens the live plugins panel: toggle, configure,
 or add bindings; `next_turn` changes apply to the next message, while `new_session`
 bindings still require a new session.
+
+Agent Skills are enabled in the local definition. Skills are discovered in
+`.agents/skills` under the agent's working directory and in `~/.agents/skills`; set
+the skills binding's `directories` in `/plugins` for a different library. Type `$` to
+pick a skill and insert a `$skill-name` reference, or `/skills` to open the same picker.
+The reference is resolved by the runtime, so it works in pasted prompts and headless
+runs too; a name with no matching skill is left as plain text.
 
 DeepSeek's native provider uses its OpenAI-compatible Chat Completions API and
 provider-specific model behavior. See the [Pydantic AI DeepSeek documentation](https://pydantic.dev/docs/ai/models/deepseek/).
