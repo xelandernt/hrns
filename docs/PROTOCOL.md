@@ -20,7 +20,13 @@ Only mutually advertised methods are invoked. A Harness host advertises:
   "_harness/configuration/get",
   "_harness/configuration/update",
   "_harness/configuration/changed",
-  "_harness/session/rename"
+  "_harness/session/rename",
+  "_harness/commands/list",
+  "_harness/commands/invoke",
+  "_harness/commands/cancel",
+  "_harness/commands/changed",
+  "_harness/presentation/updated",
+  "_harness/presentation/get"
 ], "localBindingCreation": true}}
 ```
 
@@ -133,6 +139,48 @@ Request:
 
 Response: `{"sessionId": "abc", "title": "Release notes"}`. The agent persists the title and
 may emit a standard `session_info_update`.
+
+### `_harness/commands/list`
+
+Request: `{"sessionId": "abc", "cursor": null, "limit": 100}`. Response:
+`{"commands": [{"bindingId": "git", "commandName": "status", ...}], "selectedRevision": 2,
+"supportedOperations": ["read_history", "start_turn"]}`. Only enabled bindings in the current
+composition contribute commands. These commands are not advertised through standard ACP
+`available_commands_update`; an ordinary ACP client would send them as prompts.
+
+### `_harness/commands/invoke`
+
+Request contains `sessionId`, `bindingId`, `commandName`, `requestId`, `expectedRevision`, and
+exactly one of `text` or `arguments`. Response is a `CommandInvokeResponse` whose result
+separates an optional `presentation` from at most one `conversation` action
+(`{"type": "start_turn", "prompt": ...}`). The host checks session ownership, enabled binding,
+revision, and arguments before the handler runs. A busy session returns `COMMAND_BUSY`; a
+duplicate `requestId` with identical payload replays one result, conflicting reuse fails.
+
+### `_harness/commands/cancel`
+
+Request: `{"sessionId": "abc", "requestId": "..."}`. Cancels one known invocation, including
+one waiting to run. Response: `{"cancelled": true|false, "finished": false}`. Cancellation is
+not retried automatically and ambiguous side effects are reported as such.
+
+### `_harness/commands/changed`
+
+Notification with the current `sessionId`, `selectedRevision`, command descriptors and
+supported operations. Sent after a successful configuration change replaces command
+registrations.
+
+### `_harness/presentation/updated`
+
+Notification carrying bounded `ToolPresentationSnapshot` entries keyed by `sessionId` and
+`toolCallId`, with a monotonic per-call `revision`, optional `bindingId`/`runId`, and optional
+`input`, `output`, `progress` presentation payloads. It supplements ordinary ACP tool updates;
+it never replaces their status or content.
+
+### `_harness/presentation/get`
+
+Request: `{"sessionId": "abc", "toolCallIds": ["call-1"]}`. Response returns final snapshots
+reconstructed from committed native `ToolReturn` metadata. Used only for passive replay after
+`session/load`; no tool, command, or model is executed.
 
 ## Standard configuration options
 

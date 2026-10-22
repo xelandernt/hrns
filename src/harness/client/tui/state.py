@@ -23,6 +23,7 @@ __all__ = [
     "format_usage",
     "format_usage_compact",
     "is_subagent_tool",
+    "merge_presentation",
     "merge_tool_event",
     "model_option",
     "option_values",
@@ -268,6 +269,48 @@ def merge_tool_event(existing: dict[str, Any] | None, event: Any) -> dict[str, A
             **(existing_meta if isinstance(existing_meta, dict) else {}),
             **meta,
         }
+    return merged
+
+
+def merge_presentation(data: dict[str, Any], snapshot: Any) -> dict[str, Any]:
+    """Merge one supplemental snapshot without resetting standard ACP tool state.
+
+    The snapshot carries only presentation data and identity. Revisions are monotonic per
+    tool call, so a late progress frame can never overwrite a newer or final view, and a
+    completed card's status/content is never touched.
+    """
+    merged = dict(data)
+    tool_call_id = getattr(snapshot, "tool_call_id", "") or ""
+    if tool_call_id:
+        merged["toolCallId"] = tool_call_id
+    try:
+        revision = int(getattr(snapshot, "revision", 0) or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    current = int(merged.get("presentationRevision") or 0)
+    if revision and revision < current:
+        return merged
+    if revision:
+        merged["presentationRevision"] = revision
+    binding = getattr(snapshot, "binding_id", None)
+    if binding:
+        merged["bindingId"] = binding
+    run_id = getattr(snapshot, "run_id", None)
+    if run_id:
+        merged["nativeRunId"] = run_id
+    completed = str(merged.get("status") or "") in {"completed", "failed"}
+    progress = getattr(snapshot, "progress", None)
+    if progress is not None and not completed:
+        merged["presentationProgress"] = progress.to_wire()
+        merged["presentation"] = progress.to_wire()
+    for source, key in (("input", "presentationInput"), ("output", "presentationOutput")):
+        payload = getattr(snapshot, source, None)
+        if payload is not None:
+            merged[key] = payload.to_wire()
+            merged["presentation"] = payload.to_wire()
+    fallback = str(getattr(snapshot, "fallback", "") or "")
+    if fallback:
+        merged["presentationFallback"] = fallback
     return merged
 
 

@@ -896,9 +896,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 task.add_done_callback(lambda _: self._command_tasks.pop(key, None))
         return await asyncio.shield(task)
 
-    async def _execute_command(
-        self, request: CommandInvokeRequest, digest: str
-    ) -> dict[str, Any]:
+    async def _execute_command(self, request: CommandInvokeRequest, digest: str) -> dict[str, Any]:
         session_id = request.session_id
         composition = self._require_composition(session_id)
         if request.expected_revision != composition.snapshot.selected_revision:

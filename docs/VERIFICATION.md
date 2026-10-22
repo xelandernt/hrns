@@ -109,6 +109,30 @@ A Harness host advertises `_harness/capabilities/list`, `_harness/configuration/
 is enabled. `harness.client` does not import `harness.runtime` or Pydantic AI;
 `harness.runtime` does not import FastAPI or Textual.
 
+## Plugin commands and presentation
+
+Verified offline on 2026-10-22 with a temporary definition module and the real
+`HarnessAcpClient` + `StdioAgentTransport` against a `harness-host` subprocess:
+
+- `_harness/commands/list` returned namespaced commands for the enabled binding;
+- `/demo:status` returned an inline presentation with no conversation action;
+- duplicate `requestId` with the same payload returned the same result; reuse with different
+  arguments failed before the handler;
+- `/demo:ask` returned an explicit `start_turn`; the client ran one normal prompt, and
+  `session/load` replayed the user prompt but not the command's status output;
+- a native plugin tool produced standard ACP tool events and supplemental snapshots with the
+  same `toolCallId`, including an input snapshot before the result and an output snapshot after
+  it; `_harness/presentation/get` restored the final output from committed native metadata
+  without running the tool again.
+
+A Textual headless app mounted both a custom tool body and a command-result block; the tool
+view received the provider widget and the command fallback searched/copied as plain text.
+Static checks (`ruff`, `pyrefly`, `uv build`) passed for the final change.
+
+Not run: the WebSocket hosting walkthrough for plugin commands, a second live binding under
+concurrent configuration changes, and real provider credentials. Those paths share the same
+host method table and client code exercised over stdio.
+
 ## Retired symbols
 
 A repository search found no remaining imports or calls to `SessionManager`, `Session`,
@@ -124,6 +148,9 @@ and runtime event journal are not created or read.
   streaming cancellation and post-cancel session reuse were verified.
 - Long-duration transcript performance.
 - Third-party ACP vendors other than the pinned SDK.
+- Writable conversation history (clear/compact/edit) for plugin commands: unsupported on the
+  pinned ACP adapter because it exposes no public replacement operation. Only read-only
+  history inspection and explicit `StartTurn` are advertised.
 
 ## Support boundaries
 

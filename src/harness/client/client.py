@@ -945,9 +945,7 @@ class HarnessAcpClient:
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"commands/invoke returned malformed data: {exc}") from exc
 
-    async def harness_cancel_command(
-        self, session_id: str, request_id: str
-    ) -> dict[str, Any]:
+    async def harness_cancel_command(self, session_id: str, request_id: str) -> dict[str, Any]:
         try:
             return await self._ext_request(
                 "_harness/commands/cancel",
@@ -964,7 +962,7 @@ class HarnessAcpClient:
         payload = {"sessionId": session_id, "toolCallIds": tool_call_ids[:200]}
         try:
             raw = await self._ext_request("_harness/presentation/get", payload)
-            return parse_presentation_list(raw).snapshots
+            return tuple(parse_presentation_list(raw).snapshots)
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"presentation/get returned malformed data: {exc}") from exc
 
@@ -1402,9 +1400,7 @@ class SessionProxy:
     async def cancel_command(self, request_id: str) -> dict[str, Any]:
         return await self.client.harness_cancel_command(self.session_id, request_id)
 
-    async def presentations(
-        self, tool_call_ids: list[str]
-    ) -> tuple[ToolPresentationSnapshot, ...]:
+    async def presentations(self, tool_call_ids: list[str]) -> tuple[ToolPresentationSnapshot, ...]:
         return await self.client.harness_presentations(self.session_id, tool_call_ids)
 
     async def close(self) -> None:

@@ -465,8 +465,7 @@ class PluginRegistry:
             return None
         if descriptor.plugin_id != plugin_id:
             self._discovery_errors[plugin_id] = (
-                f"Entry point {plugin_id!r} returned descriptor for "
-                f"{descriptor.plugin_id!r}."
+                f"Entry point {plugin_id!r} returned descriptor for {descriptor.plugin_id!r}."
             )
             self._providers.pop(plugin_id, None)
             return None
@@ -585,9 +584,7 @@ class PluginRegistry:
             return descriptor.config_model.model_validate(dict(config))
         except ValidationError as exc:
             errors = _simple_errors(exc)
-            rendered = "; ".join(
-                f"{'.'.join(error['loc'])}: {error['msg']}" for error in errors
-            )
+            rendered = "; ".join(f"{'.'.join(error['loc'])}: {error['msg']}" for error in errors)
             raise HarnessError(
                 "INVALID_CONFIGURATION",
                 f"Invalid configuration for binding {context.binding_id!r} "
