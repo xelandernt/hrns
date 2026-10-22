@@ -251,6 +251,11 @@ class HarnessApp(App[int]):
         padding: 0 0 0 1;
         color: $foreground;
     }
+    #approval .approval-view {
+        height: auto;
+        max-height: 9;
+        padding: 0 0 0 1;
+    }
     #approval .approval-hint {
         height: auto;
         color: $text-muted;
