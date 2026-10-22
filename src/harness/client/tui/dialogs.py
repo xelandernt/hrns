@@ -10,16 +10,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (
-    Button,
-    Checkbox,
-    Input,
-    Label,
-    Markdown,
-    OptionList,
-    Select,
-    Static,
-)
+from textual.widgets import Input, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..interactions import (
@@ -141,63 +132,251 @@ class PermissionDialog(_DialogBase):
                 self.dismiss(reject.get("optionId"))
 
 
-def _field_widget(field: dict[str, Any]) -> Any:
-    """Build the input widget for one schema field."""
-    kind = field.get("kind")
-    default = field.get("default")
-    if kind == "boolean":
-        return Checkbox(field["title"], value=bool(default))
-    if kind == "select":
-        choices = field.get("choices") or []
-        options = [(label, value) for value, label in choices]
-        value = default if any(item[1] == default for item in options) else Select.NULL
-        return Select(options, allow_blank=True, value=value)
-    if kind == "multi":
-        initial = (
-            ", ".join(str(item) for item in (default or []))
-            if isinstance(default, list)
-            else (default or "")
+_FORM_BINDINGS = [
+    Binding("up", "focus_previous", "Previous field", show=False, priority=True),
+    Binding("down", "focus_next", "Next field", show=False, priority=True),
+    Binding("tab", "focus_next", "Next field", show=False, priority=True),
+    Binding("shift+tab", "focus_previous", "Previous field", show=False, priority=True),
+    Binding("enter", "accept_form", "Save", show=False, priority=True),
+]
+
+
+def _field_text(kind: str, value: Any) -> str:
+    """Render a raw value as the text a row edits or displays."""
+    if kind in {"array", "multi"} and isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return "" if value is None else str(value)
+
+
+class _FieldRow(Horizontal):
+    """One form line: indicator, label, and an inline value.
+
+    Text kinds mount an ``Input`` with no border so the row reads as a line.
+    Choice and boolean kinds render a plain value and react to Left/Right.
+    """
+
+    can_focus = True
+
+    def __init__(self, field: dict[str, Any]) -> None:
+        super().__init__(classes="field-row")
+        self.field = field
+        self.field_name = str(field.get("name") or "")
+        self.kind = str(field.get("kind") or "string")
+        self.title = str(field.get("title") or self.field_name)
+        self.required = bool(field.get("required"))
+        self._choices: list[tuple[str, str]] = [
+            (str(value), str(label)) for value, label in (field.get("choices") or [])
+        ]
+        default = field.get("default")
+        self._input: Input | None = None
+        self._silent: str | None = None
+        self.on_changed: Callable[[_FieldRow], None] | None = None
+        if self.kind == "boolean":
+            self._flag = bool(default)
+        elif self.kind == "select":
+            self._selection = "" if default is None else str(default)
+        else:
+            placeholder = (
+                "comma-separated values" if self.kind in {"array", "multi"} else "(none)"
+            )
+            self._input = Input(
+                _field_text(self.kind, default),
+                password=self.kind == "password",
+                type=(
+                    "integer"
+                    if self.kind == "integer"
+                    else "number"
+                    if self.kind == "number"
+                    else "text"
+                ),
+                placeholder=placeholder,
+            )
+        self._view = Static(self._display(), markup=False, classes="field-value")
+
+    def compose(self) -> ComposeResult:
+        yield Static("›", classes="field-gutter")
+        yield Static(
+            self.title + (" *" if self.required else ""),
+            markup=False,
+            classes="field-name",
         )
-        return Input(str(initial), placeholder="comma-separated values")
-    if kind == "password":
-        return Input("" if default is None else str(default), password=True)
-    input_type = "integer" if kind == "integer" else "number" if kind == "number" else "text"
-    return Input("" if default is None else str(default), type=input_type)
+        yield self._input if self._input is not None else self._view
 
+    def _display(self) -> str:
+        if self.kind == "boolean":
+            return "on" if self._flag else "off"
+        if self.kind == "select":
+            for value, label in self._choices:
+                if value == self._selection:
+                    return label
+            return self._selection or "(unset)"
+        return _field_text(self.kind, self._input.value if self._input else "")
 
-def _raw_value(widget: Any) -> Any:
-    if isinstance(widget, Checkbox):
-        return widget.value
-    if isinstance(widget, Select):
-        return None if widget.value is Select.NULL else widget.value
-    return widget.value
+    def _refresh_view(self) -> None:
+        if self._view.is_mounted:
+            self._view.update(self._display())
 
+    def value(self) -> Any:
+        if self.kind == "boolean":
+            return self._flag
+        if self.kind == "select":
+            return self._selection
+        return self._input.value if self._input is not None else ""
 
-def _collect_fields(
-    fields: list[dict[str, Any]], widgets: dict[str, Any]
-) -> tuple[dict[str, Any] | None, str | None]:
-    values: dict[str, Any] = {}
-    for field in fields:
-        widget = widgets[field["name"]]
+    def set_value(self, value: Any) -> None:
+        if self.kind == "boolean":
+            self._flag = bool(value)
+        elif self.kind == "select":
+            self._selection = "" if value is None else str(value)
+        elif self._input is not None:
+            text = _field_text(self.kind, value)
+            if self._input.value != text:
+                self._silent = text
+                self._input.value = text
+        self._refresh_view()
+
+    def set_choices(self, choices: list[tuple[str, str]], *, selected: str = "") -> None:
+        self._choices = list(choices)
+        self._selection = selected
+        self._refresh_view()
+
+    def focus_target(self) -> Any:
+        return self._input if self._input is not None else self
+
+    def _step(self, direction: int) -> None:
+        if not self._choices:
+            return
+        values = [value for value, _label in self._choices]
         try:
-            value = coerce_value(field, _raw_value(widget))
-        except (TypeError, ValueError):
-            return None, f"{field['title']} needs a valid {field.get('kind')} value."
-        if field.get("required") and (
-            value is None or value == [] or (isinstance(value, str) and not value.strip())
-        ):
-            return None, f"{field['title']} is required."
-        if value not in (None, ""):
-            values[field["name"]] = value
-    return values, None
+            index = values.index(self._selection)
+        except ValueError:
+            index = -1 if direction > 0 else 0
+        self._selection = values[(index + direction) % len(values)]
+        self._refresh_view()
+        self._notify()
+
+    def _notify(self) -> None:
+        if self.on_changed is not None:
+            self.on_changed(self)
+
+    def _note_focus(self) -> None:
+        note = getattr(self.screen, "note_focused_row", None)
+        if note is not None:
+            note(self)
+
+    def on_focus(self, event: Any) -> None:
+        self._note_focus()
+
+    def on_descendant_focus(self, event: Any) -> None:
+        self._note_focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        if self._silent is not None and event.value == self._silent:
+            self._silent = None
+            return
+        self._notify()
+
+    def on_key(self, event: Any) -> None:
+        key = str(event.key)
+        if self.kind == "boolean":
+            if key == "space":
+                self._flag = not self._flag
+            elif key == "left":
+                self._flag = False
+            elif key == "right":
+                self._flag = True
+            else:
+                return
+            self._refresh_view()
+            self._notify()
+            event.stop()
+        elif self.kind == "select" and key in {"left", "right"}:
+            self._step(1 if key == "right" else -1)
+            event.stop()
 
 
-class FormDialog(_DialogBase):
-    """Build a form and submit with Enter in an input or Ctrl+Enter anywhere."""
+class _FormMixin:
+    """Shared row list, navigation, and submit wiring for form-style dialogs."""
+
+    _rows: list[_FieldRow]
+    _rows_by_name: dict[str, _FieldRow]
+    _active: _FieldRow | None
+    _help: Static
+    _error: Static
+    _on_change: Callable[[_FieldRow, dict[str, _FieldRow]], None] | None
+    accept_label: str = "save"
+
+    def _setup_rows(
+        self,
+        fields: list[dict[str, Any]],
+        on_change: Callable[[_FieldRow, dict[str, _FieldRow]], None] | None = None,
+    ) -> None:
+        self._rows = []
+        self._rows_by_name = {}
+        self._active = None
+        self._on_change = on_change
+        self._help = Static("", markup=False, classes="field-focus-help")
+        for field in fields:
+            row = _FieldRow(field)
+            row.on_changed = self._row_changed
+            self._rows.append(row)
+            self._rows_by_name[row.field_name] = row
+
+    def _row_changed(self, row: _FieldRow) -> None:
+        if self._on_change is not None:
+            self._on_change(row, self._rows_by_name)
+
+    def form_hint(self) -> str:
+        return f"↑/↓ move · ←/→ change · Enter {self.accept_label} · Esc cancel"
+
+    def form_body(self) -> ComposeResult:
+        """Rows, validation error, focused-field help, and the key hint."""
+        with VerticalScroll(classes="form-scroll"):
+            if not self._rows:
+                yield Static(
+                    "This schema has no editable fields.",
+                    markup=False,
+                    classes="dialog-help",
+                )
+            for row in self._rows:
+                yield row
+        yield self._error
+        yield self._help
+        yield Static(self.form_hint(), markup=False, classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.focus_row(0)
+
+    def note_focused_row(self, row: _FieldRow) -> None:
+        self._active = row
+        self._help.update(str(row.field.get("description") or ""))
+
+    def focus_row(self, index: int) -> None:
+        if not self._rows:
+            return
+        index = max(0, min(index, len(self._rows) - 1))
+        self._rows[index].focus_target().focus()
+
+    def action_focus_next(self) -> None:
+        self._move_row(1)
+
+    def action_focus_previous(self) -> None:
+        self._move_row(-1)
+
+    def _move_row(self, delta: int) -> None:
+        if not self._rows:
+            return
+        index = self._rows.index(self._active) if self._active in self._rows else 0
+        self.focus_row(index + delta)
+
+
+class FormDialog(_FormMixin, _DialogBase):
+    """Schema-driven form: arrow between rows, edit inline, Enter saves."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+enter", "accept_form", "Apply", show=False, priority=True),
+        *_FORM_BINDINGS,
     ]
 
     def __init__(
@@ -210,63 +389,30 @@ class FormDialog(_DialogBase):
         explanation: str = "",
         current: dict[str, Any] | None = None,
         validate: Callable[[dict[str, Any]], str | None] | None = None,
+        on_change: Callable[[_FieldRow, dict[str, _FieldRow]], None] | None = None,
     ) -> None:
         """Optionally validate collected values, returning an error to keep the form open."""
         super().__init__(title, subtitle)
-        self.fields = fields
-        self.accept_label = accept_label
+        self.fields = [
+            {**field, "default": current[field["name"]]}
+            if current and field["name"] in current
+            else field
+            for field in fields
+        ]
+        self.accept_label = accept_label.lower()
         self.explanation = explanation
-        self.current = current or {}
         self._validate = validate
-        self._widgets: dict[str, Any] = {}
-        self._scroll = VerticalScroll(classes="form-scroll")
+        self._setup_rows(self.fields, on_change)
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield from self.dialog_header()
             if self.explanation:
                 yield Static(self.explanation, markup=False, classes="dialog-help")
-            with self._scroll:
-                if not self.fields:
-                    yield Static(
-                        "This schema has no editable fields.", markup=False, classes="dialog-help"
-                    )
-                for field in self.fields:
-                    if field["name"] in self.current:
-                        field = {**field, "default": self.current[field["name"]]}
-                    yield Label(
-                        field["title"] + (" *" if field.get("required") else ""),
-                        classes="field-label",
-                        markup=False,
-                    )
-                    if field.get("description"):
-                        yield Static(field["description"], markup=False, classes="field-help")
-                    widget = _field_widget(field)
-                    self._widgets[field["name"]] = widget
-                    yield widget
-            yield self._error
-            with Horizontal(classes="button-row"):
-                yield Button(self.accept_label, id="form-accept", variant="primary")
-                yield Button("Cancel", id="form-cancel")
-
-    def on_mount(self) -> None:
-        for widget in self._widgets.values():
-            if isinstance(widget, (Input, Select)):
-                widget.focus()
-                break
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "form-accept":
-            self.action_accept_form()
-        else:
-            self.dismiss(None)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        self.action_accept_form()
+            yield from self.form_body()
 
     def action_accept_form(self) -> None:
-        values, error = _collect_fields(self.fields, self._widgets)
+        values, error = _collect_fields(self.fields, self._rows_by_name)
         if not error and values is not None and self._validate is not None:
             error = self._validate(values)
         if error:
@@ -275,19 +421,44 @@ class FormDialog(_DialogBase):
         self.dismiss(values)
 
 
-class ElicitationDialog(_DialogBase):
+def _collect_fields(
+    fields: list[dict[str, Any]], rows: dict[str, _FieldRow]
+) -> tuple[dict[str, Any] | None, str | None]:
+    values: dict[str, Any] = {}
+    for field in fields:
+        row = rows[field["name"]]
+        try:
+            value = coerce_value(field, row.value())
+        except (TypeError, ValueError):
+            return None, f"{field['title']} needs a valid {field.get('kind')} value."
+        if field.get("required") and (
+            value is None or value == [] or (isinstance(value, str) and not value.strip())
+        ):
+            return None, f"{field['title']} is required."
+        if value not in (None, ""):
+            values[field["name"]] = value
+    return values, None
+
+
+class ElicitationDialog(_FormMixin, _DialogBase):
     """Structured elicitation from an agent: form mode or URL mode."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+enter", "accept_elicitation", "Accept", show=False, priority=True),
+        *_FORM_BINDINGS,
+        Binding("d", "decline", "Decline", show=False),
     ]
+
+    accept_label = "accept"
 
     def __init__(self, request: ElicitationRequest) -> None:
         super().__init__("Agent question", request.message)
         self.request = request
         self._fields = build_form_fields(request.schema, {}) if request.kind == "form" else []
-        self._widgets: dict[str, Any] = {}
+        self._setup_rows(self._fields)
+
+    def form_hint(self) -> str:
+        return "↑/↓ move · ←/→ change · Enter accept · d decline · Esc cancel"
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
@@ -302,49 +473,24 @@ class ElicitationDialog(_DialogBase):
                 yield Static(
                     self.request.url or "(no URL supplied)", markup=False, classes="url-box"
                 )
+                yield self._error
+                yield Static(self.form_hint(), markup=False, classes="dialog-hint")
             else:
                 yield Static(
                     "Answer the fields the agent requested. Required fields are marked *.",
                     markup=False,
                     classes="dialog-help",
                 )
-                with VerticalScroll(classes="form-scroll"):
-                    for field in self._fields:
-                        yield Label(
-                            field["title"] + (" *" if field.get("required") else ""),
-                            classes="field-label",
-                            markup=False,
-                        )
-                        if field.get("description"):
-                            yield Static(field["description"], markup=False, classes="field-help")
-                        widget = _field_widget(field)
-                        self._widgets[field["name"]] = widget
-                        yield widget
-            yield self._error
-            with Horizontal(classes="button-row"):
-                yield Button("Accept", id="elicit-accept", variant="primary")
-                yield Button("Decline", id="elicit-decline")
-                yield Button("Cancel", id="elicit-cancel")
+                yield from self.form_body()
 
-    def on_mount(self) -> None:
-        for widget in self._widgets.values():
-            if isinstance(widget, (Input, Select)):
-                widget.focus()
-                break
+    def action_decline(self) -> None:
+        self.dismiss(ElicitationAnswer(action="decline"))
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "elicit-decline":
-            self.dismiss(ElicitationAnswer(action="decline"))
-        elif event.button.id == "elicit-cancel":
-            self.dismiss(ElicitationAnswer(action="cancel"))
-        elif event.button.id == "elicit-accept":
-            self.action_accept_elicitation()
-
-    def action_accept_elicitation(self) -> None:
+    def action_accept_form(self) -> None:
         if self.request.kind == "url":
             self.dismiss(ElicitationAnswer(action="accept"))
             return
-        values, error = _collect_fields(self._fields, self._widgets)
+        values, error = _collect_fields(self._fields, self._rows_by_name)
         if error:
             self.show_error(error)
             return
@@ -352,12 +498,13 @@ class ElicitationDialog(_DialogBase):
 
 
 class ConfirmDialog(_DialogBase):
-    """Yes/no confirmation with explicit labels."""
+    """Yes/no confirmation answered from the keyboard."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("y", "yes", "Yes", show=False),
         Binding("n", "cancel", "No", show=False),
+        Binding("enter", "yes", "Yes", show=False, priority=True),
     ]
 
     def __init__(self, title: str, message: str, *, confirm_label: str = "Confirm") -> None:
@@ -368,15 +515,11 @@ class ConfirmDialog(_DialogBase):
         with Vertical(classes="dialog"):
             yield from self.dialog_header()
             yield self._error
-            with Horizontal(classes="button-row"):
-                yield Button(self.confirm_label, id="confirm-yes", variant="error")
-                yield Button("Cancel", id="confirm-no")
-
-    def on_mount(self) -> None:
-        self.query_one("#confirm-no", Button).focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "confirm-yes")
+            yield Static(
+                f"y or Enter {self.confirm_label.lower()} · n or Esc cancel",
+                markup=False,
+                classes="dialog-hint",
+            )
 
     def action_yes(self) -> None:
         self.dismiss(True)
@@ -631,63 +774,72 @@ class HelpDialog(_DialogBase):
         self.query_one(Vertical).focus()
 
 
-class SettingsDialog(_DialogBase):
+class SettingsDialog(_FormMixin, _DialogBase):
     """Terminal preferences; applies immediately and can be persisted."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=False),
-        Binding("ctrl+enter", "apply_settings", "Apply", show=False, priority=True),
+        *_FORM_BINDINGS,
     ]
+
+    accept_label = "apply"
 
     def __init__(self, settings: Settings, *, can_persist: bool) -> None:
         super().__init__("Settings", "These preferences live in the client profile file.")
         self.settings = settings
         self.can_persist = can_persist
         themes = ("harness", "textual-dark", "textual-light", "ansi-dark", "ansi-light")
-        self._theme = Select(
-            [(name, name) for name in themes],
-            value=settings.theme if settings.theme in themes else "harness",
-            allow_blank=False,
-            id="settings-theme",
-        )
-        self._expand = Checkbox(
-            "Expand tool details automatically", value=settings.auto_expand_tools
-        )
-        self._thoughts = Checkbox(
-            "Expand agent reasoning when provided", value=settings.show_thoughts
-        )
-        self._panel = Checkbox("Show side panel on wide terminals", value=settings.side_panel)
         permission_labels = {
             "ask": "ask every time",
             "reads": "allow reads, ask for the rest",
             "all": "allow all tools",
         }
-        self._permission = Select(
-            [(permission_labels[mode], mode) for mode in PERMISSION_MODES],
-            value=settings.permission_mode
-            if settings.permission_mode in PERMISSION_MODES
-            else "ask",
-            allow_blank=False,
-            id="settings-permission",
+        self._setup_rows(
+            [
+                {
+                    "name": "theme",
+                    "title": "Theme",
+                    "kind": "select",
+                    "choices": [(name, name) for name in themes],
+                    "default": settings.theme if settings.theme in themes else "harness",
+                },
+                {
+                    "name": "expand",
+                    "title": "Expand tool details",
+                    "kind": "boolean",
+                    "default": settings.auto_expand_tools,
+                },
+                {
+                    "name": "thoughts",
+                    "title": "Expand agent reasoning",
+                    "kind": "boolean",
+                    "default": settings.show_thoughts,
+                },
+                {
+                    "name": "panel",
+                    "title": "Show side panel",
+                    "kind": "boolean",
+                    "default": settings.side_panel,
+                },
+                {
+                    "name": "permission",
+                    "title": "Tool approvals",
+                    "kind": "select",
+                    "choices": [(mode, permission_labels[mode]) for mode in PERMISSION_MODES],
+                    "default": settings.permission_mode
+                    if settings.permission_mode in PERMISSION_MODES
+                    else "ask",
+                    "description": (
+                        "Ask shows every request. Allow reads auto-approves read, search and "
+                        "think calls. Allow all is explicit and is not a sandbox."
+                    ),
+                },
+            ]
         )
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield from self.dialog_header()
-            with VerticalScroll(classes="form-scroll"):
-                yield Static("Theme", classes="field-label", markup=False)
-                yield self._theme
-                yield self._expand
-                yield self._thoughts
-                yield self._panel
-                yield Static("Tool approvals", classes="field-label", markup=False)
-                yield self._permission
-                yield Static(
-                    "Ask shows every request. Allow reads auto-approves read, search and think calls. "
-                    "Allow all is explicit and is not a sandbox.",
-                    markup=False,
-                    classes="field-help",
-                )
             yield Static(
                 "Saved to the profile file when it exists."
                 if self.can_persist
@@ -695,23 +847,16 @@ class SettingsDialog(_DialogBase):
                 markup=False,
                 classes="dialog-help",
             )
-            with Horizontal(classes="button-row"):
-                yield Button("Apply", id="settings-apply", variant="primary")
-                yield Button("Cancel", id="settings-cancel")
+            yield from self.form_body()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "settings-apply":
-            self.action_apply_settings()
-        else:
-            self.dismiss(None)
-
-    def action_apply_settings(self) -> None:
+    def action_accept_form(self) -> None:
+        rows = self._rows_by_name
         self.dismiss(
             Settings(
-                theme=str(self._theme.value),
-                auto_expand_tools=self._expand.value,
-                show_thoughts=self._thoughts.value,
-                side_panel=self._panel.value,
-                permission_mode=str(self._permission.value),
+                theme=str(rows["theme"].value()),
+                auto_expand_tools=bool(rows["expand"].value()),
+                show_thoughts=bool(rows["thoughts"].value()),
+                side_panel=bool(rows["panel"].value()),
+                permission_mode=str(rows["permission"].value()),
             )
         )
