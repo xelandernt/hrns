@@ -20,6 +20,12 @@ EXTENSION_METHODS = (
     "_harness/configuration/update",
     "_harness/configuration/changed",
     "_harness/session/rename",
+    "_harness/commands/list",
+    "_harness/commands/invoke",
+    "_harness/commands/cancel",
+    "_harness/commands/changed",
+    "_harness/presentation/updated",
+    "_harness/presentation/get",
 )
 
 

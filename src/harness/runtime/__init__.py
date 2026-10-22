@@ -48,6 +48,7 @@ from .definitions import (
     parse_manifest_data,
     parse_manifest_text,
 )
+from .extensions import Command, CommandBinding, CommandContext, TextArguments
 from .policy import PolicyCatalog, changes_payload_hash, order_enabled_offerings
 from .registry import (
     ENTRY_POINT_GROUP,
@@ -75,6 +76,11 @@ __all__ = [
     "HarnessError",
     "PluginInfo",
     "RuntimeEvent",
+    # command authoring
+    "Command",
+    "CommandBinding",
+    "CommandContext",
+    "TextArguments",
     # definitions
     "AGENT_FACTORY_PARAM",
     "AgentDefinition",
