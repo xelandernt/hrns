@@ -1,4 +1,4 @@
-"""Configured local developer agent served through the existing ACP host."""
+"""Configured local developer agent served through the upstream ACP adapter."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.capabilities import PrepareTools
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import Model, infer_model
@@ -21,15 +20,13 @@ from harness.config import LocalSettings, thinking_from_settings
 from harness.protocol import HarnessError
 
 from .host import (
-    HarnessHostAgent,
+    HarnessACPAgent,
     HostBundle,
-    HostMetadataStore,
     HostPolicy,
     _serve_until_closed,
     build_store,
 )
 from .registry import PluginRegistry
-from .session import SessionManager
 from .starters import developer_definition
 
 #: Frequently used provider ids are shown first in the terminal picker.
@@ -52,7 +49,6 @@ _PROVIDER_PRIORITY = (
 )
 
 #: Documented Pydantic AI providers that do not contribute a known-model list.
-#: Their model ids are free-form, so the terminal keeps a custom-model input.
 _EXTRA_PROVIDERS = (
     "azure-responses",
     "openai-codex",
@@ -84,25 +80,18 @@ def _provider_sort_key(name: str) -> tuple[int, int, str]:
 
 
 def thinking_support(model_ids: Iterable[str]) -> dict[str, str]:
-    """Map model ids to ``"supported"``/``"always"`` when the model reasons.
-
-    The client never imports Pydantic AI, so the catalog carries this instead.
-    Profile lookup does not need credentials; providers whose extra is not
-    installed simply contribute no entry.
-    """
+    """Map model ids to ``"supported"``/``"always"`` when the model reasons."""
     from pydantic_ai.models import infer_model_profile, known_model_names
 
     known = set(known_model_names())
     support: dict[str, str] = {}
     for model_id in model_ids:
         if model_id not in known:
-            # A custom id the registry cannot profile. The user chose it, so let
-            # them opt into effort instead of claiming the model cannot reason.
             support[model_id] = "custom"
             continue
         try:
             profile = infer_model_profile(model_id)
-        except Exception:  # a missing provider extra is not a catalog failure
+        except Exception:
             continue
         if profile.get("thinking_always_enabled"):
             support[model_id] = "always"
@@ -179,7 +168,6 @@ def configured_model(settings: LocalSettings, model_id: str | None = None) -> Mo
             "environment (DeepSeek/OpenAI-compatible: harness[runtime,openai])."
         ) from exc
     except (ValueError, TypeError, UserError) as exc:
-        # Constructor errors can contain configured secrets; only report parameter names.
         raise ValueError(
             f"Cannot configure provider {provider!r} / model {selected!r}. "
             "Check the provider name, credentials and supported provider_options. "
@@ -208,7 +196,7 @@ def build_local_agent(
     *,
     cwd: Path | None = None,
     model: Model | None = None,
-) -> HarnessHostAgent:
+) -> HarnessACPAgent:
     """Bind a model and trusted local workspace; every function tool needs approval."""
     workspace = (cwd or Path.cwd()).expanduser().resolve(strict=True)
     if not workspace.is_dir():
@@ -218,36 +206,18 @@ def build_local_agent(
     definition.agent_id = "harness.local"
     definition.name = f"Local · {settings.provider}:{settings.model}"
     definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))
-    spec = definition.spec
-    if spec is None:
-        raise ValueError("The local developer definition has no agent spec.")
-
-    def factory(*, model: Any, managed_capabilities: list[Any]) -> Agent:
-        selected = configured_model(settings, model) if isinstance(model, str) else model
-        return Agent.from_spec(
-            spec,
-            model=selected,
-            # Model settings (including reasoning effort) arrive per turn from the
-            # host so live changes do not require rebuilding the process.
-            capabilities=managed_capabilities,
-            output_type=[str, DeferredToolRequests],
-        )
-
-    definition.spec = None
-    definition.factory = factory
     registry = PluginRegistry()
     registry.discover()
-    store = build_store(settings.store.expanduser())
-    manager = SessionManager(registry, store=store, definitions=[definition])
-    bundle = HostBundle(
-        definition,
-        registry,
-        manager,
-        str(store.path),
-        HostMetadataStore(store.path),
-    )
+    store = build_store(str(settings.store.expanduser()))
     models = _local_models(settings)
-    return HarnessHostAgent(
+    bundle = HostBundle(
+        definition=definition,
+        registry=registry,
+        store=store,
+        close_store=True,
+        model_resolver=lambda model_id: configured_model(settings, model_id),
+    )
+    return HarnessACPAgent(
         bundle,
         HostPolicy(
             allowed_cwds=(str(workspace),),
@@ -263,8 +233,9 @@ def build_local_agent(
 
 
 async def _run(settings: LocalSettings) -> None:
-    # Provider HTTP clients are constructed on the same event loop as their requests.
-    await _serve_until_closed(build_local_agent(settings))
+    agent = build_local_agent(settings)
+    await agent.store.backend.initialize()
+    await _serve_until_closed(agent)
 
 
 def main(argv: list[str] | None = None) -> int:

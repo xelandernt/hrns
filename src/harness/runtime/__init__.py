@@ -1,12 +1,12 @@
-"""Harness runtime: typed definitions, native capability composition, and durable sessions.
+"""Harness runtime: native agent composition, plugin registry, and ACP persistence.
 
-Public integration surface (see ``docs/RUNTIME_API.md``)::
+Public integration surface::
 
-    from harness.runtime import SessionManager, PluginRegistry, AgentDefinition, ResourceSet
+    from harness.runtime import AgentDefinition, PluginRegistry, ResourceSet
+    from harness.runtime.composition import compose_definition
 
-The ACP host, catalog, and starters are optional modules layered on this core
-(``harness.runtime.acp``, ``.host``, ``.catalog``, ``.starters``); importing this package
-never imports them, so Python callers do not pull in ACP or catalog dependencies.
+ACP hosting lives in :mod:`harness.runtime.host` and is not imported by this package, so
+Python callers do not pull in the ACP adapter.
 """
 
 from __future__ import annotations
@@ -26,7 +26,10 @@ from harness.protocol import (
     RuntimeEvent,
 )
 
+from . import _warnings  # noqa: F401  (the pinned ACP adapter is experimental)
 from ._version import __version__
+from .acp_store import ScopedSessionStore, SessionRecord, SessionStore
+from .composition import Composition, EffortState, compose_definition
 from .definitions import (
     AGENT_FACTORY_PARAM,
     AgentDefinition,
@@ -45,7 +48,6 @@ from .definitions import (
     parse_manifest_data,
     parse_manifest_text,
 )
-from .jobs import OwnedJob, SessionJobManager
 from .policy import PolicyCatalog, changes_payload_hash, order_enabled_offerings
 from .registry import (
     ENTRY_POINT_GROUP,
@@ -57,22 +59,7 @@ from .registry import (
     PluginRegistry,
 )
 from .resources import ResourceKind, ResourceRequirement, ResourceSet
-from .session import (
-    HarnessRuntime,
-    Session,
-    SessionManager,
-    SessionOpener,
-    SessionSummary,
-    WorkspaceBinding,
-)
-from .store import (
-    SessionRecord,
-    SessionStore,
-    StoredRevision,
-    StoredTurn,
-    TransactionClaim,
-    default_store_path,
-)
+from .store import SQLiteSessionStore, default_store_path
 
 __all__ = [
     # protocol models used in signatures
@@ -88,9 +75,6 @@ __all__ = [
     "HarnessError",
     "PluginInfo",
     "RuntimeEvent",
-    # session-owned work
-    "OwnedJob",
-    "SessionJobManager",
     # definitions
     "AGENT_FACTORY_PARAM",
     "AgentDefinition",
@@ -124,19 +108,15 @@ __all__ = [
     "ResourceKind",
     "ResourceRequirement",
     "ResourceSet",
-    # sessions
-    "HarnessRuntime",
-    "Session",
-    "SessionManager",
-    "SessionOpener",
-    "SessionSummary",
-    "WorkspaceBinding",
+    # composition
+    "Composition",
+    "EffortState",
+    "compose_definition",
     # persistence
+    "SQLiteSessionStore",
+    "ScopedSessionStore",
     "SessionRecord",
     "SessionStore",
-    "StoredRevision",
-    "StoredTurn",
-    "TransactionClaim",
     "default_store_path",
     "__version__",
 ]

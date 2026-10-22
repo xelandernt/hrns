@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
 from harness.protocol import HarnessError, decode_frame, encode_frame
-from harness.runtime.host import HarnessHostAgent, serve_agent
+from harness.runtime.host import HarnessACPAgent, serve_agent
 
 from .errors import ACP_SUBPROTOCOL, MAX_MESSAGE_BYTES, ApiError
 from .models import Principal
@@ -105,7 +105,7 @@ async def _receive(socket: WebSocket, reader: asyncio.StreamReader, flow: _ReadF
         reader.feed_eof()
 
 
-async def _serve(socket: WebSocket, agent: HarnessHostAgent) -> None:
+async def _serve(socket: WebSocket, agent: HarnessACPAgent) -> None:
     flow = _ReadFlowControl()
     reader = asyncio.StreamReader(limit=MAX_MESSAGE_BYTES + 1)
     reader.set_transport(flow)

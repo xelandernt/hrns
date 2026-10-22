@@ -28,6 +28,7 @@ from pydantic_ai.capabilities import AgentCapability
 
 from harness.protocol import BindingId, CapabilityPolicy, HarnessError
 
+from .registry import PluginConfigT, PluginDescriptor
 from .resources import ResourceRequirement
 
 __all__ = [
@@ -135,17 +136,73 @@ class DefinitionBinding(BaseModel):
     or service accounts remain distinguishable.
     """
 
-    model_config = {"extra": "forbid"}
+    model_config = {"extra": "forbid", "arbitrary_types_allowed": True}
 
     binding_id: str = Field(min_length=1, max_length=200)
-    plugin_id: str = Field(min_length=1, max_length=200)
-    """The registered plugin this binding instantiates."""
+    plugin: PluginDescriptor[Any] | None = None
+    """Direct Python plugin descriptor. Mutually exclusive with ``plugin_id`` lookup."""
+    plugin_id: str | None = Field(default=None, min_length=1, max_length=200)
+    """The registered plugin this binding instantiates when ``plugin`` is omitted."""
     config: dict[str, Any] = Field(default_factory=dict)
     """Initial configuration, validated against the plugin's ``config_model``."""
     enabled: bool = True
     """Whether the binding is enabled by default in new sessions."""
     policy: CapabilityPolicy | None = None
     """Definition-level policy override; plugin defaults apply beneath this."""
+
+    @model_validator(mode="after")
+    def _validate_plugin_source(self) -> DefinitionBinding:
+        if self.plugin is None and self.plugin_id is None:
+            raise ValueError("A definition binding requires either plugin or plugin_id.")
+        if self.plugin is not None:
+            if self.plugin_id is not None and self.plugin_id != self.plugin.plugin_id:
+                raise ValueError(
+                    "Definition binding plugin_id must match the supplied plugin descriptor."
+                )
+            self.plugin_id = self.plugin.plugin_id
+        return self
+
+    @classmethod
+    def from_plugin(
+        cls,
+        plugin: PluginDescriptor[PluginConfigT],
+        *,
+        binding_id: str,
+        config: PluginConfigT | Mapping[str, Any] | None = None,
+        enabled: bool = True,
+        policy: CapabilityPolicy | None = None,
+    ) -> DefinitionBinding:
+        """Bind a plugin descriptor directly, with a config typed by its model.
+
+        ``config`` accepts the plugin's Pydantic config instance or a mapping. The generic
+        ``PluginDescriptor`` parameter is inferred from ``plugin``, so a mismatched model is
+        rejected by the type checker before runtime validation.
+        """
+        if config is None:
+            payload: dict[str, Any] = {}
+        elif isinstance(config, Mapping):
+            payload = dict(config)
+        elif isinstance(config, BaseModel):
+            payload = config.model_dump(mode="json", exclude_none=False)
+        else:  # pragma: no cover - the type checker should reject this first
+            raise TypeError("config must be a Pydantic model instance or a mapping")
+        return cls(
+            binding_id=binding_id,
+            plugin=plugin,
+            plugin_id=plugin.plugin_id,
+            config=payload,
+            enabled=enabled,
+            policy=policy,
+        )
+
+    @property
+    def resolved_plugin_id(self) -> str:
+        """Stable plugin id, whether the binding was declared inline or by registry id."""
+        if self.plugin_id is not None:
+            return self.plugin_id
+        if self.plugin is not None:
+            return self.plugin.plugin_id
+        raise ValueError("Definition binding has no plugin source.")
 
 
 class DefinitionManifestBinding(BaseModel):
@@ -336,6 +393,8 @@ class AgentDefinition(BaseModel):
             non_portable.append("factory")
         if self.fixed_capabilities:
             non_portable.append("fixed_capabilities")
+        if any(binding.plugin is not None for binding in self.bindings):
+            non_portable.append("bindings[].plugin")
         if non_portable:
             raise HarnessError(
                 "INVALID_CONFIGURATION",
@@ -358,7 +417,7 @@ class AgentDefinition(BaseModel):
             bindings=[
                 DefinitionManifestBinding(
                     binding_id=binding.binding_id,
-                    plugin_id=binding.plugin_id,
+                    plugin_id=binding.resolved_plugin_id,
                     config=dict(binding.config),
                     enabled=binding.enabled,
                     policy=binding.policy,

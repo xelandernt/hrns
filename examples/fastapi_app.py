@@ -11,7 +11,7 @@ import os
 from fastapi import FastAPI
 from pydantic_ai.capabilities import AbstractCapability
 
-from harness.runtime import AgentDefinition, SessionStore
+from harness.runtime import AgentDefinition, SQLiteSessionStore
 from harness.server import AgentServer
 
 
@@ -24,7 +24,7 @@ class HouseStyle(AbstractCapability[None]):
 
 
 app = FastAPI()
-agents = AgentServer(store=SessionStore("./sessions.sqlite3"))
+agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
 agents.add_agent(
     AgentDefinition(
         agent_id="example.house_style",

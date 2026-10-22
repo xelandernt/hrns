@@ -1,70 +1,61 @@
 # Shared implementation contracts
 
-`harness.protocol` exports typed configuration changes and snapshots, errors,
-capability/plugin descriptors, and runtime events. Wire DTOs accept snake_case and
-camelCase; `.to_wire()` emits JSON-safe camelCase excluding None. Unknown fields
-are rejected. Secret objects belong in runtime resources, never wire DTOs.
+`harness.protocol` exports typed extension DTOs, errors, framing, and pagination. Wire DTOs
+accept snake_case and camelCase; `.to_wire()` emits JSON-safe camelCase excluding `None`.
+Unknown fields are rejected. Secrets stay in runtime resources, never wire DTOs.
+
+## Runtime composition
+
+`compose_definition(...)` is the single composition path for Python and ACP. It returns a
+native `Agent` plus an `AcpSessionConfig`; it does not execute turns. A capability edit
+re-runs composition and replaces the live composition's contents in place, preserving the
+adapter's `SessionDeps` identity. Fixed and managed capabilities remain native Pydantic AI
+capabilities, including hooks, instructions, toolsets, and event ownership.
 
 ## Embedded FastAPI server
 
-`AgentServer(store=..., authenticate=..., registry=...)` accepts an explicit SQLite
-`SessionStore` or `PostgresSessionStore`. `add_agent(definition, ...)` registers an
-ordinary `AgentDefinition` and optional Python resource bindings, selectable models,
-and workspace roots. `mount(app, prefix="")` adds catalog and WebSocket ACP routes
-and composes storage lifecycle with the existing FastAPI lifespan.
+`AgentServer(store=..., authenticate=..., registry=...)` accepts a shared
+`SQLiteSessionStore` or `PostgresSessionStore`. `add_agent(definition, resources=...,
+models=..., allowed_cwds=..., default_cwd=...)` registers an `AgentDefinition`.
+`mount(app, prefix="")` adds catalog and WebSocket ACP routes and composes storage lifespan
+with the existing FastAPI lifespan.
 
-There is no server configuration file or subprocess deployment catalog. Registration
-passes native Python objects directly. The server executes definitions in its own
-process and uses a connection-local `SessionManager` with the shared database.
-Disconnect closes that connection's sessions and releases their claims. Application
-shutdown drains connections before closing storage.
+There is no server configuration file or subprocess deployment catalog. Registration passes
+native Python objects. Each connection gets a new `HarnessACPAgent` with a scoped store view;
+disconnect closes its sessions. Application shutdown drains connections before closing
+storage.
 
-The optional FastAPI authentication dependency returns `Principal(id, agent_ids=None)`.
-It runs for HTTP and WebSocket requests and may depend on `HTTPConnection`. The default
-identity is `local`, with access to every registered agent. Authenticated identity and
-workspace bounds come from the application, never client ACP metadata.
+The optional authentication dependency returns `Principal(id, agent_ids=None)` for HTTP and
+WebSocket requests. The default principal is `local` with access to every registered agent.
+Identity and workspace bounds come from the application, never from ACP metadata.
 
-Session ownership is scoped by principal plus a namespace derived from the registered
-agent's ID and definition version. SQLite and PostgreSQL persist conversation state,
-configuration, transcript, and ACP metadata (cwd/model/effort). The database enforces
-exclusive session control; a live owner is never stolen.
+## Storage scope
 
-## Runtime and ACP
+Session rows are keyed by session id and every query includes `(principal, deployment_id)`.
+The deployment id is a namespace derived from the registered agent id and definition version.
+SQLite and PostgreSQL use the same `acp_sessions` schema. A scoped store implements the
+upstream `SessionStore` protocol; the adapter owns conversation state, while the host owns
+cwd/title/effort/bindings/usage metadata.
 
-The runtime owns inference composition, policy, revisions, persistence, ownership,
-and transcript journaling. `HarnessHostAgent` translates ACP requests to this same
-controller for both stdio hosts and in-process network connections.
+Durability follows upstream: `save` failures are logged, not fatal; no transactional turn
+commit or cross-connection ownership claim is provided. Last writer wins.
 
-Remote connections disable local binding creation and arbitrary client MCP setup.
-Declared managed capability bindings still support policy-checked changes between
-turns. Workspace roots are canonicalized and enforced by the ACP host. A sandbox
-failure never falls back to local execution.
+## ACP and transport
 
-Local stdio clients may continue launching `harness-host` or `harness-local` as
-independent processes. The stdio CLI's host environment is separate from the embedded
-server API; network registration does not require `HARNESS_*` environment variables.
+ACP v1 is the baseline. The network subprotocol `harness.acp.v1` carries one JSON-RPC object
+per UTF-8 text frame, no batches or binary, at most 16 MiB. Shared framing rejects duplicate
+keys, non-finite numbers, and ambiguous envelopes. The WebSocket bridge feeds the official
+ACP SDK's newline-framed streams without starting a subprocess.
 
-## Transport
+Extension list responses use `items` and optional `nextCursor`. The host advertises only
+implemented methods: capabilities/list, configuration/get, session/rename. Model and effort
+are standard ACP config options.
 
-ACP v1 is the baseline. The project-defined network subprotocol is
-`harness.acp.v1`: one JSON-RPC object per UTF-8 text frame, no batches or binary, at
-most 16 MiB. Shared framing helpers reject duplicate keys, non-finite numbers and
-ambiguous envelopes. The WebSocket bridge translates frames to the official ACP
-SDK's newline-framed streams without spawning a process.
-
-Extension list responses use `items` and optional `nextCursor`. Capability lists also
-carry `selectedRevision`, `activeRevision` and `policyRevision`. The authoritative
-binding policy is `BindingDescriptor.policy`; the top-level `changeMode` mirrors it.
-`_harness/plugins/list` is advertised only when local binding creation is permitted.
-
-The client never automatically resends an uncertain prompt. Configuration transactions
-use a stable request ID and expected revision; a changed payload under the same ID is
-rejected. Disconnect cancels active work and releases session control after cleanup.
+The client never automatically resends an uncertain prompt. Disconnect cancels active work
+and releases the connection's sessions.
 
 ## Pins
 
-Pydantic AI slim **2.57.0**, official Harness **0.57.0**, official ACP SDK **0.11.1**
-(Harness's supported `<0.12` range), Textual **8.2.8**. `uv.lock` records transitive
-versions. [SERVER.md](SERVER.md) documents the public embedding API;
-[RUNTIME_API.md](RUNTIME_API.md) and [ACP_RUNTIME_CONTRACT.md](ACP_RUNTIME_CONTRACT.md)
-document runtime integration.
+Pydantic AI slim **2.57.0**, pydantic-ai-harness **0.57.0**, ACP SDK **0.11.1**, Textual
+**8.2.8**. `uv.lock` records transitive versions. See [RUNTIME_API.md](RUNTIME_API.md),
+[ACP_RUNTIME_CONTRACT.md](ACP_RUNTIME_CONTRACT.md), and [SERVER.md](SERVER.md).

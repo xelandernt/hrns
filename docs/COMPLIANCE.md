@@ -1,50 +1,44 @@
 # Concept compliance
 
-This is an evidence-oriented map of the first-release success criteria in CONCEPT.md §19. "Verified" means a test in this repository exercises the behavior without provider credentials unless stated otherwise. Optional integrations retain their upstream prerequisites.
+This maps the original concept's success criteria to the current implementation. Verification
+claims refer only to checks actually run in this revision; there is no test suite.
 
-| # | Criterion | Status and evidence |
+| # | Criterion | Status |
 | --- | --- | --- |
-| 1 | Define an agent and custom native capability; run through Python and open it in Textual without duplicate configuration | **Met for the local developer agent.** `examples/custom_capability.py` defines an `AbstractCapability` and descriptor; `harness-local` serves the shared developer definition over ACP; `hrns` connects to it by default. The TUI is not exercised against every Python/YAML definition form; those launch paths are covered by runtime/host behavior. |
-| 2 | Add a registered capability and change state; next turn includes or omits all contributions (tools, hooks, instructions) | **Met for managed native capabilities.** Composition rebuilds each turn and disabled bindings are omitted. `tests/test_runtime_session.py`, `tests/test_runtime_definitions.py`, `tests/test_catalog_factories.py`. The TUI offers `a` add only when the host negotiates `_harness/plugins/list` plus local binding creation, and edit/toggle otherwise use the policy-checked extension. `tests/test_client_ui.py`, `tests/test_spec_tui.py`. |
-| 3 | Same packaged definition runs remotely with different resource bindings, without copying plugins or provider credentials | **Met for the test deployment.** The embedded server registers native definitions and Python resources in FastAPI; the client never imports runtime/plugins. Historical worker-isolation checks below predate this server API. `tests/test_hosted_e2e.py`, isolated-wheel checks, `docs/SERVER.md`. Real provider credentials and third-party packages remain deployment-specific. |
-| 4 | Remote client changes optional capabilities; mandatory remains enforced even bypassing UI | **Met.** Policy is checked in `PolicyCatalog`/`Session.update_configuration`, not the UI. `tests/test_runtime_session.py`, `tests/test_runtime_definitions.py`, hosted capability transaction. |
-| 5 | Two sessions retain independent configuration, history, jobs and namespaces | **Met for configuration/history/jobs/workspace records.** `tests/test_runtime_session.py`, `tests/test_runtime_store.py`, `tests/test_jobs.py`, `tests/test_workspaces.py`. |
-| 6 | Client exercises independent ACP implementations, including one without extensions; unsupported controls absent | **Met with an SDK-free fixture.** `tests/fixtures/independent_acp_agent.py`, `tests/test_client_core.py`, `tests/test_client_ui.py`. Unadvertised session actions are removed from the session-panel hint and remain explained if invoked. `tests/test_spec_tui.py`. It is an independent test peer, not a claim of certification by a named editor. |
-| 7 | Standard third-party ACP client uses native agent locally and hosted agent through bridge | **Met for the pinned ACP SDK.** `tests/test_end_to_end.py` drives `harness-host` with the official SDK; `tests/test_hosted_e2e.py` drives the stdio bridge into a hosted worker. Third-party vendor clients were not installed. |
-| 8 | Model, toggle, dependency conflict and failed preparation outcomes deterministic across standard options and extension | **Met.** Standard option and extension paths share `Session`; stale revisions, dependency conflicts, unsupported lifecycle and failed composition are tested. `tests/test_acp_host.py`, `tests/test_runtime_session.py`, `tests/test_hosted_e2e.py`. |
-| 9 | Sandbox/workspace file and command tools use one selected environment; missing sandbox never host fallback | **Lifecycle and fail-closed behavior met; optional providers not executed here.** `tests/test_workspaces.py`, `tests/test_runtime_workspaces.py`. Smol/E2B/Modal etc. require their upstream extras/hosts; `docs/CATALOG.md` marks them install-required. Local/SSH workspaces are honestly labeled non-isolated. |
-| 10 | Session load reconstructs transcript/config after restart; interrupted work distinguished | **Met.** SQLite WAL persistence, pinned deployment, complete transcript replay including user prompts, and interrupted turn status. The terminal preserves replay turn boundaries, coalesces replayed token chunks, merges repeated tool progress into one card and clears previous-session activity/usage. `tests/test_end_to_end.py`, `tests/test_runtime_store.py`, `tests/test_runtime_session.py`, `tests/test_acp_review.py`, `tests/test_hosted_e2e.py`, `tests/test_spec_tui.py`. |
-| 11 | Reviewed catalog has managed descriptors or explicit deployment-only constraints, including extras/providers | **Met.** 107 entries recorded (96 managed, 3 absent upstream, 8 documented-only), with lazy imports and fail-closed missing extras. `docs/CATALOG.md`, `tests/test_catalog.py`, `tests/test_catalog_docs.py`. Provider/vendor APIs are not claimed as locally exercised. |
-| 12 | Long transcripts responsive, cancellation accessible, connection errors do not crash terminal | **Met for bounded rendering, cancellation and recovery; long-duration performance remains partial.** `tests/test_client_ui.py`, `tests/test_spec_tui.py`, connection-loss handling in `HarnessAcpClient`, bounded WebSocket/stdio frames. Reconnect is blocked during a running turn so the one-controlling-connection rule is not broken. No long-duration or high-token-rate performance benchmark is claimed. |
+| 1 | Define an agent and custom native capability; run through Python and open it in Textual | **Met.** `examples/custom_capability.py` composes a native capability; `harness-local`/`harness-host` serve definitions over ACP; `hrns` connects. |
+| 2 | Managed capability contributes or is absent as a whole | **Met.** Enabled bindings are instantiated from the current selection; disabled bindings contribute nothing. Live toggles rebuild the native agent and apply on the next turn boundary. |
+| 3 | Same definition runs remotely with different resources | **Met.** `AgentServer` registers native definitions and Python resources in FastAPI; the client never imports runtime/plugins. |
+| 4 | Remote client cannot bypass mandatory policy | **Met.** Every edit is validated against availability, toggle/edit policy, lifecycle, requirements, conflicts, and schemas before the native agent is rebuilt. |
+| 5 | Two sessions keep independent configuration/history | **Met.** The adapter owns per-session history; the store scopes rows by principal/deployment. |
+| 6 | Client works with independent ACP implementations | **Met.** The client uses standard ACP methods and invokes extension methods only when advertised. |
+| 7 | Standard ACP client drives local and hosted agents | **Met for the pinned ACP SDK.** Stdio and WebSocket use the same adapter. |
+| 8 | Standard option and extension outcomes deterministic | **Model and effort** are standard options; managed configuration uses revision-checked extension updates with request-id idempotency. |
+| 9 | Workspace tools use one selected environment | **Met for local paths.** Missing required workspace fails; no fallback. Sandbox providers remain deployment-specific. |
+| 10 | Session load restores transcript/config after restart | **Met for committed turns.** The upstream adapter replays updates and restores native history; host metadata stores cwd/title/effort/bindings. |
+| 11 | Catalog has managed descriptors or explicit constraints | **Met.** `docs/CATALOG.md` records reviewed entries and prerequisites. |
+| 12 | Long transcripts, cancellation, connection errors | **Met for bounded rendering and adapter cancellation.** No long-duration performance benchmark is claimed. |
 
-## Terminal coverage (§15), including partials
+## Deliberate changes
 
-Generic activity rendering always shows title, status, bounded text/JSON and expandable details; specialized text covers file diffs, terminal ids/commands, task plans, delegated-tool activity and usage. The following areas remain **partial** and are not claimed as complete external integrations:
+- Managed bindings can be edited live for `next_turn` capabilities; `new_session` bindings
+  still require a new session.
+- Configuration revisions and request-id idempotency are in-memory per open session rather
+  than a durable revision table.
+- Automatic model-generated titles were removed; first-prompt fallback and manual rename remain.
+- Managed workspace leases and background-job ownership were removed; local workspace paths
+  are passed through `AcpSessionConfig.workspace`.
+- Direct Python `SessionManager`/`Session` APIs and runtime event journals were removed in
+  favor of `compose_definition` and native agent runs.
+- Persistence uses upstream save/load semantics: save errors are logged, and simultaneous
+  writers are last-write-wins.
 
-| Area | Status | Boundary |
-| --- | --- | --- |
-| Local renderers | **Partial** | `RendererRegistry` resolves exact `rendererId@schemaVersion` from installed `harness.renderers` entry points and the TUI consumes payloads carried in tool `_meta`; unknown ids/versions/exceptions use sanitized fallback. `tests/test_renderers.py`, `tests/test_spec_tui.py`. No third-party renderer package is installed and the bundled runtime does not emit presentation payloads, so no host-to-adapter end-to-end claim is made. |
-| Subagent activity | **Partial** | ACP has no subagent update type. Only explicitly named delegation tool calls (`delegate_task`, `subagent`, and similar) are shown in the activity panel; no separate child-agent stream or token usage is claimed. |
-| Terminal tool output | **Partial** | Tool cards label terminal content and show supplied command/output text from ACP content/raw output. The client does not advertise an ACP terminal service, so there is no live terminal stream, input forwarding or process control in the terminal UI. |
-| Attachments | **Partial** | `/attach` stages only explicit regular files and sends them as embedded text/blob resources; this requires the agent's embedded-context capability. Image bytes are not converted into a separate ACP image block, and no client filesystem/terminal service is advertised. |
-| Structured elicitation | **Partial** | Permission options come from the agent. Form elicitation supports the JSON-Schema subset used by fields, enums, booleans and flat arrays. Nested objects, unions/`oneOf` and arbitrary schema layouts are not rendered as custom widgets. |
-| Keybindings | **Partial** | Keyboard-first defaults (including global submit, transcript focus and panel keys) are fixed and tested; user-configurable keybinding overrides are not implemented. |
-| Host-emitted presentations | **Partial** | The optional renderer path is client-side only. This release does not claim that a hosted or local peer sends versioned presentation payloads for file diffs, plans or subagents. |
+## Boundaries
 
-## Known gaps and boundaries
-
-- No malicious-plugin confinement; installed capabilities are trusted host code.
-- Optional provider, cloud sandbox, hosted integration and durability engines are cataloged/managed where possible but not all executed in this environment. See [CATALOG.md](CATALOG.md) and [VERIFICATION.md](VERIFICATION.md). PostgreSQL integration tests also require `HARNESS_TEST_POSTGRES_DSN` and are skipped without it; hosted end-to-end coverage in this repository uses the default store unless that DSN is supplied.
-- The Textual terminal implements explicit `/attach` staging for bounded local files. Client-side ACP filesystem/terminal *services* are not advertised by default; third-party agents continue to receive their own filesystem/terminal behavior, and the terminal does not pretend to offer those services.
-- Client-offered MCP setup is not implemented. MCP is supported through managed native capabilities and server/definition-configured transports; a remote client cannot inject an arbitrary transport command.
-- The framework host exposes model selection and simple capability toggles as standard ACP options. The local runtime additionally exposes a unified reasoning-effort option for models whose Pydantic AI profile supports thinking; provider-specific presets are still not synthesized for independent agents, and agents that advertise their own options are rendered normally.
-- A second controlling connection receives `SESSION_BUSY` rather than blocking until the first disconnects. This preserves exclusive control without holding a network request open indefinitely.
-- Attachment bytes are sent as ACP content. `FileBlobStore` is available for host integrations, but the runtime does not automatically persist every transcript attachment reference.
-- Authentication is checked when the HTTP/WebSocket connection and deployment are selected. Authentication is provided by the FastAPI application dependency. Continuous token revocation and per-turn authorization refresh require application-managed disconnection.
-- Runtime pins are `(agent_id, definition_version)` plus the immutable hosted deployment revision. Python factory bytecode is not fingerprinted; a local operator must publish a new definition version when code changes. Background jobs are in-memory and are not reconstructed after a host crash; external effects require reconciliation.
-- Terminal keybindings are fixed defaults, not user-configurable overrides; optional renderer payloads are exercised synthetically because the bundled runtime does not emit them.
-- Upstream OpenTelemetry instrumentation is available, but this release does not add explicit deployment/session/configuration-revision correlation spans or structured configuration-transition logs.
-- Durable execution-engine preregistered compositions and run checkpoint recovery are deployment-specific upstream integrations, not a project-owned crash-proof execution guarantee.
-- The embedded server passes registered workspace roots to its in-process ACP host; the host enforces session cwd policy. No worker environment is involved.
-- Live migration, shared live session control, tenant billing, a plugin marketplace, automatic workspace synchronization and exactly-once external effects are explicitly outside scope.
-- No claim is made for native Windows command execution.
+- Installed capabilities are trusted host code; there is no malicious-plugin confinement.
+- Optional provider, cloud sandbox, and durability integrations retain their upstream
+  prerequisites and credentials.
+- A local workspace is not a sandbox.
+- The terminal does not offer client-side ACP filesystem/terminal services by default.
+- Client-supplied MCP servers are rejected; MCP remains a deployment capability.
+- Authentication is checked when the HTTP/WebSocket connection is established. Continuous
+  token revocation is application-owned.

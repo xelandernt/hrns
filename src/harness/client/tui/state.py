@@ -441,10 +441,7 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
         "locked": not available,
         "reason": binding.get("availabilityReason") or binding.get("availability_reason") or "",
         "canToggle": bool(policy.get("clientCanToggle", policy.get("client_can_toggle", False))),
-        "changeMode": binding.get("changeMode")
-        or binding.get("change_mode")
-        or policy.get("changeMode")
-        or "new_session",
+        "changeMode": policy.get("changeMode") or policy.get("change_mode") or "new_session",
         "requires": tuple(binding.get("requires") or ()),
         "conflicts": tuple(binding.get("conflicts") or ()),
         "editableFields": tuple(

@@ -5,8 +5,10 @@ and official Harness capability surface (CONCEPT.md section 9). It provides stab
 real upstream import targets, validated serializable configuration, lazy factories, named
 resource references, and an honest three-way coverage record.
 
-This document is the coverage matrix: **what is actually tested**, what needs an optional
-integration, and what the pinned upstream releases do not ship.
+This document is the coverage matrix: what is constructible offline, what needs an optional
+integration, and what the pinned upstream releases do not ship. Harness composes managed
+bindings per session; the `next_turn`/`run` labels below describe whether a binding can be
+reconfigured during an open session or only at creation.
 
 ```python
 from harness.runtime.catalog import build_catalog_registry, entry, iter_plugins
@@ -31,9 +33,9 @@ The three levels from the concept are independent and recorded independently:
 
 ### Tiers
 
-| Tier | Count | What the tests prove |
+| Tier | Count | What the recorded review established |
 | --- | --- | --- |
-| `verified` | 66 entries (62 runtime capabilities + 4 media-store resources) | The import target was imported **and the capability constructed** offline in this workspace, with no optional extras, no provider credentials and no network. |
+| `verified` | 66 entries (62 runtime capabilities + 4 media-store resources) | The import target was imported and the capability constructed offline during the catalog review, with no optional extras, provider credentials or network. Re-run the construction manually before relying on a specific entry. |
 | `install_required` | 38 entries | The module path exists (`importlib.util.find_spec`); the optional extra is not installed here. Managed entries are registered with an import gate, so composing one raises `CAPABILITY_UNAVAILABLE` with the install command (`uv add "pydantic-ai-harness[modal]"`, `pydantic-ai-slim[mcp]`, …). |
 | `unavailable` | 3 entries | The pinned upstream releases ship no such module. They are recorded with `upstream_import=None`, no factory, and are **never registered** as usable plugins. |
 
@@ -43,11 +45,10 @@ Upstream pins reviewed and installed for this matrix:
 - `pydantic-ai-harness==0.57.0`
 - ACP SDK `0.11.1`
 
-“Verified” means exactly what the test names say (`tests/test_catalog.py`):
-`test_verified_entries_construct_offline` builds every verified entry from its validated
-example configuration and asserts the result is a native `AbstractCapability` (or an accepted
-capability callable). It does not claim that a provider, sandbox account, or vendor API works;
-those are integration needs listed below.
+“Verified” means the entry was constructed from its validated example configuration during
+the catalog review and produced a native `AbstractCapability` (or an accepted capability
+callable). It does not claim that a provider, sandbox account, vendor API, or live session
+works; those are integration needs listed below. No test suite is present in this revision.
 
 `signature_verified=False` marks entries whose upstream constructor signature could not be
 inspected offline because the module itself needs the extra. Their config models are still
@@ -81,7 +82,9 @@ factories and are intentionally not offered as toggleable bindings).
 `Config` is the catalog's validated Pydantic model (inspect
 `entry(plugin_id).config_model.model_json_schema()` at runtime). A dash means the entry has no
 managed descriptor yet; those are listed again under “Documented gaps”. Lifecycle is
-`change_mode/state_mode`.
+`change_mode/state_mode`. A plugin declares its default lifecycle once in
+`CapabilityPolicy.change_mode`; a definition may narrow a `next_turn` binding to
+`new_session`, but cannot promote it.
 
 ### Complete compositions
 
@@ -377,15 +380,21 @@ configuration against this catalog.
 
 ## Verification evidence
 
-| Test | What it proves |
-| --- | --- |
-| `tests/test_catalog.py::test_verified_entries_construct_offline` | 62 runtime capabilities construct with real config models and offline resources. |
-| `tests/test_catalog.py::test_catalog_import_loads_no_optional_integrations` | Subprocess import of the catalog loads zero optional packages. |
-| `tests/test_catalog.py::test_install_required_entries_fail_closed_through_the_registry` | Missing extras raise `CAPABILITY_UNAVAILABLE` with install guidance; no downgrade. |
-| `tests/test_catalog.py::test_unavailable_entries_are_not_registered` | Restate/Kitaru/Airflow are explicit gaps, not fake plugins. |
-| `tests/test_catalog.py::test_management_config_validation_is_real` | Unknown fields, bad ranges, conflicting triggers and missing required values are rejected. |
-| `tests/test_catalog_factories.py` (17 tests) | Resource refs, exact-store binding, spill modes, detector chains, judge models, spend budgets, media-store resources, schema/descriptor round trips. |
-| `tests/test_catalog_docs.py` (5 tests) | This document's inventory rows, import targets, tiers, lifecycle, configuration models and published totals match the executable catalog. |
+The catalog was reviewed by constructing verified entries offline with their example
+configuration, checking import boundaries, and exercising strict config validation. No test
+suite is present in this revision; rerun a focused construction check before relying on a
+specific entry in a deployment.
+
+Recorded review outcomes:
+
+- 62 runtime capabilities construct with real config models and offline resources.
+- Importing the catalog loads no optional integrations.
+- Missing extras fail closed through the registry with `CAPABILITY_UNAVAILABLE`.
+- Restate, Kitaru, and Airflow are explicit gaps, not fake plugins.
+- Unknown fields, invalid ranges, conflicting triggers, and missing required values are
+  rejected by the configuration models.
+- Resource refs, exact-store binding, spill modes, detector chains, judge models, spend
+  budgets, media-store resources, and schema/descriptor round trips were checked manually.
 
 Integration still required for `install_required` entries: install the named extra, provide
 vendor credentials/accounts (see the hosted table), satisfy platform prerequisites

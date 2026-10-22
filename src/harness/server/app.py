@@ -15,12 +15,12 @@ from harness.runtime import (
     AgentDefinition,
     PluginRegistry,
     ResourceSet,
-    SessionManager,
     SessionStore,
 )
 from harness.runtime.acp import canonical_root
 from harness.runtime.catalog import build_catalog_registry
-from harness.runtime.host import HarnessHostAgent, HostBundle, HostMetadataStore, HostPolicy
+from harness.runtime.host import HarnessACPAgent, HostBundle, HostPolicy
+from harness.runtime.local import thinking_support
 
 from .catalog import CursorCodec
 from .errors import ApiError
@@ -32,27 +32,7 @@ async def _local_principal() -> Principal:
 
 
 class AgentServer:
-    """Own a shared store and serve registered agents inside FastAPI.
-
-    Args:
-        store: Shared SQLite SessionStore or PostgresSessionStore instance. The
-            server initializes and closes it through the FastAPI lifespan.
-        authenticate: Optional FastAPI dependency returning a Principal. Supports
-            sync/async callables and dependencies yielding a Principal. FastAPI
-            supplies its parameters and subdependencies. Use HTTPConnection for
-            headers on both HTTP catalog requests and WebSocket handshakes.
-            Raise HTTPException(401) for invalid credentials. The callback may
-            look up a user dynamically; no complete token/user mapping is needed.
-            BearerAuth provides the simpler static-token implementation.
-            When omitted, all callers share Principal("local") and its sessions.
-        registry: Managed capability registry. Defaults to the bundled catalog
-            plus installed capability entry points.
-
-    Mounting composes the server lifespan with the application's existing one.
-    Authentication is resolved once per request/connection, and its stable
-    Principal.id scopes session access. A dependency returning another type is
-    rejected at the route boundary.
-    """
+    """Own a shared store and serve registered agents inside FastAPI."""
 
     def __init__(
         self,
@@ -62,7 +42,7 @@ class AgentServer:
         registry: PluginRegistry | None = None,
     ) -> None:
         if not isinstance(store, SessionStore):
-            raise TypeError("store must be a SessionStore or PostgresSessionStore instance")
+            raise TypeError("store must be a SessionStore/PostgresSessionStore instance")
         self.store = store
         self.authenticate: AuthenticationDependency = (
             authenticate if authenticate is not None else _local_principal
@@ -90,11 +70,7 @@ class AgentServer:
         allowed_cwds: Sequence[str | Path] | None = None,
         default_cwd: str | Path | None = None,
     ) -> None:
-        """Register a definition before mounting; IDs must be unique URL segments.
-
-        The current directory is the default allowed workspace. Supply explicit
-        roots and resources when serving another workspace or sandbox backend.
-        """
+        """Register a definition before mounting; IDs must be unique URL segments."""
         if self._mounted:
             raise RuntimeError("Register agents before calling mount()")
         if not isinstance(definition, AgentDefinition):
@@ -181,7 +157,7 @@ class AgentServer:
     @asynccontextmanager
     async def connection(
         self, socket: WebSocket, agent: RegisteredAgent, principal: Principal
-    ) -> AsyncIterator[HarnessHostAgent]:
+    ) -> AsyncIterator[HarnessACPAgent]:
         if not self._running:
             raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         count = self._principal_connections.get(principal.id, 0)
@@ -189,14 +165,14 @@ class AgentServer:
             raise ApiError("SERVER_BUSY", "Too many active agent connections")
         task = asyncio.current_task()
         assert task is not None
-        manager = SessionManager(self.registry, store=self.store, definitions=[agent.definition])
-        host = HarnessHostAgent(
-            HostBundle(
-                definition=agent.definition,
-                registry=self.registry,
-                manager=manager,
-                meta=HostMetadataStore(store=self.store),
-            ),
+        bundle = HostBundle(
+            definition=agent.definition,
+            registry=self.registry,
+            store=self.store,
+            close_store=False,
+        )
+        host = HarnessACPAgent(
+            bundle,
             HostPolicy(
                 principal=principal.id,
                 deployment_id=agent.session_namespace,
@@ -204,10 +180,10 @@ class AgentServer:
                 allowed_cwds=agent.allowed_cwds,
                 default_cwd=agent.default_cwd,
                 allow_local_binding_creation=False,
-                allow_client_mcp=False,
                 resources=agent.resources,
                 models=agent.models,
                 default_model=agent.models[0] if agent.models else None,
+                thinking_models=thinking_support(agent.models),
             ),
         )
         self._connections[socket] = task
