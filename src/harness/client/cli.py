@@ -125,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     remove = profiles_sub.add_parser("remove", help="Remove a saved profile")
     remove.add_argument("name")
+
+    clean = sub.add_parser("clean", help="Delete local session history")
+    clean.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    clean.add_argument(
+        "-n", "--dry-run", action="store_true", help="Show what would be deleted, then exit"
+    )
     return parser
 
 
@@ -574,6 +580,10 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_command_bridge(args))
         if args.command == "profiles":
             return _command_profiles(args)
+        if args.command == "clean":
+            from .clean import clean
+
+            return clean(assume_yes=args.yes, dry_run=args.dry_run)
     except KeyboardInterrupt:
         return 130
     except (HarnessClientError, SecretMissing, KeyError) as exc:
