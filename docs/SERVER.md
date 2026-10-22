@@ -18,8 +18,7 @@ from harness.server import AgentServer
 
 app = FastAPI()
 agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
-agents.add_agent(research_definition)
-agents.add_agent(coding_definition)
+agents.add_agent(definition)
 agents.mount(app)
 ```
 
@@ -113,14 +112,15 @@ revision; sandbox/lease management is deployment-owned and never silently falls 
 execution.
 
 Pass `registry=your_registry` for custom plugins. The default registry contains the bundled
-catalog. Embedded connections can edit existing next-turn bindings; remote clients cannot add
-local plugins or supply MCP commands.
+`harness.coder` plugin and installed `harness.capabilities` entry points; a definition still
+has to bind and enable a plugin before a session can use it. Embedded connections can edit
+existing next-turn bindings; remote clients cannot add local plugins or supply MCP commands.
 
 ## Routes and client connection
 
 ```sh
 uv run hrns agents list --url http://127.0.0.1:8080
-uv run hrns connect --url http://127.0.0.1:8080 --agent research
+uv run hrns connect --url http://127.0.0.1:8080 --agent AGENT_ID
 ```
 
 | Route | Purpose |

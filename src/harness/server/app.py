@@ -18,7 +18,6 @@ from harness.runtime import (
     SessionStore,
 )
 from harness.runtime.acp import canonical_root
-from harness.runtime.catalog import build_catalog_registry
 from harness.runtime.host import HarnessACPAgent, HostBundle, HostPolicy
 from harness.runtime.local import thinking_support
 
@@ -47,13 +46,10 @@ class AgentServer:
         self.authenticate: AuthenticationDependency = (
             authenticate if authenticate is not None else _local_principal
         )
-        self.registry = (
-            registry
-            if registry is not None
-            else build_catalog_registry(allow_local_binding_creation=False)
-        )
         if registry is None:
-            self.registry.discover()
+            registry = PluginRegistry(allow_local_binding_creation=False)
+            registry.discover()
+        self.registry = registry
         self._agents: dict[str, RegisteredAgent] = {}
         self._cursor_codec = CursorCodec()
         self._mounted = False

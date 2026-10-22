@@ -42,40 +42,6 @@ __all__ = [
 
 ENTRY_POINT_GROUP = "harness.capabilities"
 
-_BUNDLED_PLUGINS: dict[str, PluginDescriptor] | None = None
-_BUNDLED_ERROR: str | None = None
-
-
-def bundled_catalog_plugins() -> dict[str, PluginDescriptor]:
-    """Bundled official adapters, imported lazily and cached process-wide.
-
-    The catalog is metadata plus lazy factory references; importing it does not import any
-    optional integration. Entries marked unavailable in the pinned upstream release are
-    skipped (they have no factory), matching ``catalog.register_catalog``.
-    """
-    global _BUNDLED_PLUGINS, _BUNDLED_ERROR
-    if _BUNDLED_PLUGINS is not None:
-        return _BUNDLED_PLUGINS
-    plugins: dict[str, PluginDescriptor] = {}
-    try:
-        from .catalog import CatalogTier, iter_plugins
-
-        accepted = {CatalogTier.VERIFIED, CatalogTier.INSTALL_REQUIRED}
-        for catalog_entry in iter_plugins():
-            if catalog_entry.tier not in accepted:
-                continue
-            try:
-                plugins[catalog_entry.plugin_id] = catalog_entry.descriptor()
-            except HarnessError:  # pragma: no cover - unavailable factory
-                continue
-        _BUNDLED_ERROR = None
-    except Exception as exc:  # pragma: no cover - broken/missing catalog must not break core
-        _BUNDLED_ERROR = f"{type(exc).__name__}: {exc}"
-        plugins = {}
-    _BUNDLED_PLUGINS = plugins
-    return plugins
-
-
 CapabilityStateMode = Literal["run", "session", "external"]
 
 
@@ -332,8 +298,9 @@ class _PendingImportPlugin:
 class PluginRegistry:
     """Registered plugin catalog for one runtime host.
 
-    ``PluginRegistry()`` starts empty; :meth:`register` and :meth:`register_import` add
-    descriptors, and :meth:`discover` scans the installed ``harness.capabilities`` entry
+    ``PluginRegistry()`` starts with the bundled catalog (see
+    :mod:`harness.runtime.capabilities`); :meth:`register` and :meth:`register_import` add
+    more descriptors, and :meth:`discover` scans the installed ``harness.capabilities`` entry
     point group lazily (metadata only; imports are deferred until composition). Host
     configuration decides whether new bindings may be created by clients from the
     registered catalog: see :attr:`allow_local_binding_creation`.
@@ -343,14 +310,16 @@ class PluginRegistry:
         self,
         *,
         allow_local_binding_creation: bool = False,
-        use_bundled_catalog: bool = True,
     ) -> None:
         self._plugins: dict[str, PluginDescriptor] = {}
         self._providers: dict[str, Any] = {}
         self._entry_point_source: str | None = None
         self.allow_local_binding_creation = allow_local_binding_creation
-        self.use_bundled_catalog = use_bundled_catalog
         self._discovery_errors: dict[str, str] = {}
+        from .capabilities import bundled_descriptors
+
+        for descriptor in bundled_descriptors():
+            self._plugins[descriptor.plugin_id] = descriptor
 
     # --- registration -------------------------------------------------
 
@@ -431,11 +400,7 @@ class PluginRegistry:
             selected = []
         for entry_point in selected:
             plugin_id = entry_point.name
-            if (
-                plugin_id in self._plugins
-                or plugin_id in self._providers
-                or plugin_id in self._bundled()
-            ):
+            if plugin_id in self._plugins or plugin_id in self._providers:
                 continue
             self._providers[plugin_id] = entry_point
             newly += 1
@@ -490,30 +455,19 @@ class PluginRegistry:
 
     # --- lookup -------------------------------------------------------
 
-    def _bundled(self) -> dict[str, PluginDescriptor]:
-        return bundled_catalog_plugins() if self.use_bundled_catalog else {}
-
     def lookup(self, plugin_id: str | None) -> PluginDescriptor | None:
-        """Return a descriptor, resolving bundled catalog entries as a fallback.
-
-        Explicit registrations (including installation-specific factories) take precedence
-        over the bundled catalog for the same plugin id.
-        """
+        """Return a registered or installed descriptor."""
         if plugin_id is None:
             return None
         descriptor = self._plugins.get(plugin_id)
-        if descriptor is None:
-            descriptor = self._resolve_provider(plugin_id)
         if descriptor is not None:
             return descriptor
-        return self._bundled().get(plugin_id)
+        return self._resolve_provider(plugin_id)
 
     def registered(self, plugin_id: str | None) -> PluginDescriptor | None:
-        """Return an explicitly registered descriptor, never a bundled lookup fallback.
+        """Return a registered or installed descriptor.
 
-        Local binding creation is offered from the host's registered catalog only; a
-        bundled descriptor that merely backs an already-selected definition binding is not
-        automatically exposed to clients as an addable plugin.
+        Local binding creation is offered from the host's registered catalog only.
         """
         if plugin_id is None:
             return None
@@ -527,8 +481,6 @@ class PluginRegistry:
         descriptor = self.lookup(plugin_id)
         if descriptor is None:
             error = self._discovery_errors.get(plugin_id)
-            if error is None and _BUNDLED_ERROR and self.use_bundled_catalog:
-                error = f"Bundled capability catalog unavailable ({_BUNDLED_ERROR})."
             raise HarnessError(
                 "CAPABILITY_UNAVAILABLE",
                 error or f"Plugin {plugin_id!r} is not registered on this host.",
@@ -537,15 +489,11 @@ class PluginRegistry:
         return descriptor
 
     def catalog(self) -> list[PluginInfo]:
-        """Wire descriptors for explicitly registered plugins.
-
-        The bundled catalog is a lookup fallback for bindings a deployment already selects;
-        it is not offered for local binding creation unless the host registered it.
-        """
+        """Wire descriptors for registered and installed plugins."""
         return [descriptor.to_info() for descriptor in self.ordered()]
 
     def ordered(self) -> list[PluginDescriptor]:
-        """Explicitly registered descriptors in stable registration order.
+        """Registered descriptors in stable registration order.
 
         Installed providers are resolved here because a catalog listing needs their full
         descriptors; resolving a provider still does not import the plugin's capability

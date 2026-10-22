@@ -101,4 +101,4 @@ Standard model and effort options remain editable throughout. The `harness.acp.v
 subprotocol carries one JSON-RPC object per text frame with a 16 MiB limit.
 
 See [contracts](CONTRACTS.md), [ACP behavior](ACP.md), [server operation](SERVER.md), and
-[catalog coverage](CATALOG.md).
+[the capability rework inventory](../CAPABILITIES.md).

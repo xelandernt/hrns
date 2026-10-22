@@ -41,7 +41,6 @@ from .choice_keys import choice_direction
 from .state import (
     binding_summary,
     config_option_value,
-    is_subagent_tool,
     merge_presentation,
     merge_tool_event,
     pending_application_text,
@@ -421,6 +420,9 @@ class TranscriptPane(VerticalScroll):
         except Exception:
             # A broken third-party entry point must leave generic rendering usable.
             pass
+        from .tool_views import register_builtin_renderers
+
+        register_builtin_renderers(self.renderers)
 
     def on_mount(self) -> None:
         self._ticker = self.set_interval(0.06, self.flush)
@@ -1035,6 +1037,7 @@ class ToolCard(Vertical):
         self._preview.add_class("tool-output")
         self._full = Static("", markup=False)
         self._full.add_class("tool-output-expanded")
+        self._view_host = Vertical(classes="tool-view")
         self.add_class("tool-card")
         self._build_view()
         self._refresh()
@@ -1044,7 +1047,6 @@ class ToolCard(Vertical):
 
         if self._view_built or self.renderer is None or self.view_context is None:
             return
-        self._view_built = True
         payload = (
             self.data.get("presentationOutput")
             or self.data.get("presentationInput")
@@ -1053,22 +1055,30 @@ class ToolCard(Vertical):
         )
         if payload is None:
             return
-        self._view = build_view(
+        view = build_view(
             self.renderer,
             payload,
             "tool",
             self._view_state(),
             self.view_context,
         )
+        if view is None:
+            return
+        self._view_built = True
+        self._view = view
+        if self.is_mounted and not view.widget.is_mounted:
+            self._view_host.mount(view.widget)
 
     def compose(self) -> ComposeResult:
         yield self._header
-        if self._view is not None:
-            yield self._view.widget
+        yield self._view_host
         yield self._preview
         yield self._full
 
     def on_mount(self) -> None:
+        self._build_view()
+        if self._view is not None and not self._view.widget.is_mounted:
+            self._view_host.mount(self._view.widget)
         if self._is_pending():
             self._timer = self.set_interval(0.1, self._tick)
         self._refresh()
@@ -1158,8 +1168,6 @@ class ToolCard(Vertical):
         )
         args = tool_args_preview(self.data)
         text = Text()
-        if is_subagent_tool(self.data):
-            text.append("│  ", style="dim")
         text.append(f"{symbol} ", style="bold" if not pending else "dim")
         text.append(title)
         if args:
@@ -1251,6 +1259,7 @@ class ToolCard(Vertical):
         self._full.set_class(full_visible, "visible")
 
     def _refresh(self) -> None:
+        self._build_view()
         self._render_body()
         self._render_header()
 
@@ -2296,29 +2305,23 @@ class SessionPanel(Vertical):
 
 
 class ActivityPanel(VerticalScroll):
-    """Plan, delegated work, commands, usage and connection details in one scroll."""
+    """Plan, commands, usage and connection details in one scroll."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._connection = Static("Not connected.", markup=False, classes="activity-section")
         self._plan = Static("No plan reported yet.", markup=False, classes="activity-section")
-        self._subagents = Static(
-            "No subagent activity reported.", markup=False, classes="activity-section"
-        )
         self._commands = Static(
             "No agent commands advertised.", markup=False, classes="activity-section"
         )
         self._usage = Static("No usage reported.", markup=False, classes="activity-section")
         self._session = Static("", markup=False, classes="activity-section")
-        self._subagent_state: dict[str, dict[str, str]] = {}
 
     def compose(self) -> ComposeResult:
         yield Label("Connection", classes="section-title")
         yield self._connection
         yield Label("Plan", classes="section-title")
         yield self._plan
-        yield Label("Subagents", classes="section-title")
-        yield self._subagents
         yield Label("Agent commands", classes="section-title")
         yield self._commands
         yield Label("Usage", classes="section-title")
@@ -2338,47 +2341,6 @@ class ActivityPanel(VerticalScroll):
             mark = {"pending": "○", "in_progress": "◐", "completed": "●"}.get(status, "○")
             rendered.append(f"{mark} {content}   ({priority})")
         self._plan.update("\n".join(rendered))
-
-    def note_tool(self, data: dict[str, Any]) -> None:
-        """Show explicitly-named delegation tool calls as subagent activity."""
-        tool_id = str(data.get("toolCallId") or data.get("tool_call_id") or "")
-        existing = self._subagent_state.get(tool_id)
-        if existing is None and not is_subagent_tool(data):
-            return
-        if not tool_id:
-            tool_id = str(data.get("title") or "delegated task")
-        record = dict(existing or {})
-        title = str(data.get("title") or record.get("title") or tool_id)
-        record["title"] = title
-        record["status"] = str(data.get("status") or record.get("status") or "pending")
-        self._subagent_state[tool_id] = record
-        rendered = []
-        for item in list(self._subagent_state.values())[-20:]:
-            mark = {
-                "pending": "○",
-                "in_progress": "◐",
-                "completed": "●",
-                "failed": "✕",
-            }.get(item["status"], "○")
-            rendered.append(f"{mark} {item['title']}   ({item['status']})")
-        self._subagents.update("\n".join(rendered))
-
-    def clear_subagents(self) -> None:
-        self._subagent_state.clear()
-        self._subagents.update("No subagent activity reported.")
-
-    def subagent_lines(self) -> list[str]:
-        """Current delegated-work lines, for the read-only subagent overview."""
-        rendered = []
-        for item in list(self._subagent_state.values())[-20:]:
-            mark = {
-                "pending": "○",
-                "in_progress": "◐",
-                "completed": "●",
-                "failed": "✕",
-            }.get(item["status"], "○")
-            rendered.append(f"{mark} {item['title']}   ({item['status']})")
-        return rendered
 
     def set_commands(self, commands: tuple[dict[str, Any], ...]) -> None:
         if not commands:

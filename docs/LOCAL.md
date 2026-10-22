@@ -1,9 +1,12 @@
 # Local models and providers
 
-Run the developer agent on your machine with a cloud API or a locally served model.
-The client launches `harness-local` over ACP; the agent offers filesystem, shell,
-planning, repository context, and skills. Managed capabilities are selected when a
-session is created and stay fixed for that conversation.
+Run the local agent on your machine with a cloud API or a locally served model.
+The client launches `harness-local` over ACP. The bundled `harness.coder` capability is bound
+by the built-in local definition and enabled by default: it provides file tools, content
+search, and a shell in the launch directory. Reading the workspace needs no approval; writes,
+edits, and commands are approved per call. Installed plugins remain available to explicit
+`AgentDefinition` objects; managed bindings are selected when a session is created and stay
+fixed for that conversation.
 
 ## Start with DeepSeek
 

@@ -61,7 +61,6 @@ from .dialogs import (
     ConfirmDialog,
     FormDialog,
     HelpDialog,
-    InfoDialog,
     SettingsDialog,
     TranscriptSearchDialog,
 )
@@ -69,7 +68,6 @@ from .local import LocalModelResult, effort_choices, effort_label
 from .state import (
     Settings,
     activity_label,
-    binding_summary,
     build_form_fields,
     config_option_value,
     effort_option,
@@ -997,7 +995,6 @@ class ChatScreen(Screen[None]):
         self._turns_started = 0
         panel = self.query_one("#side-panel", SidePanel)
         panel.activity.set_plan((), cleared=True)
-        panel.activity.clear_subagents()
         panel.activity.set_commands(())
         panel.activity.set_usage(None)
         self._refresh_status()
@@ -1140,15 +1137,6 @@ class ChatScreen(Screen[None]):
                 await pane.start_tool(event)
             else:
                 await pane.update_tool(event)
-            self.query_one("#side-panel", SidePanel).activity.note_tool(
-                {
-                    "toolCallId": event.tool_call_id,
-                    "title": event.title,
-                    "kind": event.kind,
-                    "status": event.status,
-                    "raw_input": event.raw_input,
-                }
-            )
             if event.status in {"pending", "in_progress"}:
                 self._activity = activity_label(event.kind, event.title)
             elif self.busy:
@@ -1803,8 +1791,6 @@ class ChatScreen(Screen[None]):
             await self._stage_attachment(rest)
         elif name == "connect":
             await self.app.choose_agent(self)  # type: ignore[attr-defined]
-        elif name == "agents":
-            await self._show_subagents()
         elif name == "rename":
             await self._rename_session(rest)
         elif name == "sessions":
@@ -2878,51 +2864,6 @@ class ChatScreen(Screen[None]):
             "warning",
         )
         await self._reconnect()
-
-    async def _show_subagents(self) -> None:
-        if self.client.extension.supports("_harness/capabilities/list") and not self._bindings_raw:
-            await self._refresh_capabilities()
-        lines = ["Read-only overview. Configure subagents from `/plugins`.", ""]
-        summaries = [
-            summary
-            for raw in self._bindings_raw
-            for summary in (binding_summary(raw, None),)
-            if "subagent"
-            in f"{summary['name']} {summary['pluginId']} {summary['description']}".lower()
-        ]
-        if not self.client.extension.supports("_harness/capabilities/list"):
-            lines.append(
-                "This connection does not advertise the plugin catalog, "
-                "so configured subagents cannot be inspected."
-            )
-        elif not summaries:
-            lines.append(
-                "No subagent binding is configured for this session. "
-                "Add the Sub-agents plugin from `/plugins`."
-            )
-        else:
-            for summary in summaries:
-                state = "on" if summary["enabled"] else "off"
-                lines.append(f"### {summary['name']} · {state}")
-                lines.append(f"- id: `{summary['bindingId']}`")
-                if summary["pluginId"]:
-                    lines.append(f"- plugin: `{summary['pluginId']}`")
-                lines.append(f"- change: {summary['modeLabel']}")
-                config = summary.get("config") or {}
-                if config:
-                    lines.append("- configuration:")
-                    for key, value in list(config.items())[:12]:
-                        lines.append(f"  - `{key}`: {value}")
-                if summary["requires"]:
-                    lines.append(f"- requires: {', '.join(summary['requires'])}")
-                lines.append("")
-        activity = self.query_one("#side-panel", SidePanel).activity.subagent_lines()
-        lines.append("### Recent delegated activity")
-        if activity:
-            lines.extend(f"- {line}" for line in activity)
-        else:
-            lines.append("No delegated work has been reported in this session.")
-        self.app.push_screen(InfoDialog("Subagents", "\n".join(lines)))
 
     async def _show_model_dialog(self) -> None:
         if self.session.client is not self.client:

@@ -37,7 +37,7 @@ The plugins panel displays host-policy state, dependencies, lifecycle mode, and 
 
 In the plugins panel, `a` adds a binding only when the peer advertises `_harness/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
 
-Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/agents`, `/sessions`, `/find`, `/copy`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
+Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/sessions`, `/find`, `/copy`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
 
 ## CLI
 

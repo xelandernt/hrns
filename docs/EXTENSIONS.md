@@ -187,6 +187,8 @@ class Provider:
 
 - `command_view` and `tool_view` are independent factories for the exact renderer id and
   schema version. A command never falls back to a tool view.
+- Harness ships providers for its own bundled tools (`harness.tool.*`) and registers them
+  programmatically on the same registry, so first-party views follow this contract exactly.
 - Widgets are ordinary Textual widgets. Plugins own children, CSS, focus, messages and
   workers. Harness mounts the widget inline and applies successive immutable snapshots to the
   same instance.

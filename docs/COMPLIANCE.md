@@ -15,7 +15,7 @@ claims refer only to checks actually run in this revision; there is no test suit
 | 8 | Standard option and extension outcomes deterministic | **Model and effort** are standard options; managed configuration uses revision-checked extension updates with request-id idempotency. |
 | 9 | Workspace tools use one selected environment | **Met for local paths.** Missing required workspace fails; no fallback. Sandbox providers remain deployment-specific. |
 | 10 | Session load restores transcript/config after restart | **Met for committed turns.** The upstream adapter replays updates and restores native history; host metadata stores cwd/title/effort/bindings. |
-| 11 | Catalog has managed descriptors or explicit constraints | **Met.** `docs/CATALOG.md` records reviewed entries and prerequisites. |
+| 11 | Catalog has managed descriptors or explicit constraints | **Deferred.** The bundled catalog was removed for rework; `CAPABILITIES.md` retains the reviewed inventory, and custom plugins still provide managed descriptors. |
 | 12 | Long transcripts, cancellation, connection errors | **Met for bounded rendering and adapter cancellation.** No long-duration performance benchmark is claimed. |
 
 ## Deliberate changes
