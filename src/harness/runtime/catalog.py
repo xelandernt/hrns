@@ -1069,7 +1069,6 @@ class CatalogEntry(BaseModel):
     state_mode: Literal["run", "session", "external"] = "run"
     presentation: tuple[str, ...] = ("generic",)
 
-    default_policy: CapabilityPolicy | None = None
     notes: tuple[str, ...] = ()
     """Honest constraints, provider requirements, and verification limits."""
 
@@ -1086,8 +1085,6 @@ class CatalogEntry(BaseModel):
         return self.config_model is not None and self.factory is not None
 
     def policy(self) -> CapabilityPolicy:
-        if self.default_policy is not None:
-            return self.default_policy
         editable = set(self.config_model.model_fields) if self.config_model is not None else set()
         return CapabilityPolicy(
             available=self.tier is not CatalogTier.UNAVAILABLE,
@@ -1096,17 +1093,6 @@ class CatalogEntry(BaseModel):
             editable_fields=editable,
             change_mode=self.change_mode,
         )
-
-    @model_validator(mode="after")
-    def _policy_lifecycle_mirror(self) -> CatalogEntry:
-        # The protocol makes the policy the authoritative lifecycle source; the descriptor's
-        # top-level change_mode is only a mirror. Keep catalog data consistent up front.
-        if self.default_policy is not None and self.default_policy.change_mode != self.change_mode:
-            raise ValueError(
-                "default_policy.change_mode must equal the catalog entry's change_mode; "
-                "policy is authoritative for lifecycle"
-            )
-        return self
 
     def descriptor(self) -> PluginDescriptor:
         """Convert to the runtime's management descriptor."""
@@ -1133,7 +1119,6 @@ class CatalogEntry(BaseModel):
             factory=self.factory,
             requirements=list(self.requirements),
             conflicts=list(self.conflicts),
-            change_mode=self.change_mode,
             state_mode=self.state_mode,
             presentation=list(self.presentation),
             default_policy=self.policy(),

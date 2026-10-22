@@ -41,9 +41,10 @@ pydantic-settings. See [local setup](docs/LOCAL.md) for OpenAI-compatible endpoi
 local inference, other Pydantic AI providers, and headless execution.
 
 Useful slash commands include `/connect` (switch or add a target), `/models`
-(configure or select the local model), `/plugins` (toggle capability bindings),
-and `/agents` (inspect subagents). Typing `/` shows an inline filtered list. The
-older `/model` and `/capabilities` names remain aliases.
+(configure or select the local model), `/effort` (change reasoning effort live),
+`/plugins` (toggle, configure, or add capabilities), and `/agents` (inspect
+subagents). Typing `/` shows an inline filtered list. The older `/model` and
+`/capabilities` names remain aliases.
 
 Any independent ACP agent can still be launched explicitly:
 
@@ -58,11 +59,11 @@ and the bridge.
 
 ```python
 from fastapi import FastAPI
-from harness.runtime import SessionStore
+from harness.runtime import SQLiteSessionStore
 from harness.server import AgentServer
 
 app = FastAPI()
-agents = AgentServer(store=SessionStore("./sessions.sqlite3"))
+agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
 agents.add_agent(definition)
 agents.mount(app)
 ```
@@ -95,16 +96,16 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 
 ## Design essentials
 
-- **Native composition:** enabled bindings contribute their complete Pydantic AI behavior—tools, instructions, hooks and settings.
-- **Server-enforced policy:** availability, directional enable/disable permission, editable fields, dependencies and lifecycle apply to Python and protocol callers.
-- **Turn-boundary changes:** selected configuration is persisted immediately; an active turn keeps its captured configuration.
-- **Host-owned state:** sessions pin their deployment, retain history and configuration, and never silently retry an uncertain prompt.
-- **Explicit resources:** workspace and provider bindings belong to the host. Requested sandbox failures never imply host execution.
+- **Upstream ACP execution:** `PydanticAIACPAgent` owns prompts, streaming, approvals, cancellation, history, and transcript replay.
+- **Native composition:** managed bindings contribute their complete Pydantic AI behavior—tools, instructions, hooks and settings—and are selected when a session is composed.
+- **Live model and effort:** both use standard ACP configuration options and apply from the next request.
+- **Host-owned state:** sessions pin their principal/deployment scope, retain history and metadata, and never silently retry an uncertain prompt.
+- **Explicit resources:** workspace and provider bindings belong to the host. A local workspace is a path, not a sandbox.
 - **Standard ACP first:** generic streaming content, tools and approvals work without project-specific extensions.
 
 ## Documentation
 
-- [Implementation plan](PLAN.md) and [task checklist](tasks/todo.md)
+- [Implementation plan and task checklist](PLAN.md)
 - [Architecture](docs/ARCHITECTURE.md) and [shared contracts](docs/CONTRACTS.md)
 - [Extension protocol and wire examples](docs/PROTOCOL.md)
 - [Runtime Python API](docs/RUNTIME_API.md)
@@ -119,7 +120,9 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 ## Checks and distribution builds
 
 ```sh
+uv run ruff format --check src examples test.py
 uv run ruff check .
+uv run pyrefly check src examples --no-progress-bar
 uv build
 ```
 

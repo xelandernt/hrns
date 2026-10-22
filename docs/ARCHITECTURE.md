@@ -3,56 +3,102 @@
 ```text
 Python application ──────────────────────────────┐
                                                 ▼
-Textual / headless client ── ACP stdio ──► harness-host ──► SessionManager
-         │                                                  │
-         └── harness.acp.v1 WebSocket ──► existing FastAPI    │
-                                          + AgentServer ────┘
-                                                            ▼
-                                                  Pydantic AI Agent
-                                                  + native capabilities
-                                                  + bound workspace
+Textual / headless client ── ACP stdio ──► harness-host / harness-local
+         │                                       │
+         └── harness.acp.v1 WebSocket ──► FastAPI AgentServer
+                                                 │
+                                                 ▼
+                                   compose_definition(...)
+                                   native Pydantic AI Agent
+                                   + fixed + managed capabilities
+                                   + local workspace path
+                                                 │
+                                                 ▼
+                                   PydanticAIACPAgent (upstream)
+                                   execution, history, approvals,
+                                   cancellation, transcript replay
+                                                 │
+                                                 ▼
+                                   SQLite / PostgreSQL
+                                   acp_sessions (StoredSession + metadata)
 ```
 
-## One distribution, five modules
+## Module ownership
 
 | Module | Owns | Deliberately independent of |
 | --- | --- | --- |
-| `harness.protocol` | Typed extension DTOs, errors, framing and pagination | AI runtime, terminal, network hosting |
-| `harness.config` | Shared local settings using pydantic-settings | AI runtime, terminal, network hosting |
-| `harness.runtime` | Definitions, plugins, policy, execution, persistence, ACP worker | Terminal and server |
-| `harness.client` | ACP connections, profiles, terminal, headless runner, stdio bridge | Native agent code and provider SDKs |
-| `harness.server` | FastAPI registration, optional authentication, discovery, in-process ACP | Terminal |
+| `harness.protocol` | Extension DTOs, errors, framing, pagination | AI runtime, terminal, server |
+| `harness.config` | Shared local settings | AI runtime, terminal, server |
+| `harness.runtime` | Definitions, registry, policy, resources, native composition, persistence | Terminal and server |
+| `harness.runtime.host` | ACP adapter integration, host policy, scoped storage, CLI | Terminal |
+| `harness.client` | ACP connections, profiles, terminal, headless runner | Native agent code and provider SDKs |
+| `harness.server` | FastAPI registration, authentication, catalog, in-process ACP | Terminal |
 
-Installing the `client` extra does not install Pydantic AI. The `server` extra includes the runtime: native agent definitions execute in the existing FastAPI process. Each connection has its own ACP host and session manager; the server owns one explicit shared SQLite or PostgreSQL store. Application authentication is an optional FastAPI dependency.
+Installing the `client` extra does not install Pydantic AI. The `server` extra includes the
+runtime and executes definitions in the FastAPI process. Each connection gets its own
+`HarnessACPAgent`; the server owns one explicit shared store.
 
-## Native behavior stays native
+## Execution ownership
 
-Pydantic AI owns inference, tools, capability hooks, structured outputs, and model history. Harness adds the surrounding session controller. Capabilities are not converted to tool-only plugins. Managed bindings have explicit identity and policy; disabled bindings are omitted from the next composition. Factory-private capabilities remain fixed behavior.
+`PydanticAIACPAgent` owns every ACP session: prompt execution, streaming updates, tool
+approval pauses, cancellation, session locks, conversation history, transcript replay, and
+model selection. Harness does not run a second turn loop and does not keep a separate
+transcript journal.
 
-The upstream experimental ACP session factory runs once per session, which cannot implement a composition changing between turns. A project-owned adapter therefore uses the public ACP SDK and the same runtime controller as Python callers. Compatible upstream presentation helpers can be used without accessing upstream private adapter state.
+`compose_definition` initially builds the native agent and its `AcpSessionConfig` per session:
 
-## Configuration is a transaction
+- definition `AgentSpec` or factory, plus fixed capabilities;
+- enabled managed bindings instantiated from the plugin registry;
+- resources resolved from the deployment and the client's working directory;
+- an `EffortState` capability whose model settings are evaluated per request so effort can
+  change while a session stays open;
+- a local workspace backend rooted at the session's `cwd`, when the definition declares a
+  workspace resource.
 
-1. The client sends explicit changes with an expected selected revision and stable request ID.
-2. The controller validates the complete candidate selection against schemas, toggle permissions, lifecycle, dependencies, conflicts, and resource requirements.
-3. The store commits the selection and retry result before acknowledgment.
-4. A turn captures an immutable active selection. Changes during execution affect the next turn.
-5. Failed preparation blocks the new turn; it does not silently execute with the old selection.
+`session/new` accepts `_meta.harness.initialConfiguration` (enable/configure/add where policy
+permits). An open session can be edited through `_harness/configuration/update`: the host
+validates the change set, rebuilds the native agent, and mutates the existing `Composition`
+in place so the adapter's next run uses the new capabilities, toolsets, and workspace.
+Changes are serialized behind a per-session turn lock and apply at the next turn boundary.
+`new_session`-lifecycle bindings still require a new session. Model and reasoning effort are
+standard ACP config options and apply from the next request.
 
-An idempotent state selection does not require permission for a transition that never occurs. A disabled dependency is not automatically re-enabled. Request IDs deduplicate configuration transactions; ordinary prompts are never automatically replayed.
+## State and persistence
 
-## State ownership
+The upstream `StoredSession` is persisted through the upstream `SessionStore` protocol. One
+`acp_sessions` row holds native model messages, the client-visible update transcript, the
+selected model, and host metadata: cwd, title, effort, selected bindings, usage totals, and
+timestamps. Reads and writes go through a `ScopedSessionStore` bound to one principal and one
+registered deployment, so another scope cannot load or overwrite a session.
 
-Canonical history and configuration live on the runtime host. Session access is scoped by principal and the registered agent ID/definition version. Connections release control after active work is drained. SQLite WAL or PostgreSQL transactions coordinate session ownership. ACP working directory and selected model/effort are persisted alongside conversation state for network connections. A saved transcript is distinct from model history and from live capability instances; live objects are never pickled.
+The store is deliberately not a second orchestration engine. `save` is called after each
+committed turn; a save failure is logged and the next successful save catches up. There is no
+transactional turn commit, cross-connection ownership claim, turn table, revision log, or
+background-job ledger. Simultaneous writers are last-write-wins. Existing databases are
+opened without conversion; only the `acp_sessions` table is created or used.
 
-Attachments can use `harness.runtime.blobs.FileBlobStore`: bounded, content-addressed files outside ephemeral workspaces, with owner/session namespaces and integrity checks. A digest alone does not grant another session access.
+## Resources and lifecycle
 
-## Execution locations
-
-The workspace is a named host resource, not a directory inferred from the client machine. Network ACP hosts validate `cwd` against the roots passed during Python registration. A requested sandbox that cannot be constructed fails explicitly. Local workspace execution is non-isolated; isolated command execution requires an explicitly installed and bound upstream sandbox backend. Plugins and provider clients run in the application process for network agents, or the launched process for stdio agents.
+A workspace resource is a local path in this revision. `resolve_workspace_value` maps it to a
+native `LocalWorkspaceBackend` and the adapter applies it to every run. No managed lease,
+sandbox, or background-job subsystem is currently provided. ACP session close cancels the
+active turn through the adapter; resource cleanup beyond the local backend is owned by the
+deployment.
 
 ## Protocol versions
 
-ACP v1 is the baseline. `_harness/*` methods are version-one project extensions negotiated through `_meta.harness`. Standard-only clients receive standard content and supported configuration options. The `harness.acp.v1` WebSocket subprotocol is project-defined, carries one JSON-RPC object per text message, and has a 16 MiB message limit. The bridge preserves ACP messages while translating transport framing.
+ACP v1 is the baseline. `_harness/*` methods are version-one project extensions negotiated
+through `_meta.harness`:
 
-See [contracts](CONTRACTS.md), [server operation](SERVER.md), [ACP behavior](ACP.md), and [catalog coverage](CATALOG.md).
+- `_harness/capabilities/list` — current binding descriptors;
+- `_harness/plugins/list` — addable plugins when local creation is enabled;
+- `_harness/configuration/get` — the session's current configuration snapshot;
+- `_harness/configuration/update` — validated next-turn capability edits;
+- `_harness/configuration/changed` — notification carrying a committed snapshot;
+- `_harness/session/rename` — a persistent title.
+
+Standard model and effort options remain editable throughout. The `harness.acp.v1` WebSocket
+subprotocol carries one JSON-RPC object per text frame with a 16 MiB limit.
+
+See [contracts](CONTRACTS.md), [ACP behavior](ACP.md), [server operation](SERVER.md), and
+[catalog coverage](CATALOG.md).

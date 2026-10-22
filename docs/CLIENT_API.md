@@ -27,9 +27,9 @@ Tool approvals are non-modal: a bar above the composer shows the tool call and t
 
 Stage explicit file attachments with `/attach PATH`; `/attach list` shows staged files and `/attach clear` removes them. They are sent as content with the next message and the transcript labels the attachment names. `/attach` never grants the agent a local filesystem path.
 
-The capability panel displays host-policy state, selected versus active revision, dependencies, lifecycle mode, and locked reasons. Capability edits use the `_harness/*` atomic transaction only when both sides advertise extension version 1 **and** `_harness/configuration/update`; a read-only catalog is labeled as such and exposes no toggle/edit/add action. Otherwise the client offers the agent's standard configuration options. Disabling a capability does not cancel the running turn.
+The capability panel displays host-policy state, dependencies, lifecycle mode, and locked reasons. A Harness host advertises revision-checked configuration updates: `Space` toggles an offered binding, `e` edits allowed fields, and successful edits apply at the next turn boundary. Model and reasoning-effort changes use standard ACP configuration options.
 
-In the capability panel, `a` adds a binding from the host's registered plugin inventory when the peer advertises `_harness/plugins/list`. The chooser follows the catalog's pagination and only offers runtime-compatible `next_turn` plugins; the form asks for a binding id and validated plugin configuration, and the add is submitted as the same revision-checked transaction as other edits. A plugin's `new_session` lifecycle can only be chosen at session creation. Toggle (`Space`, `Left` or `Right`), configure (`e`) and refresh (`r`) remain available for offered bindings. Capability and plugin inventories are read to the last cursor, so large catalogs are not silently truncated.
+In the capability panel, `a` adds a binding only when the peer advertises `_harness/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
 
 Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/agents`, `/sessions`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
 
@@ -137,12 +137,13 @@ asyncio.run(main())
 ```python
 proxy = SessionProxy(client, session.session_id, cwd=".")
 await proxy.prompt("Hello")
-snapshot = await proxy.configuration()  # extension required
+snapshot = await proxy.configuration()
 await proxy.update_configuration(
-    [{"type": "enable", "bindingId": "web", "enabled": False}],
+    [{"type": "enable", "bindingId": "web_search", "enabled": False}],
     expected_revision=snapshot.selected_revision,
-    request_id="client-generated-id",
+    request_id="client-edit-1",
 )
+await proxy.set_config_option("effort", "high")  # standard ACP option
 await proxy.cancel()
 await proxy.close()
 ```
@@ -152,7 +153,7 @@ Important behavior:
 - `prompt()` returns after the ACP prompt response and drains updates that were already dispatched. Event handlers can run concurrently with the response, so UI code should update from events rather than assuming all notifications arrived before the response.
 - `connect()` negotiates initialization and records the agent's advertised capabilities. `supports_load()` is false when the peer does not advertise `session/load`. If a profile sets `auth_method`, the client verifies that the agent advertised it and performs the standard `authenticate` request before opening a session; an unknown method fails before work starts.
 - `load_session()` restores authoritative history from the agent. `resume_session()` is used only when advertised and the client has a verified complete cache; this terminal does not retain one, so its session switch always uses authoritative `session/load` when available and otherwise explains why it will not resume.
-- Configuration update retries reuse the same `request_id`; a changed payload under that ID is rejected.
+- Configuration updates are available only when the peer advertises `_harness/configuration/update`; retries reuse the same `request_id`, and a changed payload under that ID is rejected. Harness hosts advertise this method for `next_turn` bindings; `new_session` changes fail with `NEW_SESSION_REQUIRED`.
 - `WebSocketAgentTransport` adds bearer authentication, `harness.acp.v1`, a 16 MiB frame limit and bounded framing. It refuses plaintext `ws://` to a non-loopback host so a bearer token cannot cross the network unencrypted; loopback development may use `ws://`. The catalog client handles `GET /v1/agents` and `GET /v1/agents/{agentId}`.
 
 ## Interactions in headless mode
@@ -220,13 +221,13 @@ approvals, and configuration precedence.
 
 Use `/rename <name>` in the terminal, or `await session.rename(name)` on a
 `SessionProxy`, to set a persistent session name. `/rename` without an argument
-opens a dialog. The runtime provides a first-request title and a
-`set_session_title` agent tool for a concise generated title. Manual names always
-take precedence, including after reopening a session.
+opens a dialog. The host falls back to the first prompt text as a title; there is no
+model-generated title tool. Manual names always take precedence, including after
+reopening a session.
 
-The status bar shows session cost first, then input/output and cache-read/write
-tokens. Totals include persisted completed, failed, and cancelled turns and are
-restored on load. Prices come from Pydantic AI and are estimates, not invoices.
-Missing pricing displays as unavailable; incomplete totals are marked partial.
-DeepSeek cache-hit tokens count as cache reads; cache misses remain ordinary input,
-not cache writes.
+The status bar shows the current turn's token usage. The adapter returns usage on
+each prompt response; Harness also accumulates counters in session metadata, but the
+client does not reconstruct a historical cost ledger from the old runtime journal.
+Prices come from Pydantic AI and are estimates, not invoices. Missing pricing
+displays as unavailable. DeepSeek cache-hit tokens count as cache reads; cache
+misses remain ordinary input, not cache writes.

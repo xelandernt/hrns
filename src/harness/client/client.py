@@ -506,8 +506,6 @@ class HarnessAcpClient:
         self._check_additional_directories(additional_directories)
         meta: dict[str, Any] = {}
         if initial_configuration:
-            if not self.extension.supports("_harness/configuration/update"):
-                raise ExtensionUnavailable("_harness/configuration/update")
             try:
                 validated = validate_changes(initial_configuration)
             except ValueError as exc:

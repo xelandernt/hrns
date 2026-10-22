@@ -19,7 +19,7 @@ import importlib.metadata
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, TypeAlias, TypeVar, cast
+from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
@@ -35,6 +35,7 @@ __all__ = [
     "EditableField",
     "ENTRY_POINT_GROUP",
     "NonEditableField",
+    "PluginConfigT",
     "PluginDescriptor",
     "PluginRegistry",
 ]
@@ -75,7 +76,6 @@ def bundled_catalog_plugins() -> dict[str, PluginDescriptor]:
     return plugins
 
 
-CapabilityLifecycleMode = Literal["next_turn", "new_session"]
 CapabilityStateMode = Literal["run", "session", "external"]
 
 
@@ -113,12 +113,18 @@ class CompatibilityConstraints(BaseModel):
     """Free-form note rendered in catalogs, e.g. 'Apple-silicon macOS only'."""
 
 
-class PluginDescriptor(BaseModel):
+PluginConfigT = TypeVar("PluginConfigT")
+
+
+class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     """Management metadata for one capability plugin.
 
     ``factory`` creates the *native capability* from a validated configuration and a
     :class:`BindingContext`. It may also be a string import reference ``module:attr`` which
     is resolved on first instantiation, keeping module imports lazy.
+
+    The generic parameter is the plugin's configuration model, so
+    :meth:`DefinitionBinding.from_plugin` can type-check the supplied config.
     """
 
     model_config = {"extra": "forbid", "arbitrary_types_allowed": True}
@@ -126,9 +132,9 @@ class PluginDescriptor(BaseModel):
     plugin_id: str = Field(min_length=1, max_length=200)
     version: str = Field(default="0.0.0", min_length=1, max_length=100)
     description: str = ""
-    config_model: type[BaseModel] | None = None
+    config_model: type[PluginConfigT] | None = None
     """Optional Pydantic model producing the JSON schema for editable, non-secret fields."""
-    factory: Callable[[Any, BindingContext], AgentCapability] | str | None = None
+    factory: Callable[[PluginConfigT, BindingContext], AgentCapability] | str | None = None
     """Synchronous factory taking validated config and binding context, returning a native
     capability (or a ``module:attr`` import reference evaluated lazily). The config type
     depends on ``config_model``; without one, factories receive a ``CapabilityShim``.
@@ -138,7 +144,6 @@ class PluginDescriptor(BaseModel):
     """``binding_id`` (or resource) names required when this plugin is enabled."""
     conflicts: list[str] = Field(default_factory=list)
     """``binding_id`` names that may not be enabled side by side with this plugin."""
-    change_mode: CapabilityLifecycleMode = "new_session"
     state_mode: CapabilityStateMode = "run"
     presentation: list[str] = Field(default_factory=list)
     """Presentation identifiers for host presenters / client-side renderers."""
@@ -152,7 +157,7 @@ class PluginDescriptor(BaseModel):
         """Infer editable defaults and honor explicit non-editable annotations."""
         if self.config_model is None:
             return self
-        fields = self.config_model.model_fields
+        fields = cast(type[BaseModel], self.config_model).model_fields
         if "editable_fields" in self.default_policy.model_fields_set:
             editable = set(self.default_policy.editable_fields)
         else:
@@ -212,7 +217,7 @@ class PluginDescriptor(BaseModel):
         if self.config_model is None:
             return {}
         try:
-            return self.config_model.model_json_schema(mode="validation")
+            return cast(type[BaseModel], self.config_model).model_json_schema(mode="validation")
         except Exception:  # pragma: no cover - schema generation is pure
             return {}
 
@@ -220,7 +225,7 @@ class PluginDescriptor(BaseModel):
         """Initial values from the config model's field defaults."""
         if self.config_model is None:
             return {}
-        model = self.config_model
+        model = cast(type[BaseModel], self.config_model)
         try:
             instance = model()
         except ValidationError:  # pragma: no cover - required fields have no defaults
@@ -235,7 +240,7 @@ class PluginDescriptor(BaseModel):
             version=self.version,
             description=self.description,
             config_schema=self.config_schema(),
-            change_mode=self.change_mode,
+            change_mode=self.default_policy.change_mode,
             state_mode=self.state_mode,
             runtime_compatible=self.compatibility.runtime_compatible,
             managed=True,
@@ -354,7 +359,6 @@ class PluginRegistry:
         config_model: type[BaseModel] | None = None,
         requirements: list[str] | None = None,
         conflicts: list[str] | None = None,
-        change_mode: CapabilityLifecycleMode = "new_session",
         state_mode: CapabilityStateMode = "run",
         presentation: list[str] | None = None,
         default_policy: CapabilityPolicy | None = None,
@@ -369,7 +373,6 @@ class PluginRegistry:
             factory=import_ref,
             requirements=list(requirements or []),
             conflicts=list(conflicts or []),
-            change_mode=change_mode,
             state_mode=state_mode,
             presentation=list(presentation or []),
             default_policy=default_policy or CapabilityPolicy(),

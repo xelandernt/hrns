@@ -3,22 +3,21 @@
 
 The capability below is a normal Pydantic AI ``AbstractCapability``. It contributes native
 instructions (not a tool-only wrapper) and is registered as a managed plugin with a real
-config schema, so the same behavior is usable through the Python session API, ACP, and
-editable manifests. The script is deterministic and offline; run it with:
+config schema. Capabilities are chosen when a session is composed, so the script composes
+two sessions with different selections. It is deterministic and offline; run it with:
 
     python examples/custom_capability.py
 
 Expected output ends with::
 
-    turn 1 (style on):  custom example: style=punchy
-    turn 2 (style off): custom example: style=none
+    style on:  custom example: style=punchy
+    style off: custom example: style=none
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 from typing import Any
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
@@ -30,13 +29,13 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart  # noqa: 
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
 
 from harness.protocol import CapabilityPolicy, EnableChange  # noqa: E402
+from harness.runtime.composition import compose_definition  # noqa: E402
 from harness.runtime.definitions import AgentDefinition, DefinitionBinding  # noqa: E402
 from harness.runtime.registry import (  # noqa: E402
     BindingContext,
     PluginDescriptor,
     PluginRegistry,
 )
-from harness.runtime.session import SessionManager  # noqa: E402
 
 PLUGIN_ID = "example.house_style"
 BINDING_ID = "style"
@@ -81,14 +80,13 @@ def build_house_style(config: HouseStyleConfig, _binding: BindingContext) -> Hou
 # --- 3. Its management descriptor -------------------------------------------
 
 
-def plugin_descriptor() -> PluginDescriptor:
+def plugin_descriptor() -> PluginDescriptor[HouseStyleConfig]:
     return PluginDescriptor(
         plugin_id=PLUGIN_ID,
         version="0.1.0",
         description="Example custom capability with editable style configuration.",
         config_model=HouseStyleConfig,
         factory=build_house_style,
-        change_mode="next_turn",
         state_mode="run",
         presentation=["example.house_style"],
         default_policy=CapabilityPolicy(
@@ -126,42 +124,38 @@ def build_agent(
     )
 
 
-# --- 5. Run the same policy path a client or the ACP host uses ---------------
+# --- 5. Compose native agents with different session selections ---------------
 
 
 async def main() -> None:
     registry = PluginRegistry()
-    registry.register(plugin_descriptor())
+    plugin = plugin_descriptor()
+    registry.register(plugin)
     definition = AgentDefinition(
         agent_id="example.custom_capability",
         name="Custom capability example",
         definition_version="1.0.0",
         factory=build_agent,
         bindings=[
-            DefinitionBinding(
+            DefinitionBinding.from_plugin(
+                plugin,
                 binding_id=BINDING_ID,
-                plugin_id=PLUGIN_ID,
-                config={"style": "punchy"},
-                enabled=True,
+                config=HouseStyleConfig(style="punchy"),
             )
         ],
     )
-    with tempfile.TemporaryDirectory() as tmp:
-        manager = SessionManager(
-            registry,
-            store=f"{tmp}/example.db",
-            definitions=[definition],
-        )
-        async with manager.open_session(definition) as session:
-            first = await session.run("Write a short announcement.")
-            print(f"turn 1 (style on):  {first.output}")
-            await session.update_configuration(
-                [EnableChange(binding_id=BINDING_ID, enabled=False)],
-                request_id="example-disable-style",
-                expected_revision=session.snapshot.selected_revision,
-            )
-            second = await session.run("Write a short announcement.")
-            print(f"turn 2 (style off): {second.output}")
+    on = await compose_definition(definition, registry, session_id="style-on")
+    first = await on.agent.run("Write a short announcement.")
+    print(f"style on:  {first.output}")
+
+    off = await compose_definition(
+        definition,
+        registry,
+        session_id="style-off",
+        initial_configuration=[EnableChange(binding_id=BINDING_ID, enabled=False)],
+    )
+    second = await off.agent.run("Write a short announcement.")
+    print(f"style off: {second.output}")
 
 
 if __name__ == "__main__":

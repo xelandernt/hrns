@@ -2,7 +2,8 @@
 
 Run the developer agent on your machine with a cloud API or a locally served model.
 The client launches `harness-local` over ACP; the agent offers filesystem, shell,
-planning, repository context, skills, and the existing capability panel.
+planning, repository context, and skills. Managed capabilities are selected when a
+session is created and stay fixed for that conversation.
 
 ## Start with DeepSeek
 
@@ -43,8 +44,10 @@ picker it starts a session in the current directory.
 If the selected model is already advertised by `harness-local`, `/models` applies it
 to the next message without restarting the agent. Changing provider (or entering a new
 key) saves the configuration and restarts `harness-local`, then reloads the current
-session. Use `/connect` to return to the connection picker, or `/plugins` to toggle
-capability bindings in place.
+session. Use `/connect` to return to the connection picker, or `/effort` to change
+reasoning effort live. `/plugins` opens the live capability panel: toggle, configure,
+or add bindings; `next_turn` changes apply to the next message, while `new_session`
+bindings still require a new session.
 
 DeepSeek's native provider uses its OpenAI-compatible Chat Completions API and
 provider-specific model behavior. See the [Pydantic AI DeepSeek documentation](https://pydantic.dev/docs/ai/models/deepseek/).
@@ -87,10 +90,10 @@ thinking = "high"
 ```
 
 `thinking` is Pydantic AI's unified reasoning-effort setting (`minimal`, `low`,
-`medium`, `high`, `xhigh`, or `false` to disable it where the model allows). In the
-terminal, `/models` offers the ladder after selecting a model that supports reasoning,
-and `/effort` reopens it later; changes apply to the next message. Models without
-thinking support ignore the setting.
+`medium`, `high`, `xhigh`, or `false` to disable it where the model allows). The initial
+value becomes the session default. In the terminal, `/effort` changes it live; the new
+value applies to the next request. Models without thinking support do not advertise the
+option.
 
 Use environment-based authentication for secrets instead of putting them in
 `provider_options`. Unsupported constructor options fail at startup; custom
@@ -126,8 +129,9 @@ sandbox**. Approved commands execute with your user's permissions.
 
 Sessions are stored in the platform's Harness user data directory by default.
 Set `store = "/absolute/path/sessions.db"` to select another SQLite store. Existing
-session history and capability settings can be resumed through the normal session UI
-or `hrns run --local --resume SESSION_ID ...`.
+session history can be resumed through the normal session UI or
+`hrns run --local --resume SESSION_ID ...`. The store uses a fresh `acp_sessions`
+table; existing databases are opened without conversion.
 
 If the client cannot find `harness-local`, install the runtime in the same environment
 or put its executable on `PATH`. Missing provider extras and credentials are reported

@@ -1,16 +1,21 @@
 # Integration findings
 
-Issues found while connecting independently developed packages. All listed items are resolved and covered by regression tests; this file remains as a historical record of the cross-package contract checks.
-The current embedded FastAPI server replaces the earlier subprocess server; see [SERVER.md](SERVER.md).
+Historical cross-package findings and their current resolution. The adapter migration
+supersedes several earlier workarounds.
 
-| Finding | Resolution | Regression check |
-| --- | --- | --- |
-| `hrns run --server ... "prompt"` treated the prompt as a stdio command | Only explicit `--stdio` splits `CMD -- PROMPT`; local-model and remote targets use the remainder as prompt | headless positional-prompt check |
-| Server descriptors use `defaultWorkspace` / `allowedWorkspaces`; client read other spellings | Client accepts the server's stable wire names | `test_server_catalog_supplies_client_remote_workspace` |
-| Upstream experimental ACP warning polluted host stderr once per process | Filtered at the pinned adapter import boundary, not globally | manual host smoke; subprocess ACP tests |
-| PostgreSQL existed behind the runtime store interface without a selector | `build_store()` selects via DSN for stdio; the embedded server accepts a `PostgresSessionStore` instance | `test_postgres_store_url_is_passed_to_every_worker`; opt-in PostgreSQL suite |
-| Background work had no binding ownership or disable gate | `SessionJobManager`; disable cancels/drains, cannot claim success while work is active | `tests/test_jobs.py` |
-| Configuration retry could cancel jobs twice | Completed retry returns from the stored transaction before any job handling | hosted end-to-end retry assertion |
-| Workspace identity could be lost or silently replaced | Independently tested lifecycle service with durable records and `WORKSPACE_UNAVAILABLE` | `tests/test_workspaces.py`, runtime workspace tests |
+| Finding | Resolution |
+| --- | --- |
+| `hrns run --server ... "prompt"` treated the prompt as a stdio command | Only explicit `--stdio` splits `CMD -- PROMPT`; remote targets use the remainder as prompt. |
+| Server descriptors use `defaultWorkspace` / `allowedWorkspaces` | The client reads those stable wire names. |
+| Upstream experimental ACP warning polluted host stderr | Filtered at the runtime package boundary before importing the pinned adapter. |
+| PostgreSQL existed behind a store interface without a selector | `build_store()` selects by DSN for stdio; the embedded server accepts a `PostgresSessionStore`. |
+| Background work had no binding ownership or disable gate | Removed with the managed job subsystem; there is no background-job API in this revision. |
+| Configuration retry could cancel jobs twice | Removed with the job subsystem; live capability edits use in-memory revision/idempotency checks and apply at the turn boundary. |
+| Workspace identity could be lost or silently replaced | Removed with managed leases; a local path is stored as host metadata and validated on reload. |
+| Custom ACP loop duplicated execution, approvals, cancellation, and history | Replaced by `PydanticAIACPAgent`; the host only composes and scopes persistence. |
+| Separate runtime event journal and turn store | Removed. The upstream `StoredSession` is the durable conversation record. |
+| ACP `session/list` and `session/delete` unavailable from the upstream adapter | Small public subclass methods backed by scoped host metadata; delete uses the standard route. |
+| No per-turn model-settings hook | A native capability returns per-request model settings, so effort changes live while bindings stay fixed. |
 
-The native headless path returns the agent's text, and the hosted end-to-end path exercises catalog discovery, authenticated WebSocket, capability disable, retry idempotency and authoritative transcript reload.
+Verification of these items is recorded in [VERIFICATION.md](VERIFICATION.md). No regression
+test suite is present in this revision.

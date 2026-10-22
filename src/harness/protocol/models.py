@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from pydantic.alias_generators import to_camel
 
 
@@ -84,19 +84,11 @@ class BindingDescriptor(WireModel):
     enabled: bool = False
     active_enabled: bool | None = None
     policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
-    change_mode: Literal["next_turn", "new_session"] = "new_session"
     state_mode: Literal["run", "session", "external"] = "run"
     requires: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     availability_reason: str | None = None
     presentation: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def effective_lifecycle(self) -> "BindingDescriptor":
-        # policy is authoritative; the top-level field is a convenience mirror
-        # for generic descriptor renderers, never an independent permission.
-        self.change_mode = self.policy.change_mode
-        return self
 
 
 class PluginInfo(WireModel):

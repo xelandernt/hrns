@@ -271,14 +271,14 @@ class PolicyCatalog:
     def _build_offerings(self, *, validate_defaults: bool = True) -> None:
         missing_plugins: list[str] = []
         for binding in self.definition.bindings:
-            descriptor = self.registry.lookup(binding.plugin_id)
+            descriptor = binding.plugin or self.registry.lookup(binding.plugin_id)
             if descriptor is None:
-                missing_plugins.append(binding.plugin_id)
+                missing_plugins.append(binding.resolved_plugin_id)
                 continue
             self._sequence += 1
             self.offerings[binding.binding_id] = BindingOffering(
                 binding_id=binding.binding_id,
-                plugin_id=binding.plugin_id,
+                plugin_id=descriptor.plugin_id,
                 descriptor=descriptor,
                 policy=self._effective_policy(descriptor, binding.policy),
                 enabled=binding.enabled,
@@ -346,8 +346,6 @@ class PolicyCatalog:
         descriptor: PluginDescriptor, override: CapabilityPolicy | None
     ) -> CapabilityPolicy:
         policy = descriptor.default_policy.model_copy(deep=True)
-        if "change_mode" not in descriptor.default_policy.model_fields_set:
-            policy.change_mode = descriptor.change_mode
         if override is not None:
             for name in override.model_fields_set:
                 value = getattr(override, name)
@@ -581,7 +579,6 @@ class PolicyCatalog:
                     enabled=offering.enabled,
                     active_enabled=active_enabled,
                     policy=offering.policy,
-                    change_mode=offering.policy.change_mode,
                     state_mode=offering.descriptor.state_mode,
                     requires=offering.requirements,
                     conflicts=offering.conflicts,
@@ -795,14 +792,14 @@ class PolicyCatalog:
             self.registry.check_compatibility(descriptor)
         except HarnessError:
             raise
-        if not initial_configuration and descriptor.change_mode == "new_session":
+        if not initial_configuration and descriptor.default_policy.change_mode == "new_session":
             raise HarnessError(
                 "NEW_SESSION_REQUIRED",
                 f"Plugin {change.plugin_id!r} can only be added when a new session is created.",
                 details={
                     "plugin_id": change.plugin_id,
                     "binding_id": change.binding_id,
-                    "change_mode": descriptor.change_mode,
+                    "change_mode": descriptor.default_policy.change_mode,
                 },
             )
         self._check_config_schema(descriptor, change.binding_id, change.config)
@@ -936,7 +933,7 @@ class PolicyCatalog:
             editable_fields=host_editable_fields(descriptor),
             # Preserve the plugin's lifecycle; a host cannot promote a new_session
             # integration into a safe next-turn toggle merely by adding it.
-            change_mode=descriptor.change_mode,
+            change_mode=descriptor.default_policy.change_mode,
         )
         self._sequence += 1
         offering = BindingOffering(
