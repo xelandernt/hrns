@@ -182,11 +182,18 @@ def command_view(state: CommandViewState, context: ViewContext) -> ViewHandle:
 
 class Provider:
     command_view = staticmethod(command_view)
-    # tool_view is independent; omit it and tool calls use the generic body.
+    # tool_view and approval_view are independent; omit either one and that block
+    # uses the generic body.
 ```
 
-- `command_view` and `tool_view` are independent factories for the exact renderer id and
-  schema version. A command never falls back to a tool view.
+- `command_view`, `tool_view` and `approval_view` are independent factories for the exact
+  renderer id and schema version. A command never falls back to a tool view, and a tool
+  without an approval view keeps the client's readable approval detail.
+- `approval_view` renders the body of the tool approval prompt before the call runs. It
+  receives the same `ToolViewState`: `raw_input` holds the arguments under review, while
+  `input`/`output` carry only the presentation payloads the call has published so far. The
+  header, the agent's options and the `y`/`n` shortcuts stay client-owned, so a provider
+  cannot hide the reject path.
 - Harness ships providers for its own bundled tools (`harness.tool.*`) and registers them
   programmatically on the same registry, so first-party views follow this contract exactly.
 - Widgets are ordinary Textual widgets. Plugins own children, CSS, focus, messages and

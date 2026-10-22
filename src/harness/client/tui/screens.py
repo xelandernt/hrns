@@ -1289,7 +1289,13 @@ class ChatScreen(Screen[None]):
             self._resolve_approval(None)
         future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()
         self._approval_future = future
-        self.query_one("#approval", ApprovalBar).show(request)
+        transcript = self.query_one("#transcript", TranscriptPane)
+        self.query_one("#approval", ApprovalBar).show(
+            request,
+            data=transcript.tool_data(request.tool_call_id),
+            renderer=transcript.renderers,
+            view_context=transcript.view_context,
+        )
         return await future
 
     def expect_redirect(self) -> None:

@@ -39,7 +39,12 @@ class CommandViewState:
 
 @dataclass(frozen=True, slots=True)
 class ToolViewState:
-    """Immutable merged state for one inline tool body."""
+    """Immutable merged state for one inline tool body or approval detail.
+
+    Approval views receive the same shape. ``raw_input`` carries the arguments the agent is
+    asking permission for, while ``input``/``output`` carry only what the call has published
+    so far — for a pending call that is usually the input payload or nothing at all.
+    """
 
     session_id: str
     tool_call_id: str

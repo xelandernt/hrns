@@ -36,9 +36,14 @@ def readable_text(value: Any, *, limit: int = 64_000) -> str:
 class RendererRegistry:
     """Resolve versioned presentation identifiers against locally installed providers.
 
-    A provider is an object (or a callable returning one) with optional ``command_view``
-    and ``tool_view`` factories. The two factory kinds are independent; an invocation asks
-    for exactly one kind, so a missing tool factory can never turn a command into a tool.
+    A provider is an object (or a callable returning one) with optional ``command_view``,
+    ``tool_view`` and ``approval_view`` factories. The factory kinds are independent; an
+    invocation asks for exactly one kind, so a missing approval factory can never turn a
+    permission prompt into a tool body.
+
+    An approval view is optional: a provider that only implements ``tool_view`` keeps the
+    client's readable approval fallback, because a provider without the kind has nothing to
+    say about the call it is asking the user to allow.
     """
 
     def __init__(self) -> None:
@@ -72,7 +77,11 @@ class RendererRegistry:
             return None
         try:
             loaded = entry.load()
-            is_provider = hasattr(loaded, "tool_view") or hasattr(loaded, "command_view")
+            is_provider = (
+                hasattr(loaded, "tool_view")
+                or hasattr(loaded, "command_view")
+                or hasattr(loaded, "approval_view")
+            )
             provider = loaded if is_provider else loaded() if callable(loaded) else None
         except Exception:
             return None
@@ -82,7 +91,7 @@ class RendererRegistry:
         return provider
 
     def factory(self, renderer_id: str, version: int, kind: str) -> Any | None:
-        if kind not in {"command", "tool"}:
+        if kind not in {"approval", "command", "tool"}:
             raise ValueError(f"Unknown view kind: {kind}")
         provider = self.provider(renderer_id, version)
         if provider is None:

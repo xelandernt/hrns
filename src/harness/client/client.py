@@ -137,6 +137,23 @@ def _clip(text: str, limit: int = 2000) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _raw_arguments(value: Any) -> Any:
+    """Decode ``raw_input``, which agents send as an object or as a JSON string.
+
+    A string payload left undecoded renders as a JSON blob in approval prompts and hides the
+    argument names every view keys off.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text.startswith(("{", "[")):
+        return value
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return value
+
+
 def _absolute_path(value: str, *, label: str) -> str:
     if not isinstance(value, str) or not value.startswith("/"):
         raise HarnessClientError(f"The {label} must be an absolute path, got '{value}'.")
@@ -178,7 +195,7 @@ def normalize_permission(
     options: list[PermissionOption],
 ) -> PermissionRequest:
     title = getattr(tool_call, "title", None) or getattr(tool_call, "kind", None) or "tool call"
-    raw_input = getattr(tool_call, "raw_input", None)
+    raw_input = _raw_arguments(getattr(tool_call, "raw_input", None))
     detail = ""
     if raw_input is not None:
         try:
@@ -1145,7 +1162,7 @@ class HarnessAcpClient:
             is_new=is_new,
             content=tuple(content),
             locations=locations,
-            raw_input=getattr(update, "raw_input", None),
+            raw_input=_raw_arguments(getattr(update, "raw_input", None)),
             raw_output=getattr(update, "raw_output", None),
             meta=dict(getattr(update, "field_meta", None) or {}),
         )

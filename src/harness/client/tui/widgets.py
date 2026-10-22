@@ -7,6 +7,7 @@ import json
 import time
 from collections import deque
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
@@ -519,6 +520,11 @@ class TranscriptPane(VerticalScroll):
             view_context=self.view_context,
         )
 
+    def tool_data(self, tool_call_id: str) -> dict[str, Any] | None:
+        """The current snapshot of one tool call, if its card is still in the transcript."""
+        card = self._tools.get(tool_call_id)
+        return dict(card.data) if card is not None else None
+
     # ------------------------------------------------------------- mounting
 
     async def _mount_block(self, block: Any) -> None:
@@ -997,6 +1003,40 @@ class NoticeBlock(Static):
         return rendered
 
 
+def _presentation_of(data: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The richest presentation payload a tool call has published so far."""
+    payload = (
+        data.get("presentationOutput")
+        or data.get("presentationInput")
+        or data.get("presentationProgress")
+        or presentation_payload(dict(data))
+    )
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _tool_view_state(data: Mapping[str, Any], *, live: bool | None = None) -> Any:
+    """One immutable snapshot for a tool body, an approval body, or both."""
+    from .extensions import ToolViewState
+
+    pending = str(data.get("status") or "") in {"", "pending", "in_progress"}
+    return ToolViewState(
+        session_id=str(data.get("sessionId") or ""),
+        tool_call_id=str(data.get("toolCallId") or ""),
+        title=str(data.get("title") or ""),
+        kind=str(data.get("kind") or ""),
+        status=str(data.get("status") or ""),
+        raw_input=data.get("raw_input"),
+        raw_output=data.get("raw_output"),
+        input=data.get("presentationInput"),
+        output=data.get("presentationOutput"),
+        progress=data.get("presentationProgress"),
+        fallback=str(data.get("presentationFallback") or ""),
+        revision=int(data.get("presentationRevision") or 0),
+        live=pending if live is None else live,
+        binding_id=data.get("bindingId"),
+    )
+
+
 class ToolCard(Vertical):
     """An inline tool activity row with a short, expandable result preview.
 
@@ -1047,12 +1087,7 @@ class ToolCard(Vertical):
 
         if self._view_built or self.renderer is None or self.view_context is None:
             return
-        payload = (
-            self.data.get("presentationOutput")
-            or self.data.get("presentationInput")
-            or self.data.get("presentationProgress")
-            or presentation_payload(self.data)
-        )
+        payload = _presentation_of(self.data)
         if payload is None:
             return
         view = build_view(
@@ -1088,24 +1123,7 @@ class ToolCard(Vertical):
         self._view = None
 
     def _view_state(self) -> Any:
-        from .extensions import ToolViewState
-
-        return ToolViewState(
-            session_id=str(self.data.get("sessionId") or ""),
-            tool_call_id=self.tool_call_id,
-            title=str(self.data.get("title") or ""),
-            kind=str(self.data.get("kind") or ""),
-            status=str(self.data.get("status") or ""),
-            raw_input=self.data.get("raw_input"),
-            raw_output=self.data.get("raw_output"),
-            input=self.data.get("presentationInput"),
-            output=self.data.get("presentationOutput"),
-            progress=self.data.get("presentationProgress"),
-            fallback=str(self.data.get("presentationFallback") or ""),
-            revision=int(self.data.get("presentationRevision") or 0),
-            live=self._is_pending(),
-            binding_id=self.data.get("bindingId"),
-        )
+        return _tool_view_state(self.data, live=self._is_pending())
 
     def _apply_view(self) -> bool:
         if self._view is None:
@@ -1545,8 +1563,8 @@ def _approval_detail(request: PermissionRequest) -> Text:
         if pattern and not command:
             lines.append(f"pattern: {pattern}")
         diff = raw.get("patch") or raw.get("diff")
-        old = raw.get("old_string")
-        new = raw.get("new_string")
+        old = raw.get("old_string") or raw.get("old_text")
+        new = raw.get("new_string") or raw.get("new_text")
         content = raw.get("content")
         if isinstance(diff, str) and diff.strip():
             lines.extend(diff.splitlines()[:10])
@@ -1577,6 +1595,26 @@ def _approval_detail(request: PermissionRequest) -> Text:
     return text
 
 
+def _approval_view_state(request: PermissionRequest, data: Mapping[str, Any]) -> Any:
+    """The approval's own identity, plus whatever the tool call already published.
+
+    Presentation data is a snapshot of a call that may not have run yet, so anything the
+    payload cannot answer is left to the request: the arguments under review, the title and
+    the readable detail are all on ``PermissionRequest``.
+    """
+    base = _tool_view_state(data, live=True)
+    return replace(
+        base,
+        session_id=request.session_id or base.session_id,
+        tool_call_id=request.tool_call_id or base.tool_call_id,
+        title=request.title or base.title,
+        kind=request.kind or base.kind,
+        status=request.status or base.status or "pending",
+        raw_input=request.raw_input if request.raw_input is not None else base.raw_input,
+        fallback=base.fallback or request.detail,
+    )
+
+
 class ApprovalBar(Vertical):
     """Non-modal approval prompt above the composer.
 
@@ -1592,6 +1630,8 @@ class ApprovalBar(Vertical):
         self._header.add_class("approval-header")
         self._detail = Static("", markup=False)
         self._detail.add_class("approval-detail")
+        self._view_host = Vertical(classes="approval-view")
+        self._view: Any = None
         self._options = OptionList(id="approval-options", markup=False)
         self._hint = Static("", markup=False)
         self._hint.add_class("approval-hint")
@@ -1600,6 +1640,7 @@ class ApprovalBar(Vertical):
     def compose(self) -> ComposeResult:
         yield self._header
         yield self._detail
+        yield self._view_host
         yield self._options
         yield self._hint
 
@@ -1607,7 +1648,21 @@ class ApprovalBar(Vertical):
     def pending(self) -> bool:
         return self._request is not None
 
-    def show(self, request: PermissionRequest) -> None:
+    def show(
+        self,
+        request: PermissionRequest,
+        *,
+        data: Mapping[str, Any] | None = None,
+        renderer: RendererRegistry | None = None,
+        view_context: Any = None,
+    ) -> None:
+        """Show one request, preferring a local approval view over the generic detail.
+
+        ``data`` is the tool call the request belongs to, when the transcript still holds
+        it. Without a payload there is nothing for a provider to render, so the readable
+        fallback stays in place.
+        """
+        self._clear_view()
         self._request = request
         header = Text()
         header.append("Approval needed", style="bold")
@@ -1617,6 +1672,7 @@ class ApprovalBar(Vertical):
             header.append(f"  ·  {readable_text(request.kind, limit=40)}", style="dim")
         self._header.update(header)
         self._detail.update(_approval_detail(request))
+        self._build_view(request, data or {}, renderer, view_context)
         self._options.clear_options()
         for option in request.options:
             kind = str(option.get("kind") or "")
@@ -1645,10 +1701,46 @@ class ApprovalBar(Vertical):
             self._options.highlighted = 0
         self.call_after_refresh(self._options.focus)
 
+    def _build_view(
+        self,
+        request: PermissionRequest,
+        data: Mapping[str, Any],
+        renderer: RendererRegistry | None,
+        view_context: Any,
+    ) -> None:
+        from .extensions import build_view
+
+        if renderer is None or view_context is None:
+            return
+        payload = _presentation_of(data)
+        if payload is None:
+            return
+        view = build_view(
+            renderer,
+            payload,
+            "approval",
+            _approval_view_state(request, data),
+            view_context,
+        )
+        if view is None:
+            return
+        self._view = view
+        self._detail.display = False
+        if self.is_mounted and not view.widget.is_mounted:
+            self._view_host.mount(view.widget)
+
+    def _clear_view(self) -> None:
+        view, self._view = self._view, None
+        self._detail.display = True
+        if view is not None and view.widget.is_mounted:
+            with contextlib.suppress(Exception):
+                view.widget.remove()
+
     def hide(self) -> None:
         self._request = None
         self.display = False
         self._options.clear_options()
+        self._clear_view()
 
     def option_id_for_kind(self, kind: str) -> str | None:
         if self._request is None:

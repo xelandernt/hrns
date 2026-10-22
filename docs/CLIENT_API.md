@@ -189,12 +189,12 @@ hrns run --server team --agent form-agent \
 
 `RendererRegistry` resolves versioned presentation identifiers against locally installed
 `harness.renderers` entry points named `<rendererId>@<schemaVersion>`. Each entry point is a
-provider object with optional, independent `command_view` and `tool_view` factories. A remote
-peer supplies only an ID, version, JSON data and readable fallback — never an import path or
-widget code. Unknown versions, missing factories and factory/apply exceptions all return the
-sanitized fallback. Rendered fallback text strips terminal escapes, control characters and
-bidi overrides and is bounded. Generic ACP activity rendering remains available without any
-provider installed. See [EXTENSIONS.md](EXTENSIONS.md).
+provider object with optional, independent `command_view`, `tool_view` and `approval_view`
+factories. A remote peer supplies only an ID, version, JSON data and readable fallback — never
+an import path or widget code. Unknown versions, missing factories and factory/apply
+exceptions all return the sanitized fallback. Rendered fallback text strips terminal escapes,
+control characters and bidi overrides and is bounded. Generic ACP activity rendering remains
+available without any provider installed. See [EXTENSIONS.md](EXTENSIONS.md).
 
 Plugin commands are discovered with `_harness/commands/list` and invoked with
 `_harness/commands/invoke`; direct output renders as a distinct inline command block. The
