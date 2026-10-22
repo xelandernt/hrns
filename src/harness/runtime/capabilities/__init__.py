@@ -21,6 +21,12 @@ def bundled_descriptors() -> list[PluginDescriptor]:
     """
     from .ask_user import descriptor as ask_user_descriptor
     from .coder import descriptor as coder_descriptor
+    from .mcp import descriptor as mcp_descriptor
     from .skills import descriptor as skills_descriptor
 
-    return [ask_user_descriptor(), coder_descriptor(), skills_descriptor()]
+    return [
+        ask_user_descriptor(),
+        coder_descriptor(),
+        mcp_descriptor(),
+        skills_descriptor(),
+    ]

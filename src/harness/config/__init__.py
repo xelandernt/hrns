@@ -1,5 +1,6 @@
 """Local agent configuration shared by the independent client and runtime."""
 
+from .mcp import McpOAuthConfig, McpServerConfig, McpServerSettings, McpSettings
 from .settings import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
@@ -17,6 +18,10 @@ __all__ = [
     "THINKING_LEVELS",
     "CapabilitiesSettings",
     "LocalSettings",
+    "McpOAuthConfig",
+    "McpServerConfig",
+    "McpServerSettings",
+    "McpSettings",
     "default_local_config_path",
     "thinking_from_settings",
     "with_thinking",
