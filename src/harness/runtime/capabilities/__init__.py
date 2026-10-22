@@ -19,7 +19,8 @@ def bundled_descriptors() -> list[PluginDescriptor]:
     Import stays lazy so ``harness.runtime`` does not pull in a plugin's capability module
     until a binding is composed.
     """
+    from .ask_user import descriptor as ask_user_descriptor
     from .coder import descriptor as coder_descriptor
     from .skills import descriptor as skills_descriptor
 
-    return [coder_descriptor(), skills_descriptor()]
+    return [ask_user_descriptor(), coder_descriptor(), skills_descriptor()]

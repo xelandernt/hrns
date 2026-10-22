@@ -38,6 +38,8 @@ api_key_env = "DEEPSEEK_API_KEY"
 `uv run hrns` starts a session in the current directory using that model. The bundled
 `harness.coder` capability gives it file tools, content search, and a shell in that
 directory: reads are automatic, while writes, edits, and commands ask for approval first.
+`harness.ask_user` lets the model ask structured multiple-choice questions in the terminal;
+disable it with `[capabilities] ask_user = false` for headless runs.
 Configuration uses pydantic-settings. See
 [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints, local inference, other
 Pydantic AI providers, and headless execution.

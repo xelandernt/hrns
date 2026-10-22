@@ -176,9 +176,7 @@ class _FieldRow(Horizontal):
         elif self.kind == "select":
             self._selection = "" if default is None else str(default)
         else:
-            placeholder = (
-                "comma-separated values" if self.kind in {"array", "multi"} else "(none)"
-            )
+            placeholder = "comma-separated values" if self.kind in {"array", "multi"} else "(none)"
             self._input = Input(
                 _field_text(self.kind, default),
                 password=self.kind == "password",

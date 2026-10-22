@@ -118,10 +118,13 @@ from .extension import (
     validate_changes,
 )
 from .interactions import (
+    AskUserResponse,
     ElicitationRequest,
     InteractionPolicy,
     PermissionRequest,
     RequireInteractions,
+    ask_user_payload,
+    parse_ask_user_request,
 )
 from .transport import AgentTransport, ConnectionBundle
 
@@ -1204,6 +1207,15 @@ class HarnessAcpClient:
     async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         return None
 
+    async def _answer_questions(self, params: dict[str, Any]) -> dict[str, Any]:
+        request = parse_ask_user_request(params)
+        try:
+            response = await self.policy.answer_questions(request)
+        except (InteractionRequired, InteractionRejected) as exc:
+            self._pending_interaction_error = exc
+            return ask_user_payload(AskUserResponse(cancelled=True))
+        return ask_user_payload(response)
+
     async def read_text_file(
         self,
         session_id: str,
@@ -1218,6 +1230,9 @@ class HarnessAcpClient:
         raise RequestError.method_not_found("fs/write_text_file")  # not advertised by this client
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> Any:
+        name = method.lstrip("_")
+        if name == "harness/ask_user":
+            return await self._answer_questions(params)
         if method in {"harness/configuration/changed", "_harness/configuration/changed"}:
             snapshot = parse_configuration_snapshot(params)
             self.bus.publish(

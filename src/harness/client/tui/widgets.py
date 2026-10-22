@@ -36,7 +36,13 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS, UI_MAX_TRANSCRIPT_BLOCKS
-from ..interactions import PermissionRequest
+from ..interactions import (
+    AskUserAnswer,
+    AskUserQuestion,
+    AskUserRequest,
+    AskUserResponse,
+    PermissionRequest,
+)
 from ..renderers import RendererRegistry, readable_text
 from .choice_keys import choice_direction
 from .state import (
@@ -52,6 +58,8 @@ __all__ = [
     "ActivityPanel",
     "ApprovalBar",
     "ApprovalDecided",
+    "AskUserAnswered",
+    "AskUserBar",
     "CapabilityPanel",
     "CommandResultBlock",
     "CommandSuggestionKey",
@@ -1455,11 +1463,7 @@ class StatusBar(Static):
             if self._model
             else None
         )
-        mode = (
-            Text(self._mode, style=Style(color=palette.foreground))
-            if self._mode
-            else None
-        )
+        mode = Text(self._mode, style=Style(color=palette.foreground)) if self._mode else None
         effort = (
             Text(self._effort, style=Style(color=palette.muted or palette.foreground))
             if self._effort
@@ -1752,6 +1756,300 @@ class ApprovalBar(Vertical):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         self.post_message(ApprovalDecided(str(event.option_id)))
+
+
+class AskUserAnswered(Message):
+    """The local user finished or declined an agent question."""
+
+    def __init__(self, response: AskUserResponse) -> None:
+        super().__init__()
+        self.response = response
+
+
+class AskUserBar(Vertical):
+    """Non-modal question dock above the composer, one tab per question.
+
+    Modeled on the OpenCode/Codex prompts: the transcript stays visible, the
+    composer keeps its place, and the question is answered in place with Tab
+    between questions, arrows between options, and a typed custom answer.
+    """
+
+    BINDINGS = [
+        Binding("tab", "next_question", "Next question", show=False, priority=True),
+        Binding("shift+tab", "previous_question", "Previous question", show=False, priority=True),
+        Binding("ctrl+enter", "submit", "Submit", show=False, priority=True),
+        Binding("ctrl+j", "submit", "Submit", show=False, priority=True),
+        Binding("escape", "decline", "Decline", show=False, priority=True),
+    ]
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._request: AskUserRequest | None = None
+        self.questions: list[AskUserQuestion] = []
+        self._tab = 0
+        self._answers: list[tuple[str, ...]] = []
+        self._custom: list[str] = []
+        self._custom_on: list[bool] = []
+        self._editing = False
+        self._edit_before: tuple[tuple[str, ...], bool, str] | None = None
+        self._tabs = Static("", markup=False, classes="ask-tabs")
+        self._prompt = Static("", markup=False, classes="ask-question")
+        self._options = OptionList(id="ask-options", markup=False)
+        self._input = Input(placeholder="Type your own answer…", id="ask-custom-input")
+        self._error = Static("", markup=False, classes="dialog-error")
+        self._hint = Static("", markup=False, classes="ask-hint")
+        self.display = False
+
+    @property
+    def pending(self) -> bool:
+        return self._request is not None
+
+    def compose(self) -> ComposeResult:
+        yield self._tabs
+        yield self._prompt
+        yield self._options
+        yield self._input
+        yield self._error
+        yield self._hint
+
+    def show(self, request: AskUserRequest) -> None:
+        self._request = request
+        self.questions = list(request.questions)
+        self._tab = 0
+        self._answers = [() for _ in self.questions]
+        self._custom = ["" for _ in self.questions]
+        self._custom_on = [False for _ in self.questions]
+        self._editing = False
+        self._edit_before = None
+        self._error.update("")
+        self._hint.update(
+            "Tab/Shift+Tab question · ↑/↓ option · 1–9 pick · Enter choose · "
+            "Ctrl+Enter submit · Esc decline"
+        )
+        self._input.display = False
+        self._input.value = ""
+        self._refresh()
+        self.display = True
+        self.call_after_refresh(self._options.focus)
+
+    def hide(self) -> None:
+        self._request = None
+        self._editing = False
+        self.display = False
+        with contextlib.suppress(Exception):
+            self._options.set_options([])
+
+    # ------------------------------------------------------------- rendering
+
+    def _question(self) -> AskUserQuestion:
+        return self.questions[self._tab]
+
+    def _answered(self, index: int) -> bool:
+        if self._custom_on[index]:
+            return bool(self._custom[index].strip())
+        return bool(self._answers[index])
+
+    def _tab_text(self) -> Text:
+        text = Text()
+        for index, question in enumerate(self.questions):
+            if index:
+                text.append("   ")
+            if index == self._tab:
+                text.append(f" {index + 1} {question.header} ", style="bold underline")
+            else:
+                text.append(f" {index + 1} {question.header} ", style="dim")
+        text.append(f"   ({self._tab + 1}/{len(self.questions)})", style="dim")
+        return text
+
+    def _option_text(self, index: int, label: str, description: str) -> Text:
+        question = self._question()
+        selected = (
+            self._custom_on[self._tab] and index == len(question.options)
+        ) or label in self._answers[self._tab]
+        if question.multi_select:
+            mark = "☑" if selected else "☐"
+        else:
+            mark = "◉" if selected else "○"
+        text = Text()
+        text.append(f"{index + 1}. ")
+        text.append(f"{mark} ")
+        text.append(label, style="bold" if selected else "")
+        if description:
+            text.append(f"  {description}", style="dim")
+        return text
+
+    def _refresh(self, *, highlight: int | None = None) -> None:
+        question = self._question()
+        self._tabs.update(self._tab_text())
+        self._prompt.update(question.question)
+        options: list[Option] = []
+        for index, option in enumerate(question.options):
+            options.append(
+                Option(
+                    self._option_text(index, option.label, option.description),
+                    id=f"option:{index}",
+                )
+            )
+        custom = self._custom[self._tab].strip()
+        custom_label = f'Type your own answer — "{custom}"' if custom else "Type your own answer"
+        options.append(
+            Option(
+                self._option_text(len(question.options), custom_label, ""),
+                id="custom",
+            )
+        )
+        self._options.set_options(options)
+        if highlight is not None:
+            self._options.highlighted = max(0, min(highlight, len(options) - 1))
+        elif self._custom_on[self._tab]:
+            self._options.highlighted = len(question.options)
+        else:
+            selected = self._answers[self._tab]
+            labels = [option.label for option in question.options]
+            index = next((labels.index(label) for label in selected if label in labels), 0)
+            self._options.highlighted = index
+
+    # -------------------------------------------------------------- editing
+
+    def _begin_edit(self) -> None:
+        self._edit_before = (
+            self._answers[self._tab],
+            self._custom_on[self._tab],
+            self._custom[self._tab],
+        )
+        self._editing = True
+        self._custom_on[self._tab] = True
+        self._input.value = self._custom[self._tab]
+        self._input.display = True
+        self._input.focus()
+        self._refresh()
+
+    def _commit_edit(self) -> None:
+        if not self._editing:
+            return
+        value = self._input.value.strip()
+        self._custom[self._tab] = value
+        self._custom_on[self._tab] = bool(value)
+        if value:
+            self._answers[self._tab] = ()
+        self._editing = False
+        self._edit_before = None
+        self._input.display = False
+        self._error.update("")
+        self._refresh()
+
+    def _cancel_edit(self) -> None:
+        if self._edit_before is not None:
+            self._answers[self._tab], self._custom_on[self._tab], self._custom[self._tab] = (
+                self._edit_before
+            )
+        self._editing = False
+        self._edit_before = None
+        self._input.display = False
+        self._refresh()
+        self._options.focus()
+
+    def _switch(self, index: int) -> None:
+        if self._editing:
+            self._commit_edit()
+        self._tab = index % len(self.questions)
+        self._error.update("")
+        self._refresh()
+        self._options.focus()
+
+    def _pick(self, index: int) -> None:
+        question = self._question()
+        if index == len(question.options):
+            self._begin_edit()
+            return
+        label = question.options[index].label
+        if question.multi_select:
+            current = self._answers[self._tab]
+            self._answers[self._tab] = (
+                tuple(item for item in current if item != label)
+                if label in current
+                else (*current, label)
+            )
+        else:
+            self._answers[self._tab] = (label,)
+        self._custom_on[self._tab] = False
+        self._custom[self._tab] = ""
+        self._error.update("")
+        self._refresh(highlight=index)
+
+    # --------------------------------------------------------------- events
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        option_id = event.option_id or ""
+        if option_id == "custom":
+            self._begin_edit()
+            return
+        prefix, _, raw = option_id.partition(":")
+        if prefix == "option" and raw.isdigit():
+            self._pick(int(raw))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if self._editing:
+            self._custom[self._tab] = event.value
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._commit_edit()
+        self._options.focus()
+
+    def on_key(self, event: Any) -> None:
+        if self._editing:
+            return
+        key = str(event.key)
+        if key == "space":
+            highlighted = self._options.highlighted
+            if highlighted is not None:
+                event.stop()
+                self._pick(highlighted)
+            return
+        if key.isdigit() and key != "0":
+            index = int(key) - 1
+            if 0 <= index <= len(self._question().options):
+                event.stop()
+                self._pick(index)
+
+    # -------------------------------------------------------------- actions
+
+    def action_decline(self) -> None:
+        if self._editing:
+            self._cancel_edit()
+            return
+        self.post_message(AskUserAnswered(AskUserResponse(cancelled=True)))
+
+    def action_next_question(self) -> None:
+        self._switch(self._tab + 1)
+
+    def action_previous_question(self) -> None:
+        self._switch(self._tab - 1)
+
+    def action_submit(self) -> None:
+        if self._editing:
+            self._commit_edit()
+        missing = [index for index in range(len(self.questions)) if not self._answered(index)]
+        if missing:
+            index = missing[0]
+            self._tab = index
+            self._refresh()
+            self._options.focus()
+            self._error.update(
+                f"Answer question {index + 1} before submitting, or press Esc to decline."
+            )
+            return
+        answers: list[AskUserAnswer] = []
+        for index, question in enumerate(self.questions):
+            if self._custom_on[index]:
+                answers.append(
+                    AskUserAnswer(header=question.header, custom_answer=self._custom[index].strip())
+                )
+            else:
+                answers.append(AskUserAnswer(header=question.header, selected=self._answers[index]))
+        self.post_message(AskUserAnswered(AskUserResponse(answers=tuple(answers))))
 
 
 # --------------------------------------------------------------- side panels

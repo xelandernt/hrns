@@ -48,7 +48,13 @@ from ..events import (
     UsageUpdated,
     UserMessageReplayed,
 )
-from ..interactions import PERMISSION_MODES, PermissionDecision, PermissionRequest
+from ..interactions import (
+    PERMISSION_MODES,
+    AskUserRequest,
+    AskUserResponse,
+    PermissionDecision,
+    PermissionRequest,
+)
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
 from ..local import local_model_catalog, local_target, local_thinking_support
 from ..profiles import Profile, Profiles, default_profiles_path
@@ -79,6 +85,8 @@ from .state import (
 from .widgets import (
     ApprovalBar,
     ApprovalDecided,
+    AskUserAnswered,
+    AskUserBar,
     AttachmentBar,
     AttachmentRemoved,
     BindingEditRequested,
@@ -801,6 +809,7 @@ class ChatScreen(Screen[None]):
         self._session_rows: list[dict[str, Any]] = []
         self._session_cursor: str | None = None
         self._approval_future: asyncio.Future[PermissionDecision] | None = None
+        self._answers_future: asyncio.Future[AskUserResponse] | None = None
         self._redirect_after_turn = False
         self._suggestion_items: list[dict[str, Any]] = []
         self._suggestion_index = 0
@@ -820,6 +829,8 @@ class ChatScreen(Screen[None]):
             yield SidePanel()
         yield Button("New output ↓ · Ctrl+End", id="new-output")
         yield PromptQueue(id="prompt-queue")
+        with Horizontal(id="ask-user-dock"):
+            yield AskUserBar(id="ask-user")
         with Horizontal(id="approval-dock"):
             yield ApprovalBar(id="approval")
         with Horizontal(id="suggestions-dock"):
@@ -845,6 +856,7 @@ class ChatScreen(Screen[None]):
 
     def on_unmount(self) -> None:
         self._resolve_approval(None, focus=False)
+        self._resolve_questions(AskUserResponse(cancelled=True), focus=False)
         if self._consumer is not None:
             self._consumer.cancel()
             self._consumer = None
@@ -1322,6 +1334,29 @@ class ChatScreen(Screen[None]):
         if event.option_id is None:
             self._redirect_after_turn = True
             self._cancel_turn()
+
+    # --------------------------------------------------------------- questions
+
+    async def request_questions(self, request: AskUserRequest) -> AskUserResponse:
+        if self._answers_future is not None:
+            self._resolve_questions(AskUserResponse(cancelled=True))
+        future: asyncio.Future[AskUserResponse] = asyncio.get_running_loop().create_future()
+        self._answers_future = future
+        self.query_one("#ask-user", AskUserBar).show(request)
+        return await future
+
+    def _resolve_questions(self, response: AskUserResponse, *, focus: bool = True) -> None:
+        future, self._answers_future = self._answers_future, None
+        if future is not None and not future.done():
+            future.set_result(response)
+        with contextlib.suppress(Exception):
+            self.query_one("#ask-user", AskUserBar).hide()
+        if focus and self.is_mounted:
+            with contextlib.suppress(Exception):
+                self.query_one("#composer", Composer).focus()
+
+    def on_ask_user_answered(self, event: AskUserAnswered) -> None:
+        self._resolve_questions(event.response)
 
     def on_key(self, event: Any) -> None:
         """Left/Right change a focused choice control; approval shortcuts need focus."""
@@ -3279,6 +3314,9 @@ invents commands the agent did not advertise.
         )
 
     def action_interrupt_or_focus(self) -> None:
+        if self._answers_future is not None:
+            self.query_one("#ask-user", AskUserBar).action_decline()
+            return
         if self._approval_future is not None:
             # Esc is the Codex-style "no, and tell it what to do differently":
             # stop the pending call, stop the turn, then hand back the composer.
@@ -3293,6 +3331,9 @@ invents commands the agent did not advertise.
 
     def action_submit_composer(self) -> None:
         """Send whatever the composer holds, from any focused chat widget."""
+        if self._answers_future is not None:
+            self.query_one("#ask-user", AskUserBar).action_submit()
+            return
         composer = self.query_one("#composer", Composer)
         if not composer.text.strip():
             composer.focus()

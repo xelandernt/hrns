@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import tomli_w
 from platformdirs import user_config_path, user_data_path
-from pydantic import Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
 
 #: Unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
@@ -26,6 +26,20 @@ EFFORT_OFF = "off"
 def default_local_config_path() -> Path:
     project = Path.cwd() / "harness.local.toml"
     return project if project.is_file() else user_config_path("harness") / "local.toml"
+
+
+class CapabilitiesSettings(BaseModel):
+    """Which interactive capabilities the local definition binds."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ask_user: bool = Field(
+        default=True,
+        description=(
+            "Bind the ask_user capability so the agent can ask structured questions. "
+            "Turn it off for headless runs, where nobody is there to answer."
+        ),
+    )
 
 
 class LocalSettings(BaseSettings):
@@ -50,6 +64,7 @@ class LocalSettings(BaseSettings):
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     provider_options: dict[str, Any] = Field(default_factory=dict)
     model_settings: dict[str, Any] = Field(default_factory=dict)
+    capabilities: CapabilitiesSettings = Field(default_factory=CapabilitiesSettings)
     store: Path = Field(default_factory=lambda: user_data_path("harness") / "local-sessions.db")
 
     @field_validator("base_url")

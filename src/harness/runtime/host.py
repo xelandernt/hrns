@@ -81,6 +81,7 @@ from .acp_store import (
     merge_usage,
     usage_payload,
 )
+from .ask_user import QuestionChannel
 from .composition import Composition, compose_definition
 from .definitions import (
     AgentDefinition,
@@ -328,6 +329,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._pending_effort: str | None = None
         self._new_lock = asyncio.Lock()
         self._client_conn: Any | None = None
+        self.question_channel = QuestionChannel()
         models = tuple(self.policy.models)
         default = self.policy.default_model or (models[0] if models else None)
         self._default_model = default
@@ -352,6 +354,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
 
     def on_connect(self, conn: Any) -> None:
         self._client_conn = conn
+        self.question_channel.bind(conn)
         super().on_connect(conn)
 
     async def shutdown(self) -> None:
@@ -1110,6 +1113,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
 
     def _resources(self, cwd: str) -> dict[str, Any]:
         values = dict(self.policy.resources)
+        values.setdefault("user_answers", self.question_channel)
         model = self._default_model
         if model is not None:
             values.setdefault("model.default", model)

@@ -38,9 +38,17 @@ workspace. Read before you edit, keep commands non-interactive, and confirm chan
 command instead of assuming they work. Answer directly when no tool is needed.
 """
 
-#: Tools that only read the workspace; everything else needs explicit approval.
+#: Tools that only read the workspace (or ask the user); everything else needs approval.
 _READ_ONLY_TOOLS = frozenset(
-    {"read_file", "list_files", "grep", "list_directory", "search_files", "find_files"}
+    {
+        "read_file",
+        "list_files",
+        "grep",
+        "list_directory",
+        "search_files",
+        "find_files",
+        "ask_user_question",
+    }
 )
 
 #: Frequently used provider ids are shown first in the terminal picker.
@@ -213,33 +221,52 @@ def _local_models(settings: LocalSettings) -> tuple[str, ...]:
 
 def local_definition(settings: LocalSettings) -> AgentDefinition:
     """The built-in local definition: bundled coder tools in the working directory."""
+    bindings = [
+        DefinitionBinding(
+            plugin_id="harness.coder",
+            binding_id="coder",
+        ),
+        DefinitionBinding(
+            plugin_id="harness.skills",
+            binding_id="skills",
+        ),
+    ]
+    resources = [
+        ResourceRequirement(
+            name="model.default",
+            kind="model",
+            description="Agent model (provider string or native Model instance).",
+        ),
+        ResourceRequirement(
+            name="workspace",
+            kind="workspace",
+            description="Working directory the bundled tools act on.",
+        ),
+    ]
+    if settings.capabilities.ask_user:
+        bindings.append(
+            DefinitionBinding(
+                plugin_id="harness.ask_user",
+                binding_id="ask_user",
+            )
+        )
+        resources.append(
+            ResourceRequirement(
+                name="user_answers",
+                kind="service",
+                description="Answerer that carries agent questions to the connected client.",
+            )
+        )
     definition = AgentDefinition(
         agent_id="harness.local",
         name=f"Local · {settings.provider}:{settings.model}",
-        description="Local coding agent with bundled file, search, and shell tools plus Agent Skills.",
+        description=(
+            "Local coding agent with bundled file, search, and shell tools, Agent Skills, "
+            "and structured user questions."
+        ),
         spec=AgentSpec(instructions=_LOCAL_INSTRUCTIONS),
-        resources=[
-            ResourceRequirement(
-                name="model.default",
-                kind="model",
-                description="Agent model (provider string or native Model instance).",
-            ),
-            ResourceRequirement(
-                name="workspace",
-                kind="workspace",
-                description="Working directory the bundled tools act on.",
-            ),
-        ],
-        bindings=[
-            DefinitionBinding(
-                plugin_id="harness.coder",
-                binding_id="coder",
-            ),
-            DefinitionBinding(
-                plugin_id="harness.skills",
-                binding_id="skills",
-            ),
-        ],
+        resources=resources,
+        bindings=bindings,
     )
     definition.fixed_capabilities.append(PrepareTools(_require_tool_approval))
     return definition
@@ -251,7 +278,7 @@ def build_local_agent(
     cwd: Path | None = None,
     model: Model | None = None,
 ) -> HarnessACPAgent:
-    """Bind a model and trusted local workspace; every function tool needs approval."""
+    """Bind a model and trusted local workspace; workspace-changing tools need approval."""
     workspace = (cwd or Path.cwd()).expanduser().resolve(strict=True)
     if not workspace.is_dir():
         raise ValueError("The local working directory must be a directory.")

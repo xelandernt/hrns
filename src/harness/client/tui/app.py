@@ -15,6 +15,8 @@ from textual.theme import Theme
 from ..client import HarnessAcpClient, SessionProxy
 from ..errors import HarnessClientError, InteractionRequired
 from ..interactions import (
+    AskUserRequest,
+    AskUserResponse,
     ElicitationAnswer,
     ElicitationRequest,
     InteractionPolicy,
@@ -64,6 +66,12 @@ class UiInteractionPolicy(InteractionPolicy):
 
     async def answer_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
         return await self.app.ask_elicitation(request)
+
+    async def answer_questions(self, request: AskUserRequest) -> AskUserResponse:
+        for screen in reversed(self.app.screen_stack):
+            if isinstance(screen, ChatScreen):
+                return await screen.request_questions(request)
+        return AskUserResponse(cancelled=True)
 
 
 class HarnessApp(App[int]):
@@ -235,10 +243,44 @@ class HarnessApp(App[int]):
 
     /* ----------------------------------------------------------- composer */
 
+    #ask-user-dock,
     #approval-dock {
         height: auto;
         padding: 0 2;
         background: transparent;
+    }
+    #ask-user {
+        height: auto;
+        max-height: 18;
+        margin: 0;
+        padding: 0 1;
+        background: $surface;
+        border: round $accent 75%;
+    }
+    #ask-user .ask-tabs {
+        height: auto;
+        padding: 0 0 1 0;
+    }
+    #ask-user .ask-question {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #ask-user #ask-options {
+        background: transparent;
+        height: auto;
+        max-height: 8;
+        scrollbar-size-vertical: 1;
+    }
+    #ask-user #ask-options:focus {
+        border: none;
+    }
+    #ask-user #ask-custom-input {
+        display: none;
+        margin-top: 1;
+    }
+    #ask-user .ask-hint {
+        height: auto;
+        color: $text-muted;
     }
     #approval {
         height: auto;
@@ -337,6 +379,7 @@ class HarnessApp(App[int]):
         color: $text-muted;
     }
     .narrow #composer-dock,
+    .narrow #ask-user-dock,
     .narrow #approval-dock,
     .narrow #suggestions-dock { padding: 0 1; }
     .narrow .message-role { margin-top: 0; }
