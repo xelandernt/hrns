@@ -42,7 +42,7 @@ local inference, other Pydantic AI providers, and headless execution.
 
 Useful slash commands include `/connect` (switch or add a target), `/models`
 (configure or select the local model), `/effort` (change reasoning effort live),
-`/plugins` (toggle, configure, or add capabilities), and `/agents` (inspect
+`/plugins` (toggle, configure, or add plugins), and `/agents` (inspect
 subagents). Typing `/` shows an inline filtered list. The older `/model` and
 `/capabilities` names remain aliases.
 

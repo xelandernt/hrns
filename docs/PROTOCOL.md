@@ -121,7 +121,7 @@ Server notification:
 {"schemaVersion": 1, "sessionId": "abc", "selectedRevision": 2, ...}
 ```
 
-The client applies the snapshot to its capability panel. It is a notification, not a request.
+The client applies the snapshot to its plugins panel. It is a notification, not a request.
 
 ### `_harness/session/rename`
 
@@ -190,7 +190,7 @@ not start a subprocess and does not translate JSON-RPC payloads.
 ## Client behavior
 
 - Extension methods are called only when advertised by both sides.
-- The capability panel is editable when `_harness/configuration/update` is advertised;
+- The plugins panel is editable when `_harness/configuration/update` is advertised;
   add controls require `_harness/plugins/list` plus local binding creation.
 - The client never automatically resends an uncertain prompt after reconnect.
 - Session load uses standard `session/load`; a failed or unsupported load is reported rather

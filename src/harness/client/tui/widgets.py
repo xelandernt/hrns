@@ -6,7 +6,7 @@ import json
 import time
 from collections import deque
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from rich.text import Text
@@ -16,8 +16,10 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import (
+    Button,
     Collapsible,
     DataTable,
+    Input,
     Label,
     Markdown,
     OptionList,
@@ -129,6 +131,10 @@ class Composer(TextArea):
         self.show_line_numbers = False
         self.soft_wrap = True
         self.suggestions_open = False
+        self.prompt_history: list[str] = []
+        self._history_index: int | None = None
+        self._history_draft = ""
+        self._history_text = ""
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
@@ -144,6 +150,38 @@ class Composer(TextArea):
             event.stop()
             self.post_message(CommandSuggestionKey(event.key))
             return
+        row, _ = self.cursor_location
+        if (
+            not self.suggestions_open
+            and self.selection.is_empty
+            and (
+                (event.key == "up" and row == 0)
+                or (event.key == "down" and row == self.document.line_count - 1)
+            )
+            and self.prompt_history
+        ):
+            if self._history_index is not None and self.text != self._history_text:
+                self._history_index = None
+            if event.key == "up":
+                if self._history_index is None:
+                    self._history_draft = self.text
+                    self._history_index = len(self.prompt_history)
+                self._history_index = max(0, self._history_index - 1)
+            elif self._history_index is not None:
+                self._history_index += 1
+                if self._history_index >= len(self.prompt_history):
+                    self._history_index = None
+            else:
+                return
+            self._history_text = (
+                self._history_draft
+                if self._history_index is None
+                else self.prompt_history[self._history_index]
+            )
+            self.load_text(self._history_text)
+            self.move_cursor(self.document.end)
+            event.prevent_default()
+            event.stop()
         # Let TextArea's own ``_on_key`` handle printable input and navigation.
 
     def on_blur(self) -> None:
@@ -156,7 +194,86 @@ class Composer(TextArea):
             self.post_message(Submitted(text))
 
     def clear_composer(self) -> None:
+        self._history_index = None
         self.load_text("")
+
+
+class QueueAction(Message):
+    def __init__(self, action: str, index: int = 0) -> None:
+        super().__init__()
+        self.action = action
+        self.index = index
+
+
+class AttachmentRemoved(Message):
+    def __init__(self, index: int) -> None:
+        super().__init__()
+        self.index = index
+
+
+class AttachmentBar(OptionList):
+    """Persistent attachment metadata; selecting a file removes it from the draft."""
+
+    DEFAULT_CSS = """
+    AttachmentBar { height: auto; max-height: 5; margin: 0 2; background: $surface; }
+    """
+
+    def show_files(self, summaries: list[dict[str, Any]]) -> None:
+        self.display = bool(summaries)
+        self.clear_options()
+        for index, item in enumerate(summaries):
+            size = item["size"]
+            size_text = f"{size:,} bytes" if size is not None else "unavailable"
+            self.add_option(
+                Option(
+                    f"× {item['name']} · {size_text} · {item['mimeType']} · select to remove",
+                    id=str(index),
+                )
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if event.option_id is not None:
+            self.post_message(AttachmentRemoved(int(event.option_id)))
+
+
+class PromptQueue(Vertical):
+    DEFAULT_CSS = """
+    PromptQueue { height: auto; max-height: 10; padding: 0 2; }
+    PromptQueue OptionList { height: auto; max-height: 5; background: $surface; }
+    PromptQueue Button { height: 1; min-width: 12; border: none; margin: 0 1 0 0; }
+    PromptQueue Horizontal { height: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+
+        yield Label("Queued follow-ups", id="queue-label")
+        yield OptionList(id="queue-items", markup=False)
+        with Horizontal():
+            yield Button("Edit", id="queue-edit")
+            yield Button("Remove", id="queue-remove")
+            yield Button("Resume queue", id="queue-resume")
+
+    def show_prompts(self, prompts: list[tuple[str, list[str]]], *, paused: bool) -> None:
+        self.display = bool(prompts)
+        choices = self.query_one(OptionList)
+        selected = choices.highlighted or 0
+        choices.clear_options()
+        for index, (text, attachments) in enumerate(prompts):
+            suffix = f" · {len(attachments)} files" if attachments else ""
+            choices.add_option(Option(f"{index + 1}. {' '.join(text.split())[:100]}{suffix}"))
+        if prompts:
+            choices.highlighted = min(selected, len(prompts) - 1)
+        self.query_one("#queue-label", Label).update(
+            "Queued follow-ups · paused" if paused else "Queued follow-ups"
+        )
+        self.query_one("#queue-resume").display = paused
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        action = (event.button.id or "").removeprefix("queue-")
+        self.post_message(QueueAction(action, self.query_one(OptionList).highlighted or 0))
 
 
 class TopBar(Static):
@@ -189,6 +306,12 @@ class TopBar(Static):
         self.update(text)
 
 
+class OutputPending(Message):
+    def __init__(self, pending: bool) -> None:
+        super().__init__()
+        self.pending = pending
+
+
 class TranscriptPane(VerticalScroll):
     """Streaming transcript with bounded retained widgets.
 
@@ -216,6 +339,8 @@ class TranscriptPane(VerticalScroll):
         #: Expand reasoning text (the Thinking/Thought row appears either way).
         self.show_thoughts = False
         self._ticker: Any = None
+        self._following = True
+        self._navigation_block: Any = None
         self.renderers = RendererRegistry()
         try:
             self.renderers.discover()
@@ -225,6 +350,88 @@ class TranscriptPane(VerticalScroll):
 
     def on_mount(self) -> None:
         self._ticker = self.set_interval(0.06, self.flush)
+        self.anchor()
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        if new_value < old_value:
+            self._following = False
+        if self.is_vertical_scroll_end:
+            if not self._following:
+                self.anchor()
+            self._following = True
+            self.post_message(OutputPending(False))
+
+    def _output_updated(self) -> None:
+        if not self._following:
+            self.post_message(OutputPending(True))
+
+    def jump_to_latest(self) -> None:
+        if self._navigation_block is not None:
+            self._navigation_block.remove_class("navigation-target")
+        self._navigation_block = None
+        self._following = True
+        self.anchor()
+        self.post_message(OutputPending(False))
+
+    def jump_user(self, direction: int) -> None:
+        messages = [
+            block
+            for block in self._blocks
+            if isinstance(block, MessageBlock) and block.role == "you"
+        ]
+        if not messages:
+            return
+        if self._navigation_block in messages:
+            index = messages.index(self._navigation_block) + direction
+        else:
+            visible = [
+                i for i, block in enumerate(messages) if block.virtual_region.y <= self.scroll_y + 1
+            ]
+            index = (visible[-1] if visible else 0) + (1 if direction > 0 else -1)
+            if self.is_vertical_scroll_end and direction < 0:
+                index = len(messages) - 1
+        block = messages[max(0, min(index, len(messages) - 1))]
+        self.reveal(block)
+
+    def reveal(self, block: Any) -> None:
+        if self._navigation_block is not None:
+            self._navigation_block.remove_class("navigation-target")
+        block.add_class("navigation-target")
+        if isinstance(block, ToolCard):
+            block._expanded = True
+            block._refresh()
+        elif isinstance(block, ReasoningBlock):
+            block.collapsed = False
+        self._following = False
+        self.anchor(False)
+        self._navigation_block = block
+        self.scroll_to_widget(block, top=True, animate=False)
+        self.focus()
+
+    def search_entries(self) -> list[tuple[Any, str, str]]:
+        entries: list[tuple[Any, str, str]] = []
+        for block in self._blocks:
+            if isinstance(block, MessageBlock):
+                entries.append((block, block.role, block._text))
+            elif isinstance(block, ToolCard):
+                text = f"{block.data.get('title', 'Tool')}\n{block.data.get('detail') or block._body_text}"
+                entries.append((block, "tool", text))
+            elif isinstance(block, ReasoningBlock):
+                entries.append((block, "reasoning", block._text))
+        return entries
+
+    def latest_response(self) -> MessageBlock | None:
+        return next(
+            (
+                block
+                for block in reversed(self._blocks)
+                if isinstance(block, MessageBlock)
+                and block.role == "agent"
+                and block is not self._stream
+            ),
+            None,
+        )
 
     def _tool_card(self, data: dict[str, Any]) -> "ToolCard":
         return ToolCard(
@@ -247,7 +454,7 @@ class TranscriptPane(VerticalScroll):
                 self._blocks.append(oldest)
                 break
             await oldest.remove()
-        self.scroll_end(animate=False)
+        self._output_updated()
 
     async def add_user(self, text: str) -> None:
         text = bounded_user_text(text)
@@ -282,7 +489,7 @@ class TranscriptPane(VerticalScroll):
                 await self._mount_block(self._thought)
             self._thought_buffer += text
             self._thought.append_text(text)
-            self.scroll_end(animate=False)
+            self._output_updated()
         else:
             self._end_thought()
             if self._stream is None:
@@ -313,7 +520,7 @@ class TranscriptPane(VerticalScroll):
             return
         self._stream.flush()
         self._dirty = False
-        self.scroll_end(animate=False)
+        self._output_updated()
 
     def _end_agent_stream(self) -> None:
         """Finish the current assistant block so later text starts below a tool card."""
@@ -352,7 +559,7 @@ class TranscriptPane(VerticalScroll):
             await self.start_tool(event)
             return
         card.update_from(merge_tool_event(card.data, event))
-        self.scroll_end(animate=False)
+        self._output_updated()
 
     def _replay_tool(self, tool_call_id: str) -> dict[str, Any] | None:
         for kind, payload in reversed(self._replay_entries):
@@ -379,6 +586,10 @@ class TranscriptPane(VerticalScroll):
         self._thought = None
         self._stream_buffer = ""
         self._thought_buffer = ""
+        self._following = True
+        self._navigation_block = None
+        self.anchor()
+        self.post_message(OutputPending(False))
         self._tools.clear()
         self._blocks.clear()
         await self.remove_children()
@@ -414,6 +625,12 @@ class TranscriptPane(VerticalScroll):
         return list(self._replay_entries)
 
 
+class CopyCodeRequested(Message):
+    def __init__(self, codes: list[str]) -> None:
+        super().__init__()
+        self.codes = codes
+
+
 class MessageBlock(Vertical):
     """One message: a small role label and streaming Markdown body.
 
@@ -422,6 +639,13 @@ class MessageBlock(Vertical):
     """
 
     ROLE_LABELS = {"you": "You", "agent": "Assistant"}
+    DEFAULT_CSS = """
+    MessageBlock .message-actions { height: 1; }
+    MessageBlock .message-actions Button {
+        height: 1; min-width: 16; border: none; margin: 0 1 0 0;
+        color: $text-muted; background: transparent;
+    }
+    """
 
     def __init__(self, role: str, text: str = "") -> None:
         super().__init__()
@@ -442,6 +666,24 @@ class MessageBlock(Vertical):
     def compose(self) -> ComposeResult:
         yield self._label
         yield self._body
+        if self.role == "agent":
+            from textual.containers import Horizontal
+
+            with Horizontal(classes="message-actions"):
+                yield Button("Copy response", id="copy-response", disabled=True)
+                yield Button("Copy code…", id="copy-code", disabled=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "copy-response":
+            self.app.copy_to_clipboard(self._text)
+            self.app.notify("Response copied")
+        elif event.button.id == "copy-code":
+            codes = [str(getattr(block, "code", "")) for block in self._body.query("MarkdownFence")]
+            if codes:
+                self.post_message(CopyCodeRequested(codes))
+            else:
+                self.app.notify("This response has no fenced code blocks")
 
     def append_text(self, text: str) -> None:
         self._text += text
@@ -470,6 +712,9 @@ class MessageBlock(Vertical):
 
     def finish(self) -> None:
         self.flush()
+        if self.is_mounted:
+            for button in self.query(Button):
+                button.disabled = False
 
 
 class ReasoningBlock(Collapsible):
@@ -1007,7 +1252,14 @@ class ApprovalBar(Vertical):
 
 
 class SidePanel(TabbedContent):
-    """Capabilities, sessions and activity. Hidden in narrow terminals."""
+    """Plugins, sessions and activity. Hidden in narrow terminals."""
+
+    PANE_ORDER: tuple[str, ...] = ("capabilities", "sessions", "activity")
+
+    BINDINGS = [
+        Binding("tab", "next_pane", "Next panel", show=False),
+        Binding("shift+tab", "previous_pane", "Previous panel", show=False),
+    ]
 
     def __init__(self) -> None:
         super().__init__(initial="capabilities", id="side-panel")
@@ -1018,11 +1270,37 @@ class SidePanel(TabbedContent):
         # Overriding compose() here would omit ContentTabs entirely.
         self._tab_content.extend(
             [
-                TabPane("Capabilities", self.capabilities, id="capabilities"),
+                TabPane("Plugins", self.capabilities, id="capabilities"),
                 TabPane("Sessions", self.sessions, id="sessions"),
                 TabPane("Activity", self.activity, id="activity"),
             ]
         )
+
+    def activate(self, tab: str) -> None:
+        """Show ``tab`` and move focus into its content."""
+        self.active = tab
+        # The pane is only focusable once the switch has been laid out.
+        self.call_after_refresh(self._focus_pane, tab)
+
+    def _focus_pane(self, tab: str) -> None:
+        if tab == "capabilities":
+            self.capabilities._list.focus()
+        elif tab == "sessions":
+            self.sessions._table.focus()
+        else:
+            self.activity.focus()
+
+    def action_next_pane(self) -> None:
+        self._cycle_pane(1)
+
+    def action_previous_pane(self) -> None:
+        self._cycle_pane(-1)
+
+    def _cycle_pane(self, step: int) -> None:
+        order = self.PANE_ORDER
+        current = self.active
+        index = order.index(current) if current in order else 0
+        self.activate(order[(index + step) % len(order)])
 
 
 class BindingToggleRequested(Message):
@@ -1068,7 +1346,7 @@ class CapabilityPanel(Vertical):
         Binding("r", "refresh", "Refresh", show=False),
         Binding("e", "edit", "edit", show=False),
         Binding("space", "toggle_binding", "Toggle", show=False),
-        Binding("a", "add", "Add local capability", show=False),
+        Binding("a", "add", "Add local plugin", show=False),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1079,10 +1357,10 @@ class CapabilityPanel(Vertical):
         self._order: list[str] = []
         self._options: dict[str, dict[str, Any]] = {}
         self._snapshot: dict[str, Any] | None = None
-        self._status = Static("Loading capabilities…", markup=False)
+        self._status = Static("Loading plugins…", markup=False)
         self._status.add_class("panel-status")
         self._list = OptionList(id="binding-list", markup=False)
-        self._detail = Static("Select a capability to inspect it.", markup=False)
+        self._detail = Static("Select a plugin to inspect it.", markup=False)
         self._detail.add_class("panel-detail")
         self._hint = Static(
             "e edit · Space/←/→ toggle · a add plugin · r refresh",
@@ -1108,7 +1386,6 @@ class CapabilityPanel(Vertical):
         *,
         active_revision: int | None = None,
         selected_revision: int | None = None,
-        policy_revision: int | None = None,
         can_write: bool = True,
     ) -> None:
         self.extension_mode = True
@@ -1138,15 +1415,13 @@ class CapabilityPanel(Vertical):
             if active_revision is not None
             else (snapshot or {}).get("activeRevision")
         )
-        policy = (
-            policy_revision
-            if policy_revision is not None
-            else (snapshot or {}).get("policyRevision")
-        )
-        revision = f"selected v{selected} · active v{active} · policy v{policy}"
+        total = len(self._order)
+        notes = [f"{total} plugin" + ("" if total == 1 else "s")]
+        if selected is not None and active is not None and selected != active:
+            notes.append("selected changes apply next turn")
         if not self.can_write:
-            revision += " · read-only (update not advertised)"
-        self._status.update(Text(f"{len(bindings)} capabilities · {revision}", style="dim"))
+            notes.append("read-only")
+        self._status.update(Text(" · ".join(notes), style="dim"))
         self._hint.update(
             "select to inspect · this host does not advertise configuration updates"
             if not self.can_write
@@ -1157,7 +1432,7 @@ class CapabilityPanel(Vertical):
             self._list.highlighted = index
             self._show_detail(self._order[index])
         else:
-            self._detail.update("No capabilities offered by this agent.")
+            self._detail.update("No plugins offered by this agent.")
 
     def set_standard_options(self, options: list[dict[str, Any]]) -> None:
         self.extension_mode = False
@@ -1322,7 +1597,7 @@ class CapabilityPanel(Vertical):
             return
         if not self.can_write:
             self._show_detail(binding_id)
-            self.show_message("This host advertises a read-only capability catalog.")
+            self.show_message("This host advertises a read-only plugin catalog.")
             return
         if summary["locked"]:
             self.show_message(f"{summary['name']} is locked: {summary['reason'] or 'unavailable'}")
@@ -1334,7 +1609,7 @@ class CapabilityPanel(Vertical):
 
     def action_edit(self) -> None:
         if self.extension_mode and not self.can_write:
-            self.show_message("This host advertises a read-only capability catalog.")
+            self.show_message("This host advertises a read-only plugin catalog.")
             return
         binding_id = self.current_binding_id()
         if not binding_id:
@@ -1347,13 +1622,13 @@ class CapabilityPanel(Vertical):
 
     def action_add(self) -> None:
         if self.extension_mode and not self.can_write:
-            self.show_message("This host advertises a read-only capability catalog.")
+            self.show_message("This host advertises a read-only plugin catalog.")
             return
         self.post_message(CapabilityAddRequested())
 
     def action_toggle_binding(self) -> None:
         if self.extension_mode and not self.can_write:
-            self.show_message("This host advertises a read-only capability catalog.")
+            self.show_message("This host advertises a read-only plugin catalog.")
             return
         binding_id = self.current_binding_id()
         if not binding_id:
@@ -1423,6 +1698,7 @@ class SessionPanel(Vertical):
 
     can_focus = True
     BINDINGS = [
+        Binding("slash", "filter_sessions", "Find session", show=False),
         Binding("d", "delete_session", "Delete", show=False),
         Binding("x", "close_session", "Close", show=False),
         Binding("u", "resume_session", "Resume", show=False),
@@ -1435,6 +1711,10 @@ class SessionPanel(Vertical):
         super().__init__(**kwargs)
         self._ids: dict[str, str] = {}
         self._cwds: dict[str, str] = {}
+        self._sessions: list[dict[str, Any]] = []
+        self._current_session: str | None = None
+        self._session_notes = ""
+        self._filter = Input(placeholder="Filter title or workspace…", id="session-filter")
         self._status = Static(
             "Sessions load when you open this panel.", markup=False, classes="panel-status"
         )
@@ -1447,12 +1727,14 @@ class SessionPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield self._status
+        yield self._filter
         yield self._table
         yield self._hint
 
     def on_mount(self) -> None:
         self._table.add_columns("title", "updated", "workspace")
         self._table.cursor_type = "row"
+        self.set_interval(60, self._render_sessions)
 
     def show_message(self, text: str) -> None:
         self._status.update(Text(text))
@@ -1467,29 +1749,13 @@ class SessionPanel(Vertical):
         can_load: bool = True,
         next_cursor: str | None = None,
     ) -> None:
-        self._table.clear()
-        self._ids.clear()
-        self._cwds.clear()
-        for item in sessions:
-            session_id = str(item.get("sessionId") or item.get("session_id") or "")
-            if not session_id:
-                continue
-            title = str(item.get("title") or "(untitled)")
-            updated = str(item.get("updatedAt") or item.get("updated_at") or "")
-            cwd = str(item.get("cwd") or "")
-            row_key = self._table.add_row(title, updated, cwd, key=session_id)
-            self._ids[str(row_key.value)] = session_id
-            self._cwds[session_id] = cwd
+        self._sessions = list(sessions)
         delete_note = "" if can_delete else " · delete not advertised"
         close_note = "" if can_close else " · close not advertised"
         resume_note = "" if can_resume else " · resume not advertised"
         more = " · m load more pages" if next_cursor else ""
-        self._status.update(
-            Text(
-                f"{len(self._ids)} sessions{more}{delete_note}{close_note}{resume_note}",
-                style="dim",
-            )
-        )
+        self._session_notes = f"{more}{delete_note}{close_note}{resume_note}"
+        self._render_sessions()
         actions = [] if can_load else ["load unavailable"]
         if can_resume:
             actions.append("u resume")
@@ -1499,8 +1765,76 @@ class SessionPanel(Vertical):
             actions.append("x close")
         if next_cursor:
             actions.append("m more")
-        actions.extend(("n new session", "r refresh"))
+        actions.extend(("/ filter", "n new session", "r refresh"))
         self._hint.update(Text(" · ".join(actions), style="dim"))
+
+    def mark_current(self, session_id: str | None) -> None:
+        if session_id != self._current_session:
+            self._current_session = session_id
+            self._render_sessions()
+
+    def _render_sessions(self) -> None:
+        selected = self.selected_session_id()
+        self._table.clear()
+        self._ids.clear()
+        self._cwds.clear()
+        needle = self._filter.value.strip().casefold()
+        for item in self._sessions:
+            session_id = str(item.get("sessionId") or item.get("session_id") or "")
+            if not session_id:
+                continue
+            title = str(item.get("title") or "(untitled)")
+            cwd = str(item.get("cwd") or "")
+            self._cwds[session_id] = cwd
+            if needle and needle not in f"{title} {cwd} {session_id}".casefold():
+                continue
+            updated = str(item.get("updatedAt") or item.get("updated_at") or "")
+            try:
+                timestamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                seconds = max(0, int((datetime.now(timezone.utc) - timestamp).total_seconds()))
+                updated = (
+                    "just now"
+                    if seconds < 60
+                    else f"{seconds // 60}m ago"
+                    if seconds < 3600
+                    else f"{seconds // 3600}h ago"
+                    if seconds < 86400
+                    else f"{seconds // 86400}d ago"
+                )
+            except ValueError:
+                pass
+            current = session_id == self._current_session
+            label = Text(f"● {title}" if current else title, style="bold" if current else "")
+            key = self._table.add_row(label, updated, cwd, key=session_id)
+            self._ids[str(key.value)] = session_id
+        if selected in self._ids:
+            self._table.move_cursor(row=list(self._ids).index(selected))
+        self._status.update(
+            Text(
+                f"{len(self._ids)}/{len(self._sessions)} sessions{self._session_notes}", style="dim"
+            )
+        )
+
+    def action_filter_sessions(self) -> None:
+        self._filter.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input is self._filter:
+            event.stop()
+            self._render_sessions()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input is self._filter:
+            event.stop()
+            self._table.focus()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape" and self._filter.has_focus:
+            event.stop()
+            self._filter.value = ""
+            self._table.focus()
 
     def selected_session_id(self) -> str | None:
         if self._table.row_count == 0:

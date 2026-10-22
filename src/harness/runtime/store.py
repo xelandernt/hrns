@@ -244,7 +244,7 @@ class SQLiteSessionStore(SessionStore):
         title: str | None = None,
         effort: str | None = None,
         bindings: Mapping[str, Mapping[str, Any]] | None = None,
-        usage: Mapping[str, int] | None = None,
+        usage: Mapping[str, Any] | None = None,
         touch: bool = False,
     ) -> None:
         assignments: list[str] = []

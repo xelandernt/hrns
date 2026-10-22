@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 import warnings
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import reduce
@@ -35,7 +35,11 @@ from acp.schema import DeleteSessionRequest, DeleteSessionResponse
 from acp.stdio import stdio_streams
 from acp.utils import normalize_result, notify_model, request_model
 from pydantic import ValidationError
+from pydantic_ai import RunContext
 from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
@@ -55,7 +59,14 @@ from harness.protocol import (
 )
 
 from . import acp as acp_map
-from .acp_store import SessionRecord, SessionStore, merge_usage, usage_payload
+from ._unavailable_tools import UnavailableTools
+from .acp_store import (
+    SessionRecord,
+    SessionStore,
+    finalize_usage,
+    merge_usage,
+    usage_payload,
+)
 from .composition import Composition, compose_definition
 from .definitions import (
     AgentDefinition,
@@ -190,6 +201,23 @@ class SessionDeps:
     composition: Composition
 
 
+@dataclass
+class _UsageReporting(AbstractCapability[Any]):
+    """Publish measured usage after each response, before tools continue the turn."""
+
+    report: Callable[[ModelResponse], Awaitable[None]]
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[Any],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        await self.report(response)
+        return response
+
+
 class _ComposedAgent:
     """A narrow agent-shaped dispatcher over one native agent per session.
 
@@ -200,8 +228,11 @@ class _ComposedAgent:
     turns itself.
     """
 
-    def __init__(self, *, name: str) -> None:
+    def __init__(
+        self, *, name: str, report_usage: Callable[[str, ModelResponse], Awaitable[None]]
+    ) -> None:
         self.name = name
+        self._report_usage = report_usage
         self.output_type = str
         self.toolsets: list[Any] = []
 
@@ -211,13 +242,19 @@ class _ComposedAgent:
             raise RuntimeError("ACP run without a composed session dependency")
         return deps.composition.agent
 
+    def _capabilities(self, deps: SessionDeps) -> list[AbstractCapability[Any]]:
+        async def report(response: ModelResponse) -> None:
+            await self._report_usage(deps.session_id, response)
+
+        return [*(deps.composition.config.capabilities or ()), _UsageReporting(report=report)]
+
     def run_stream_events(self, *args: Any, **kwargs: Any) -> Any:
         deps = kwargs.get("deps")
         composition = deps.composition if isinstance(deps, SessionDeps) else None
         target = composition.agent if composition is not None else self._select(deps)
-        if composition is not None:
+        if isinstance(deps, SessionDeps) and composition is not None:
             kwargs["deps"] = composition.deps
-            kwargs["capabilities"] = composition.config.capabilities
+            kwargs["capabilities"] = self._capabilities(deps)
             kwargs["toolsets"] = composition.config.toolsets
             kwargs["workspace"] = composition.config.workspace
         return target.run_stream_events(*args, **kwargs)
@@ -226,9 +263,9 @@ class _ComposedAgent:
         deps = kwargs.get("deps")
         composition = deps.composition if isinstance(deps, SessionDeps) else None
         target = composition.agent if composition is not None else self._select(deps)
-        if composition is not None:
+        if isinstance(deps, SessionDeps) and composition is not None:
             kwargs["deps"] = composition.deps
-            kwargs["capabilities"] = composition.config.capabilities
+            kwargs["capabilities"] = self._capabilities(deps)
             kwargs["toolsets"] = composition.config.toolsets
             kwargs["workspace"] = composition.config.workspace
         return await target.run(*args, **kwargs)
@@ -272,6 +309,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self.store = bundle.store.scoped(self.policy.principal, self.policy.deployment_id)
         self._compositions: dict[str, Composition] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._turn_usage: dict[str, dict[str, Any]] = {}
         self._config_requests: dict[str, dict[str, tuple[str, ConfigurationSnapshot]]] = {}
         self._pending_initial: list[Any] | None = None
         self._pending_effort: str | None = None
@@ -283,7 +321,10 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         super().__init__(
             cast(
                 AbstractAgent[Any, str],
-                _ComposedAgent(name=self.definition.name or self.definition.agent_id),
+                _ComposedAgent(
+                    name=self.definition.name or self.definition.agent_id,
+                    report_usage=self._report_model_usage,
+                ),
             ),
             name=self.definition.name or self.definition.agent_id,
             version=self.definition.version,
@@ -474,24 +515,61 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.PromptResponse:
         async with self._turn_lock(session_id):
-            response = await super().prompt(session_id, prompt, **kwargs)
-            record = await self.store.get(session_id)
-            if record is not None:
-                title = record.title
-                if not title:
-                    title = _prompt_text(prompt) or None
-                totals = record.usage
-                if response.usage is not None:
-                    totals = merge_usage(totals, usage_payload(response.usage))
-                await self.store.update(
-                    session_id,
-                    title=title,
-                    usage=totals,
-                    touch=True,
-                )
-                if title and title != record.title:
-                    await self._send_session_title(session_id, title)
-            return response
+            self._turn_usage[session_id] = {}
+            response = None
+            try:
+                response = await super().prompt(session_id, prompt, **kwargs)
+                return response
+            finally:
+                increment = self._turn_usage.pop(session_id, {})
+                if response is not None and response.usage is not None:
+                    # The adapter's final totals include approval continuations and limits.
+                    # Reconcile without double counting or losing measured usage on cancel.
+                    # Only counters reconcile by max; the price is summed per response.
+                    for name, value in usage_payload(response.usage).items():
+                        if isinstance(value, int) and not isinstance(value, bool):
+                            increment[name] = max(increment.get(name, 0), value)
+                record = await self.store.get(session_id)
+                if record is not None:
+                    title = record.title
+                    if not title and response is not None:
+                        title = _prompt_text(prompt) or None
+                    totals = merge_usage(record.usage, increment)
+                    await self.store.update(
+                        session_id,
+                        title=title,
+                        usage=totals,
+                        touch=True,
+                    )
+                    await self._send_session_usage(session_id, finalize_usage(totals))
+                    if title and title != record.title:
+                        await self._send_session_title(session_id, title)
+
+    async def _report_model_usage(self, session_id: str, response: ModelResponse) -> None:
+        current = self._turn_usage.get(session_id)
+        if current is None:
+            return
+        increment = usage_payload(response.usage)
+        increment["requests"] = 1
+        current = merge_usage(current, increment)
+        self._turn_usage[session_id] = current
+        record = await self.store.get(session_id)
+        await self._send_session_usage(
+            session_id,
+            finalize_usage(merge_usage(record.usage if record is not None else {}, current)),
+        )
+
+    async def _send_session_usage(self, session_id: str, totals: Mapping[str, Any]) -> None:
+        if self._client_conn is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._client_conn.session_update(
+                session_id=session_id,
+                update=schema.SessionInfoUpdate(
+                    session_update="session_info_update",
+                    field_meta={"harness": {"sessionUsage": {"scope": "session", **totals}}},
+                ),
+            )
 
     async def set_config_option(
         self,
@@ -706,6 +784,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             composition.capabilities = refreshed.capabilities
             composition.workspace = refreshed.workspace
             composition.deps = refreshed.deps
+            await self._apply_unavailable_tools(session_id, composition)
             self._config_requests.setdefault(session_id, {})[request.request_id] = (
                 request_hash,
                 snapshot,
@@ -731,6 +810,55 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             await self._client_conn.ext_notification(
                 "harness/configuration/changed", snapshot.to_wire()
             )
+
+    async def _remembered_tool_names(self, session_id: str) -> frozenset[str]:
+        """Function-tool names already present in the session's native history."""
+        stored = await self.store.load(session_id)
+        if stored is None:
+            return frozenset()
+        names: set[str] = set()
+        for message in stored.messages:
+            for part in getattr(message, "parts", ()):
+                if isinstance(part, ToolCallPart):
+                    name = getattr(part, "tool_name", None)
+                    if isinstance(name, str) and name:
+                        names.add(name)
+        return frozenset(names)
+
+    async def _apply_unavailable_tools(self, session_id: str, composition: Composition) -> None:
+        """Keep disabled tool names callable as failures for existing conversations.
+
+        DeepSeek emits raw DSML text instead of structured calls when a previously used
+        tool disappears from the request. A stub keeps the declaration and returns a
+        clear ``ToolFailed`` if the model still calls it. Active tools always win.
+        """
+        disabled = tuple(
+            offering.binding_id
+            for offering in composition.catalog.ordered_offerings()
+            if not offering.enabled
+        )
+        capabilities = [
+            capability
+            for capability in (composition.config.capabilities or ())
+            if not isinstance(capability, UnavailableTools)
+        ]
+        if disabled:
+            remembered = await self._remembered_tool_names(session_id)
+            if remembered:
+                capabilities.insert(
+                    0,
+                    UnavailableTools(
+                        disabled_bindings=disabled,
+                        remembered_tools=remembered,
+                    ),
+                )
+        composition.config = type(composition.config)(
+            deps=composition.config.deps,
+            capabilities=capabilities,
+            toolsets=composition.config.toolsets,
+            workspace=composition.config.workspace,
+        )
+        composition.capabilities = capabilities
 
     # --- composition ------------------------------------------------------
 
@@ -801,6 +929,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             toolsets=composition.config.toolsets,
             workspace=composition.config.workspace,
         )
+        await self._apply_unavailable_tools(session.session_id, composition)
         return composition.config
 
     def _require_composition(self, session_id: str) -> Composition:

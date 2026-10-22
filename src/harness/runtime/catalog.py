@@ -384,6 +384,20 @@ class ResearcherConfig(_Config):
     include_default_subagent: bool = True
 
 
+_FileSystemToolName = Literal[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_directory",
+    "search_files",
+    "find_files",
+    "create_directory",
+    "file_info",
+    "list_files",
+    "grep",
+]
+
+
 class FileSystemConfig(_Config):
     root_dir: str | None = None
     read_only: bool = False
@@ -392,8 +406,12 @@ class FileSystemConfig(_Config):
     read_only_patterns: tuple[str, ...] | None = None
     max_read_lines: int = Field(default=2_000, ge=1)
     max_read_chars: int | None = Field(default=50_000, ge=1)
+    max_list_results: int = Field(default=1_000, ge=1)
+    max_search_results: int = Field(default=1_000, ge=1)
+    max_find_results: int = Field(default=1_000, ge=1)
+    max_retries: int | None = Field(default=None, ge=0)
     content_hashes: bool = True
-    tools: tuple[str, ...] | None = None
+    tools: tuple[_FileSystemToolName, ...] | None = None
 
 
 class ShellConfig(_Config):
@@ -655,7 +673,7 @@ class ConversationSearchConfig(_Config):
 
 
 class SkillsConfig(_Config):
-    directories: tuple[str, ...] = (".agents/skills",)
+    directories: tuple[str, ...] = Field(default=(".agents/skills",), min_length=1)
     include: tuple[str, ...] | None = None
     exclude: tuple[str, ...] | None = None
     missing_directories: Literal["error", "skip"] = "error"
@@ -663,6 +681,8 @@ class SkillsConfig(_Config):
 
     @model_validator(mode="after")
     def _exclusive(self) -> SkillsConfig:
+        if any(not directory.strip() for directory in self.directories):
+            raise ValueError("skill directories must not be blank")
         if self.include is not None and self.exclude is not None:
             raise ValueError("include and exclude are mutually exclusive")
         return self
@@ -1423,6 +1443,10 @@ def _build_filesystem(_cls: Any, config: Any, binding: BindingContext) -> Any:
         "denied_patterns": list(_cfg(config, "denied_patterns", ()) or ()),
         "max_read_lines": _cfg(config, "max_read_lines", 2_000),
         "max_read_chars": _cfg(config, "max_read_chars", 50_000),
+        "max_list_results": _cfg(config, "max_list_results", 1_000),
+        "max_search_results": _cfg(config, "max_search_results", 1_000),
+        "max_find_results": _cfg(config, "max_find_results", 1_000),
+        "max_retries": _cfg(config, "max_retries"),
         "content_hashes": _cfg(config, "content_hashes", True),
     }
     patterns = _as_list(_cfg(config, "read_only_patterns"))
@@ -1823,7 +1847,7 @@ def _build_skills(_cls: Any, config: Any, binding: BindingContext) -> Any:
     _resource(binding, "workspace", plugin_id="harness.skills", description="run workspace")
     directories = list(_cfg(config, "directories", (".agents/skills",)) or ())
     kwargs: dict[str, Any] = {
-        "directories": directories if len(directories) > 1 else directories[0],
+        "directories": directories,
         "missing_directories": _cfg(config, "missing_directories", "error"),
         "duplicate_names": _cfg(config, "duplicate_names", "error"),
     }
