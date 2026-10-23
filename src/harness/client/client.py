@@ -166,15 +166,9 @@ def _absolute_path(value: str, *, label: str) -> str:
 def _checked_limit(limit: int | None) -> int | None:
     if limit is None:
         return None
-    try:
-        value = int(limit)
-    except (TypeError, ValueError) as exc:
-        raise HarnessClientError(
-            "The pagination limit must be an integer between 1 and 100."
-        ) from exc
-    if not 1 <= value <= 100:
+    if not 1 <= limit <= 100:
         raise HarnessClientError("The pagination limit must be between 1 and 100.")
-    return value
+    return limit
 
 
 def _text_of(content: Any) -> str | None:
@@ -381,7 +375,7 @@ class HarnessAcpClient:
             await self._abort(bundle)
             self._publish_connection("error", f"Agent rejected initialize: {exc}")
             raise ProtocolError(f"The agent rejected ACP initialize: {exc}") from exc
-        except (ConnectionError, asyncio.IncompleteReadError, BrokenPipeError) as exc:
+        except (ConnectionError, asyncio.IncompleteReadError) as exc:
             tail = await self._bundle_stderr_tail()
             await self._abort(bundle)
             detail = f"Agent closed the connection during initialize: {exc}"
@@ -767,7 +761,7 @@ class HarnessAcpClient:
         except asyncio.CancelledError:
             self.bus.publish(TurnCompleted(session_id=session_id, stop_reason="cancelled"))
             raise
-        except (ConnectionError, asyncio.IncompleteReadError, BrokenPipeError) as exc:
+        except (ConnectionError, asyncio.IncompleteReadError) as exc:
             await self.drain_events()
             detail = f"The connection was lost during the turn: {exc}"
             self.bus.publish(

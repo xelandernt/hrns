@@ -110,7 +110,7 @@ async def run_bridge_pump(
         status = getattr(getattr(exc, "response", None), "status_code", None)
         report(f"the server rejected the connection{f' (HTTP {status})' if status else ''}")
         return EXIT_BRIDGE_FAILURE
-    except (OSError, WebSocketException, asyncio.TimeoutError, TimeoutError) as exc:
+    except (OSError, WebSocketException) as exc:
         report(f"cannot connect to the remote agent: {exc}")
         return EXIT_BRIDGE_FAILURE
     selected = getattr(ws, "subprotocol", None)
@@ -123,7 +123,7 @@ async def run_bridge_pump(
         return EXIT_BRIDGE_PROTOCOL
 
     rewritten = False
-    remote_error = ""
+    remote_error: str = ""
 
     async def local_to_remote() -> None:
         nonlocal rewritten

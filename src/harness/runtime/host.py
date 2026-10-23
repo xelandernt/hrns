@@ -41,6 +41,7 @@ from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
@@ -136,7 +137,7 @@ class HostSetup:
 
     @property
     def advertise_local_binding_creation(self) -> bool:
-        return bool(self.local_binding_creation) and not self.hosted
+        return self.local_binding_creation and not self.hosted
 
     def advertised_models(self) -> tuple[str, ...]:
         values = list(dict.fromkeys(model for model in self.models if model))
@@ -173,7 +174,7 @@ class HostPolicy:
     default_model: str | None = None
     thinking_models: Mapping[str, str] = field(default_factory=dict)
     default_effort: str | None = None
-    model_settings: Mapping[str, Any] = field(default_factory=dict)
+    model_settings: ModelSettings = field(default_factory=ModelSettings)
     resources: ResourceSet | ResourceBindings = field(default_factory=dict)
     default_cwd: str | None = None
 
@@ -1486,7 +1487,7 @@ def build_agent(bundle: HostBundle, setup: HostSetup | None = None) -> HarnessAC
     policy = HostPolicy(
         principal=setup.principal if setup else "local",
         deployment_id=setup.deployment_id if setup else "local",
-        hosted=bool(setup.hosted) if setup else False,
+        hosted=setup.hosted if setup else False,
         allowed_cwds=setup.allowed_cwds if setup else None,
         allow_local_binding_creation=setup.advertise_local_binding_creation if setup else True,
         models=models,
@@ -1740,7 +1741,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         setup = setup_from_args(args)
     except _UsageError as exc:
         parser.error(str(exc))
-        return 2  # pragma: no cover
     try:
         bundle = resolve_builder(args.runtime_module)(setup)
         agent = build_agent(bundle, setup)

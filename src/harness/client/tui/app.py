@@ -128,6 +128,16 @@ class HarnessApp(App[int]):
         padding-left: 1;
         margin-bottom: 1;
     }
+    /* Inline code and list markers stay neutral: the default Markdown theme
+       tints them with the warning colour, which reads as red in the transcript. */
+    MarkdownBlock:dark > .code_inline,
+    MarkdownBlock:light > .code_inline {
+        color: $foreground;
+        background: $surface 70%;
+    }
+    Markdown MarkdownBullet {
+        color: $text-muted;
+    }
     .reasoning-body {
         color: $text-muted;
         padding-left: 1;
@@ -821,7 +831,7 @@ def run_terminal(
     async def _main() -> int:
         try:
             result = await app.run_async()
-            return int(result or 0)
+            return result or 0
         finally:
             await app.shutdown_client()
 

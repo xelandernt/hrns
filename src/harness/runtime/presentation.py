@@ -156,7 +156,7 @@ class PresentationObserver(AbstractCapability[Any]):
                     tool_call_id=call_id,
                     revision=self._revision(call_id),
                     binding_id=self._bindings[call_id],
-                    run_id=str(ctx.run_id) if ctx.run_id else None,
+                    run_id=ctx.run_id if ctx.run_id else None,
                     input=input_payload,
                     fallback=input_payload.fallback if input_payload else "",
                 )
@@ -175,7 +175,7 @@ class PresentationObserver(AbstractCapability[Any]):
                     tool_call_id=call_id,
                     revision=self._revision(call_id),
                     binding_id=self._bindings.get(call_id),
-                    run_id=str(ctx.run_id) if ctx.run_id else None,
+                    run_id=ctx.run_id if ctx.run_id else None,
                     progress=payload,
                     fallback=payload.fallback,
                 )
@@ -213,7 +213,7 @@ class PresentationObserver(AbstractCapability[Any]):
                 "version": 1,
                 "revision": revision,
                 "bindingId": str(binding) if binding else None,
-                "runId": str(ctx.run_id) if ctx.run_id else None,
+                "runId": ctx.run_id if ctx.run_id else None,
                 "input": input_payload.to_wire() if input_payload else None,
                 "output": output_payload.to_wire() if output_payload else None,
                 "fallback": (
@@ -239,7 +239,7 @@ class PresentationObserver(AbstractCapability[Any]):
                 tool_call_id=call_id,
                 revision=revision,
                 binding_id=str(binding) if binding else None,
-                run_id=str(ctx.run_id) if ctx.run_id else None,
+                run_id=ctx.run_id if ctx.run_id else None,
                 input=input_payload,
                 output=output_payload,
                 fallback=(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -26,6 +27,7 @@ __all__ = [
     "format_cost",
     "format_usage",
     "format_usage_compact",
+    "is_shell_call",
     "merge_presentation",
     "merge_tool_event",
     "model_option",
@@ -66,6 +68,22 @@ def tool_status_label(status: str) -> str:
 def _one_line(value: Any, limit: int) -> str:
     text = " ".join(str(value).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def is_shell_call(data: Mapping[str, Any]) -> bool:
+    """Whether a tool call carries a shell command, regardless of its reported kind."""
+    if str(data.get("kind") or "") == "execute":
+        return True
+    raw = data.get("raw_input")
+    if isinstance(raw, str):
+        decoded = raw.strip()
+        if not decoded.startswith("{"):
+            return False
+        try:
+            raw = json.loads(decoded)
+        except (TypeError, ValueError):
+            return False
+    return isinstance(raw, Mapping) and ("command" in raw or "cmd" in raw)
 
 
 def tool_args_preview(data: dict[str, Any], *, limit: int = 80) -> str:

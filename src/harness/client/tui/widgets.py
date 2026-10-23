@@ -53,6 +53,7 @@ from .choice_keys import choice_direction
 from .state import (
     binding_summary,
     config_option_value,
+    is_shell_call,
     merge_presentation,
     merge_tool_event,
     presentation_payload,
@@ -1204,7 +1205,7 @@ class ToolCard(Vertical):
         self.view_context = view_context
         self._view: Any = None
         self._view_built = False
-        self._expanded = bool(auto_expand)
+        self._expanded = auto_expand
         self._started = time.monotonic()
         self._finished: float | None = None
         self._spin_index = 0
@@ -1328,7 +1329,7 @@ class ToolCard(Vertical):
         args = tool_args_preview(self.data, limit=args_limit)
         text = Text()
         text.append(f"{symbol} ", style="bold" if not pending else "dim")
-        if str(self.data.get("kind") or "") == "execute" and args:
+        if is_shell_call(self.data) and args:
             # Shell calls read like a prompt line: ``$ <command>``.
             text.append("$ ", style="bold")
             text.append(args)
@@ -1879,16 +1880,14 @@ class ApprovalBar(Vertical):
         self._build_view(request, data or {}, renderer, view_context)
         self._options.clear_options()
         for option in request.options:
-            kind = str(option.get("kind") or "")
+            kind = option.get("kind") or ""
             label, shortcut = APPROVAL_LABELS.get(
-                kind, (str(option.get("name") or kind or "Option"), "")
+                kind, (option.get("name") or kind or "Option", "")
             )
             suffix = f"   ({shortcut})" if shortcut else ""
             label = readable_text(label, limit=120)
-            self._options.add_option(
-                Option(f"{label}{suffix}", id=str(option.get("optionId") or ""))
-            )
-        kinds = {str(option.get("kind") or "") for option in request.options}
+            self._options.add_option(Option(f"{label}{suffix}", id=option.get("optionId") or ""))
+        kinds = {option.get("kind") or "" for option in request.options}
         hints = ["↑/↓ choose"]
         if "allow_once" in kinds:
             hints.append("y allow once")
@@ -1950,13 +1949,13 @@ class ApprovalBar(Vertical):
         if self._request is None:
             return None
         option = self._request.first_of_kind(kind)
-        option_id = str(option.get("optionId") or "") if option else ""
+        option_id = option.get("optionId") or "" if option else ""
         return option_id or None
 
     def option_id_at(self, index: int) -> str | None:
         if self._request is None or not 0 <= index < len(self._request.options):
             return None
-        option_id = str(self._request.options[index].get("optionId") or "")
+        option_id = self._request.options[index].get("optionId") or ""
         return option_id or None
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -2322,7 +2321,7 @@ class McpPanel(Vertical):
         *,
         can_write: bool = True,
     ) -> None:
-        self.can_write = bool(can_write)
+        self.can_write = can_write
         self._server_bindings = list(bindings)
         self._snapshot = snapshot
         self._render_rows()
@@ -2633,7 +2632,7 @@ class CapabilityPanel(Vertical):
         can_write: bool = True,
     ) -> None:
         self.extension_mode = True
-        self.can_write = bool(can_write)
+        self.can_write = can_write
         self._plugin_bindings = list(bindings)
         self._snapshot = snapshot
         self._render_rows(active_revision=active_revision, selected_revision=selected_revision)

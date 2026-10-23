@@ -22,7 +22,7 @@ from ..config.mcp import (
 from ._version import __version__
 from .catalog import AgentDeployment
 from .client import HarnessAcpClient
-from .errors import HarnessClientError, InteractionRequired, SecretMissing
+from .errors import HarnessClientError, InteractionRequired
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
 from .launch import (
@@ -937,13 +937,13 @@ def main(argv: list[str] | None = None) -> int:
             return clean(assume_yes=args.yes, dry_run=args.dry_run)
     except KeyboardInterrupt:
         return 130
-    except (HarnessClientError, SecretMissing, KeyError) as exc:
-        message = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
-        print(f"harness: error: {message}", file=sys.stderr)
-        return EXIT_USAGE if isinstance(exc, KeyError) else EXIT_FAILURE
     except InteractionRequired as exc:
         print(f"harness: interaction-required: {exc.message}", file=sys.stderr)
         return 3
+    except (HarnessClientError, KeyError) as exc:
+        message = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+        print(f"harness: error: {message}", file=sys.stderr)
+        return EXIT_USAGE if isinstance(exc, KeyError) else EXIT_FAILURE
     except (ValueError, OSError) as exc:
         print(f"harness: error: {exc}", file=sys.stderr)
         return EXIT_FAILURE

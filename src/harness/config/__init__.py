@@ -18,6 +18,7 @@ __all__ = [
     "EFFORT_OFF",
     "THINKING_LEVELS",
     "CapabilitiesSettings",
+    "EffortLevel",
     "LocalSettings",
     "McpOAuthConfig",
     "McpServerConfig",

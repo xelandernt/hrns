@@ -11,13 +11,13 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, JsonValue
 from pydantic_ai import Agent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.agent.spec import AgentSpec as NativeAgentSpec
-from pydantic_ai.capabilities import AbstractCapability, AgentCapability
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability, DynamicCapability
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
 from typing_extensions import TypeIs
@@ -76,7 +76,7 @@ class _ProviderSettings(ModelSettings, total=False):
     rather than widening the whole mapping to a loose dict.
     """
 
-    openai_reasoning_effort: Literal["none", EffortLevel]
+    openai_reasoning_effort: Literal["none", EffortLevel] | None
 
 
 def _is_effort_level(value: object) -> TypeIs[EffortLevel]:
@@ -154,7 +154,7 @@ class Composition:
     resources: ResourceSet
     effort: EffortState
     config: AcpSessionConfig[object]
-    capabilities: list[AgentCapability] = field(default_factory=list)
+    capabilities: list[AbstractCapability[object]] = field(default_factory=list)
     commands: CommandRegistry = field(default_factory=CommandRegistry)
     presentation: PresentationObserver | None = None
     workspace: ResolvedWorkspace | None = None
@@ -262,7 +262,7 @@ async def _build_agent(
     principal: str,
     deployment_id: str,
     deps_type: type[HarnessDeps] | None = None,
-) -> tuple[AbstractAgent, list[AgentCapability]]:
+) -> tuple[AbstractAgent[Any, Any], list[AgentCapability]]:
     """Construct the native agent and any capabilities that must be applied per run.
 
     ``deps_type`` is the run's dependency type when Harness owns the agent (spec or plain
@@ -272,7 +272,7 @@ async def _build_agent(
     capabilities = [capability for _, capability in composed]
     _validate_composed_identities(definition, composed)
     if definition.spec is not None:
-        spec: NativeAgentSpec | Mapping[str, JsonValue] = definition.spec
+        spec: NativeAgentSpec | dict[str, Any] = definition.spec
         if isinstance(spec, BaseModel):
             spec = spec.model_dump(mode="json", exclude_defaults=True)
         declared: list[AgentCapability] = [*definition.fixed_capabilities, *capabilities]
@@ -374,6 +374,18 @@ def _validate_resource_needs(
                         "description": slot.description,
                     },
                 )
+
+
+def _session_capability(capability: AgentCapability) -> AbstractCapability[object]:
+    """The capability object the ACP session config can hold.
+
+    ``AgentCapability`` also admits a plain callable, which ``Agent.run`` wraps in a
+    ``DynamicCapability``. The ACP adapter inspects ``AcpSessionConfig.capabilities``
+    before a run exists, so the wrapper has to be applied here rather than left to the run.
+    """
+    if isinstance(capability, AbstractCapability):
+        return capability
+    return DynamicCapability[object](capability_func=capability)
 
 
 async def compose_definition(
@@ -483,10 +495,10 @@ async def compose_definition(
     observer: PresentationObserver | None = None
     if presentation_sink is not None:
         observer = PresentationObserver(session_id=session_id, publish=presentation_sink)
-    capabilities: list[AgentCapability] = [
+    capabilities: list[AbstractCapability[object]] = [
         _EffortCapability(state=effort_state),
         *([observer] if observer is not None else []),
-        *run_capabilities,
+        *(_session_capability(capability) for capability in run_capabilities),
     ]
     workspace = _workspace_value(definition, resource_set)
     config = AcpSessionConfig(
