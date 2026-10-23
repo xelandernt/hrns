@@ -37,6 +37,7 @@ from .models import (
     PluginListResponse,
     PresentationPayload,
     RuntimeEvent,
+    SteerRequest,
     WireModel,
     changes_adapter,
 )
@@ -55,6 +56,7 @@ from .transport import (
 
 __all__ = [
     "SUPPORTED_CONVERSATION_OPERATIONS",
+    "SteerRequest",
     "CommandCancelRequest",
     "CommandCancelResponse",
     "CommandCatalogChanged",

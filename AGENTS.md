@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## Typing
+
+To the best of the ability:
+
+- typing.Any should be avoided
+- typing.cast() should be avoided
+- $ type:ignore or similar comments should be avoided
+
 ## Backwards Compatibility
 
 !Important! No Backwards Compatability needs to be supported unless explicitly requested.

@@ -68,6 +68,7 @@ from harness.protocol import (
     PresentationListRequest,
     PresentationListResponse,
     PresentationUpdated,
+    SteerRequest,
     ToolPresentationSnapshot,
     canonical_hash,
     paginate,
@@ -93,6 +94,7 @@ from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
 from .presentation import snapshot_from_metadata
 from .registry import PluginRegistry
 from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceBindings, ResourceSet
+from .steering import SteeringCapability, SteeringChannel
 from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
@@ -329,6 +331,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._command_results: dict[str, OrderedDict[str, tuple[str, dict[str, Any]]]] = {}
         self._command_locks: dict[str, asyncio.Lock] = {}
         self._plan_channels: dict[str, PlanChannel] = {}
+        self._steering: dict[str, SteeringChannel] = {}
         self._pending_initial: list[Any] | None = None
         self._pending_effort: str | None = None
         self._new_lock = asyncio.Lock()
@@ -390,6 +393,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._command_results.pop(session_id, None)
         self._command_locks.pop(session_id, None)
         self._plan_channels.pop(session_id, None)
+        self._steering.pop(session_id, None)
         self._command_active.discard(session_id)
         return response
 
@@ -557,6 +561,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 response = await super().prompt(session_id, prompt, **kwargs)
                 return response
             finally:
+                channel = self._steering.get(session_id)
+                if channel is not None:
+                    channel.detach()
                 increment = self._turn_usage.pop(session_id, {})
                 if response is not None and response.usage is not None:
                     # The adapter's final totals include approval continuations and limits.
@@ -585,7 +592,8 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         current = self._turn_usage.get(session_id)
         if current is None:
             return
-        increment = usage_payload(response.usage)
+        payload = usage_payload(response.usage)
+        increment = dict(payload)
         increment["requests"] = 1
         current = merge_usage(current, increment)
         self._turn_usage[session_id] = current
@@ -594,6 +602,55 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             session_id,
             finalize_usage(merge_usage(record.usage if record is not None else {}, current)),
         )
+        await self._send_context_usage(session_id, payload)
+
+    async def _send_context_usage(self, session_id: str, payload: Mapping[str, Any]) -> None:
+        """Publish how full the model's context window is after one model response.
+
+        ACP's ``UsageUpdate`` carries the gauge (tokens in context) separately from the
+        cumulative session counters, so clients can show a context readout that does not
+        grow by the whole history on every turn.
+        """
+        if self._client_conn is None:
+            return
+        input_tokens = payload.get("input_tokens")
+        output_tokens = payload.get("output_tokens")
+        used = payload.get("total_tokens")
+        if not isinstance(used, int):
+            used = int(input_tokens or 0) + int(output_tokens or 0)
+        detail = {
+            key: value
+            for key, value in payload.items()
+            if key
+            in {
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            }
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        }
+        with contextlib.suppress(Exception):
+            await self._client_conn.session_update(
+                session_id=session_id,
+                update=schema.UsageUpdate(
+                    session_update="usage_update",
+                    used=max(0, used),
+                    size=self._context_window(session_id),
+                    field_meta={"harness": {"contextUsage": detail}},
+                ),
+            )
+
+    def _context_window(self, session_id: str) -> int:
+        """The selected model's context window, or 0 when the profile does not say."""
+        composition = self._compositions.get(session_id)
+        model = getattr(composition.agent, "model", None) if composition is not None else None
+        window = getattr(model, "context_window", None)
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            return window
+        return 0
 
     async def _send_session_usage(self, session_id: str, totals: Mapping[str, Any]) -> None:
         if self._client_conn is None:
@@ -680,6 +737,17 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 await self.store.update(request.session_id, title=request.title, touch=True)
                 await self._send_session_title(request.session_id, request.title)
                 return {"sessionId": request.session_id, "title": request.title}
+            if method == "harness/session/steer":
+                request = SteerRequest.model_validate(dict(params))
+                if await self.store.get(request.session_id) is None:
+                    raise HarnessError("SESSION_CLOSED", "Load the session before steering it.")
+                channel = self._steering.get(request.session_id)
+                if channel is None or not channel.enqueue(request.text):
+                    raise HarnessError(
+                        "TURN_NOT_RUNNING",
+                        "The turn is no longer accepting steering; send the message as a prompt.",
+                    )
+                return {"sessionId": request.session_id, "steered": True}
             if method == "harness/capabilities/list":
                 request = ListRequest.model_validate(dict(params))
                 if not request.session_id:
@@ -1222,12 +1290,17 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 bindings=composition.catalog.export_bindings(),
                 touch=True,
             )
+        steering = SteeringChannel()
         composition.config = type(composition.config)(
             deps=SessionDeps(session_id=session.session_id, composition=composition),
-            capabilities=composition.config.capabilities,
+            capabilities=[
+                *(composition.config.capabilities or ()),
+                SteeringCapability(steering),
+            ],
             toolsets=composition.config.toolsets,
             workspace=composition.config.workspace,
         )
+        self._steering[session.session_id] = steering
         await self._apply_unavailable_tools(session.session_id, composition)
         channel = self._plan_channels.get(session.session_id)
         if channel is not None:

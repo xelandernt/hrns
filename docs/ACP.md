@@ -71,7 +71,8 @@ Initialization advertises `_meta.harness` version 1 with:
   "_harness/configuration/get",
   "_harness/configuration/update",
   "_harness/configuration/changed",
-  "_harness/session/rename"
+  "_harness/session/rename",
+  "_harness/session/steer"
 ], "localBindingCreation": true}}
 ```
 
@@ -87,6 +88,7 @@ permit adding bindings. A hosted connection advertises the remaining methods wit
 | `_harness/configuration/update` | the committed snapshot after a validated edit |
 | `_harness/configuration/changed` | host notification carrying the committed snapshot |
 | `_harness/session/rename` | persists a title and emits `session_info_update` |
+| `_harness/session/steer` | injects a follow-up into the running turn at its next model request |
 
 Descriptors describe identity, config schema, current non-secret values, availability,
 requirements/conflicts, lifecycle, and policy. No descriptor contains executable code or
@@ -125,7 +127,11 @@ scoped metadata row; a foreign session is never leaked. Delete closes active wor
 Per-turn usage comes from `PromptResponse.usage`. After each model response, the host also
 publishes cumulative session usage in `SessionInfoUpdate._meta.harness.sessionUsage` with
 `scope: "session"`, so clients can refresh token counts while tools and further model
-requests are still running. The payload also carries `cost` (a decimal string, present only
+requests are still running. The same response publishes a separate ACP `usage_update`
+notification whose `used`/`size` are the context gauge for that single request (with the
+per-request counters in `_meta.harness.contextUsage`), so clients can show context-window
+fill without treating cumulative counters as a gauge. The session payload also carries
+`cost` (a decimal string, present only
 when Pydantic AI priced the response) and a derived `cost_status`: `estimated` when the total
 includes a price, `unavailable` when the model has no known price. A missing price is never
 reported as free. Final usage is reconciled once and persisted in metadata; measured tokens

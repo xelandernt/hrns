@@ -60,7 +60,7 @@ from ..local import local_model_catalog, local_target, local_thinking_support
 from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow, stepped_value
 from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
-from .completion import matching_files, matching_skills, workspace_files
+from .completion import FileIndex, index_workspace, matching_skills
 from .dialogs import (
     ChoiceDialog,
     CommandPaletteDialog,
@@ -78,7 +78,9 @@ from .state import (
     build_form_fields,
     config_option_value,
     effort_option,
-    format_usage_compact,
+    format_context_detail,
+    format_context_usage,
+    format_cost,
     model_option,
     option_values,
     permission_mode_label,
@@ -790,6 +792,7 @@ class ChatScreen(Screen[None]):
         self._activity = ""
         self._hint_note = ""
         self._usage: dict[str, Any] | None = None
+        self._context_usage: dict[str, Any] | None = None
         self._session_title: str | None = None
         self._plan: tuple[tuple[str, str, str], ...] = ()
         self._todo_auto_opened_for: str | None = None
@@ -819,6 +822,7 @@ class ChatScreen(Screen[None]):
         self._suggestion_index = 0
         self._suggestion_signature: tuple[str, ...] = ()
         self._workspace_files: list[str] = []
+        self._file_index = FileIndex(())
         self._workspace_root = Path.cwd()
         self._skills: list[dict[str, Any]] = []
         self._skills_loading = False
@@ -974,7 +978,9 @@ class ChatScreen(Screen[None]):
             model=config_option_value(option) if option else "",
             effort=config_option_value(reasoning) if reasoning else "",
             mode=(session.current_mode_id or "") if session else "",
-            usage=format_usage_compact(self._usage),
+            usage=format_context_usage(self._context_usage),
+            cost=format_cost(self._usage),
+            usage_detail=format_context_detail(self._context_usage, self._usage),
             busy=self.busy,
             activity=self._activity,
             permission=permission_mode_label(self.settings.permission_mode),
@@ -1003,6 +1009,7 @@ class ChatScreen(Screen[None]):
     def _reset_activity(self) -> None:
         """Drop activity that belongs to the previous session or connection."""
         self._usage = None
+        self._context_usage = None
         self._activity = ""
         self._hint_note = ""
         self._session_title = None
@@ -1250,6 +1257,10 @@ class ChatScreen(Screen[None]):
                     self.refresh_sessions()
             return
         if isinstance(event, UsageUpdated):
+            if event.summary.get("scope") == "context":
+                self._context_usage = event.summary
+                self._refresh_status()
+                return
             if (
                 self._usage
                 and self._usage.get("scope") == "session"
@@ -1419,8 +1430,23 @@ class ChatScreen(Screen[None]):
 
     @work(group="file-index", exclusive=True)
     async def _index_workspace(self) -> None:
-        self._workspace_files = await asyncio.to_thread(workspace_files, self._workspace_root)
+        self._workspace_files, self._file_index = await asyncio.to_thread(
+            index_workspace, self._workspace_root
+        )
+        self._sync_mention_catalog()
         self._sync_command_suggestions()
+
+    def _sync_mention_catalog(self) -> None:
+        """Tell the composer which ``$skill`` / ``@path`` references are real."""
+        with contextlib.suppress(Exception):
+            self.query_one("#composer", Composer).set_mention_catalog(
+                skills=[
+                    str(skill.get("name", ""))
+                    for skill in self._skills
+                    if bool(skill.get("user_invocable", True))
+                ],
+                files=self._workspace_files,
+            )
 
     def _sync_skill_suggestions(self) -> bool:
         composer = self.query_one("#composer", Composer)
@@ -1474,7 +1500,7 @@ class ChatScreen(Screen[None]):
                 "start": (row, match.start()),
                 "end": (row, column),
             }
-            for path in matching_files(self._workspace_files, match.group(1))
+            for path in self._file_index.matching(match.group(1))
         ]
         if not items:
             self._hide_command_suggestions()
@@ -1720,6 +1746,8 @@ class ChatScreen(Screen[None]):
             self.query_one("#composer", Composer).focus()
             return False
         if self.busy:
+            if not self._attachments and await self._steer(text):
+                return True
             if len(self._queued_prompts) >= 20:
                 await self._notice(
                     "The queue is full (20 follow-ups). Edit or remove an item.", "warning"
@@ -1764,6 +1792,27 @@ class ChatScreen(Screen[None]):
             del history[:-100]
         self.query_one("#composer", Composer).prompt_history = history
 
+    async def _steer(self, text: str) -> bool:
+        """Deliver a follow-up into the running turn instead of waiting for it to end.
+
+        The host injects it before its next model request, so the agent can act on it
+        after the tool call it is currently running. Peers without the extension, or a
+        turn that just finished, fall back to the local queue.
+        """
+        if not self.client.extension.supports("_harness/session/steer"):
+            return False
+        try:
+            if not await self.session.steer(text):
+                return False
+        except HarnessClientError:
+            return False
+        pane = self.query_one("#transcript", TranscriptPane)
+        await pane.finish_message()
+        await pane.add_user(text)
+        self._remember_prompt(text)
+        self.query_one("#composer", Composer).clear_composer()
+        return True
+
     def _save_draft(self) -> None:
         self._drafts[self.session.session_id] = (
             self.query_one("#composer", Composer).text,
@@ -1777,6 +1826,7 @@ class ChatScreen(Screen[None]):
             if root.is_dir() and root != self._workspace_root:
                 self._workspace_root = root
                 self._workspace_files = []
+                self._file_index = FileIndex(())
                 self._index_workspace()
         text, attachments, queue = self._drafts.get(self.session.session_id, ("", [], []))
         composer = self.query_one("#composer", Composer)
@@ -1949,6 +1999,7 @@ class ChatScreen(Screen[None]):
         try:
             binding_id = await self._skills_binding_id()
             self._skills = [] if binding_id is None else await self._fetch_skill_catalog(binding_id)
+            self._sync_mention_catalog()
         finally:
             self._skills_loading = False
 
@@ -3384,8 +3435,10 @@ class ChatScreen(Screen[None]):
 {plugin_section}
 
 Type `@` to find and attach a local workspace file; select a staged file to remove it.
-Submitting during a running turn queues a follow-up with its attachments. Use the queue's
-Edit and Remove controls to revise pending messages. Cancellation or errors pause the queue.
+Submitting during a running turn steers the agent: the text reaches it at its next model
+request instead of waiting for the turn to end. Prompts with attachments, and peers without
+the steering extension, queue locally instead; use the queue's Edit and Remove controls to
+revise those. Cancellation or errors pause the queue.
 Drafts, prompt history, attachments, and queues stay with their session while this app is open.
 Use `/` in the sessions panel to filter titles and workspaces. `Esc` closes the panel.
 

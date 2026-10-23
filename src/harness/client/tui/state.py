@@ -21,6 +21,9 @@ __all__ = [
     "binding_summary",
     "coerce_value",
     "config_option_value",
+    "format_context_detail",
+    "format_context_usage",
+    "format_cost",
     "format_usage",
     "format_usage_compact",
     "merge_presentation",
@@ -444,13 +447,41 @@ def format_usage(usage: dict[str, Any] | None) -> str:
 
 def _token_count(value: int) -> str:
     if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
-    if value >= 1_000:
-        return f"{value / 1_000:.1f}k"
-    return str(value)
+        size, unit = value / 1_000_000, "M"
+    elif value >= 1_000:
+        size, unit = value / 1_000, "k"
+    else:
+        return str(value)
+    text = f"{size:.1f}"
+    return text.removesuffix(".0") + unit
 
 
 COST_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£"}
+
+
+def format_cost(usage: dict[str, Any] | None) -> str:
+    """The session's priced total, e.g. ``$0.0123``; empty when the model is unpriced."""
+    if not usage:
+        return ""
+    cost = usage.get("cost")
+    currency = "USD"
+    if isinstance(cost, dict):
+        currency = cost.get("currency", "USD")
+        cost = cost.get("amount")
+    try:
+        amount = Decimal(str(cost))
+        if not amount.is_finite():
+            raise ValueError("Non-finite cost")
+    except (InvalidOperation, ValueError, TypeError):
+        return ""
+    symbol = COST_SYMBOLS.get(currency.upper(), f"{currency} ")
+    # Four decimals matter for cheap models; trim noise but keep cents legible.
+    text = f"{amount:.4f}".rstrip("0")
+    if text.endswith("."):
+        text += "00"
+    elif len(text.rsplit(".", 1)[-1]) == 1:
+        text += "0"
+    return f"{symbol}{text}"
 
 
 def format_usage_compact(usage: dict[str, Any] | None) -> str:
@@ -463,20 +494,9 @@ def format_usage_compact(usage: dict[str, Any] | None) -> str:
     if not usage:
         return ""
     parts: list[str] = []
-    cost = usage.get("cost")
-    currency = "USD"
-    if isinstance(cost, dict):
-        currency = cost.get("currency", "USD")
-        cost = cost.get("amount")
-    try:
-        amount = Decimal(str(cost))
-        if not amount.is_finite():
-            raise ValueError("Non-finite cost")
-        symbol = COST_SYMBOLS.get(currency.upper(), f"{currency} ")
-        digits = 2 if amount >= Decimal("0.01") else 4
-        parts.append(f"{symbol}{amount:.{digits}f}")
-    except (InvalidOperation, ValueError, TypeError):
-        pass
+    cost = format_cost(usage)
+    if cost:
+        parts.append(cost)
     for camel, snake, label in (
         ("inputTokens", "input_tokens", "in"),
         ("outputTokens", "output_tokens", "out"),
@@ -488,6 +508,60 @@ def format_usage_compact(usage: dict[str, Any] | None) -> str:
     if isinstance(cached, int) and cached:
         parts.append(f"{_token_count(cached)} cached")
     return " · ".join(parts)
+
+
+def format_context_usage(context: dict[str, Any] | None) -> str:
+    """Tokens currently in the model's context window, for the status band."""
+    if not context:
+        return ""
+    used = context.get("used")
+    if not isinstance(used, int) or isinstance(used, bool):
+        return ""
+    size = context.get("size")
+    if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+        return f"{_token_count(used)}/{_token_count(size)} ({used * 100 // size}%)"
+    return _token_count(used)
+
+
+def format_context_detail(context: dict[str, Any] | None, session: dict[str, Any] | None) -> str:
+    """Hover text for the context readout: what fills it, plus session totals."""
+    lines: list[str] = []
+    if context:
+        used = context.get("used")
+        size = context.get("size")
+        if isinstance(used, int) and not isinstance(used, bool):
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                share = used * 100 // size
+                lines.append(f"context {used:,} / {size:,} tokens ({share}%)")
+            else:
+                lines.append(f"context {used:,} tokens")
+        detail = context.get("detail")
+        if isinstance(detail, dict):
+            counts = (
+                ("input_tokens", "in"),
+                ("output_tokens", "out"),
+                ("cache_read_tokens", "cached"),
+                ("cache_write_tokens", "cache write"),
+            )
+            parts: list[str] = []
+            for key, label in counts:
+                value = detail.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value:
+                    parts.append(f"{label} {_token_count(value)}")
+            if parts:
+                lines.append("last request · " + " · ".join(parts))
+    totals = format_usage_compact(session)
+    if totals:
+        lines.append("session · " + totals)
+    elif isinstance(context, dict) and isinstance(context.get("cost"), dict):
+        # Other ACP agents report only a cumulative price on the usage gauge.
+        cost = context["cost"]
+        amount = cost.get("amount")
+        currency = str(cost.get("currency") or "USD")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            symbol = COST_SYMBOLS.get(currency.upper(), f"{currency} ")
+            lines.append(f"session · {symbol}{amount:.4f}")
+    return "\n".join(lines)
 
 
 ACTIVITY_VERBS = {

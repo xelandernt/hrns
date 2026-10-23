@@ -20,6 +20,7 @@ EXTENSION_METHODS = (
     "_harness/configuration/update",
     "_harness/configuration/changed",
     "_harness/session/rename",
+    "_harness/session/steer",
     "_harness/commands/list",
     "_harness/commands/invoke",
     "_harness/commands/cancel",

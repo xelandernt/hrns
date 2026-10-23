@@ -97,7 +97,8 @@ through `_meta.harness`:
 - `_harness/configuration/get` — the session's current configuration snapshot;
 - `_harness/configuration/update` — validated next-turn capability edits;
 - `_harness/configuration/changed` — notification carrying a committed snapshot;
-- `_harness/session/rename` — a persistent title.
+- `_harness/session/rename` — a persistent title;
+- `_harness/session/steer` — a follow-up injected into the running turn.
 
 Standard model and effort options remain editable throughout. The `harness.acp.v1` WebSocket
 subprotocol carries one JSON-RPC object per text frame with a 16 MiB limit.
