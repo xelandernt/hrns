@@ -23,7 +23,6 @@ from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
-from pydantic_core import to_jsonable_python
 
 from harness.protocol import CapabilityPolicy, HarnessError, PluginInfo, ResourceNeed
 
@@ -306,15 +305,6 @@ def current_tuple(parts: Sequence[int]) -> tuple[int, ...]:
     return tuple(parts)
 
 
-class _PendingImportPlugin:
-    """Metadata for an import-reference plugin discovered without importing its module."""
-
-    __slots__ = ("descriptor",)
-
-    def __init__(self, descriptor: PluginDescriptor) -> None:
-        self.descriptor = descriptor
-
-
 class PluginRegistry:
     """Registered plugin catalog for one runtime host.
 
@@ -333,7 +323,6 @@ class PluginRegistry:
     ) -> None:
         self._plugins: dict[str, PluginDescriptor] = {}
         self._providers: dict[str, Any] = {}
-        self._entry_point_source: str | None = None
         self.allow_local_binding_creation = allow_local_binding_creation
         self._discovery_errors: dict[str, str] = {}
         from .capabilities import bundled_descriptors
@@ -424,8 +413,6 @@ class PluginRegistry:
                 continue
             self._providers[plugin_id] = entry_point
             newly += 1
-        if newly:
-            self._entry_point_source = entry_point_group
         return newly
 
     def _resolve_provider(self, plugin_id: str) -> PluginDescriptor | None:
@@ -623,11 +610,6 @@ def _entry_point_summary(entry_point: Any) -> str:
     except Exception:  # pragma: no cover - defensive
         summary = None
     return summary or ""
-
-
-def jsonable(value: Any) -> Any:
-    """JSON-safe projection used for persisted and wire values."""
-    return to_jsonable_python(value)
 
 
 def _simple_errors(exc: BaseException, *, limit: int = 5) -> list[dict[str, Any]]:

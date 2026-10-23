@@ -46,7 +46,6 @@ class _DialogBase(ModalScreen[Any]):
         self._title = title
         self._subtitle = subtitle
         self._error = Static("", markup=False, classes="dialog-error")
-        self.query_prefix = ""
 
     def dialog_header(self) -> ComposeResult:
         yield Static(Text(self._title, style="bold"), classes="dialog-title")
@@ -542,7 +541,7 @@ class ChoiceDialog(_DialogBase):
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield from self.dialog_header()
-            for index, choice in enumerate(self.choices):
+            for choice in self.choices:
                 current = "  · current" if choice.get("value") == self.current else ""
                 text = f"{choice.get('name', choice.get('value', ''))}{current}"
                 if choice.get("description"):

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import AgentDeployment, CatalogClient
-from .constants import CONNECT_TIMEOUT, WS_SUBPROTOCOL
+from .constants import CONNECT_TIMEOUT
 from .errors import HarnessClientError
 from .profiles import Profile
 from .transport import AgentTransport, StdioAgentTransport, WebSocketAgentTransport
@@ -157,8 +157,3 @@ def transport_for(target: ConnectionTarget) -> AgentTransport:
         name=profile.name,
         connect_timeout=CONNECT_TIMEOUT,
     )
-
-
-def remote_handshake_headers() -> dict[str, str]:
-    """Documentation hook for the subprotocol used above the catalog auth."""
-    return {"Sec-WebSocket-Protocol": WS_SUBPROTOCOL}

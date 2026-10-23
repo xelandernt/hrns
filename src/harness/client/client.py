@@ -53,11 +53,9 @@ from acp.schema import (
 )
 
 from harness.protocol import (
-    BindingDescriptor,
     CommandCatalogChanged,
     CommandInvokeResponse,
     ConfigurationSnapshot,
-    PluginInfo,
     PresentationUpdated,
     ToolPresentationSnapshot,
 )
@@ -287,11 +285,9 @@ class HarnessAcpClient:
         self.agent_title = CLIENT_NAME
         self.auth_methods: list[Any] = []
         self.connection_state = "idle"
-        self.last_error: BaseException | None = None
 
         self._inflight_updates = 0
         self._closing = False
-        self._disconnect_event: asyncio.Event | None = None
         self._stderr_tail: list[str] = []
         self._pending_interaction_error: HarnessClientError | None = None
 
@@ -342,7 +338,6 @@ class HarnessAcpClient:
         self._closing = False
         transport = self._transport_factory()
         self._transport = transport
-        self._disconnect_event = asyncio.Event()
         try:
             bundle = await asyncio.wait_for(
                 transport.open(self, on_loss=self._on_transport_loss),
@@ -453,17 +448,10 @@ class HarnessAcpClient:
             return str(getter())
         return ""
 
-    async def wait_disconnected(self) -> None:
-        if self._disconnect_event is not None:
-            await self._disconnect_event.wait()
-
     def _on_transport_loss(self, detail: str, exception: BaseException | None) -> None:
         if self._closing:
             return
         self.connection_state = "lost"
-        self.last_error = exception
-        if self._disconnect_event is not None:
-            self._disconnect_event.set()
         self.bus.publish(ConnectionEvent(state="lost", detail=detail, exception=exception))
 
     def _publish_connection(self, state: str, detail: str) -> None:
@@ -659,30 +647,6 @@ class HarnessAcpClient:
         except RequestError as exc:
             raise HarnessClientError(self._describe_rpc_error("authenticate", exc)) from exc
 
-    def auth_candidates(self) -> list[dict[str, Any]]:
-        """Agent-advertised auth methods, normalized for display/CLI use."""
-        candidates: list[dict[str, Any]] = []
-        for method in self.auth_methods:
-            entry: dict[str, Any] = {
-                "id": getattr(method, "id", ""),
-                "name": getattr(method, "name", ""),
-                "description": getattr(method, "description", "") or "",
-                "type": str(getattr(method, "type", "") or type(method).__name__),
-            }
-            variables = getattr(method, "vars", None)
-            if variables:
-                entry["vars"] = [
-                    {
-                        "name": item.name,
-                        "label": getattr(item, "label", None) or item.name,
-                        "secret": getattr(item, "secret", True) is not False,
-                        "optional": bool(getattr(item, "optional", False)),
-                    }
-                    for item in variables
-                ]
-            candidates.append(entry)
-        return candidates
-
     # ------------------------------------------------------------- turn control
 
     def _check_prompt_capabilities(self, blocks: list[Any]) -> None:
@@ -805,10 +769,6 @@ class HarnessAcpClient:
     async def set_config_option(
         self, session_id: str, config_id: str, value: str | bool
     ) -> tuple[dict[str, Any], ...]:
-        if isinstance(value, bool) and not self._boolean_options_advertised:
-            raise ProtocolError(
-                "Boolean session options were not negotiated with this agent; choose a select value instead."
-            )
         try:
             response = await self.connection.set_config_option(
                 config_id=config_id, session_id=session_id, value=value
@@ -823,10 +783,6 @@ class HarnessAcpClient:
         )
         self.bus.publish(ConfigOptionsUpdated(session_id=session_id, options=options))
         return options
-
-    @property
-    def _boolean_options_advertised(self) -> bool:
-        return True  # the client advertises support in initialize; the agent decides what to send
 
     # --------------------------------------------------------------- extension
 
@@ -1013,17 +969,14 @@ class HarnessAcpClient:
 
     # ------------------------------------------------------- client callbacks
 
-    def on_connect(self, conn: ClientSideConnection) -> None:  # ACP Client protocol
-        self._last_connection = conn
-
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self._inflight_updates += 1
         try:
-            self._dispatch_update(session_id, update, kwargs)
+            self._dispatch_update(session_id, update)
         finally:
             self._inflight_updates -= 1
 
-    def _dispatch_update(self, session_id: str, update: Any, meta: dict[str, Any]) -> None:
+    def _dispatch_update(self, session_id: str, update: Any) -> None:
         raw_meta = dict(getattr(update, "field_meta", None) or {})
         if isinstance(update, UserMessageChunk):
             # Live prompts are rendered by the composer action; user updates only
@@ -1313,9 +1266,6 @@ class SessionProxy:
         self.config_options: tuple[dict[str, Any], ...] = ()
         self.modes: dict[str, Any] | None = None
         self.current_mode_id: str | None = None
-        self.extension_snapshot: ConfigurationSnapshot | None = None
-        self.bindings: tuple[BindingDescriptor, ...] = ()
-        self.plugins: tuple[PluginInfo, ...] = ()
         self._unsubscribe: list[Callable[[], None]] = []
 
     def apply_state(self, modes: Any, config_options: Any) -> None:
@@ -1367,7 +1317,6 @@ class SessionProxy:
 
     async def configuration(self) -> ConfigurationSnapshot:
         snapshot = await self.client.harness_configuration(self.session_id)
-        self.extension_snapshot = snapshot
         return snapshot
 
     async def update_configuration(
@@ -1383,14 +1332,12 @@ class SessionProxy:
             expected_revision=expected_revision,
             request_id=request_id,
         )
-        self.extension_snapshot = snapshot
         return snapshot
 
     async def list_capabilities(
         self, *, cursor: str | None = None, limit: int | None = None
     ) -> CapabilityListResult:
         result = await self.client.harness_capabilities(self.session_id, cursor=cursor, limit=limit)
-        self.bindings = result.bindings
         self.client.bus.publish(
             CapabilitiesListed(
                 session_id=self.session_id,
@@ -1408,7 +1355,6 @@ class SessionProxy:
         self, *, cursor: str | None = None, limit: int | None = None
     ) -> PluginListResult:
         result = await self.client.harness_plugins(cursor=cursor, limit=limit)
-        self.plugins = result.plugins
         self.client.bus.publish(
             PluginListed(plugins=result.plugins, next_cursor=result.next_cursor)
         )

@@ -29,10 +29,6 @@ class ConnectionEvent:
     agent_name: str = CLIENT_NAME
     exception: BaseException | None = None
 
-    @property
-    def is_ready(self) -> bool:
-        return self.state == "ready"
-
 
 @dataclass(frozen=True, slots=True)
 class UserMessageReplayed:

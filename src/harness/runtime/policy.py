@@ -103,18 +103,6 @@ class BindingOffering:
     def state(self) -> BindingState:
         return BindingState(enabled=self.enabled, config=jsonable_config(self.config))
 
-    def with_state(self, enabled: bool, config: Mapping[str, Any]) -> BindingOffering:
-        return BindingOffering(
-            binding_id=self.binding_id,
-            plugin_id=self.plugin_id,
-            descriptor=self.descriptor,
-            policy=self.policy,
-            enabled=enabled,
-            config=dict(config),
-            session_added=self.session_added,
-            sequence=self.sequence,
-        )
-
 
 def jsonable_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return to_jsonable_python(dict(config))  # type: ignore[return-value]
@@ -642,7 +630,7 @@ class PolicyCatalog:
                     "INVALID_CONFIGURATION", f"Unsupported change type {type(change).__name__}"
                 )
         self._validate_graph_states(work, added_descriptors)
-        for binding_id, (enabled, config) in work.items():
+        for binding_id, (_, config) in work.items():
             descriptor = (
                 added_descriptors[binding_id]
                 if binding_id in added_descriptors
@@ -867,11 +855,10 @@ class PolicyCatalog:
                         f"Bindings {pair[0]!r} and {pair[1]!r} conflict; they cannot both be enabled.",
                         details={"conflicts": [pair]},
                     )
-        self._validate_no_cycles(work, enabled_ids, added)
+        self._validate_no_cycles(enabled_ids, added)
 
     def _validate_no_cycles(
         self,
-        work: dict[str, tuple[bool, dict[str, Any]]],
         enabled_ids: set[str],
         added: Mapping[str, PluginDescriptor],
     ) -> None:

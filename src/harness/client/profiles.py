@@ -23,6 +23,7 @@ from .constants import (
     CONFIG_DIR_NAME,
     CONFIG_ENV_OVERRIDE,
     CONFIG_FILE_NAME,
+    PROJECT_CONFIG_NAME,
 )
 from .errors import SecretMissing
 
@@ -281,7 +282,7 @@ class Profiles:
         if extra_files:
             candidates.extend(path for path in extra_files if path.exists())
         elif include_defaults:
-            project_file = Path.cwd() / "harness.toml"
+            project_file = Path.cwd() / PROJECT_CONFIG_NAME
             if project_file != user_file and project_file.exists():
                 candidates.append(project_file)
 
@@ -351,11 +352,3 @@ def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | 
             raise SecretMissing(reference, f"keyring has no entry '{service}' for '{username}'")
         return value
     return reference
-
-
-def resolve_env_map(env_map: dict[str, str]) -> dict[str, str]:
-    """Resolve a profile env mapping into concrete values."""
-    resolved = {name: value for name, value in env_map.items()}
-    for key, ref in env_map.items():
-        resolved[key] = secret_value(ref) or ""
-    return resolved

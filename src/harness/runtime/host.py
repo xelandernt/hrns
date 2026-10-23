@@ -190,9 +190,6 @@ class HostPolicy:
                 "A hosted worker requires HARNESS_ALLOWED_CWDS (a JSON list, possibly empty).",
             )
 
-    def fallback_cwd(self) -> str:
-        return acp_map.canonical_root(self.default_cwd or os.getcwd())
-
     @property
     def can_create_bindings(self) -> bool:
         return self.allow_local_binding_creation and not self.hosted

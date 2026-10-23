@@ -77,9 +77,6 @@ class HarnessExtension:
             return False
         return method in self.methods
 
-    def supports_any(self, *methods: str) -> bool:
-        return self.enabled and any(method in self.methods for method in methods)
-
     def describe(self) -> str:
         if not self.enabled:
             return "standard ACP only"

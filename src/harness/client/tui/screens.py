@@ -794,7 +794,6 @@ class ChatScreen(Screen[None]):
         self._usage: dict[str, Any] | None = None
         self._context_usage: dict[str, Any] | None = None
         self._session_title: str | None = None
-        self._plan: tuple[tuple[str, str, str], ...] = ()
         self._todo_auto_opened_for: str | None = None
         self._commands: tuple[dict[str, Any], ...] = ()
         self._plugin_commands: tuple[dict[str, Any], ...] = ()
@@ -1013,7 +1012,6 @@ class ChatScreen(Screen[None]):
         self._activity = ""
         self._hint_note = ""
         self._session_title = None
-        self._plan = ()
         self._commands = ()
         self._plugin_commands = ()
         self._plugin_revision = 0
@@ -1218,7 +1216,6 @@ class ChatScreen(Screen[None]):
             self._set_plugin_commands(event.commands, revision=event.selected_revision)
             return
         if isinstance(event, PlanChanged):
-            self._plan = event.entries
             panel = self.query_one("#side-panel", SidePanel)
             panel.todos.set_plan(event.entries, cleared=event.cleared)
             session_id = self._replay_target or (self.session.session_id if self.session else None)
@@ -2736,7 +2733,7 @@ class ChatScreen(Screen[None]):
                 "warning",
             )
             if initial:
-                await self._new_session(replace_session=True)
+                await self._new_session()
             return
         pane = self.query_one("#transcript", TranscriptPane)
         self._reset_activity()
@@ -2752,7 +2749,7 @@ class ChatScreen(Screen[None]):
             self._loading_session = False
             await self._notice(f"Could not load session {session_id}: {exc.message}", "error")
             if initial:
-                await self._new_session(replace_session=True)
+                await self._new_session()
             return
         await pane.end_replay()
         tool_ids = pane.retained_tool_ids()
@@ -2809,7 +2806,7 @@ class ChatScreen(Screen[None]):
     async def _new_session_worker(self) -> None:
         await self._new_session()
 
-    async def _new_session(self, *, replace_session: bool = False) -> None:
+    async def _new_session(self) -> None:
         if self.busy:
             await self._notice("Stop the running turn before creating a session.", "warning")
             return
@@ -2869,7 +2866,7 @@ class ChatScreen(Screen[None]):
             return
         await self._notice(f"Deleted session {session_id}.", "success")
         if session_id == self.session.session_id:
-            await self._new_session(replace_session=True)
+            await self._new_session()
         self.refresh_sessions()
 
     def on_session_close_requested(self, event: SessionCloseRequested) -> None:
@@ -2892,7 +2889,7 @@ class ChatScreen(Screen[None]):
             f"Closed session {session_id}; history is retained by the agent.", "success"
         )
         if session_id == self.session.session_id:
-            await self._new_session(replace_session=True)
+            await self._new_session()
         self.refresh_sessions()
 
     def on_session_refresh_requested(self, event: SessionRefreshRequested) -> None:

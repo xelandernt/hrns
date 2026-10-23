@@ -49,13 +49,6 @@ TOOL_STATUS_LABELS = {
 }
 
 
-def local_command_names() -> frozenset[str]:
-    """Compatibility hook; commands now live in :mod:`tui.commands`."""
-    from .commands import command_names
-
-    return command_names()
-
-
 def permission_mode_label(mode: str) -> str:
     """Short status-bar label; the mode value stays the on-wire/persisted key."""
     return {"ask": "ask", "reads": "reads", "all": "allow all"}.get(mode, mode)

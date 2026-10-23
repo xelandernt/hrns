@@ -745,12 +745,6 @@ class HarnessApp(App[int]):
                 screen.expect_redirect()
             return decision
 
-    def _chat_screen(self) -> ChatScreen | None:
-        for screen in reversed(self.screen_stack):
-            if isinstance(screen, ChatScreen):
-                return screen
-        return None
-
     async def _ask_permission_dialog(self, request: PermissionRequest) -> PermissionDecision:
         future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()
 
