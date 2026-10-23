@@ -1,11 +1,11 @@
-"""Todo wiring: the upstream planning tools on a session-scoped plan store."""
+"""Bind the upstream planning capability to the host's plan channel."""
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic_ai_harness.planning import InMemoryPlanStore, Planning
 
+from ...registry import BindingContext
+from ...resources import PLAN
 from .config import TodoConfig
 
 __all__ = ["Todo", "build_todo"]
@@ -15,15 +15,15 @@ __all__ = ["Todo", "build_todo"]
 Todo = Planning
 
 
-def build_todo(config: TodoConfig, binding: Any) -> Planning[Any]:
-    """Bind planning to the host's session-scoped ``plan_events`` resource."""
-    resources = getattr(binding, "resources", None)
-    channel = resources.get("plan_events") if resources is not None else None
-    store = getattr(channel, "store", None)
-    if store is None:
-        # A definition can use this capability without a host channel (a headless run,
-        # for example). The list still works for the run, but no client is notified.
-        store = InMemoryPlanStore()
+def build_todo(config: TodoConfig, binding: BindingContext) -> Planning[object]:
+    """Bind planning to the host's session-scoped ``plan_events`` resource.
+
+    The channel is optional by design: a definition may enable planning without one (a
+    headless run), and the list then works for the run without notifying a client.
+    """
+    resources = binding.resources
+    channel = resources.get(PLAN) if resources is not None else None
+    store = channel.store if channel is not None else InMemoryPlanStore()
     return Planning(
         store=store,
         enable_subtasks=config.enable_subtasks,

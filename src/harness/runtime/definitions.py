@@ -29,7 +29,7 @@ from pydantic_ai.capabilities import AgentCapability
 from harness.protocol import BindingId, CapabilityPolicy, HarnessError
 
 from .registry import PluginConfigT, PluginDescriptor
-from .resources import ResourceRequirement
+from .resources import SLOTS, ResourceRequirement, ResourceSlot
 
 __all__ = [
     "AGENT_FACTORY_PARAM",
@@ -385,6 +385,15 @@ class AgentDefinition(BaseModel):
             if requirement.name == name:
                 return requirement
         return None
+
+    def declares(self, slot: ResourceSlot[Any]) -> bool:
+        """Whether any requirement of this definition addresses ``slot``.
+
+        A definition that enables a plugin declaring ``needs`` must declare the matching slot;
+        composition checks this before a turn starts, so a capability never runs against a
+        resource its definition never asked for.
+        """
+        return any(SLOTS.of(requirement).name == slot.name for requirement in self.resources)
 
     def to_manifest(self) -> DefinitionManifest:
         """Export to a serializable manifest, failing loudly on non-portable fields."""

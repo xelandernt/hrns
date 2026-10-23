@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic_ai.capabilities import AgentCapability
+
 from harness.protocol import CapabilityPolicy
 
-from ...registry import PluginDescriptor
+from ...registry import BindingContext, PluginDescriptor
 from .config import TodoConfig
 
 __all__ = ["Todo", "TodoConfig", "build_todo", "descriptor"]
@@ -19,7 +21,7 @@ __all__ = ["Todo", "TodoConfig", "build_todo", "descriptor"]
 _PLUGIN_ID = "harness.todo"
 
 
-def build_todo(config: TodoConfig, binding: object) -> object:
+def build_todo(config: TodoConfig, binding: BindingContext) -> AgentCapability:
     """Lazy factory reference; imports the planning capability only when composed."""
     from ._capability import build_todo as _build
 

@@ -7,9 +7,12 @@ identifiers listed here are the ones :mod:`harness.client.tui.tool_views` implem
 
 from __future__ import annotations
 
+from pydantic_ai.capabilities import AgentCapability
+
 from harness.protocol import CapabilityPolicy
 
-from ...registry import PluginDescriptor
+from ...registry import BindingContext, PluginDescriptor
+from ...resources import WORKSPACE
 from ._ids import RENDERER_IDS
 from .config import CoderConfig
 
@@ -18,7 +21,7 @@ __all__ = ["Coder", "CoderConfig", "build_coder", "descriptor"]
 _PLUGIN_ID = "harness.coder"
 
 
-def build_coder(config: CoderConfig, binding: object) -> object:
+def build_coder(config: CoderConfig, binding: BindingContext) -> AgentCapability:
     """Lazy factory reference; imports the capability module only when composed."""
     from ._capability import build_coder as _build
 
@@ -36,6 +39,7 @@ def descriptor() -> PluginDescriptor[CoderConfig]:
         ),
         config_model=CoderConfig,
         factory="harness.runtime.capabilities.coder:build_coder",
+        needs=(WORKSPACE,),
         state_mode="run",
         presentation=list(RENDERER_IDS),
         default_policy=CapabilityPolicy(

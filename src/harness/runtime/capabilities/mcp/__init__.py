@@ -7,11 +7,13 @@ by ``hrns mcp``; this plugin only turns one validated server entry into a Pydant
 
 from __future__ import annotations
 
+from pydantic_ai.capabilities import AgentCapability
+
 from harness.protocol import CapabilityPolicy
 from harness.protocol.extensions import CommandResult
 
 from ...extensions import Command, CommandContext, TextArguments
-from ...registry import CompatibilityConstraints, PluginDescriptor
+from ...registry import BindingContext, CompatibilityConstraints, PluginDescriptor
 from .config import McpServerConfig
 
 __all__ = ["McpServerConfig", "build_mcp_server", "descriptor"]
@@ -19,7 +21,7 @@ __all__ = ["McpServerConfig", "build_mcp_server", "descriptor"]
 _PLUGIN_ID = "harness.mcp"
 
 
-def build_mcp_server(config: McpServerConfig, binding: object) -> object:
+def build_mcp_server(config: McpServerConfig, binding: BindingContext) -> AgentCapability:
     """Lazy factory reference; imports FastMCP only when a server binding composes."""
     from ._capability import build_mcp_server as _build
 

@@ -6,6 +6,7 @@ from .settings import (
     EFFORT_OFF,
     THINKING_LEVELS,
     CapabilitiesSettings,
+    EffortLevel,
     LocalSettings,
     default_local_config_path,
     thinking_from_settings,

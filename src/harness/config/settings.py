@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import tomli_w
@@ -17,6 +17,9 @@ from .mcp import McpSettings
 
 #: Unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
 THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+
+#: The literal type of those levels, so settings can be assigned without narrowing.
+EffortLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
 
 #: TUI/ACP spelling for "do not set thinking; use the provider default".
 EFFORT_DEFAULT = "default"

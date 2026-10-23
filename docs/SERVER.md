@@ -39,8 +39,9 @@ uv run uvicorn my_app:app --host 127.0.0.1 --port 8080 \
   --ws-max-size 16777216 --ws-ping-interval 30 --ws-ping-timeout 30
 ```
 
-`examples/fastapi_app.py` is a complete application; `test.py` adds a managed capability and
-bearer authentication.
+`examples/fastapi_app.py` is a complete application. `test.py` serves the bundled coder against
+a remote workspace using Pydantic AI Harness's `SSHWorkspaceBackend`, with bearer
+authentication and a typed `HarnessDeps` projection of the session's resources.
 
 ## Storage and lifespan
 
@@ -92,24 +93,36 @@ unknown and forbidden IDs both return 404. The principal is fixed for the connec
 ## Resources, models, and workspaces
 
 ```python
+from harness.runtime import MODEL, WORKSPACE, ResourceSet
+
 agents.add_agent(
     coding_definition,
-    resources={"model.default": model, "workspace": "/srv/workspaces/project"},
+    resources=ResourceSet({MODEL: model, WORKSPACE: "/srv/workspaces/project"}),
     models=["openai:gpt-5-mini", "openai:gpt-5"],
     allowed_cwds=["/srv/workspaces/project"],
     default_cwd="/srv/workspaces/project",
 )
 ```
 
-Resources may be a mapping or `ResourceSet`. Model strings bound through resources or
+Resources are bound to typed slots (`MODEL`, `WORKSPACE`, `ANSWERS`, `PLAN`, or a slot a
+plugin registers): a misspelled slot is an import-time error rather than a `None` at run time,
+and a value of the wrong type is rejected at registration. A plain string keyed mapping is
+still accepted for configuration that arrives as data (`--resource NAME=VALUE`, settings
+files); it resolves to the slot owning that name. Model strings bound through resources or
 `definition.model` are advertised automatically; `models` adds selectable IDs. Definitions
 use the same native composition as Python and stdio.
 
+A definition that enables a plugin declaring `needs` must also declare the matching
+requirement, and the deployment must bind it: composition rejects the session with
+`INVALID_CONFIGURATION` (undeclared), `WORKSPACE_UNAVAILABLE`, or `RESOURCE_UNAVAILABLE`
+(unbound) before the plugin factory runs.
+
 The current directory at registration is the default allowed workspace root. Paths are
 canonicalized; `default_cwd` must be one of the roots. ACP session paths must remain inside
-those roots, and reopening uses the recorded path. Workspace execution is a local path in this
-revision; sandbox/lease management is deployment-owned and never silently falls back to host
-execution.
+those roots, and reopening uses the recorded path. A bound workspace backend wins over the
+session's `cwd`, so a deployment may bind a remote or sandboxed backend while clients send an
+ordinary path; workspace execution otherwise falls back to a local path, and sandbox/lease
+management is deployment-owned and never silently executes on the host.
 
 Pass `registry=your_registry` for custom plugins. The default registry contains the bundled
 `harness.coder`, `harness.todo` and `harness.skills` plugins and installed

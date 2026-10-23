@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from harness.runtime import AgentDefinition
 
@@ -53,7 +53,7 @@ class RegisteredAgent:
     allowed_cwds: tuple[str, ...]
     default_cwd: str
     models: tuple[str, ...] = ()
-    resources: dict[str, Any] = field(default_factory=dict)
+    resources: dict[str, object] = field(default_factory=dict)
 
     @property
     def id(self) -> str:

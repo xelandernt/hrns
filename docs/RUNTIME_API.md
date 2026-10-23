@@ -27,10 +27,12 @@ from harness.runtime import (
 ## Compose a session
 
 ```python
+from harness.runtime import MODEL, WORKSPACE, ResourceSet
+
 composition = await compose_definition(
     definition,
     registry,
-    resources={"model.default": model, "workspace": "/path/to/project"},
+    resources=ResourceSet({MODEL: model, WORKSPACE: "/path/to/project"}),
     session_id="session-id",
     principal="user-1",
     deployment_id='["agent-id","1.0.0"]',
@@ -41,17 +43,30 @@ composition = await compose_definition(
 )
 ```
 
+Bindings are typed slots: `MODEL`, `WORKSPACE`, `ANSWERS`, `PLAN`, or a slot a plugin
+registers with `harness.runtime.resources.SLOTS.register`. A `{name: value}` mapping is also
+accepted — the name resolves to its slot — so values loaded from configuration still work.
+A definition that never declares a slot receives no value for it, even when the deployment
+bound one.
+
 The result is a native agent plus an upstream `AcpSessionConfig`:
 
 | Field | Meaning |
 | --- | --- |
-| `composition.agent` | the native Pydantic AI agent |
+| `composition.agent` | the native Pydantic AI agent, with `deps_type=HarnessDeps` when Harness builds it |
 | `composition.config` | `deps`, capabilities, toolsets, and workspace for every run |
 | `composition.catalog` | live `PolicyCatalog` for the session |
 | `composition.snapshot` | current `ConfigurationSnapshot` |
 | `composition.resources` | resolved `ResourceSet` |
+| `composition.deps` | `HarnessDeps` for the run: `workspace`, `model`, `answers`, `plan`, `custom` |
 | `composition.effort` | mutable reasoning-effort state |
 | `composition.workspace` | native workspace backend, or `None` |
+
+`composition.deps` is what tools, instructions and capabilities read as `ctx.deps` — the
+framework's own dependency injection, typed as `AbstractCapability[HarnessDeps]`. Pass
+`deps=` to `compose_definition` to supply a deployment's own object instead; Harness then
+leaves `deps_type` alone, because an application that declares its own dependencies must keep
+them.
 
 `compose_definition` is async because Python factories may be sync or async. It applies
 `initial_configuration` (creation) or `saved_bindings` (reload/edit), never both. A factory
