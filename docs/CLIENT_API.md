@@ -248,9 +248,13 @@ opens a dialog. The host falls back to the first prompt text as a title; there i
 model-generated title tool. Manual names always take precedence, including after
 reopening a session.
 
-For Harness hosts, the status bar and activity panel show cumulative session token usage,
-updated after every completed model response, including intermediate responses before
-tool execution. Turn completion reconciles and persists the counters without adding the
+For Harness hosts, the status bar shows how much of the selected model's context window the
+current turn has filled (hover for the last request's in/out/cached split and the session
+totals), while the activity panel shows cumulative session usage, updated after every
+completed model response, including intermediate responses before
+tool execution. The context readout comes from ACP `usage_update` (a gauge, not a counter);
+session totals come from `_meta.harness.sessionUsage` and are never derived from it.
+Turn completion reconciles and persists the counters without adding the
 same tokens twice. Other ACP agents can publish usage updates or return usage with the
 prompt response. The client does not reconstruct a historical cost ledger from the old runtime journal.
 Prices come from Pydantic AI and are estimates, not invoices. Missing pricing

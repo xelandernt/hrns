@@ -151,3 +151,10 @@ class SessionTitleUpdate(WireModel):
 
     session_id: str = Field(min_length=1)
     title: str = Field(min_length=1, max_length=120)
+
+
+class SteerRequest(WireModel):
+    """Inject a follow-up into the turn that is currently running."""
+
+    session_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)

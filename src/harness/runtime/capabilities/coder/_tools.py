@@ -412,7 +412,12 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                 "durationMs": elapsed,
                 "timedOut": False,
             }
-            return output_return(model_text, "shell", payload)
+            # The collapsed card previews real output rather than the model-facing
+            # "exit code:" sentence; the exit code is only prefixed when it failed.
+            preview = "\n".join(part for part in (stdout.rstrip("\n"), stderr.rstrip("\n")) if part)
+            if result.exit_code:
+                preview = f"exit {result.exit_code}" + (f"\n{preview}" if preview else "")
+            return output_return(model_text, "shell", payload, fallback=preview or "no output")
 
         return FunctionToolset(
             id="harness.coder.files",

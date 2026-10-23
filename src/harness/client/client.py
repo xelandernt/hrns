@@ -930,6 +930,13 @@ class HarnessAcpClient:
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"commands/list returned malformed data: {exc}") from exc
 
+    async def harness_steer(self, session_id: str, text: str) -> bool:
+        """Inject a follow-up into the turn that is currently running."""
+        raw = await self._ext_request(
+            "_harness/session/steer", {"sessionId": session_id, "text": text}
+        )
+        return bool(raw.get("steered"))
+
     async def harness_invoke_command(
         self,
         session_id: str,
@@ -1125,7 +1132,19 @@ class HarnessAcpClient:
                     self.bus.publish(UsageUpdated(session_id=session_id, summary=usage))
             return
         if isinstance(update, UsageUpdate):
-            summary = update.model_dump(mode="json", by_alias=True, exclude_none=True)
+            harness_meta = raw_meta.get("harness", {})
+            detail = harness_meta.get("contextUsage") if isinstance(harness_meta, dict) else None
+            summary: dict[str, Any] = {
+                "scope": "context",
+                "used": update.used,
+                "size": update.size,
+                "detail": detail if isinstance(detail, dict) else {},
+            }
+            if update.cost is not None:
+                summary["cost"] = {
+                    "amount": update.cost.amount,
+                    "currency": update.cost.currency,
+                }
             self.bus.publish(UsageUpdated(session_id=session_id, summary=summary))
             return
         # Unknown future update kinds degrade to a readable activity event.
@@ -1347,6 +1366,10 @@ class SessionProxy:
         request = SessionTitleUpdate(session_id=self.session_id, title=title)
         result = await self.client._ext_request("_harness/session/rename", request.to_wire())
         return SessionTitleUpdate.model_validate(result).title
+
+    async def steer(self, text: str) -> bool:
+        """Deliver a follow-up into the running turn; false when it has finished."""
+        return await self.client.harness_steer(self.session_id, text)
 
     async def configuration(self) -> ConfigurationSnapshot:
         snapshot = await self.client.harness_configuration(self.session_id)

@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import re
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
 from rich.color import Color
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
+from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.geometry import Offset
 from textual.message import Message
+from textual.strip import Strip
 from textual.widgets import (
     Button,
     Collapsible,
@@ -78,12 +83,21 @@ __all__ = [
 # One monochrome marker per tool call; status carries the meaning while it
 # runs. The result body is shown as a short ``⎿`` preview beneath the header.
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-TOOL_PREVIEW_LINES = 12
+# Collapsed cards stay a few rows tall; the rest is one click (or Enter) away.
+TOOL_PREVIEW_LINES = 4
 TOOL_OUTPUT_INDENT = "    ⎿  "
 
 # Retained text per message block is bounded so a single very long streaming
 # reply cannot grow the widget tree or make Markdown re-renders unbounded.
 MAX_STREAM_MESSAGE_CHARS = 24_000
+
+#: ``$skill`` and ``@path`` references in the composer. A match is only coloured when
+#: it names a known, user-invocable skill or a file in the workspace index, so a typo
+#: like ``$dwadawdawda`` stays plain.
+MENTION_PATTERN = re.compile(r"(?<!\S)(\$[A-Za-z0-9][\w-]*|@[^\s]+)")
+
+#: Punctuation that may trail a file reference without being part of the path.
+MENTION_TRAILING = ".,;:!?)]}'\""
 
 
 def bounded_user_text(text: str) -> str:
@@ -91,6 +105,17 @@ def bounded_user_text(text: str) -> str:
     if len(text) <= MAX_STREAM_MESSAGE_CHARS:
         return text
     return "…" + text[-(MAX_STREAM_MESSAGE_CHARS - 1) :]
+
+
+def truncate_text(text: str, width: int) -> str:
+    """Clip `text` to `width` characters, marking the cut with an ellipsis."""
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return "…"
+    return text[: width - 1].rstrip() + "…"
 
 
 class Submitted(Message):
@@ -133,8 +158,52 @@ class CommandSuggestions(OptionList):
         self.clear_options()
 
 
+def _restyle_spans(
+    strip: Strip,
+    spans: list[tuple[int, int, str]],
+    styles: Mapping[str, Style],
+) -> Strip:
+    """Restyle character ranges of an already-rendered strip.
+
+    ``Strip`` is immutable, so a new one is built by splitting segments at span
+    boundaries. Characters keep their existing style; the span style is layered on
+    top so cursor and selection styling still show through.
+    """
+    text = strip.text
+    span_styles: list[Style | None] = [None] * len(text)
+    for start, end, marker in spans:
+        style = styles.get(marker)
+        if style is None:
+            continue
+        for index in range(start, min(end, len(text))):
+            span_styles[index] = style
+
+    segments: list[Segment] = []
+    position = 0
+    for segment in strip._segments:
+        chunk_text = segment.text
+        run_start = 0
+        for offset in range(1, len(chunk_text) + 1):
+            ends_run = offset == len(chunk_text)
+            if not ends_run and span_styles[position + offset] is span_styles[position + run_start]:
+                continue
+            span_style = span_styles[position + run_start]
+            style = segment.style
+            if span_style is not None:
+                style = span_style if style is None else style + span_style
+            segments.append(Segment(chunk_text[run_start:offset], style, segment.control))
+            run_start = offset
+        position += len(chunk_text)
+    return Strip(segments, strip.cell_length)
+
+
 class Composer(TextArea):
     """Multiline prompt editor with inline command suggestions."""
+
+    COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
+        "text-area--skill-token",
+        "text-area--file-token",
+    }
 
     BINDINGS = [
         Binding("ctrl+enter", "submit", "Send", show=False, priority=True),
@@ -150,6 +219,8 @@ class Composer(TextArea):
         self._history_index: int | None = None
         self._history_draft = ""
         self._history_text = ""
+        self._skill_names: frozenset[str] = frozenset()
+        self._file_paths: frozenset[str] = frozenset()
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
@@ -211,6 +282,51 @@ class Composer(TextArea):
     def clear_composer(self) -> None:
         self._history_index = None
         self.load_text("")
+
+    def set_mention_catalog(self, *, skills: Iterable[str], files: Iterable[str]) -> None:
+        """Declare which ``$skill`` and ``@path`` references are real."""
+        skill_names = frozenset(name for name in skills if name)
+        file_paths = frozenset(path for path in files if path)
+        if skill_names == self._skill_names and file_paths == self._file_paths:
+            return
+        self._skill_names = skill_names
+        self._file_paths = file_paths
+        self._line_cache.clear()
+        self.refresh()
+
+    def _mention_spans(self, text: str) -> list[tuple[int, int, str]]:
+        """Valid ``$skill`` / ``@path`` spans in a rendered line."""
+        spans: list[tuple[int, int, str]] = []
+        for match in MENTION_PATTERN.finditer(text):
+            token = match.group(0)
+            marker = token[0]
+            name = token[1:]
+            if marker == "@":
+                name = name.rstrip(MENTION_TRAILING)
+                if name not in self._file_paths:
+                    continue
+                spans.append((match.start(), match.start() + 1 + len(name), marker))
+            elif name in self._skill_names:
+                spans.append((match.start(), match.end(), marker))
+        return spans
+
+    def _render_line(self, y: int) -> Strip:
+        """Re-colour known ``$skill`` / ``@path`` references in the rendered line."""
+        strip = super()._render_line(y)
+        text = strip.text
+        if "$" not in text and "@" not in text:
+            return strip
+        spans = self._mention_spans(text)
+        if not spans:
+            return strip
+        return _restyle_spans(
+            strip,
+            spans,
+            {
+                "$": self.get_component_rich_style("text-area--skill-token"),
+                "@": self.get_component_rich_style("text-area--file-token"),
+            },
+        )
 
 
 class QueueAction(Message):
@@ -793,6 +909,12 @@ class MessageBlock(Vertical):
         self._dropped = 0
         self._marked = False
         self._finished = False
+        # Textual's Markdown parses and mounts the whole document on every update, so a
+        # streaming reply re-rendered its entire history 16 times a second. Remembering
+        # what was already handed over lets each tick append only the new fragment.
+        self._rendered = ""
+        self._render_job: AwaitComplete | None = None
+        self._catch_up: asyncio.Task[None] | None = None
         label = Text()
         label.append(self.ROLE_LABELS.get(role, role.title()), style="bold")
         label.append("  ")
@@ -830,15 +952,52 @@ class MessageBlock(Vertical):
                 self._text = "…" + self._text[1:]
 
     def flush(self) -> None:
+        # Markdown.update needs a live app for its theme; pre-mount callers are
+        # buffered until on_mount rather than raising NoActiveAppError.
+        if not self.is_mounted:
+            return
+        source = self._source_text()
+        if source == self._rendered:
+            return
+        body = self._body
+        if not isinstance(body, Markdown):
+            # "you" blocks are plain Static text; there is nothing to re-parse.
+            self._rendered = source
+            body.update(source)
+            return
+        if self._render_job is not None and not self._render_job.is_done:
+            # The fragment already queued will follow this text; let it land before
+            # appending more instead of piling up full re-parses.
+            self._schedule_catch_up()
+            return
+        if self._rendered and source.startswith(self._rendered):
+            delta = source[len(self._rendered) :]
+            self._rendered = source
+            self._render_job = body.append(delta)
+        else:
+            self._rendered = source
+            self._render_job = body.update(source)
+
+    def _source_text(self) -> str:
         marker = (
             f"⋯ {self._dropped:,} earlier characters of this message trimmed from view ⋯\n\n"
             if self._dropped
             else ""
         )
-        # Markdown.update needs a live app for its theme; pre-mount callers are
-        # buffered until on_mount rather than raising NoActiveAppError.
-        if self.is_mounted:
-            self._body.update(marker + readable_text(self._text))
+        return marker + readable_text(self._text)
+
+    def _schedule_catch_up(self) -> None:
+        render = self._render_job
+        if render is None or self._catch_up is not None:
+            return
+
+        async def follow_up() -> None:
+            with contextlib.suppress(BaseException):
+                await render
+            self._catch_up = None
+            self.call_later(self.flush)
+
+        self._catch_up = asyncio.create_task(follow_up())
 
     def on_mount(self) -> None:
         self.flush()
@@ -1164,14 +1323,21 @@ class ToolCard(Vertical):
             self.data.get("title") or self.data.get("toolCallId") or "tool",
             limit=200,
         )
-        args = tool_args_preview(self.data)
+        width = self.size.width
+        args_limit = max(32, width - 26) if width else 80
+        args = tool_args_preview(self.data, limit=args_limit)
         text = Text()
         text.append(f"{symbol} ", style="bold" if not pending else "dim")
-        text.append(title)
-        if args:
-            text.append("(", style="dim")
-            text.append(args, style="dim")
-            text.append(")", style="dim")
+        if str(self.data.get("kind") or "") == "execute" and args:
+            # Shell calls read like a prompt line: ``$ <command>``.
+            text.append("$ ", style="bold")
+            text.append(args)
+        else:
+            text.append(title)
+            if args:
+                text.append("(", style="dim")
+                text.append(args, style="dim")
+                text.append(")", style="dim")
 
         added = int(self.data.get("diffAdded") or 0)
         removed = int(self.data.get("diffRemoved") or 0)
@@ -1208,10 +1374,18 @@ class ToolCard(Vertical):
 
     def _render_lines(self, lines: list[str], *, limit: int | None) -> Text:
         selected = lines if limit is None else lines[:limit]
+        # The collapsed preview keeps one row per output line; wrapping long
+        # shell output would defeat the point of collapsing it.
+        room = 0
+        if limit is not None:
+            width = self._preview.size.width or self.size.width
+            room = max(0, width - len(TOOL_OUTPUT_INDENT)) if width else 0
         text = Text()
         for index, line in enumerate(selected):
             if index:
                 text.append("\n")
+            if room:
+                line = truncate_text(line, room)
             text.append(TOOL_OUTPUT_INDENT, style="dim")
             # Only the diff markers get weight; the rest stays quiet so the
             # transcript reads as one calm stream.
@@ -1249,8 +1423,17 @@ class ToolCard(Vertical):
         self._preview.update(self._render_lines(preview_lines, limit=TOOL_PREVIEW_LINES))
         self._full.update(self._render_lines(full_lines, limit=None))
 
+        # A plugin view is the expanded body: collapsed cards keep the generic
+        # preview (or nothing, while the call is still running) so a rich view can
+        # never make the transcript tall by default.
+        show_custom = custom and (self._expanded or self._is_pending())
+        if custom:
+            self._view_host.display = show_custom
         preview_visible = (
-            bool(preview_lines) and not self._expanded and not self._is_pending() and not custom
+            bool(preview_lines)
+            and not self._expanded
+            and not self._is_pending()
+            and not show_custom
         )
         full_visible = bool(full_lines) and self._expanded and not custom
         self._preview.set_class(preview_visible, "visible")
@@ -1270,6 +1453,11 @@ class ToolCard(Vertical):
     def on_click(self, event: events.Click) -> None:
         event.stop()
         self.action_toggle_expand()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-clip the collapsed preview when the transcript width changes."""
+        if self._body_text and self.is_mounted:
+            self._render_body()
 
     def update_from(self, data: dict[str, Any]) -> None:
         was_pending = self._is_pending()
@@ -1356,6 +1544,7 @@ class StatusBar(Static):
         self._effort = ""
         self._mode = ""
         self._usage = ""
+        self._cost = ""
         self._permission = ""
         self._activity = ""
         self._hint = ""
@@ -1372,6 +1561,8 @@ class StatusBar(Static):
         effort: str = "",
         mode: str = "",
         usage: str = "",
+        cost: str = "",
+        usage_detail: str = "",
         busy: bool = False,
         activity: str = "",
         permission: str = "",
@@ -1383,6 +1574,8 @@ class StatusBar(Static):
         self._effort = effort
         self._mode = mode
         self._usage = usage
+        self._cost = cost
+        self.tooltip = usage_detail or None
         self._permission = permission
         self._activity = activity
         self._hint = hint
@@ -1477,7 +1670,16 @@ class StatusBar(Static):
             if self._permission and self._permission != "ask"
             else None
         )
-        usage = Text(self._usage, style="dim") if self._usage else None
+        usage = (
+            Text(f"ctx {self._usage}", style=Style(color=palette.foreground))
+            if self._usage
+            else None
+        )
+        cost = (
+            Text(self._cost, style=Style(color=palette.muted or palette.foreground))
+            if self._cost
+            else None
+        )
         connection = (
             None
             if self._connected
@@ -1489,6 +1691,7 @@ class StatusBar(Static):
             ("effort", effort),
             ("permission", permission),
             ("usage", usage),
+            ("cost", cost),
             ("connection", connection),
         ]
 
@@ -1506,8 +1709,8 @@ class StatusBar(Static):
             return text
 
         # Ambiguity is resolved by dropping the least load-bearing field first;
-        # the model name is the last thing to go, and only in a very narrow band.
-        for name in ("usage", "permission", "effort", "mode", "model"):
+        # the model name and the two usage figures are the last to go.
+        for name in ("permission", "effort", "mode", "cost", "usage", "model"):
             if len(assemble()) <= budget:
                 break
             fields = [(label, None if label == name else piece) for label, piece in fields]
@@ -2391,12 +2594,18 @@ class CapabilityPanel(Vertical):
         super().__init__(**kwargs)
         self.extension_mode = False
         self.can_write = False
+        self._plugin_bindings: list[dict[str, Any]] = []
+        self._snapshot: dict[str, Any] | None = None
         self._summary: dict[str, dict[str, Any]] = {}
         self._order: list[str] = []
         self._options: dict[str, dict[str, Any]] = {}
+        self._row_chars = 0
+        self._name_chars = 6
         self._status = Static("Loading plugins…", markup=False)
         self._status.add_class("panel-status")
         self._list = OptionList(id="binding-list", markup=False)
+        self._detail = Static("", markup=False, classes="panel-detail")
+        self._detail.display = False
         self._hint = Static(
             "e edit · Space toggle · a add · r refresh · Esc close",
             markup=False,
@@ -2407,6 +2616,7 @@ class CapabilityPanel(Vertical):
         yield self._status
         yield self._hint
         yield self._list
+        yield self._detail
 
     # ------------------------------------------------------------------ data
 
@@ -2424,29 +2634,43 @@ class CapabilityPanel(Vertical):
     ) -> None:
         self.extension_mode = True
         self.can_write = bool(can_write)
+        self._plugin_bindings = list(bindings)
+        self._snapshot = snapshot
+        self._render_rows(active_revision=active_revision, selected_revision=selected_revision)
+
+    def _render_rows(
+        self,
+        *,
+        active_revision: int | None = None,
+        selected_revision: int | None = None,
+    ) -> None:
+        """Rebuild every plugin row; descriptions follow the current panel width."""
         previous = self.current_binding_id()
+        self._row_chars = self._row_width()
         self._summary = {}
         self._order = []
         self._options = {}
         self._list.clear_options()
-        for raw in bindings:
-            summary = binding_summary(raw, snapshot)
+        for raw in self._plugin_bindings:
+            summary = binding_summary(raw, self._snapshot)
             binding_id = summary["bindingId"]
             if not binding_id:
                 continue
             self._summary[binding_id] = summary
             self._order.append(binding_id)
             self._options[binding_id] = raw
-            self._list.add_option(Option(self._row_text(summary), id=binding_id))
+        self._name_chars = self._name_column()
+        for binding_id in self._order:
+            self._list.add_option(Option(self._row_text(self._summary[binding_id]), id=binding_id))
         selected = (
             selected_revision
             if selected_revision is not None
-            else (snapshot or {}).get("selectedRevision")
+            else (self._snapshot or {}).get("selectedRevision")
         )
         active = (
             active_revision
             if active_revision is not None
-            else (snapshot or {}).get("activeRevision")
+            else (self._snapshot or {}).get("activeRevision")
         )
         total = len(self._order)
         notes = [f"{total} plugin" + ("" if total == 1 else "s")]
@@ -2461,16 +2685,51 @@ class CapabilityPanel(Vertical):
             else "e edit · Space toggle · a add · r refresh · Esc close"
         )
         if self._list.option_count:
-            self._list.highlighted = self._highlight_index(previous)
+            index = self._highlight_index(previous)
+            self._list.highlighted = index
+            self._show_detail(self._order[index])
+        else:
+            self._show_detail(None)
+
+    def _row_width(self) -> int:
+        """Characters available to one list row."""
+        width = self._list.content_size.width
+        if width <= 0:
+            width = self.size.width - 6
+        return max(0, width)
+
+    def _show_detail(self, binding_id: str | None) -> None:
+        """Render the highlighted plugin's full description below the list."""
+        summary = self._summary.get(binding_id) if binding_id else None
+        if summary is None:
+            self._detail.update(Text(""))
+            self._detail.display = False
+            return
+        lines = [
+            line for line in (" ".join(str(summary.get("description") or "").split()),) if line
+        ]
+        if summary["locked"]:
+            lines.append(f"locked: {summary['reason'] or 'unavailable'}")
+        requires = [str(item) for item in summary.get("requires") or ()]
+        if requires:
+            lines.append("requires: " + ", ".join(requires))
+        conflicts = [str(item) for item in summary.get("conflicts") or ()]
+        if conflicts:
+            lines.append("conflicts: " + ", ".join(conflicts))
+        self._detail.update(Text("\n".join(lines), style="dim"))
+        self._detail.display = bool(lines)
 
     def set_standard_options(self, options: list[dict[str, Any]]) -> None:
         self.extension_mode = False
         self.can_write = True
+        self._plugin_bindings = []
+        self._snapshot = None
         previous = self.current_binding_id()
         self._summary = {}
         self._order = []
         self._options = {}
         self._list.clear_options()
+        self._show_detail(None)
         for option in options:
             option_id = str(option.get("id", ""))
             if not option_id:
@@ -2499,23 +2758,57 @@ class CapabilityPanel(Vertical):
             return self._order.index(previous)
         return 0
 
+    def _name_column(self) -> int:
+        """Width of the name column, so toggles and descriptions line up."""
+        longest = max(
+            (len(str(self._summary[binding_id]["name"])) for binding_id in self._order),
+            default=0,
+        )
+        # Keep at least a sliver of description visible on narrow drawers.
+        cap = max(6, self._row_chars - 24)
+        return max(6, min(longest, cap, 24))
+
     def _row_text(self, summary: dict[str, Any]) -> str:
         enabled = "on" if summary["enabled"] else "off"
-        bits = [f"{summary['name']}   <{enabled}>"]
+        name = truncate_text(str(summary["name"]), self._name_chars)
+        toggle = f"<{enabled}>"
+        prefix = f"{name:<{self._name_chars}}  {toggle:<5}  "
+        tail: list[str] = []
         if summary["locked"]:
-            bits.append("locked")
+            tail.append("locked")
         elif summary.get("pending"):
             active = summary.get("state") or {}
             active_on = (
                 active.get("enabled") if isinstance(active, dict) else summary.get("activeEnabled")
             )
             if active_on is not None and bool(active_on) != summary["enabled"]:
-                bits.append("next turn")
+                tail.append("next turn")
         if summary["changeMode"] == "new_session":
-            bits.append("new session")
-        return "   ".join(bits)
+            tail.append("new session")
+        description = " ".join(str(summary.get("description") or "").split())
+        # The description starts in its own column and is clipped to whatever room is
+        # left; selecting the row shows the full text in the detail line.
+        room = self._row_chars - len(prefix) - sum(len(bit) + 3 for bit in tail)
+        description = truncate_text(description, room) if room >= 8 else ""
+        suffix = "".join(f"   {bit}" for bit in tail)
+        head = f"{name:<{self._name_chars}}  {toggle:<5}"
+        if description:
+            head += f"  {description}"
+        return f"{head}{suffix}".rstrip()
 
     # --------------------------------------------------------------- events
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if self.extension_mode:
+            self._show_detail(event.option_id)
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Re-clip descriptions when the drawer changes width."""
+        if not self.extension_mode or not self._plugin_bindings:
+            return
+        width = self._row_width()
+        if width and width != self._row_chars:
+            self._render_rows()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option_id

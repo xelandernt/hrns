@@ -374,6 +374,13 @@ class HarnessApp(App[int]):
     #composer .text-area--placeholder {
         color: $text-muted;
     }
+    #composer .text-area--skill-token {
+        color: $success;
+        text-style: bold;
+    }
+    #composer .text-area--file-token {
+        color: $accent;
+    }
     #suggestions-dock {
         dock: bottom;
         offset: 0 -8;

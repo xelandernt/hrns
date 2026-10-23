@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any
 
@@ -20,23 +21,49 @@ def workspace_files(root: Path) -> list[str]:
     return sorted(paths)
 
 
-def matching_files(paths: list[str], query: str) -> list[str]:
-    needle = query.casefold()
+def _is_subsequence(needle: str, haystack: str) -> bool:
+    """Whether ``needle``'s characters appear in ``haystack`` in order.
 
-    def matches(path: str) -> bool:
-        characters = iter(path.casefold())
-        return all(character in characters for character in needle)
+    ``str.find`` from the previous hit keeps this in C and avoids the regex
+    backtracking blow-up a ``.*``-joined pattern hits on long needles.
+    """
+    position = 0
+    for character in needle:
+        position = haystack.find(character, position)
+        if position < 0:
+            return False
+        position += 1
+    return True
 
-    candidates = [path for path in paths if matches(path)]
-    candidates.sort(
-        key=lambda path: (
-            not Path(path).name.casefold().startswith(needle),
-            needle not in path.casefold(),
-            len(path),
-            path,
+
+class FileIndex:
+    """Case-folded workspace paths, prepared once per index refresh."""
+
+    def __init__(self, paths: Iterable[str]) -> None:
+        self._entries: tuple[tuple[str, str, int, str], ...] = tuple(
+            (path.rsplit("/", 1)[-1].casefold(), path.casefold(), len(path), path) for path in paths
         )
-    )
-    return candidates[:12]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def matching(self, query: str, *, limit: int = 12) -> list[str]:
+        needle = query.casefold()
+        if needle:
+            candidates = [entry for entry in self._entries if _is_subsequence(needle, entry[1])]
+        else:
+            candidates = list(self._entries)
+
+        def rank(entry: tuple[str, str, int, str]) -> tuple[bool, bool, int, str]:
+            return (not entry[0].startswith(needle), needle not in entry[1], entry[2], entry[3])
+
+        return [entry[3] for entry in nsmallest(limit, candidates, key=rank)]
+
+
+def index_workspace(root: Path) -> tuple[list[str], FileIndex]:
+    """Discover the workspace and prepare its match index off the UI thread."""
+    paths = workspace_files(root)
+    return paths, FileIndex(paths)
 
 
 def matching_skills(skills: Iterable[Mapping[str, Any]], query: str) -> list[Mapping[str, Any]]:

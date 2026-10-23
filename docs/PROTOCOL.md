@@ -21,6 +21,7 @@ Only mutually advertised methods are invoked. A Harness host advertises:
   "_harness/configuration/update",
   "_harness/configuration/changed",
   "_harness/session/rename",
+  "_harness/session/steer",
   "_harness/commands/list",
   "_harness/commands/invoke",
   "_harness/commands/cancel",
@@ -139,6 +140,17 @@ Request:
 
 Response: `{"sessionId": "abc", "title": "Release notes"}`. The agent persists the title and
 may emit a standard `session_info_update`.
+
+### `_harness/session/steer`
+
+Request: `{"sessionId": "abc", "text": "skip the docs, fix the test first"}`. Response:
+`{"sessionId": "abc", "steered": true}`.
+
+The host places the text on the running turn's pending-message queue, so the model receives it
+in the request after the tool call or response in flight and the message is committed to native
+history. It is the mid-turn counterpart to `session/prompt`, which is serialized behind the
+running turn. When no turn is live the host answers with an error and the client falls back to
+queueing the text locally.
 
 ### `_harness/commands/list`
 
