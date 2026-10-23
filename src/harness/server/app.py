@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -12,8 +12,10 @@ from typing import Any
 from fastapi import FastAPI, WebSocket
 
 from harness.runtime import (
+    MODEL,
     AgentDefinition,
     PluginRegistry,
+    ResourceBindings,
     ResourceSet,
     SessionStore,
 )
@@ -61,7 +63,7 @@ class AgentServer:
         self,
         definition: AgentDefinition,
         *,
-        resources: ResourceSet | Mapping[str, Any] | None = None,
+        resources: ResourceSet | ResourceBindings | None = None,
         models: Sequence[str] = (),
         allowed_cwds: Sequence[str | Path] | None = None,
         default_cwd: str | Path | None = None,
@@ -92,8 +94,8 @@ class AgentServer:
             not isinstance(model, str) or not model.strip() for model in models
         ):
             raise ValueError("models must be a sequence of non-empty model IDs")
-        values = resources.values if isinstance(resources, ResourceSet) else dict(resources or {})
-        selected = ResourceSet(values).get_model() or definition.model
+        bound = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
+        selected = bound.get(MODEL) or definition.model
         offered = tuple(
             dict.fromkeys([*([selected] if isinstance(selected, str) else []), *models])
         )
@@ -102,7 +104,7 @@ class AgentServer:
             allowed_cwds=roots,
             default_cwd=cwd,
             models=offered,
-            resources=values,
+            resources=bound.values,
         )
 
     def mount(self, app: FastAPI, *, prefix: str = "") -> None:

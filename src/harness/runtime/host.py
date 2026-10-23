@@ -92,6 +92,7 @@ from .definitions import (
 from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
 from .presentation import snapshot_from_metadata
 from .registry import PluginRegistry
+from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceBindings, ResourceSet
 from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
@@ -171,7 +172,7 @@ class HostPolicy:
     thinking_models: Mapping[str, str] = field(default_factory=dict)
     default_effort: str | None = None
     model_settings: Mapping[str, Any] = field(default_factory=dict)
-    resources: Mapping[str, Any] = field(default_factory=dict)
+    resources: ResourceSet | ResourceBindings = field(default_factory=dict)
     default_cwd: str | None = None
 
     def __post_init__(self) -> None:
@@ -1151,18 +1152,23 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 update=plan_update(items),
             )
 
-    def _resources(self, cwd: str, session_id: str | None = None) -> dict[str, Any]:
-        values = dict(self.policy.resources)
-        values.setdefault("user_answers", self.question_channel)
+    def _resources(self, cwd: str, session_id: str | None = None) -> ResourceSet:
+        """The deployment's bindings plus the services this session owns.
+
+        A deployment binding always wins: the ACP client's cwd only fills a workspace slot the
+        deployment left empty. That is what lets a host bind a remote or sandboxed workspace
+        backend while the client still sends an ordinary path as its ``cwd``.
+        """
+        resources = ResourceSet(self.policy.resources)
+        resources.bind_if_absent(ANSWERS, self.question_channel)
         if session_id is not None:
-            values.setdefault("plan_events", self._plan_channel(session_id))
+            resources.bind_if_absent(PLAN, self._plan_channel(session_id))
         model = self._default_model
         if model is not None:
-            values.setdefault("model.default", model)
-        for requirement in self.definition.resources:
-            if requirement.kind == "workspace":
-                values.setdefault(requirement.name, cwd)
-        return values
+            resources.bind_if_absent(MODEL, model)
+        if self.definition.declares(WORKSPACE):
+            resources.bind_if_absent(WORKSPACE, cwd)
+        return resources
 
     async def _compose_session(self, session: Any) -> Any:
         record = await self.store.get(session.session_id)
@@ -1401,9 +1407,9 @@ def build_agent(bundle: HostBundle, setup: HostSetup | None = None) -> HarnessAC
     from .local import thinking_support
 
     models = setup.advertised_models() if setup else ()
-    resources = dict(setup.resources) if setup else {}
-    if setup and setup.model and "model.default" not in resources:
-        resources["model.default"] = setup.model
+    resources = ResourceSet(setup.resources if setup else None)
+    if setup and setup.model:
+        resources.bind_if_absent(MODEL, setup.model)
     policy = HostPolicy(
         principal=setup.principal if setup else "local",
         deployment_id=setup.deployment_id if setup else "local",

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 
+from ...registry import BindingContext
 from ._catalog import build_capability, build_skills, workspace_base
 from ._invocation import explicit_skill_names, latest_user_text
 from .config import SkillsConfig, resolved_directories
@@ -72,8 +73,8 @@ class AgentSkills(CombinedCapability[AgentDepsT]):
         )
 
 
-def build_agent_skills(config: SkillsConfig, binding: object) -> AgentSkills:
+def build_agent_skills(config: SkillsConfig, binding: BindingContext) -> AgentSkills:
     """Plugin factory: turn a validated configuration into the native capability."""
-    resources = getattr(binding, "resources", None)
+    resources = binding.resources
     base = str(workspace_base(resources)) if resources is not None else None
     return AgentSkills(config, base=base)

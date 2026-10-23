@@ -12,6 +12,7 @@ from pydantic_ai_harness.repair_tool_arguments import RepairToolArguments
 from pydantic_ai_harness.repo_context import RepoContext
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
+from ...registry import BindingContext
 from ._instructions import INSTRUCTIONS
 from ._tools import MAX_MODEL_TEXT, CoderTools
 from .config import CoderConfig
@@ -80,6 +81,6 @@ class Coder(CombinedCapability[AgentDepsT]):
         )
 
 
-def build_coder(config: CoderConfig, _binding: object) -> Coder:
+def build_coder(config: CoderConfig, _binding: BindingContext) -> Coder:
     """Plugin factory: turn a validated configuration into the native capability."""
     return Coder(config)

@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic_ai.capabilities import AgentCapability
+
 from harness.protocol import CapabilityPolicy
 from harness.protocol.extensions import CommandResult
 
 from ...extensions import Command, CommandContext, TextArguments
-from ...registry import CompatibilityConstraints, PluginDescriptor
+from ...registry import BindingContext, CompatibilityConstraints, PluginDescriptor
+from ...resources import WORKSPACE
 from .config import SkillsConfig
 
 __all__ = ["AgentSkills", "SkillsConfig", "build_agent_skills", "descriptor"]
@@ -20,7 +23,7 @@ __all__ = ["AgentSkills", "SkillsConfig", "build_agent_skills", "descriptor"]
 _PLUGIN_ID = "harness.skills"
 
 
-def build_agent_skills(config: SkillsConfig, binding: object) -> object:
+def build_agent_skills(config: SkillsConfig, binding: BindingContext) -> AgentCapability:
     """Lazy factory reference; imports the capability module only when composed."""
     from ._capability import build_agent_skills as _build
 
@@ -54,6 +57,7 @@ def descriptor() -> PluginDescriptor[SkillsConfig]:
         ],
         state_mode="run",
         compatibility=CompatibilityConstraints(requires_extras=["pydantic_ai_skills"]),
+        needs=(WORKSPACE,),
         default_policy=CapabilityPolicy(
             available=True,
             enabled_by_default=False,

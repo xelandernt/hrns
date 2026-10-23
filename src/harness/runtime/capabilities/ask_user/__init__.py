@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic_ai.capabilities import AgentCapability
+
 from harness.protocol import CapabilityPolicy
 
-from ...registry import PluginDescriptor
+from ...registry import BindingContext, PluginDescriptor
+from ...resources import ANSWERS
 from .config import AskUserConfig
 
 __all__ = ["AskUser", "AskUserConfig", "build_ask_user", "descriptor"]
@@ -19,7 +22,7 @@ __all__ = ["AskUser", "AskUserConfig", "build_ask_user", "descriptor"]
 _PLUGIN_ID = "harness.ask_user"
 
 
-def build_ask_user(config: AskUserConfig, binding: object) -> object:
+def build_ask_user(config: AskUserConfig, binding: BindingContext) -> AgentCapability:
     """Lazy factory reference; imports the upstream capability only when composed."""
     from ._capability import build_ask_user as _build
 
@@ -37,6 +40,7 @@ def descriptor() -> PluginDescriptor[AskUserConfig]:
         ),
         config_model=AskUserConfig,
         factory="harness.runtime.capabilities.ask_user:build_ask_user",
+        needs=(ANSWERS,),
         state_mode="run",
         default_policy=CapabilityPolicy(
             available=True,

@@ -27,7 +27,7 @@ from pydantic_core import to_jsonable_python
 
 from harness.protocol import CapabilityPolicy, HarnessError, PluginInfo
 
-from .resources import ResourceSet
+from .resources import ResourceSet, ResourceSlot
 
 __all__ = [
     "BindingContext",
@@ -79,7 +79,7 @@ class CompatibilityConstraints(BaseModel):
     """Free-form note rendered in catalogs, e.g. 'Apple-silicon macOS only'."""
 
 
-PluginConfigT = TypeVar("PluginConfigT")
+PluginConfigT = TypeVar("PluginConfigT", bound=BaseModel)
 
 
 class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
@@ -110,6 +110,13 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     instructions: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
     """``binding_id`` (or resource) names required when this plugin is enabled."""
+    needs: tuple[ResourceSlot[object], ...] = ()
+    """Typed resources this plugin cannot work without.
+
+    Composition rejects an enabled binding whose definition does not declare the slot, or
+    whose slot is unbound, before the plugin factory runs — so a factory may read the value
+    with :meth:`ResourceSet.require` instead of re-checking it.
+    """
     conflicts: list[str] = Field(default_factory=list)
     """``binding_id`` names that may not be enabled side by side with this plugin."""
     state_mode: CapabilityStateMode = "run"
@@ -140,7 +147,7 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
         """Infer editable defaults and honor explicit non-editable annotations."""
         if self.config_model is None:
             return self
-        fields = cast(type[BaseModel], self.config_model).model_fields
+        fields = self.config_model.model_fields
         if "editable_fields" in self.default_policy.model_fields_set:
             editable = set(self.default_policy.editable_fields)
         else:
@@ -200,7 +207,7 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
         if self.config_model is None:
             return {}
         try:
-            return cast(type[BaseModel], self.config_model).model_json_schema(mode="validation")
+            return self.config_model.model_json_schema(mode="validation")
         except Exception:  # pragma: no cover - schema generation is pure
             return {}
 
@@ -208,7 +215,7 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
         """Initial values from the config model's field defaults."""
         if self.config_model is None:
             return {}
-        model = cast(type[BaseModel], self.config_model)
+        model = self.config_model
         try:
             instance = model()
         except ValidationError:  # pragma: no cover - required fields have no defaults

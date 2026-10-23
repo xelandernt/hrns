@@ -29,7 +29,7 @@ from .host import (
     build_store,
 )
 from .registry import PluginRegistry
-from .resources import ResourceRequirement
+from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceRequirement
 
 _LOCAL_INSTRUCTIONS = """\
 You are a local Harness agent connected through ACP, working in the user's project.
@@ -251,19 +251,12 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
         ],
     ]
     resources = [
-        ResourceRequirement(
-            name="model.default",
-            kind="model",
-            description="Agent model (provider string or native Model instance).",
+        ResourceRequirement.of(
+            MODEL, description="Agent model (provider string or native Model instance)."
         ),
-        ResourceRequirement(
-            name="workspace",
-            kind="workspace",
-            description="Working directory the bundled tools act on.",
-        ),
-        ResourceRequirement(
-            name="plan_events",
-            kind="service",
+        ResourceRequirement.of(WORKSPACE, description="Directory the bundled tools act on."),
+        ResourceRequirement.of(
+            PLAN,
             description="Session-scoped plan channel that streams todos to the connected client.",
         ),
     ]
@@ -275,9 +268,8 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             )
         )
         resources.append(
-            ResourceRequirement(
-                name="user_answers",
-                kind="service",
+            ResourceRequirement.of(
+                ANSWERS,
                 description="Answerer that carries agent questions to the connected client.",
             )
         )
@@ -326,7 +318,7 @@ def build_local_agent(
             default_cwd=str(workspace),
             models=models,
             default_model=f"{settings.provider}:{settings.model}",
-            resources={"model.default": model, "workspace": str(workspace)},
+            resources={MODEL: model, WORKSPACE: str(workspace)},
             thinking_models=thinking_support(models),
             default_effort=thinking_from_settings(settings),
             model_settings=settings.model_settings,

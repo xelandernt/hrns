@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic_ai.capabilities import MCP
+from pydantic_ai.capabilities import MCP, AgentCapability
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.tools import AgentDepsT, RunContext
-from pydantic_ai.toolsets import WrapperToolset
+from pydantic_ai.toolsets import AbstractToolset, WrapperToolset
 
 from harness.config.mcp import McpServerConfig, build_token_store, build_transport, server_name
+
+from ...registry import BindingContext
 
 __all__ = ["GuardedMcpToolset", "build_mcp_server"]
 
@@ -74,10 +76,10 @@ class GuardedMcpToolset(WrapperToolset[AgentDepsT]):
 
 
 def _filter_tools(
-    toolset: Any,
+    toolset: AbstractToolset[AgentDepsT],
     include: list[str],
     exclude: list[str],
-) -> Any:
+) -> AbstractToolset[AgentDepsT]:
     if include:
         allowed = set(include)
         return toolset.filtered(lambda _ctx, tool: tool.name in allowed)
@@ -87,7 +89,7 @@ def _filter_tools(
     return toolset
 
 
-def build_mcp_server(config: McpServerConfig, binding: object) -> Any:
+def build_mcp_server(config: McpServerConfig, binding: BindingContext) -> AgentCapability:
     """Compose the transport, guard, and ``MCP`` capability for one server."""
     from pydantic_ai.capabilities import Capability
     from pydantic_ai.mcp import MCPToolset

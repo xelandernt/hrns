@@ -9,31 +9,53 @@ transcripts, turns, or ACP execution.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.agent.spec import AgentSpec as NativeAgentSpec
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import AgentDepsT, RunContext
+from typing_extensions import TypeIs
 
-from harness.config import EFFORT_OFF, THINKING_LEVELS
-from harness.protocol import BindingChange, ConfigurationSnapshot, HarnessError
+from harness.config import EFFORT_OFF, THINKING_LEVELS, EffortLevel
+from harness.protocol import (
+    BindingChange,
+    BindingDescriptor,
+    ConfigurationSnapshot,
+    HarnessError,
+)
 
 from ._model_usage import normalize_model_usage
 from .commands import CommandRegistry, build_command_registry
 from .definitions import (
     AGENT_FACTORY_PARAM,
     AgentDefinition,
+    AgentFactory,
     AgentFactoryContext,
     factory_declared_params,
     factory_managed_param,
 )
+from .deps import HarnessDeps
 from .policy import PolicyCatalog
-from .presentation import PresentationObserver
+from .presentation import PresentationObserver, ToolPresentationSnapshot
 from .registry import PluginRegistry
-from .resources import ResourceSet, resolve_workspace_value
+from .resources import (
+    MODEL,
+    WORKSPACE,
+    ModelInput,
+    ResolvedWorkspace,
+    ResourceBindings,
+    ResourceSet,
+    resolve_workspace_value,
+)
+
+if TYPE_CHECKING:
+    from pydantic_ai_harness.experimental.acp import AcpSessionConfig
 
 __all__ = [
     "Composition",
@@ -41,6 +63,31 @@ __all__ = [
     "compose_definition",
     "compose_session_config",
 ]
+
+#: Where a host publishes tool-presentation snapshots for the connected client.
+PresentationSink = Callable[[ToolPresentationSnapshot], Awaitable[None]]
+
+
+class _ProviderSettings(ModelSettings, total=False):
+    """Model settings plus the provider-specific reasoning-effort key.
+
+    ``openai_reasoning_effort`` is not part of the unified ``ModelSettings`` surface — it is
+    the explicit key providers without a model profile accept — so it needs declaring here
+    rather than widening the whole mapping to a loose dict.
+    """
+
+    openai_reasoning_effort: Literal["none", EffortLevel]
+
+
+def _is_effort_level(value: object) -> TypeIs[EffortLevel]:
+    """Whether a spelling is one of the unified thinking levels."""
+    return value in THINKING_LEVELS
+
+
+def _effort_or_none(value: str) -> EffortLevel | None:
+    """The literal level for a spelling, or ``None`` for one pydantic-ai does not define."""
+    return value if _is_effort_level(value) else None
+
 
 #: Providers whose model classes accept the explicit OpenAI reasoning-effort key.
 #: Custom model ids use it because the unified ``thinking`` setting is gated on a
@@ -57,7 +104,7 @@ class EffortState:
     effort: str | None = None
     support: str | None = None
     model: str | None = None
-    base: dict[str, Any] = field(default_factory=dict)
+    base: ModelSettings = field(default_factory=ModelSettings)
 
     def set_model(self, model: str | None, support: str | None) -> None:
         self.model = model
@@ -65,22 +112,25 @@ class EffortState:
         if self.effort is not None and support is None:
             self.effort = None
 
-    def settings(self, _ctx: Any = None) -> ModelSettings:
+    def settings(self, _ctx: RunContext[AgentDepsT] | None = None) -> ModelSettings:
         """Return the merged model settings for the next request."""
-        settings: dict[str, Any] = dict(self.base)
-        settings.pop("thinking", None)
+        merged: _ProviderSettings = {**self.base}
+        merged.pop("thinking", None)
         if self.support is None or self.effort is None:
-            return settings  # type: ignore[return-value]
+            return merged
         off = self.effort == EFFORT_OFF
-        settings["thinking"] = False if off else self.effort
+        if off:
+            merged["thinking"] = False
+        elif _is_effort_level(self.effort):
+            merged["thinking"] = self.effort
         provider = (self.model or "").partition(":")[0]
         if self.support == "custom" and provider in _OPENAI_EFFORT_PROVIDERS:
-            settings["openai_reasoning_effort"] = "none" if off else self.effort
-        return settings  # type: ignore[return-value]
+            merged["openai_reasoning_effort"] = "none" if off else _effort_or_none(self.effort)
+        return merged
 
 
 @dataclass(kw_only=True)
-class _EffortCapability(AbstractCapability[Any]):
+class _EffortCapability(AbstractCapability[AgentDepsT]):
     """Contribute the session's current effort to every model request.
 
     The capability is constructed once; ``get_model_settings`` returns a callable so a
@@ -90,7 +140,7 @@ class _EffortCapability(AbstractCapability[Any]):
     state: EffortState
     id: str | None = "harness.effort"
 
-    def get_model_settings(self) -> Any:
+    def get_model_settings(self) -> Callable[[RunContext[AgentDepsT]], ModelSettings]:
         return self.state.settings
 
 
@@ -98,24 +148,26 @@ class _EffortCapability(AbstractCapability[Any]):
 class Composition:
     """One session's native agent and its ACP run configuration."""
 
-    agent: Any
+    agent: AbstractAgent
     catalog: PolicyCatalog
     snapshot: ConfigurationSnapshot
     resources: ResourceSet
     effort: EffortState
-    config: Any
-    capabilities: list[AbstractCapability[Any]] = field(default_factory=list)
+    config: AcpSessionConfig[object]
+    capabilities: list[AgentCapability] = field(default_factory=list)
     commands: CommandRegistry = field(default_factory=CommandRegistry)
     presentation: PresentationObserver | None = None
-    workspace: Any = None
-    deps: Any = None
+    workspace: ResolvedWorkspace | None = None
+    deps: object = None
 
-    def descriptors(self) -> list[Any]:
+    def descriptors(self) -> list[BindingDescriptor]:
         return list(self.catalog.descriptors())
 
 
-def _capability_tool_names(capability: Any) -> set[str]:
+def _capability_tool_names(capability: AgentCapability) -> set[str]:
     """Best-effort tool names contributed by one capability instance."""
+    if not isinstance(capability, AbstractCapability):
+        return set()
     names: set[str] = set()
     try:
         toolset = capability.get_toolset()
@@ -128,13 +180,15 @@ def _capability_tool_names(capability: Any) -> set[str]:
 
 
 def _validate_composed_identities(
-    definition: AgentDefinition, composed: Sequence[tuple[str, Any]]
+    definition: AgentDefinition, composed: Sequence[tuple[str, AgentCapability]]
 ) -> None:
     """Reject duplicate capability ids/tools before Pydantic AI silently merges them."""
     seen_ids: dict[str, str] = {}
     seen_tools: dict[str, str] = {}
     fixed = list(definition.fixed_capabilities)
-    all_capabilities: list[tuple[str, Any]] = [("fixed", capability) for capability in fixed]
+    all_capabilities: list[tuple[str, AgentCapability]] = [
+        ("fixed", capability) for capability in fixed
+    ]
     all_capabilities.extend(composed)
     for owner, capability in all_capabilities:
         capability_id = getattr(capability, "id", None)
@@ -160,17 +214,17 @@ def _validate_composed_identities(
 
 def _factory_kwargs(
     definition: AgentDefinition,
-    factory: Any,
+    factory: AgentFactory,
     *,
     resources: ResourceSet,
     snapshot: ConfigurationSnapshot,
-    composed: Sequence[tuple[str, Any]],
-    managed_capabilities: list[Any] | None,
-    model: Any,
+    composed: Sequence[tuple[str, AgentCapability]],
+    managed_capabilities: list[AgentCapability] | None,
+    model: ModelInput | None,
     session_id: str,
     principal: str,
     deployment_id: str,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     declared = set(factory_declared_params(factory))
     try:
         parameters = inspect.signature(factory).parameters.values()
@@ -185,7 +239,7 @@ def _factory_kwargs(
         deployment_id=deployment_id,
         binding_ids=tuple(binding_id for binding_id, _ in composed),
     )
-    values: dict[str, Any] = {
+    values: dict[str, object] = {
         "resources": resources,
         "active_config": snapshot,
         "model": model,
@@ -200,26 +254,32 @@ def _factory_kwargs(
 async def _build_agent(
     definition: AgentDefinition,
     *,
-    composed: Sequence[tuple[str, Any]],
+    composed: Sequence[tuple[str, AgentCapability]],
     snapshot: ConfigurationSnapshot,
     resources: ResourceSet,
-    model: Any,
+    model: ModelInput | None,
     session_id: str,
     principal: str,
     deployment_id: str,
-) -> tuple[Any, list[Any]]:
-    """Construct the native agent and any capabilities that must be applied per run."""
+    deps_type: type[HarnessDeps] | None = None,
+) -> tuple[AbstractAgent, list[AgentCapability]]:
+    """Construct the native agent and any capabilities that must be applied per run.
+
+    ``deps_type`` is the run's dependency type when Harness owns the agent (spec or plain
+    construction). A factory-created agent keeps whatever type it declared, since a
+    deployment's own agent may expect its own dependencies.
+    """
     capabilities = [capability for _, capability in composed]
     _validate_composed_identities(definition, composed)
     if definition.spec is not None:
-        spec: Any = definition.spec
+        spec: NativeAgentSpec | Mapping[str, JsonValue] = definition.spec
         if isinstance(spec, BaseModel):
             spec = spec.model_dump(mode="json", exclude_defaults=True)
-        agent = Agent.from_spec(
-            spec,
-            model=model,
-            capabilities=[*definition.fixed_capabilities, *capabilities],
-        )
+        declared: list[AgentCapability] = [*definition.fixed_capabilities, *capabilities]
+        if deps_type is None:
+            agent = Agent.from_spec(spec, model=model, capabilities=declared)
+        else:
+            agent = Agent.from_spec(spec, model=model, capabilities=declared, deps_type=deps_type)
         return agent, []
     if definition.factory is not None:
         factory = definition.factory
@@ -252,38 +312,86 @@ async def _build_agent(
         if managed_at_agent:
             return agent, fixed
         return agent, [*fixed, *capabilities]
-    agent = Agent(
-        model=model,
-        capabilities=[*definition.fixed_capabilities, *capabilities],
-    )
+    declared: list[AgentCapability] = [*definition.fixed_capabilities, *capabilities]
+    if deps_type is None:
+        agent = Agent(model=model, capabilities=declared)
+    else:
+        agent = Agent(model=model, capabilities=declared, deps_type=deps_type)
     return agent, []
 
 
-def _workspace_value(definition: AgentDefinition, resources: ResourceSet) -> Any:
-    for requirement in definition.resources:
-        if requirement.kind != "workspace":
-            continue
-        found, value = resources.try_resolve(requirement)
-        return resolve_workspace_value(value) if found else None
-    return None
+def _workspace_value(
+    definition: AgentDefinition, resources: ResourceSet
+) -> ResolvedWorkspace | None:
+    """The run workspace, when the definition asked for one.
+
+    Declaration drives injection: a definition that never declares a workspace requirement
+    receives no workspace, even if the deployment bound one. A declared-and-bound value is
+    passed through :func:`resolve_workspace_value`, so a plain path becomes a local backend
+    and a remote or sandboxed backend reaches the run unchanged.
+    """
+    if not definition.declares(WORKSPACE):
+        return None
+    value = resources.get(WORKSPACE)
+    return resolve_workspace_value(value) if value is not None else None
+
+
+def _validate_resource_needs(
+    definition: AgentDefinition,
+    catalog: PolicyCatalog,
+    resources: ResourceSet,
+) -> None:
+    """Reject an enabled binding whose typed resources are undeclared or unbound.
+
+    This is the runtime side of a plugin's ``needs`` declaration: the definition must ask for
+    the slot and the deployment must fill it before the factory runs, so the capability can
+    read the value without a defensive check of its own.
+    """
+    for offering in catalog.enabled_ordered():
+        for slot in offering.descriptor.needs:
+            if not definition.declares(slot):
+                raise HarnessError(
+                    "INVALID_CONFIGURATION",
+                    f"Binding {offering.binding_id!r} (plugin {offering.plugin_id!r}) needs the "
+                    f"{slot.kind} resource {slot.name!r}, which definition "
+                    f"{definition.agent_id!r} does not declare.",
+                    details={
+                        "binding_id": offering.binding_id,
+                        "plugin_id": offering.plugin_id,
+                        "resource": slot.name,
+                        "kind": slot.kind,
+                    },
+                )
+            if resources.get(slot) is None:
+                raise HarnessError(
+                    slot.missing_code,
+                    f"Binding {offering.binding_id!r} needs the {slot.kind} resource "
+                    f"{slot.name!r}, which this deployment does not bind.",
+                    details={
+                        "binding_id": offering.binding_id,
+                        "resource": slot.name,
+                        "kind": slot.kind,
+                        "description": slot.description,
+                    },
+                )
 
 
 async def compose_definition(
     definition: AgentDefinition,
     registry: PluginRegistry,
     *,
-    resources: ResourceSet | Mapping[str, Any] | None = None,
+    resources: ResourceSet | ResourceBindings | None = None,
     session_id: str,
     principal: str = "local",
     deployment_id: str = "local",
     initial_configuration: Sequence[BindingChange] | None = None,
-    saved_bindings: Mapping[str, Mapping[str, Any]] | None = None,
-    model: Any = None,
-    model_settings: Mapping[str, Any] | None = None,
+    saved_bindings: Mapping[str, Mapping[str, JsonValue]] | None = None,
+    model: ModelInput | None = None,
+    model_settings: ModelSettings | None = None,
     effort: str | None = None,
     effort_support: str | None = None,
-    deps: Any = None,
-    presentation_sink: Any = None,
+    deps: object = None,
+    presentation_sink: PresentationSink | None = None,
 ) -> Composition:
     """Compose a definition into a native agent and an ACP session configuration.
 
@@ -315,11 +423,9 @@ async def compose_definition(
         active_revision=1,
         application_status="applied",
     )
-    resource_values = (
-        resources.values if isinstance(resources, ResourceSet) else dict(resources or {})
-    )
-    resource_set = ResourceSet(resource_values)
+    resource_set = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
     resource_set.validate_requirements(definition.resources)
+    _validate_resource_needs(definition, catalog, resource_set)
     composed = catalog.compose(
         resources=resource_set,
         active_configuration=snapshot,
@@ -332,10 +438,10 @@ async def compose_definition(
     )
     selected_model = (
         normalize_model_usage(model)
-        or normalize_model_usage(resource_set.get_model())
+        or normalize_model_usage(resource_set.get(MODEL))
         or normalize_model_usage(definition.model)
     )
-    base_settings = dict(model_settings or {})
+    base_settings: ModelSettings = {**(model_settings or {})}
     base_settings.pop("thinking", None)
     effort_state = EffortState(
         effort=effort if effort in (*THINKING_LEVELS, EFFORT_OFF) else None,
@@ -345,6 +451,14 @@ async def compose_definition(
     )
     if effort_state.effort is not None and effort_state.support is None:
         effort_state.effort = None
+    workspace = _workspace_value(definition, resource_set)
+    # The run's dependencies: the deployment's own object when it supplied one, otherwise the
+    # typed projection of this session's resources. Handing resources to the framework's own
+    # injection keeps `ctx.deps` typed for tools, instructions and capabilities.
+    run_deps = (
+        deps if deps is not None else HarnessDeps.from_resources(resource_set, workspace=workspace)
+    )
+    deps_type = HarnessDeps if isinstance(run_deps, HarnessDeps) else None
     agent, run_capabilities = await _build_agent(
         definition,
         composed=composed,
@@ -354,6 +468,7 @@ async def compose_definition(
         session_id=session_id,
         principal=principal,
         deployment_id=deployment_id,
+        deps_type=deps_type,
     )
     commands = build_command_registry(
         registry=registry,
@@ -368,14 +483,14 @@ async def compose_definition(
     observer: PresentationObserver | None = None
     if presentation_sink is not None:
         observer = PresentationObserver(session_id=session_id, publish=presentation_sink)
-    capabilities = [
+    capabilities: list[AgentCapability] = [
         _EffortCapability(state=effort_state),
         *([observer] if observer is not None else []),
         *run_capabilities,
     ]
     workspace = _workspace_value(definition, resource_set)
     config = AcpSessionConfig(
-        deps=None,
+        deps=run_deps,
         capabilities=capabilities,
         toolsets=None,
         workspace=workspace,
@@ -391,10 +506,10 @@ async def compose_definition(
         commands=commands,
         presentation=observer,
         workspace=workspace,
-        deps=deps,
+        deps=run_deps,
     )
 
 
-def compose_session_config(composition: Composition) -> Any:
+def compose_session_config(composition: Composition) -> AcpSessionConfig[object]:
     """Return the adapter-facing run configuration for a composition."""
     return composition.config

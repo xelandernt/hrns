@@ -48,6 +48,7 @@ from .definitions import (
     parse_manifest_data,
     parse_manifest_text,
 )
+from .deps import HarnessDeps
 from .extensions import Command, CommandBinding, CommandContext, TextArguments
 from .policy import PolicyCatalog, changes_payload_hash, order_enabled_offerings
 from .registry import (
@@ -59,7 +60,21 @@ from .registry import (
     PluginDescriptor,
     PluginRegistry,
 )
-from .resources import ResourceKind, ResourceRequirement, ResourceSet
+from .resources import (
+    ANSWERS,
+    MODEL,
+    PLAN,
+    SLOTS,
+    WORKSPACE,
+    ModelInput,
+    ResolvedWorkspace,
+    ResourceBindings,
+    ResourceKind,
+    ResourceRequirement,
+    ResourceSet,
+    ResourceSlot,
+    WorkspaceInput,
+)
 from .store import SQLiteSessionStore, default_store_path
 
 __all__ = [
@@ -111,12 +126,23 @@ __all__ = [
     "changes_payload_hash",
     "order_enabled_offerings",
     # resources
+    "ANSWERS",
+    "MODEL",
+    "PLAN",
+    "SLOTS",
+    "WORKSPACE",
+    "ModelInput",
+    "ResolvedWorkspace",
+    "ResourceBindings",
     "ResourceKind",
     "ResourceRequirement",
     "ResourceSet",
+    "ResourceSlot",
+    "WorkspaceInput",
     # composition
     "Composition",
     "EffortState",
+    "HarnessDeps",
     "compose_definition",
     # persistence
     "SQLiteSessionStore",

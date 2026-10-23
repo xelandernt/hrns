@@ -15,7 +15,7 @@ from harness.protocol import HarnessError, PresentationPayload
 from harness.protocol.extensions import CommandResult
 
 from ...extensions import CommandContext, TextArguments
-from ...resources import ResourceSet
+from ...resources import WORKSPACE, ResourceSet
 from .config import SkillsConfig, resolved_directories
 
 __all__ = [
@@ -37,8 +37,8 @@ def workspace_base(resources: ResourceSet | None) -> Path:
     `.agents/skills`. A remote or sandboxed workspace is not readable on this host; fall
     back to the runtime's working directory, matching how `SkillsCapability` reads.
     """
-    value = resources.get("workspace") if resources is not None else None
-    if isinstance(value, (str, Path)):
+    value = resources.get(WORKSPACE) if resources is not None else None
+    if isinstance(value, str | Path):
         path = Path(value).expanduser()
         if path.is_dir():
             return path
@@ -126,7 +126,7 @@ async def catalog_command(context: CommandContext, _arguments: TextArguments) ->
     config = context.config
     if not isinstance(config, SkillsConfig):
         raise HarnessError("COMMAND_FAILED", "Agent Skills received an invalid configuration.")
-    if context.resources is not None and context.resources.get("workspace") is None:
+    if context.resources is not None and context.resources.get(WORKSPACE) is None:
         raise HarnessError(
             "SKILLS_UNAVAILABLE",
             "Agent Skills needs a workspace resource to discover its libraries.",
