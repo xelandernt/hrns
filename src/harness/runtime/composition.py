@@ -213,7 +213,6 @@ def _validate_composed_identities(
 
 
 def _factory_kwargs(
-    definition: AgentDefinition,
     factory: AgentFactory,
     *,
     resources: ResourceSet,
@@ -286,7 +285,6 @@ async def _build_agent(
         managed_at_agent = factory_managed_param(factory)
         factory_caps = capabilities if managed_at_agent else None
         kwargs = _factory_kwargs(
-            definition,
             factory,
             resources=resources,
             snapshot=snapshot,

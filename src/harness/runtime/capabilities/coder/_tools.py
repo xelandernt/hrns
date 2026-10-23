@@ -173,7 +173,7 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                 raise ModelRetry(f"Could not write {path!r}: {exc}") from exc
             new_hash = content_hash(content.encode())
             if existed:
-                diff = unified_diff(path, before, content, limit=MAX_DIFF_LINES)
+                diff = unified_diff(before, content, limit=MAX_DIFF_LINES)
                 added = sum(1 for line in diff if line.startswith("+"))
                 removed = sum(1 for line in diff if line.startswith("-"))
             else:
@@ -245,7 +245,7 @@ class CoderTools(AbstractCapability[AgentDepsT]):
             except (WorkspaceError, OSError) as exc:
                 raise ModelRetry(f"Could not write {path!r}: {exc}") from exc
             new_hash = content_hash(after.encode())
-            diff = unified_diff(path, before, after, limit=MAX_DIFF_LINES)
+            diff = unified_diff(before, after, limit=MAX_DIFF_LINES)
             added = sum(1 for line in diff if line.startswith("+"))
             removed = sum(1 for line in diff if line.startswith("-"))
             model_text = f"Edited {path} (+{added} -{removed}, hash {new_hash})"

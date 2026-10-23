@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -232,22 +232,6 @@ class ScopedSessionStore:
         )
 
 
-def record_from_mapping(data: Mapping[str, Any]) -> SessionRecord:
-    """Build a record from untrusted JSON (used by stored bindings)."""
-    return SessionRecord(
-        session_id=str(data["session_id"]),
-        principal=str(data["principal"]),
-        deployment_id=str(data["deployment_id"]),
-        agent_id=str(data["agent_id"]),
-        definition_version=str(data["definition_version"]),
-        cwd=str(data["cwd"]),
-        title=data.get("title") if isinstance(data.get("title"), str) else None,
-        effort=data.get("effort") if isinstance(data.get("effort"), str) else None,
-        bindings=dict(data.get("bindings") or {}),
-        usage=dict(data.get("usage") or {}),
-    )
-
-
 def merge_usage(current: Mapping[str, Any], increment: Mapping[str, Any]) -> dict[str, Any]:
     """Add two usage totals without dropping unknown provider counters or the price."""
     # `cost_status` is derived on emit, and an earlier build also wrote an
@@ -357,11 +341,3 @@ def _add_costs(left: Any, right: Any) -> str | None:
             total += Decimal(text)
             priced = True
     return _cost_text(total) if priced else None
-
-
-def list_result(
-    records: Sequence[SessionRecord], *, limit: int, offset: int
-) -> tuple[list[SessionRecord], int | None]:
-    page = list(records[offset : offset + limit])
-    next_offset = offset + len(page)
-    return page, next_offset if next_offset < len(records) else None

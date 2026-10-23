@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 from acp import PROTOCOL_VERSION
 from websockets.typing import Subprotocol
 
@@ -32,10 +30,9 @@ WS_PING_INTERVAL = float(PING_INTERVAL)
 WS_PING_TIMEOUT = float(PING_TIMEOUT)
 WS_SUBPROTOCOL: Subprotocol = Subprotocol(SUBPROTOCOL)
 
-#: Retention bounds for the terminal UI and logs.
+#: Retention bounds for the terminal UI.
 UI_MAX_TRANSCRIPT_BLOCKS = 400
 UI_MAX_TOOL_CONTENT_CHARS = 8000
-UI_MAX_LOG_LINES = 500
 UI_STREAM_COALESCE_SECONDS = 0.06
 
 #: Bounded outbound buffering hint for the WebSocket transport.
@@ -48,16 +45,3 @@ CONFIG_DIR_NAME = "harness"
 CONFIG_FILE_NAME = "profiles.toml"
 PROJECT_CONFIG_NAME = "harness.toml"
 CONFIG_ENV_OVERRIDE = "HARNESS_PROFILES"
-
-
-def client_info_dict() -> dict[str, str]:
-    """Name/title metadata used in the initialize request."""
-    return {
-        "name": CLIENT_NAME,
-        "title": CLIENT_TITLE,
-        "version": CLIENT_VERSION,
-    }
-
-
-def is_ci() -> bool:
-    return bool(os.environ.get("CI"))

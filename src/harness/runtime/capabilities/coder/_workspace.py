@@ -11,7 +11,6 @@ from __future__ import annotations
 import difflib
 import hashlib
 import posixpath
-from collections.abc import Sequence
 
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.workspaces import Workspace
@@ -56,7 +55,7 @@ def is_binary(data: bytes) -> bool:
     return b"\x00" in data[:_BINARY_SAMPLE]
 
 
-def unified_diff(path: str, before: str, after: str, *, limit: int = 400) -> list[str]:
+def unified_diff(before: str, after: str, *, limit: int = 400) -> list[str]:
     """Unified diff lines with headers stripped, bounded for display."""
     old = before.splitlines()
     new = after.splitlines()
@@ -65,12 +64,6 @@ def unified_diff(path: str, before: str, after: str, *, limit: int = 400) -> lis
     if len(body) > limit:
         body = body[:limit] + [f"… {len(body) - limit} more diff lines"]
     return body
-
-
-def diff_counts(lines: Sequence[str]) -> tuple[int, int]:
-    added = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
-    removed = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
-    return added, removed
 
 
 class FileGuard:

@@ -12,9 +12,7 @@ from dataclasses import dataclass
 __all__ = [
     "LOCAL_COMMANDS",
     "LocalCommand",
-    "command_names",
     "command_suggestion_text",
-    "matches_command",
     "resolve_local_command",
 ]
 
@@ -88,16 +86,6 @@ for _command in LOCAL_COMMANDS:
 def resolve_local_command(name: str) -> LocalCommand | None:
     """Resolve a canonical name or compatibility alias."""
     return _BY_NAME.get(name.strip().lower())
-
-
-def command_names(*, include_aliases: bool = True) -> frozenset[str]:
-    if include_aliases:
-        return frozenset(_BY_NAME)
-    return frozenset(command.name for command in LOCAL_COMMANDS)
-
-
-def matches_command(command: LocalCommand, needle: str) -> bool:
-    return command.matches(needle)
 
 
 def command_suggestion_text(command: LocalCommand) -> str:

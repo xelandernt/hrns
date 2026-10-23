@@ -154,10 +154,6 @@ class ResourceSlot(Generic[T_co]):
     aliases: tuple[str, ...] = ()
     missing_code: str = "RESOURCE_UNAVAILABLE"
 
-    def named(self, name: str) -> bool:
-        """Whether a serialized name addresses this slot."""
-        return name == self.name or name in self.aliases
-
     def validate_value(self, value: object) -> None:
         """Reject a value this slot cannot hold."""
         if self.coerce(value) is None:
@@ -419,26 +415,12 @@ class ResourceSet:
             },
         )
 
-    def has(self, slot: ResourceSlot[object]) -> bool:
-        """Whether a value is bound to ``slot``."""
-        return self.get(slot) is not None
-
     @property
     def values(self) -> dict[str, object]:
         """A copy of the raw bindings, keyed by serialized name."""
         return dict(self._values)
 
     # --- whole-set operations ----------------------------------------
-
-    def merge(self, other: ResourceBindings | ResourceSet) -> ResourceSet:
-        """A new set starting from this one, with ``other`` bound on top."""
-        merged = ResourceSet(self)
-        if isinstance(other, ResourceSet):
-            merged._values.update(other._values)
-        else:
-            for key, value in other.items():
-                merged.bind(key, value)
-        return merged
 
     def missing(self, requirements: Iterable[ResourceRequirement]) -> list[ResourceRequirement]:
         """Required requirements whose slot has no value bound."""

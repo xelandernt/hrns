@@ -40,7 +40,11 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from ..constants import UI_MAX_TOOL_CONTENT_CHARS, UI_MAX_TRANSCRIPT_BLOCKS
+from ..constants import (
+    UI_MAX_TOOL_CONTENT_CHARS,
+    UI_MAX_TRANSCRIPT_BLOCKS,
+    UI_STREAM_COALESCE_SECONDS,
+)
 from ..interactions import (
     AskUserAnswer,
     AskUserQuestion,
@@ -498,9 +502,7 @@ class TranscriptPane(VerticalScroll):
         # Supplemental snapshots can arrive before the standard ACP tool-call start.
         self._pending_presentations: dict[str, Any] = {}
         self._stream: "MessageBlock | None" = None
-        self._stream_buffer = ""
         self._thought: "ReasoningBlock | None" = None
-        self._thought_buffer = ""
         self._dirty = False
         self._replay = False
         self._replay_entries: list[tuple[str, Any]] = []
@@ -509,7 +511,6 @@ class TranscriptPane(VerticalScroll):
         self.view_context: Any = None
         #: Expand reasoning text (the Thinking/Thought row appears either way).
         self.show_thoughts = False
-        self._ticker: Any = None
         self._following = True
         self._navigation_block: Any = None
         self.renderers = RendererRegistry()
@@ -523,7 +524,7 @@ class TranscriptPane(VerticalScroll):
         register_builtin_renderers(self.renderers)
 
     def on_mount(self) -> None:
-        self._ticker = self.set_interval(0.06, self.flush)
+        self.set_interval(UI_STREAM_COALESCE_SECONDS, self.flush)
         self.anchor()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
@@ -677,9 +678,6 @@ class TranscriptPane(VerticalScroll):
                 view = build_view(self.renderers, payload, "command", state, self.view_context)
         await self._mount_block(CommandResultBlock(data, view=view))
 
-    def command_blocks(self) -> list[CommandResultBlock]:
-        return [block for block in self._blocks if isinstance(block, CommandResultBlock)]
-
     async def append_agent_text(self, text: str, *, thought: bool = False) -> None:
         if not text:
             return
@@ -697,7 +695,6 @@ class TranscriptPane(VerticalScroll):
             if self._thought is None:
                 self._thought = ReasoningBlock(expanded=self.show_thoughts)
                 await self._mount_block(self._thought)
-            self._thought_buffer += text
             self._thought.append_text(text)
             self._output_updated()
         else:
@@ -705,7 +702,6 @@ class TranscriptPane(VerticalScroll):
             if self._stream is None:
                 self._stream = MessageBlock("agent", "")
                 await self._mount_block(self._stream)
-            self._stream_buffer += text
             self._stream.append_text(text)
             self._dirty = True
 
@@ -714,7 +710,6 @@ class TranscriptPane(VerticalScroll):
         if self._thought is not None:
             self._thought.finish()
         self._thought = None
-        self._thought_buffer = ""
 
     async def finish_message(self) -> None:
         self.flush()
@@ -722,7 +717,6 @@ class TranscriptPane(VerticalScroll):
             self._stream.finish()
         self._end_thought()
         self._stream = None
-        self._stream_buffer = ""
 
     def flush(self) -> None:
         if not self._dirty or self._stream is None:
@@ -738,7 +732,6 @@ class TranscriptPane(VerticalScroll):
         if self._stream is not None:
             self._stream.finish()
         self._stream = None
-        self._stream_buffer = ""
 
     async def start_tool(self, event: Any) -> None:
         if self._replay:
@@ -830,8 +823,6 @@ class TranscriptPane(VerticalScroll):
     async def clear_transcript(self) -> None:
         self._stream = None
         self._thought = None
-        self._stream_buffer = ""
-        self._thought_buffer = ""
         self._following = True
         self._navigation_block = None
         self.anchor()
@@ -867,9 +858,6 @@ class TranscriptPane(VerticalScroll):
             elif kind == "tool":
                 await self.add_tool_snapshot(payload)
         await self.finish_message()
-
-    def replay_entries(self) -> list[tuple[str, Any]]:
-        return list(self._replay_entries)
 
     def retained_tool_ids(self) -> list[str]:
         """Tool-call ids retained in the transcript, for passive presentation replay."""
@@ -2890,10 +2878,6 @@ class CapabilityPanel(Vertical):
         if index is None or index < 0 or index >= len(self._order):
             return None
         return self._order[index]
-
-    def selected_option(self) -> dict[str, Any] | None:
-        binding_id = self.current_binding_id()
-        return self._options.get(binding_id) if binding_id else None
 
     def binding(self, binding_id: str) -> dict[str, Any] | None:
         return self._summary.get(binding_id)

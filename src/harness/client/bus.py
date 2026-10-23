@@ -7,8 +7,6 @@ import weakref
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .events import ConnectionEvent
-
 Subscriber = Callable[[Any], Awaitable[None] | None]
 
 
@@ -40,9 +38,6 @@ class EventBus:
 
         return unsubscribe
 
-    def unsubscribe_all(self) -> None:
-        self._subscribers.clear()
-
     def publish(self, event: Any) -> None:
         for handler in list(self._subscribers):
             try:
@@ -61,10 +56,3 @@ class EventBus:
         """Wait for handler tasks published so far to finish (tests only)."""
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
-
-    def connection(
-        self, state: str, detail: str = "", location: dict[str, str] | None = None
-    ) -> ConnectionEvent:
-        event = ConnectionEvent(state=state, detail=detail, location=location or {})
-        self.publish(event)
-        return event

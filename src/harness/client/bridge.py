@@ -100,7 +100,6 @@ async def run_bridge_pump(
     *,
     remote_cwd: str | None = None,
     stderr: Callable[[str], None] | None = None,
-    max_remote_seconds: float = 5.0,
 ) -> int:
     """Run both directions until stdin closes or the remote side goes away."""
     report = stderr or (lambda line: print(f"bridge: {line}", file=sys.stderr, flush=True))

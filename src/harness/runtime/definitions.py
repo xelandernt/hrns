@@ -421,11 +421,6 @@ class AgentDefinition(BaseModel):
         """
         return any(SLOTS.of(requirement).name == slot.name for requirement in self.resources)
 
-    @property
-    def required_slots(self) -> tuple[ResourceSlot[object], ...]:
-        """The typed slots this definition requires, including descriptor-derived needs."""
-        return tuple(SLOTS.of(requirement) for requirement in self.resources)
-
     def resolve(self, registry: PluginRegistry) -> AgentDefinition:
         """Attach registry descriptors to ``plugin_id`` bindings and derive their needs.
 
