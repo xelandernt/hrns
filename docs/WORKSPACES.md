@@ -62,7 +62,9 @@ from harness.runtime import MODEL, WORKSPACE, ResourceSet
 
 agents.add_agent(
     definition,
-    resources=ResourceSet({MODEL: model, WORKSPACE: SSHWorkspaceBackend("dev@build-01", working_dir="/srv/app")}),
+    resources=ResourceSet(
+        {MODEL: model, WORKSPACE: SSHWorkspaceBackend("dev@build-01", working_dir="/srv/app")}
+    ),
     allowed_cwds=["/srv/app"],
     default_cwd="/srv/app",
 )
