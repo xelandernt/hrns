@@ -71,6 +71,15 @@ class CapabilityPolicy(WireModel):
     change_mode: Literal["next_turn", "new_session"] = "new_session"
 
 
+class ResourceNeed(WireModel):
+    """One host-supplied resource a plugin cannot work without."""
+
+    name: str
+    kind: Literal["model", "workspace", "memory", "store", "service", "custom"] = "custom"
+    required: bool = True
+    description: str = ""
+
+
 class BindingDescriptor(WireModel):
     schema_version: Literal[1] = 1
     binding_id: BindingId
@@ -86,6 +95,7 @@ class BindingDescriptor(WireModel):
     policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
     state_mode: Literal["run", "session", "external"] = "run"
     requires: list[str] = Field(default_factory=list)
+    needs: list[ResourceNeed] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     availability_reason: str | None = None
     presentation: list[str] = Field(default_factory=list)
@@ -103,6 +113,7 @@ class PluginInfo(WireModel):
     managed: bool = False
     presentation: str = "generic"
     requirements: list[str] = Field(default_factory=list)
+    needs: list[ResourceNeed] = Field(default_factory=list)
     constraint: str | None = None
 
 

@@ -75,6 +75,8 @@ agents.add_agent(definition)
 agents.mount(app)
 ```
 
+`add_agent` binds and validates the definition's resource requirements at registration; pass
+`resources=`, or a `definition.bind(...)` result, when a capability needs host values.
 Install the `server` extra, register your `AgentDefinition` objects, and run the app
 with Uvicorn. Connect using `hrns connect --url http://127.0.0.1:8080 --agent AGENT_ID`.
 PostgreSQL and optional FastAPI authentication dependencies use the same API.

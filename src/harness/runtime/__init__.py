@@ -36,6 +36,7 @@ from .definitions import (
     AgentFactory,
     AgentFactoryContext,
     AgentSpec,
+    BoundDefinition,
     CapabilityFactory,
     DefinitionBinding,
     DefinitionManifest,
@@ -99,6 +100,7 @@ __all__ = [
     # definitions
     "AGENT_FACTORY_PARAM",
     "AgentDefinition",
+    "BoundDefinition",
     "AgentFactory",
     "AgentFactoryContext",
     "AgentSpec",

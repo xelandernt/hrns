@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from pydantic_ai.capabilities import AbstractCapability, Caching, Capability, CombinedCapability
 from pydantic_ai.exceptions import UserError
@@ -13,7 +14,9 @@ from pydantic_ai_harness.repo_context import RepoContext
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
 from ...registry import BindingContext
+from ...resources import WORKSPACE, ResourceSlot
 from ._instructions import INSTRUCTIONS
+from ._needs import NEEDS
 from ._tools import MAX_MODEL_TEXT, CoderTools
 from .config import CoderConfig
 
@@ -50,13 +53,15 @@ class Coder(CombinedCapability[AgentDepsT]):
     and prompt caching when the provider supports it. Delegation is not included.
     """
 
+    needs: ClassVar[tuple[ResourceSlot[object], ...]] = NEEDS
+
     def __init__(self, config: CoderConfig | None = None) -> None:
         config = config if config is not None else CoderConfig()
         instructions = INSTRUCTIONS
         if config.instructions:
             instructions = f"{INSTRUCTIONS}\n{config.instructions.strip()}\n"
         capabilities: list[AbstractCapability[AgentDepsT]] = [
-            _RequireWorkspace(),
+            *([_RequireWorkspace()] if WORKSPACE in NEEDS else []),
             Capability(id="harness.coder.instructions", instructions=[instructions]),
             CoderTools(config=config),
             ClearToolResults(max_fraction=0.7, id="harness.coder.clear_tool_results"),

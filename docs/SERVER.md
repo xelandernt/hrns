@@ -39,9 +39,10 @@ uv run uvicorn my_app:app --host 127.0.0.1 --port 8080 \
   --ws-max-size 16777216 --ws-ping-interval 30 --ws-ping-timeout 30
 ```
 
-`examples/fastapi_app.py` is a complete application. `test.py` serves the bundled coder against
-a remote workspace using Pydantic AI Harness's `SSHWorkspaceBackend`, with bearer
-authentication and a typed `HarnessDeps` projection of the session's resources.
+`examples/fastapi_app.py` is a complete application. `test.py` serves the bundled coder with
+its workspace bound to a hand-written `DockerWorkspaceBackend` that runs commands and file
+access through `docker exec` in a container you start separately. It also supports optional
+bearer authentication.
 
 ## Storage and lifespan
 
@@ -93,11 +94,13 @@ unknown and forbidden IDs both return 404. The principal is fixed for the connec
 ## Resources, models, and workspaces
 
 ```python
-from harness.runtime import MODEL, WORKSPACE, ResourceSet
+from harness.runtime import MODEL, WORKSPACE
 
+bound = coding_definition.bind(
+    {MODEL: model, WORKSPACE: "/srv/workspaces/project"}
+)
 agents.add_agent(
-    coding_definition,
-    resources=ResourceSet({MODEL: model, WORKSPACE: "/srv/workspaces/project"}),
+    bound,
     models=["openai:gpt-5-mini", "openai:gpt-5"],
     allowed_cwds=["/srv/workspaces/project"],
     default_cwd="/srv/workspaces/project",
@@ -112,10 +115,11 @@ files); it resolves to the slot owning that name. Model strings bound through re
 `definition.model` are advertised automatically; `models` adds selectable IDs. Definitions
 use the same native composition as Python and stdio.
 
-A definition that enables a plugin declaring `needs` must also declare the matching
-requirement, and the deployment must bind it: composition rejects the session with
-`INVALID_CONFIGURATION` (undeclared), `WORKSPACE_UNAVAILABLE`, or `RESOURCE_UNAVAILABLE`
-(unbound) before the plugin factory runs.
+Capabilities declare their resource needs; the definition derives the matching requirements.
+`definition.bind(...)` rejects missing or wrongly typed values before the server registers the
+agent, and composition re-checks them before the plugin factory runs. `add_agent` still accepts
+a bare definition plus `resources=`, but it performs the same bind internally, so a coder
+definition without a workspace fails at registration rather than at `session/new`.
 
 The current directory at registration is the default allowed workspace root. Paths are
 canonicalized; `default_cwd` must be one of the roots. ACP session paths must remain inside

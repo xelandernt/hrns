@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from pydantic_core import to_jsonable_python
 
-from harness.protocol import CapabilityPolicy, HarnessError, PluginInfo
+from harness.protocol import CapabilityPolicy, HarnessError, PluginInfo, ResourceNeed
 
 from .resources import ResourceSet, ResourceSlot
 
@@ -223,6 +223,18 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
         dump = instance.model_dump(mode="json", exclude_none=False)
         return {key: value for key, value in dump.items()}
 
+    def resource_needs(self) -> list[ResourceNeed]:
+        """Wire-view of the typed resources this plugin cannot work without."""
+        return [
+            ResourceNeed(
+                name=slot.name,
+                kind=slot.kind,
+                required=True,
+                description=slot.description,
+            )
+            for slot in self.needs
+        ]
+
     def to_info(self) -> PluginInfo:
         """Wire-view descriptor for the extension's ``plugins list``."""
         return PluginInfo(
@@ -236,6 +248,7 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
             managed=True,
             presentation=self.presentation[0] if self.presentation else "generic",
             requirements=list(self.requirements),
+            needs=self.resource_needs(),
             constraint=self.compatibility.constraint,
         )
 

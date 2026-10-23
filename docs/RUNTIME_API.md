@@ -6,6 +6,7 @@ that belongs to `pydantic_ai_harness.experimental.acp.PydanticAIACPAgent`.
 ```python
 from harness.runtime import (
     AgentDefinition,
+    BoundDefinition,
     DefinitionBinding,
     AgentSpec,
     PluginRegistry,
@@ -90,6 +91,31 @@ result = await composition.agent.run("Hello")
 - managed `bindings`, each a named, configured instance of a registered plugin;
 - `resources` requirements and an optional fallback model.
 
+Requirements for descriptor-backed bindings are derived from the plugin's `needs`, so a coder
+binding adds the workspace requirement automatically. Derivation covers every bound plugin,
+including one disabled by default, so enabling it next turn cannot reveal a missing resource.
+`resources` remains for host choices such as `MODEL` and for custom slots.
+`definition.resolve(registry)` attaches descriptors to `plugin_id` bindings; manifests need
+this because they carry ids rather than Python objects.
+
+`definition.bind(...)` validates the deployment's values against every requirement and returns
+a `BoundDefinition`. Hosts register that validated value, moving a missing workspace from
+`session/new` to registration:
+
+```python
+from harness.runtime import MODEL, WORKSPACE
+
+bound = definition.bind(
+    {MODEL: "openai:gpt-5-mini", WORKSPACE: "/path/to/project"},
+    registry=registry,  # when bindings still carry only plugin ids
+)
+agents.add_agent(bound)
+```
+
+`BoundDefinition` is the typed hand-off between definition and deployment. Its
+`resources` are a normal `ResourceSet`, so `bound.resources.get(WORKSPACE)` is still
+narrowed to the workspace input type.
+
 `PluginRegistry` resolves plugin descriptors and instantiates native capabilities from
 validated configuration. `PolicyCatalog` validates initial selections against configuration
 schemas, availability, toggle policy, lifecycle, requirements, conflicts, and cycles.
@@ -116,6 +142,8 @@ binding = DefinitionBinding.from_plugin(
 and derives the stable `plugin_id`. Inline descriptors bypass registry lookup for that binding,
 but still require a stable plugin id for persistence and runtime-added binding reload. Manifests
 remain `plugin_id`-only; exporting a definition with an inline descriptor fails explicitly.
+Descriptors attached by `resolve` are registry-backed, so a resolved definition still exports
+by id.
 
 Registration remains lazy; a definition manifest references plugins by `plugin_id`.
 

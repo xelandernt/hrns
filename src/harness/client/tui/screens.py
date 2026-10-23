@@ -2512,6 +2512,9 @@ class ChatScreen(Screen[None]):
                         f"requirements: {', '.join(plugin.requirements)}"
                         if plugin.requirements
                         else "",
+                        f"needs: {', '.join(need.name for need in plugin.needs)}"
+                        if plugin.needs
+                        else "",
                         plugin.constraint or "",
                     )
                     if item
@@ -2582,6 +2585,8 @@ class ChatScreen(Screen[None]):
         subtitle = f"Create a new binding from {plugin.plugin_id}."
         if plugin.requirements:
             subtitle += " Requires: " + ", ".join(plugin.requirements) + "."
+        if plugin.needs:
+            subtitle += " Needs: " + ", ".join(need.name for need in plugin.needs) + "."
         if plugin.constraint:
             subtitle += " " + plugin.constraint
         self.app.push_screen(

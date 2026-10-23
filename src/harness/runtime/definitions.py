@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -28,8 +29,8 @@ from pydantic_ai.capabilities import AgentCapability
 
 from harness.protocol import BindingId, CapabilityPolicy, HarnessError
 
-from .registry import PluginConfigT, PluginDescriptor
-from .resources import SLOTS, ResourceRequirement, ResourceSlot
+from .registry import PluginConfigT, PluginDescriptor, PluginRegistry
+from .resources import SLOTS, ResourceBindings, ResourceRequirement, ResourceSet, ResourceSlot
 
 __all__ = [
     "AGENT_FACTORY_PARAM",
@@ -38,6 +39,7 @@ __all__ = [
     "AgentFactory",
     "AgentFactoryContext",
     "AgentSpec",
+    "BoundDefinition",
     "CapabilityFactory",
     "DefinitionBinding",
     "DefinitionManifest",
@@ -143,6 +145,8 @@ class DefinitionBinding(BaseModel):
     """Direct Python plugin descriptor. Mutually exclusive with ``plugin_id`` lookup."""
     plugin_id: str | None = Field(default=None, min_length=1, max_length=200)
     """The registered plugin this binding instantiates when ``plugin`` is omitted."""
+    inline: bool = False
+    """Whether ``plugin`` is Python-only behavior rather than a registry-resolved descriptor."""
     config: dict[str, Any] = Field(default_factory=dict)
     """Initial configuration, validated against the plugin's ``config_model``."""
     enabled: bool = True
@@ -160,6 +164,7 @@ class DefinitionBinding(BaseModel):
                     "Definition binding plugin_id must match the supplied plugin descriptor."
                 )
             self.plugin_id = self.plugin.plugin_id
+            self.inline = True
         return self
 
     @classmethod
@@ -190,6 +195,7 @@ class DefinitionBinding(BaseModel):
             binding_id=binding_id,
             plugin=plugin,
             plugin_id=plugin.plugin_id,
+            inline=True,
             config=payload,
             enabled=enabled,
             policy=policy,
@@ -363,7 +369,27 @@ class AgentDefinition(BaseModel):
                     f"duplicate resource requirement {requirement.name!r} on {self.agent_id!r}"
                 )
             seen.add(requirement.name)
+        self._derive_resources()
         return self
+
+    def _derive_resources(self) -> None:
+        """Add every requirement a descriptor-backed binding declares.
+
+        Inline descriptors are known at construction; ``resolve`` attaches the rest from a
+        registry. The declaration is kept in ``resources`` so manifests and error messages
+        show the same contract composition enforces.
+        """
+        requirements = list(self.resources)
+        for binding in self.bindings:
+            if binding.plugin is None:
+                continue
+            for slot in binding.plugin.needs:
+                if not any(SLOTS.of(requirement).name == slot.name for requirement in requirements):
+                    requirements.append(ResourceRequirement.of(slot))
+        if len(requirements) != len(self.resources):
+            # The requirements were built from validated slots, so re-entering Pydantic
+            # assignment validation would only add recursion.
+            object.__setattr__(self, "resources", requirements)
 
     # --- runtime accessors ------------------------------------------------
 
@@ -395,6 +421,63 @@ class AgentDefinition(BaseModel):
         """
         return any(SLOTS.of(requirement).name == slot.name for requirement in self.resources)
 
+    @property
+    def required_slots(self) -> tuple[ResourceSlot[object], ...]:
+        """The typed slots this definition requires, including descriptor-derived needs."""
+        return tuple(SLOTS.of(requirement) for requirement in self.resources)
+
+    def resolve(self, registry: PluginRegistry) -> AgentDefinition:
+        """Attach registry descriptors to ``plugin_id`` bindings and derive their needs.
+
+        Definitions authored in Python may bind a descriptor directly; manifests carry ids
+        only. Resolving at the host boundary gives both forms the same typed requirements
+        before a session exists.
+        """
+        bindings: list[DefinitionBinding] = []
+        changed = False
+        for binding in self.bindings:
+            if binding.plugin is not None:
+                bindings.append(binding)
+                continue
+            descriptor = registry.require(binding.resolved_plugin_id)
+            bindings.append(
+                binding.model_copy(update={"plugin": descriptor, "plugin_id": descriptor.plugin_id})
+            )
+            changed = True
+        resolved = self.model_copy(update={"bindings": bindings}) if changed else self
+        resolved._derive_resources()
+        return resolved
+
+    def bind(
+        self,
+        resources: ResourceSet | ResourceBindings | None = None,
+        *,
+        registry: PluginRegistry | None = None,
+    ) -> BoundDefinition:
+        """Validate the deployment's resources against this definition.
+
+        Pass ``registry`` when any binding still carries only a ``plugin_id``. The result is
+        a :class:`BoundDefinition`, the only value a host needs in order to know that every
+        declared requirement has been supplied.
+        """
+        resolved = self.resolve(registry) if registry is not None else self
+        unresolved = [binding.binding_id for binding in resolved.bindings if binding.plugin is None]
+        if unresolved:
+            raise HarnessError(
+                "INVALID_CONFIGURATION",
+                "Definition bindings "
+                + ", ".join(repr(binding_id) for binding_id in unresolved)
+                + " have no resolved plugin descriptor; resolve the definition against a "
+                "registry before binding its resources.",
+                details={"bindings": unresolved},
+            )
+        resolved._derive_resources()
+        resource_set = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
+        resource_set.validate_requirements(
+            resolved.resources, context=f"Definition {self.agent_id!r}"
+        )
+        return BoundDefinition(definition=resolved, resources=resource_set)
+
     def to_manifest(self) -> DefinitionManifest:
         """Export to a serializable manifest, failing loudly on non-portable fields."""
         non_portable: list[str] = []
@@ -402,7 +485,7 @@ class AgentDefinition(BaseModel):
             non_portable.append("factory")
         if self.fixed_capabilities:
             non_portable.append("fixed_capabilities")
-        if any(binding.plugin is not None for binding in self.bindings):
+        if any(binding.inline for binding in self.bindings):
             non_portable.append("bindings[].plugin")
         if non_portable:
             raise HarnessError(
@@ -444,6 +527,34 @@ class AgentDefinition(BaseModel):
             ],
             model=self.model,
             interaction_features=list(self.interaction_features),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundDefinition:
+    """A definition whose declared resources have all been supplied and type-checked.
+
+    Hosts register this instead of a bare definition, so an unsatisfied capability fails at
+    registration rather than when a client opens a session.
+    """
+
+    definition: AgentDefinition
+    resources: ResourceSet
+
+    def __post_init__(self) -> None:
+        unresolved = [
+            binding.binding_id for binding in self.definition.bindings if binding.plugin is None
+        ]
+        if unresolved:
+            raise HarnessError(
+                "INVALID_CONFIGURATION",
+                "A BoundDefinition requires resolved plugin descriptors; call "
+                "AgentDefinition.bind(..., registry=...) instead of constructing it directly.",
+                details={"bindings": unresolved},
+            )
+        self.definition._derive_resources()
+        self.resources.validate_requirements(
+            self.definition.resources, context=f"Definition {self.definition.agent_id!r}"
         )
 
 

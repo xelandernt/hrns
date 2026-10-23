@@ -14,6 +14,7 @@ from fastapi import FastAPI, WebSocket
 from harness.runtime import (
     MODEL,
     AgentDefinition,
+    BoundDefinition,
     PluginRegistry,
     ResourceBindings,
     ResourceSet,
@@ -61,22 +62,34 @@ class AgentServer:
 
     def add_agent(
         self,
-        definition: AgentDefinition,
+        definition: BoundDefinition | AgentDefinition,
         *,
         resources: ResourceSet | ResourceBindings | None = None,
         models: Sequence[str] = (),
         allowed_cwds: Sequence[str | Path] | None = None,
         default_cwd: str | Path | None = None,
     ) -> None:
-        """Register a definition before mounting; IDs must be unique URL segments."""
+        """Register a validated definition before mounting.
+
+        A bare ``AgentDefinition`` is resolved against this server's registry and bound to
+        ``resources`` here, so a capability whose requirements are missing fails at
+        registration rather than on the first ``session/new``.
+        """
         if self._mounted:
             raise RuntimeError("Register agents before calling mount()")
-        if not isinstance(definition, AgentDefinition):
-            raise TypeError("definition must be an AgentDefinition")
-        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}", definition.agent_id):
+        if isinstance(definition, BoundDefinition):
+            if resources is not None:
+                raise TypeError("resources are already bound by the BoundDefinition")
+            bound = definition
+        elif isinstance(definition, AgentDefinition):
+            bound = definition.bind(resources, registry=self.registry)
+        else:
+            raise TypeError("definition must be an AgentDefinition or BoundDefinition")
+        agent_definition = bound.definition
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}", agent_definition.agent_id):
             raise ValueError("agent_id must be a URL segment using letters, digits, ._-")
-        if definition.agent_id in self._agents:
-            raise ValueError(f"Agent {definition.agent_id!r} is already registered")
+        if agent_definition.agent_id in self._agents:
+            raise ValueError(f"Agent {agent_definition.agent_id!r} is already registered")
         if isinstance(allowed_cwds, (str, Path)):
             raise TypeError("allowed_cwds must be a sequence of paths")
         roots = tuple(
@@ -94,17 +107,16 @@ class AgentServer:
             not isinstance(model, str) or not model.strip() for model in models
         ):
             raise ValueError("models must be a sequence of non-empty model IDs")
-        bound = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
-        selected = bound.get(MODEL) or definition.model
+        selected = bound.resources.get(MODEL) or agent_definition.model
         offered = tuple(
             dict.fromkeys([*([selected] if isinstance(selected, str) else []), *models])
         )
-        self._agents[definition.agent_id] = RegisteredAgent(
-            definition=definition.snapshot(),
+        self._agents[agent_definition.agent_id] = RegisteredAgent(
+            definition=agent_definition.snapshot(),
             allowed_cwds=roots,
             default_cwd=cwd,
             models=offered,
-            resources=bound.values,
+            resources=bound.resources.values,
         )
 
     def mount(self, app: FastAPI, *, prefix: str = "") -> None:
