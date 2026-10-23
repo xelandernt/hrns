@@ -2712,6 +2712,9 @@ class CapabilityPanel(Vertical):
         requires = [str(item) for item in summary.get("requires") or ()]
         if requires:
             lines.append("requires: " + ", ".join(requires))
+        needs = [str(item) for item in summary.get("needs") or ()]
+        if needs:
+            lines.append("needs: " + ", ".join(needs))
         conflicts = [str(item) for item in summary.get("conflicts") or ()]
         if conflicts:
             lines.append("conflicts: " + ", ".join(conflicts))

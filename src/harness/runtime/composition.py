@@ -417,6 +417,7 @@ async def compose_definition(
             "INVALID_CONFIGURATION",
             "A session composition cannot be both initial and restored.",
         )
+    definition = definition.resolve(registry)
     catalog = PolicyCatalog(
         definition,
         registry,

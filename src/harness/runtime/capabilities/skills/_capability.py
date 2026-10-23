@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import ClassVar
 
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from ...registry import BindingContext
+from ...resources import ResourceSlot
 from ._catalog import build_capability, build_skills, workspace_base
 from ._invocation import explicit_skill_names, latest_user_text
+from ._needs import NEEDS
 from .config import SkillsConfig, resolved_directories
 
 __all__ = ["AgentSkills", "build_agent_skills"]
@@ -58,6 +61,8 @@ class AgentSkills(CombinedCapability[AgentDepsT]):
     are part of the turn without waiting for the model to choose, exactly as the `/skills`
     picker suggests. Names the catalog does not know are left as ordinary text.
     """
+
+    needs: ClassVar[tuple[ResourceSlot[object], ...]] = NEEDS
 
     def __init__(self, config: SkillsConfig | None = None, *, base: str | None = None) -> None:
         config = config if config is not None else SkillsConfig()

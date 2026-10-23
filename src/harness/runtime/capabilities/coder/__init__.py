@@ -12,8 +12,8 @@ from pydantic_ai.capabilities import AgentCapability
 from harness.protocol import CapabilityPolicy
 
 from ...registry import BindingContext, PluginDescriptor
-from ...resources import WORKSPACE
 from ._ids import RENDERER_IDS
+from ._needs import NEEDS
 from .config import CoderConfig
 
 __all__ = ["Coder", "CoderConfig", "build_coder", "descriptor"]
@@ -39,7 +39,7 @@ def descriptor() -> PluginDescriptor[CoderConfig]:
         ),
         config_model=CoderConfig,
         factory="harness.runtime.capabilities.coder:build_coder",
-        needs=(WORKSPACE,),
+        needs=NEEDS,
         state_mode="run",
         presentation=list(RENDERER_IDS),
         default_policy=CapabilityPolicy(

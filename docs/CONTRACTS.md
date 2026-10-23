@@ -15,7 +15,7 @@ capabilities, including hooks, instructions, toolsets, and event ownership.
 ## Embedded FastAPI server
 
 `AgentServer(store=..., authenticate=..., registry=...)` accepts a shared
-`SQLiteSessionStore` or `PostgresSessionStore`. `add_agent(definition, resources=...,
+`SQLiteSessionStore` or `PostgresSessionStore`. `add_agent(definition | BoundDefinition, resources=...,
 models=..., allowed_cwds=..., default_cwd=...)` registers an `AgentDefinition`.
 `mount(app, prefix="")` adds catalog and WebSocket ACP routes and composes storage lifespan
 with the existing FastAPI lifespan.

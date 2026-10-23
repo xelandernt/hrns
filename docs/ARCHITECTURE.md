@@ -83,7 +83,9 @@ A workspace resource is a local path by default in this revision; `resolve_works
 a path to a native `LocalWorkspaceBackend` and the adapter applies the backend to every run.
 Resources are bound to typed slots (`WORKSPACE`, `MODEL`, `ANSWERS`, `PLAN`), so a definition
 declares what it needs and a deployment fills the slot with any backend that satisfies it — a
-local path, a sandbox, or a remote machine. No managed lease, sandbox, or background-job
+local path, a sandbox, or a remote machine. A capability's descriptor declares its `needs`, and
+the definition derives those requirements automatically; `definition.bind(...)` validates the
+deployment's values before an agent is registered. No managed lease, sandbox, or background-job
 subsystem is currently provided. ACP session close cancels the active turn through the adapter;
 resource cleanup beyond the bound backend is owned by the deployment.
 

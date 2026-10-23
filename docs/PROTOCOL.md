@@ -60,10 +60,10 @@ Response is a `BindingListResponse`:
 ```
 
 Descriptors describe the current selection: identity, name/description, JSON config schema,
-non-secret current values/defaults, availability, requirements/conflicts, lifecycle,
-presentation ids, and policy (`available`, `enabledByDefault`, `clientCanToggle`,
-`editableFields`, `changeMode`). Descriptors never contain executable code, imports,
-credentials, or live objects.
+non-secret current values/defaults, availability, plugin requirements, typed resource needs,
+conflicts, lifecycle, presentation ids, and policy (`available`, `enabledByDefault`,
+`clientCanToggle`, `editableFields`, `changeMode`). Descriptors never contain executable code,
+imports, credentials, or live objects.
 
 ### `_harness/configuration/get`
 

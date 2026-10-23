@@ -581,6 +581,7 @@ class PolicyCatalog:
                     policy=offering.policy,
                     state_mode=offering.descriptor.state_mode,
                     requires=offering.requirements,
+                    needs=offering.descriptor.resource_needs(),
                     conflicts=offering.conflicts,
                     availability_reason=offering.availability_reason,
                     presentation=list(offering.descriptor.presentation),

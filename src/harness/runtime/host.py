@@ -1467,6 +1467,7 @@ def build_local_bundle(setup: HostSetup) -> HostBundle:
     definition, hook_registry = _load_definition_source(setup.definition)
     registry = hook_registry or PluginRegistry()
     registry.discover()
+    definition = definition.resolve(registry)
     store = build_store(setup.store_path)
     return HostBundle(
         definition=definition,

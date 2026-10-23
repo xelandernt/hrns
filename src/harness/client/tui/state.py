@@ -625,6 +625,11 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
         "canToggle": bool(policy.get("clientCanToggle", policy.get("client_can_toggle", False))),
         "changeMode": policy.get("changeMode") or policy.get("change_mode") or "new_session",
         "requires": tuple(binding.get("requires") or ()),
+        "needs": tuple(
+            str(item.get("name"))
+            for item in binding.get("needs") or ()
+            if isinstance(item, dict) and item.get("name")
+        ),
         "conflicts": tuple(binding.get("conflicts") or ()),
         "editableFields": tuple(
             policy.get("editableFields") or policy.get("editable_fields") or ()

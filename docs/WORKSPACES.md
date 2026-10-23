@@ -58,17 +58,21 @@ integration:
 
 ```python
 from pydantic_ai_harness.ssh_workspace import SSHWorkspaceBackend
-from harness.runtime import MODEL, WORKSPACE, ResourceSet
+from harness.runtime import MODEL, WORKSPACE
 
+bound = definition.bind(
+    {MODEL: model, WORKSPACE: SSHWorkspaceBackend("dev@build-01", working_dir="/srv/app")}
+)
 agents.add_agent(
-    definition,
-    resources=ResourceSet(
-        {MODEL: model, WORKSPACE: SSHWorkspaceBackend("dev@build-01", working_dir="/srv/app")}
-    ),
+    bound,
     allowed_cwds=["/srv/app"],
     default_cwd="/srv/app",
 )
 ```
+
+A workspace-dependent capability's `needs` also becomes a definition requirement, so a
+definition with the coder binding cannot be bound without a workspace. `bind` validates the
+backend against the slot and `agents.add_agent` refuses an unbound definition.
 
 ## Workspace-dependent capabilities
 

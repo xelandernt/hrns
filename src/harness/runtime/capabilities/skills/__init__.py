@@ -15,7 +15,7 @@ from harness.protocol.extensions import CommandResult
 
 from ...extensions import Command, CommandContext, TextArguments
 from ...registry import BindingContext, CompatibilityConstraints, PluginDescriptor
-from ...resources import WORKSPACE
+from ._needs import NEEDS
 from .config import SkillsConfig
 
 __all__ = ["AgentSkills", "SkillsConfig", "build_agent_skills", "descriptor"]
@@ -57,7 +57,7 @@ def descriptor() -> PluginDescriptor[SkillsConfig]:
         ],
         state_mode="run",
         compatibility=CompatibilityConstraints(requires_extras=["pydantic_ai_skills"]),
-        needs=(WORKSPACE,),
+        needs=NEEDS,
         default_policy=CapabilityPolicy(
             available=True,
             enabled_by_default=False,
