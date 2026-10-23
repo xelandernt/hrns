@@ -93,7 +93,7 @@ class ApiError(Exception):
         self.code = code
         self.message = message
         self.details: dict[str, Any] = dict(details or {})
-        self.status_code = int(status)
+        self.status_code = status
         self.headers: dict[str, str] = dict(headers or {})
 
     def envelope(self) -> dict[str, Any]:

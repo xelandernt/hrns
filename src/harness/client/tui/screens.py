@@ -991,7 +991,7 @@ class ChatScreen(Screen[None]):
     def _status_context(self) -> str:
         agent = f"{self.client.agent_title} {self.client.agent_version}".strip()
         location = self.target.location()
-        where = str(location.get("cwd") or location.get("server") or "")
+        where = location.get("cwd") or location.get("server") or ""
         where = _short_path(where, 48) if where else ""
         session = self._session_title or (self.session.session_id if self.session else "")
         return " · ".join(part for part in (agent, where, session) if part)
@@ -3130,7 +3130,7 @@ class ChatScreen(Screen[None]):
             old = None
         wanted = f"{result.provider}:{result.model}"
         option = model_option(self.session.config_options)
-        values = {str(item["value"]) for item in option_values(option)} if option else set()
+        values = {item["value"] for item in option_values(option)} if option else set()
         restart = (
             old is None
             or result.provider != old.provider

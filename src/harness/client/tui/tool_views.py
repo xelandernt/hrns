@@ -47,7 +47,7 @@ def _args(state: ToolViewState) -> Mapping[str, Any]:
 
 
 def _pending(state: ToolViewState) -> Text:
-    label = str(state.fallback or "working…")
+    label = state.fallback or "working…"
     return Text(readable_text(label, limit=200), style="dim")
 
 

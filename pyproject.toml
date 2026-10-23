@@ -67,6 +67,7 @@ dev = [
     "build>=1.2",
     "httpx>=0.28",
     "pyrefly>=1.4.0",
+    "types-pyyaml>=6",
 ]
 
 [tool.hatch.build.targets.wheel]

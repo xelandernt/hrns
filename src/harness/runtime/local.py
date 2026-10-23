@@ -15,6 +15,7 @@ from pydantic_ai.capabilities import PrepareTools
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.providers import infer_provider_class
+from pydantic_ai.settings import ModelSettings
 
 from harness.config import LocalSettings, thinking_from_settings
 from harness.config.mcp import McpServerConfig, default_token_store_path
@@ -321,7 +322,7 @@ def build_local_agent(
             resources={MODEL: model, WORKSPACE: str(workspace)},
             thinking_models=thinking_support(models),
             default_effort=thinking_from_settings(settings),
-            model_settings=settings.model_settings,
+            model_settings=ModelSettings(**settings.model_settings),
         ),
     )
 

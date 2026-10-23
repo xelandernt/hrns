@@ -728,10 +728,10 @@ class CommandPaletteDialog(_DialogBase):
         if index is not None and 0 <= index < self._list.option_count:
             option = self._list.get_option_at_index(index)
             if option.id and not option.disabled:
-                self.dismiss(str(option.id))
+                self.dismiss(option.id)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_id and not str(event.option_id).startswith("__"):
+        if event.option_id and not event.option_id.startswith("__"):
             self.dismiss(event.option_id)
 
     def action_focus_list(self) -> None:

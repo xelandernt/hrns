@@ -252,11 +252,11 @@ def merge_usage(current: Mapping[str, Any], increment: Mapping[str, Any]) -> dic
     """Add two usage totals without dropping unknown provider counters or the price."""
     # `cost_status` is derived on emit, and an earlier build also wrote an
     # `unpriced_requests` counter that no longer means anything; drop both.
-    total = {str(key): value for key, value in current.items()}
+    total = dict(current)
     total.pop(USAGE_STATUS, None)
     total.pop(_LEGACY_UNPRICED, None)
     for key, value in increment.items():
-        name = str(key)
+        name = key
         if name in (USAGE_STATUS, _LEGACY_UNPRICED):
             continue
         if name == USAGE_COST:
@@ -322,7 +322,7 @@ def usage_payload(usage: Any) -> dict[str, Any]:
 
 def finalize_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
     """Add the price status the client renders next to the amount."""
-    payload = {str(key): value for key, value in usage.items()}
+    payload = dict(usage)
     payload.pop(_LEGACY_UNPRICED, None)
     cost = _cost_text(payload.pop(USAGE_COST, None))
     if cost is not None:

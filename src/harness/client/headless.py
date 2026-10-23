@@ -19,7 +19,7 @@ from typing import Any, TextIO
 from .attachments import attachment_summary, build_prompt_blocks
 from .client import HarnessAcpClient, SessionProxy
 from .constants import CLIENT_VERSION
-from .errors import HarnessClientError, InteractionRequired, TransportError
+from .errors import HarnessClientError, InteractionRequired
 from .events import (
     AgentTextChunk,
     CommandsUpdated,
@@ -308,8 +308,8 @@ async def run_headless(
             f"The turn did not finish within {timeout}s; cancellation was requested. "
             "Inspect the session before retrying."
         )
-    except (HarnessClientError, TransportError) as exc:
-        error = exc if isinstance(exc, HarnessClientError) else HarnessClientError(str(exc))
+    except HarnessClientError as exc:
+        error = exc
     except (KeyboardInterrupt, asyncio.CancelledError):
         if session is not None:
             try:

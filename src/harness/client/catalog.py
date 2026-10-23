@@ -84,7 +84,7 @@ class AgentDeployment:
             version=str(payload.get("version") or ""),
             recommended=bool(payload.get("recommended", False)),
             default_working_directory=default_cwd,
-            workspaces=tuple(str(item) for item in workspaces if isinstance(item, str)),
+            workspaces=tuple(item for item in workspaces if isinstance(item, str)),
             connection=connection if isinstance(connection, dict) else {},
             raw=payload,
         )
@@ -203,9 +203,9 @@ class CatalogClient:
     async def list_agents(
         self, *, cursor: str | None = None, limit: int = DEFAULT_CATALOG_LIMIT
     ) -> AgentPage:
-        if not 1 <= int(limit) <= 100:
+        if not 1 <= limit <= 100:
             raise ValueError("Catalog limit must be between 1 and 100")
-        params: dict[str, Any] = {"limit": int(limit)}
+        params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
         payload = await self._request("GET", "/v1/agents", params=params)

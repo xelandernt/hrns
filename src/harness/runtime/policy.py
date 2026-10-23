@@ -152,7 +152,7 @@ def configuration_payload_hash(
     or a different session is rejected (CONCEPT §10.3).
     """
     del session_id, request_id  # already the transaction key
-    expected = "*" if expected_revision is None else str(int(expected_revision))
+    expected = "*" if expected_revision is None else str(expected_revision)
     return f"{changes_payload_hash(changes)}|{expected}"
 
 

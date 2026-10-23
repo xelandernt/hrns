@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -128,7 +128,7 @@ class AgentServer:
         return agent
 
     @asynccontextmanager
-    async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         if self._running:
             raise RuntimeError("AgentServer is already running")
         self._running = True
@@ -155,7 +155,7 @@ class AgentServer:
     @asynccontextmanager
     async def connection(
         self, socket: WebSocket, agent: RegisteredAgent, principal: Principal
-    ) -> AsyncIterator[HarnessACPAgent]:
+    ) -> AsyncGenerator[HarnessACPAgent, None]:
         if not self._running:
             raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         count = self._principal_connections.get(principal.id, 0)

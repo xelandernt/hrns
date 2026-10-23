@@ -188,7 +188,7 @@ class StdioAgentTransport:
                 f"Cannot launch '{self.command}': permission denied.",
                 details={"command": self.command},
             ) from exc
-        except (asyncio.TimeoutError, TimeoutError) as exc:
+        except TimeoutError as exc:
             raise TransportError(f"Timed out launching agent process '{self.command}'.") from exc
         except OSError as exc:
             raise TransportError(f"Cannot launch '{self.command}': {exc}") from exc
@@ -273,7 +273,7 @@ class _WsWriteTransport(asyncio.BaseTransport):
 
     def write(self, data: bytes) -> None:  # type: ignore[override]
         if not self._closing:
-            self._enqueue(bytes(data))
+            self._enqueue(data)
 
     def can_write_eof(self) -> bool:  # type: ignore[override]
         return False
@@ -393,7 +393,7 @@ class WebSocketAgentTransport:
             ) from exc
         except InvalidURI as exc:
             raise TransportError(f"Invalid WebSocket URL: {self.url}") from exc
-        except (asyncio.TimeoutError, TimeoutError) as exc:
+        except TimeoutError as exc:
             raise TransportError(f"Timed out connecting to {self.url}") from exc
         except OSError as exc:
             raise TransportError(f"Cannot reach {self.url}: {exc}") from exc

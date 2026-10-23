@@ -98,7 +98,7 @@ def auto_permission(mode: str, request: PermissionRequest) -> PermissionDecision
     option = request.first_of_kind("allow_once", "allow_always")
     if option is None:
         return None
-    option_id = str(option.get("optionId") or "")
+    option_id = option.get("optionId") or ""
     return PermissionDecision(option_id=option_id) if option_id else None
 
 
@@ -118,7 +118,7 @@ class ElicitationRequest:
     @property
     def required_fields(self) -> list[str]:
         required = self.schema.get("required") or []
-        return [str(item) for item in required if isinstance(item, str)]
+        return [item for item in required if isinstance(item, str)]
 
     @property
     def properties(self) -> dict[str, Any]:

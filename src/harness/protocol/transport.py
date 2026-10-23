@@ -71,7 +71,7 @@ def decode_frame(raw: str | bytes) -> dict[str, Any]:
             parse_constant=_invalid_constant,
             parse_float=_finite_float,
         )
-    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise HarnessError("INVALID_FRAME", "Expected a UTF-8 JSON-RPC object") from exc
     if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
         raise HarnessError(
