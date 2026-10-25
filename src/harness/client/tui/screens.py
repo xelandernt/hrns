@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     pass
 
 from .approval import ApprovalBar, AskUserBar
+from .chat.capabilities import CapabilityWorkflow
 from .chat.model import ModelWorkflow
 from .chat.session import SessionWorkflow
 from .composer import (
@@ -102,8 +103,6 @@ from .screen_base import _HarnessScreen
 from .state import (
     Settings,
     activity_label,
-    binding_summary,
-    build_form_fields,
     config_option_value,
     effort_option,
     format_context_detail,
@@ -200,6 +199,7 @@ class ChatScreen(_HarnessScreen):
             self._workspace_root = Path(target.cwd).resolve()
         self.sessions = SessionWorkflow(self)
         self.models = ModelWorkflow(self)
+        self.capabilities = CapabilityWorkflow(self)
 
     # --------------------------------------------------------------- structure
 
@@ -407,74 +407,16 @@ class ChatScreen(_HarnessScreen):
 
     @work(group="panels", exclusive=True)
     async def _refresh_panels(self) -> None:
-        await self._refresh_capabilities()
+        await self.capabilities.refresh()
         await self.sessions.refresh()
 
     @work(group="panels", exclusive=True)
     async def refresh_capabilities(self) -> None:
-        await self._refresh_capabilities()
+        await self.capabilities.refresh()
 
     @work(group="panels", exclusive=True)
     async def refresh_sessions(self) -> None:
         await self.sessions.refresh()
-
-    def _set_plugin_commands(self, commands: tuple[Any, ...], *, revision: int) -> None:
-        self._plugin_commands = tuple(
-            command.model_dump(mode="json", by_alias=True)
-            if hasattr(command, "model_dump")
-            else dict(command)
-            for command in commands
-        )
-        self._plugin_revision = revision
-        self._sync_command_suggestions()
-
-    async def _refresh_plugin_commands(self) -> None:
-        if not self.client.extension.supports("_harness/commands/list"):
-            self._set_plugin_commands((), revision=0)
-            return
-        try:
-            result = await self.session.list_commands()
-        except (ExtensionUnavailable, HarnessClientError):
-            self._set_plugin_commands((), revision=0)
-            return
-        self._set_plugin_commands(result.commands, revision=result.selected_revision)
-
-    async def _refresh_capabilities(self) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        await self._refresh_plugin_commands()
-        if self.session.client is not self.client:
-            panel.show_message(
-                "This session is not attached to the reconnected client. "
-                "Start a new session to change plugins."
-            )
-            return
-        if self.client.extension.supports(
-            "_harness/capabilities/list"
-        ) and self.client.extension.supports("_harness/configuration/get"):
-            try:
-                bindings = await self._all_capability_pages()
-                snapshot = await self.session.configuration()
-                self._bindings_raw = [
-                    binding.model_dump(mode="json", by_alias=True) for binding in bindings
-                ]
-                panel.set_bindings(
-                    self._plugin_bindings(),
-                    snapshot.to_wire(),
-                    active_revision=snapshot.active_revision,
-                    selected_revision=snapshot.selected_revision,
-                    can_write=self.client.extension.supports("_harness/configuration/update"),
-                )
-                self._sync_mcp_panel(snapshot)
-                await self._refresh_skills()
-                return
-            except ExtensionUnavailable:
-                pass
-            except HarnessClientError as exc:
-                panel.show_message(exc.message)
-                return
-        panel.show_message("Loading standard configuration…")
-        panel.set_standard_options(list(self.session.config_options))
-        await self._refresh_skills()
 
     # ------------------------------------------------------------------ events
 
@@ -551,7 +493,7 @@ class ChatScreen(_HarnessScreen):
             self._sync_command_suggestions()
             return
         if isinstance(event, PluginCommandsListed):
-            self._set_plugin_commands(event.commands, revision=event.selected_revision)
+            self.capabilities.set_plugin_commands(event.commands, revision=event.selected_revision)
             return
         if isinstance(event, PlanChanged):
             panel = self.query_one("#side-panel", SidePanel)
@@ -608,7 +550,7 @@ class ChatScreen(_HarnessScreen):
             return
         if isinstance(event, ConfigurationChanged):
             try:
-                self._apply_snapshot(event.snapshot)
+                self.capabilities.apply_snapshot(event.snapshot)
             except Exception as exc:
                 await self._notice(f"configuration update was malformed: {exc}", "error")
             return
@@ -629,18 +571,6 @@ class ChatScreen(_HarnessScreen):
             self.connected = True
             self._update_chrome()
             return
-
-    def _apply_snapshot(self, snapshot: Any) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        if self._bindings_raw:
-            panel.set_bindings(
-                self._plugin_bindings(),
-                snapshot.to_wire(),
-                active_revision=snapshot.active_revision,
-                selected_revision=snapshot.selected_revision,
-                can_write=self.client.extension.supports("_harness/configuration/update"),
-            )
-            self._sync_mcp_panel(snapshot)
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -1605,13 +1535,13 @@ class ChatScreen(_HarnessScreen):
         self._refresh_mcp()
 
     def on_capability_add_requested(self, event: CapabilityAddRequested) -> None:
-        asyncio.create_task(self._choose_plugin_to_add())
+        asyncio.create_task(self.capabilities.choose_plugin_to_add())
 
     def on_binding_toggle_requested(self, event: BindingToggleRequested) -> None:
         self._toggle_binding(event.binding_id, event.enabled)
 
     def on_binding_edit_requested(self, event: BindingEditRequested) -> None:
-        self._edit_binding(event.binding_id)
+        self.capabilities.edit_binding(event.binding_id)
 
     def on_config_option_requested(self, event: ConfigOptionRequested) -> None:
         self._change_standard_option(event.option_id)
@@ -1621,318 +1551,11 @@ class ChatScreen(_HarnessScreen):
 
     @work(group="capability", exclusive=True)
     async def _toggle_binding(self, binding_id: str, enabled: bool) -> None:
-        side = self.query_one("#side-panel", SidePanel)
-        panel: Any = side.capabilities
-        summary = panel.binding(binding_id)
-        if summary is None:
-            panel = side.mcp
-            summary = panel.binding(binding_id)
-        if summary is None:
-            return
-        label = str(summary["name"])
-        if summary.get("pluginId") == "harness.mcp":
-            label = str(summary["bindingId"]).removeprefix("mcp.")
-        if not summary["canToggle"]:
-            panel.show_message(f"{label} cannot be toggled from this client.")
-            return
-        try:
-            snapshot = await self.session.update_configuration(
-                [{"type": "enable", "bindingId": binding_id, "enabled": enabled}]
-            )
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            if "REVISION_CONFLICT" in exc.message or "revision" in exc.message.lower():
-                await self._refresh_capabilities()
-            return
-        self._apply_snapshot(snapshot)
-        await self._refresh_capabilities()
-        state = "enabled" if enabled else "disabled"
-        panel.show_message(
-            f"{label} {state} for the next turn."
-            if summary["changeMode"] == "next_turn"
-            else f"{label} {state}; change takes effect with a new session."
-        )
-
-    def _edit_binding(self, binding_id: str) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        summary = panel.binding(binding_id)
-        if summary is None:
-            return
-        schema = summary.get("configSchema") or {}
-        fields = build_form_fields(schema, summary.get("config") or {})
-        editable = set(summary.get("editableFields") or ())
-        if editable:
-            fields = [field for field in fields if field["name"] in editable]
-        if not fields:
-            panel.show_message(f"{summary['name']} has no editable fields.")
-            return
-
-        async def apply(fields_values: dict[str, Any] | None) -> None:
-            if not fields_values:
-                return
-            self._apply_binding_config(binding_id, fields_values)
-
-        subtitle = (
-            "Field replacements apply at the next turn boundary when the binding mode allows it."
-        )
-        if summary["requires"]:
-            subtitle += " Requires: " + ", ".join(summary["requires"]) + "."
-        if summary["conflicts"]:
-            subtitle += " Conflicts: " + ", ".join(summary["conflicts"]) + "."
-        self.app.push_screen(
-            FormDialog(
-                f"Configure {summary['name']}",
-                subtitle,
-                fields,
-                accept_label="Save configuration",
-                current=summary.get("config") or {},
-            ),
-            lambda result: apply(result),
-        )
-
-    def _plugin_bindings(self) -> list[dict[str, Any]]:
-        """Bindings shown in the Plugins panel; MCP servers have their own tab."""
-        return [
-            binding
-            for binding in self._bindings_raw
-            if str(binding.get("pluginId") or binding.get("plugin_id") or "") != "harness.mcp"
-        ]
-
-    def _mcp_bindings(self) -> list[dict[str, Any]]:
-        return [
-            binding
-            for binding in self._bindings_raw
-            if str(binding.get("pluginId") or binding.get("plugin_id") or "") == "harness.mcp"
-        ]
-
-    def _sync_mcp_panel(self, snapshot: Any = None) -> None:
-        panel = self.query_one("#side-panel", SidePanel).mcp
-        wire = snapshot.to_wire() if snapshot is not None else None
-        panel.set_bindings(
-            self._mcp_bindings(),
-            wire,
-            can_write=self.client.extension.supports("_harness/configuration/update"),
-        )
+        await self.capabilities.toggle_binding(binding_id, enabled)
 
     @work(group="mcp", exclusive=True)
     async def _refresh_mcp(self) -> None:
-        """Probe every enabled MCP server; discovery stays host-side."""
-        panel = self.query_one("#side-panel", SidePanel).mcp
-        bindings = self._mcp_bindings()
-        if not bindings and self.client.extension.supports("_harness/capabilities/list"):
-            await self._refresh_capabilities()
-            bindings = self._mcp_bindings()
-        if not bindings:
-            self._sync_mcp_panel()
-            panel.show_message(
-                "No MCP servers are offered by this agent. "
-                "Local servers are added with `hrns mcp add`."
-            )
-            return
-
-        await self._refresh_plugin_commands()
-
-        snapshot = None
-        if self.client.extension.supports("_harness/configuration/get"):
-            try:
-                snapshot = await self.session.configuration()
-            except (ExtensionUnavailable, HarnessClientError):
-                snapshot = None
-        self._sync_mcp_panel(snapshot)
-        wire = snapshot.to_wire() if snapshot is not None else None
-        enabled = [binding for binding in bindings if binding_summary(binding, wire)["enabled"]]
-        if not enabled:
-            panel.show_message("Every MCP server is disabled. Press Space to enable one.")
-            return
-        if not self.client.extension.supports("_harness/commands/invoke"):
-            panel.show_message("This host cannot probe MCP servers (commands are unavailable).")
-            return
-
-        panel.show_message(f"Probing {len(enabled)} MCP server(s)…")
-        results = await asyncio.gather(
-            *(self._probe_mcp(binding) for binding in enabled),
-            return_exceptions=True,
-        )
-        statuses: dict[str, dict[str, Any]] = {}
-        for result in results:
-            if isinstance(result, tuple):
-                statuses[result[0]] = result[1]
-        panel.set_statuses(statuses)
-        connected = sum(1 for status in statuses.values() if status.get("state") == "connected")
-        failed = len(statuses) - connected
-        note = f"Probed {len(statuses)} server(s): {connected} connected"
-        if failed:
-            note += f", {failed} unavailable"
-        panel.show_message(note + ".")
-
-    async def _probe_mcp(self, binding: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        binding_id = str(binding.get("bindingId") or binding.get("binding_id") or "")
-        if not binding_id or self._find_plugin_command(f"{binding_id}:status") is None:
-            return binding_id, {}
-        try:
-            response = await self.session.invoke_command(
-                binding_id,
-                "status",
-                expected_revision=self._plugin_revision,
-                request_id=f"ui-{uuid.uuid4().hex}",
-            )
-        except (ExtensionUnavailable, HarnessClientError) as exc:
-            return binding_id, {"state": "failed", "error": str(exc)}
-        presentation = response.result.presentation
-        data = presentation.data if presentation is not None else {}
-        return binding_id, dict(data) if isinstance(data, dict) else {}
-
-    async def _all_capability_pages(self) -> list[Any]:
-        items: list[Any] = []
-        cursor: str | None = None
-        seen: set[str] = set()
-        while True:
-            listing = await self.session.list_capabilities(cursor=cursor, limit=100)
-            items.extend(listing.bindings)
-            cursor = listing.next_cursor
-            if not cursor or cursor in seen:
-                return items
-            seen.add(cursor)
-
-    async def _all_plugin_pages(self) -> list[Any]:
-        items: list[Any] = []
-        cursor: str | None = None
-        seen: set[str] = set()
-        while True:
-            listing = await self.session.list_plugins(cursor=cursor, limit=100)
-            items.extend(listing.plugins)
-            cursor = listing.next_cursor
-            if not cursor or cursor in seen:
-                return items
-            seen.add(cursor)
-
-    async def _choose_plugin_to_add(self) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        if not (
-            self.client.extension.local_binding_creation
-            and self.client.extension.supports("_harness/plugins/list")
-        ):
-            panel.show_message(
-                "This host does not advertise local binding creation; only offered bindings "
-                "can be enabled here."
-            )
-            return
-        try:
-            inventory = await self._all_plugin_pages()
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            return
-        available = [
-            plugin
-            for plugin in inventory
-            if plugin.runtime_compatible
-            and plugin.change_mode == "next_turn"
-            and plugin.plugin_id != "harness.mcp"
-        ]
-        if not available:
-            panel.show_message(
-                "No runtime-compatible next-turn plugins are available to add. "
-                "New-session plugins can only be chosen when the session is created."
-            )
-            return
-        choices = [
-            {
-                "value": plugin.plugin_id,
-                "name": f"{plugin.plugin_id}  {plugin.version}".strip(),
-                "description": " · ".join(
-                    item
-                    for item in (
-                        plugin.description or "No description.",
-                        f"activation: {plugin.change_mode}",
-                        f"requirements: {', '.join(plugin.requirements)}"
-                        if plugin.requirements
-                        else "",
-                        f"needs: {', '.join(need.name for need in plugin.needs)}"
-                        if plugin.needs
-                        else "",
-                        plugin.constraint or "",
-                    )
-                    if item
-                ),
-            }
-            for plugin in available
-        ]
-
-        def start_plugin(plugin_id: str | None) -> None:
-            if isinstance(plugin_id, str) and plugin_id:
-                asyncio.create_task(self._plugin_add_form(plugin_id))
-
-        self.app.push_screen(
-            ChoiceDialog(
-                "Add a local plugin",
-                "Only plugins the host advertises for local binding creation are listed.",
-                choices,
-            ),
-            start_plugin,
-        )
-
-    async def _plugin_add_form(self, plugin_id: str) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        try:
-            inventory = await self._all_plugin_pages()
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            return
-        plugin = next((item for item in inventory if item.plugin_id == plugin_id), None)
-        if plugin is None:
-            panel.show_message(f"Plugin {plugin_id} is no longer available.")
-            return
-        fields = [
-            {
-                "name": "__binding_id__",
-                "title": "Binding id",
-                "kind": "text",
-                "required": True,
-                "description": "A stable name for this configured instance.",
-            },
-            {
-                "name": "__enabled__",
-                "title": "Enable for the next turn",
-                "kind": "boolean",
-                "required": False,
-                "default": True,
-            },
-            *build_form_fields(plugin.config_schema, {}),
-        ]
-
-        async def apply(values: dict[str, Any] | None) -> None:
-            if not values:
-                return
-            binding_id = str(values.pop("__binding_id__", "")).strip()
-            enabled = bool(values.pop("__enabled__", True))
-            if not binding_id:
-                panel.show_message("A binding id is required.")
-                return
-            # @work returns a Worker, not an awaitable; let it run in its group.
-            self._add_capability(
-                plugin.plugin_id,
-                binding_id,
-                enabled,
-                values,
-                plugin.change_mode,
-            )
-
-        subtitle = f"Create a new binding from {plugin.plugin_id}."
-        if plugin.requirements:
-            subtitle += " Requires: " + ", ".join(plugin.requirements) + "."
-        if plugin.needs:
-            subtitle += " Needs: " + ", ".join(need.name for need in plugin.needs) + "."
-        if plugin.constraint:
-            subtitle += " " + plugin.constraint
-        self.app.push_screen(
-            FormDialog(
-                "Add a local plugin",
-                subtitle,
-                fields,
-                accept_label="Add plugin",
-            ),
-            apply,
-        )
+        await self.capabilities.refresh_mcp()
 
     @work(group="capability", exclusive=True)
     async def _add_capability(
@@ -1943,44 +1566,11 @@ class ChatScreen(_HarnessScreen):
         config: dict[str, Any],
         change_mode: str = "next_turn",
     ) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        try:
-            snapshot = await self.session.configuration()
-            updated = await self.session.update_configuration(
-                [
-                    {
-                        "type": "add",
-                        "bindingId": binding_id,
-                        "pluginId": plugin_id,
-                        "config": config,
-                        "enabled": enabled,
-                    }
-                ],
-                expected_revision=snapshot.selected_revision,
-                request_id=f"ui-add-{uuid.uuid4().hex}",
-            )
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            return
-        self._apply_snapshot(updated)
-        await self._refresh_capabilities()
-        timing = "with a new session" if change_mode == "new_session" else "for the next turn"
-        state = "enabled" if enabled else "disabled"
-        panel.show_message(f"Added {binding_id} from {plugin_id} ({state}) {timing}.")
+        await self.capabilities.add_capability(plugin_id, binding_id, enabled, config, change_mode)
 
     @work(group="capability", exclusive=True)
     async def _apply_binding_config(self, binding_id: str, values: dict[str, Any]) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        try:
-            snapshot = await self.session.update_configuration(
-                [{"type": "configure", "bindingId": binding_id, "fields": values}]
-            )
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            return
-        self._apply_snapshot(snapshot)
-        await self._refresh_capabilities()
-        panel.show_message(f"Configuration saved for {binding_id}.")
+        await self.capabilities.apply_binding_config(binding_id, values)
 
     @work(group="capability", exclusive=True)
     async def _change_standard_option(self, option_id: str) -> None:
