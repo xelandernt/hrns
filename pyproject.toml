@@ -58,7 +58,7 @@ all = [
 
 [project.scripts]
 hrns = "harness.client.cli:main"
-harness-host = "harness.runtime.host:main"
+harness-host = "harness.runtime.cli:main"
 harness-local = "harness.runtime.local:main"
 
 [dependency-groups]

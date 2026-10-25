@@ -30,7 +30,9 @@ Textual / headless client ── ACP stdio ──► harness-host / harness-loca
 | `harness.protocol` | Extension DTOs, errors, framing, pagination | AI runtime, terminal, server |
 | `harness.config` | Shared local settings | AI runtime, terminal, server |
 | `harness.runtime` | Definitions, registry, policy, resources, native composition, persistence | Terminal and server |
-| `harness.runtime.host` | ACP adapter integration, host policy, scoped storage, CLI | Terminal |
+| `harness.runtime.host` | Thin ACP adapter over composed sessions | Terminal |
+| `harness.runtime.host_support` | Host setup/policy, support types, store selection, agent construction | Terminal |
+| `harness.runtime.cli` | Definition loading, CLI parsing, stdio serving | Terminal |
 | `harness.client` | ACP connections, profiles, terminal, headless runner | Native agent code and provider SDKs |
 | `harness.server` | FastAPI registration, authentication, catalog, in-process ACP | Terminal |
 

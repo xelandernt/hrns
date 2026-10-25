@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
@@ -21,7 +21,10 @@ from .acp_store import SessionStore
 from .composition import Composition
 from .definitions import AgentDefinition
 from .registry import PluginRegistry
-from .resources import ResourceBindings, ResourceSet
+from .resources import MODEL, ResourceBindings, ResourceSet
+
+if TYPE_CHECKING:
+    from .host import HarnessACPAgent
 
 _EXTENSION_METHODS = tuple(EXTENSION_METHODS)
 
@@ -222,3 +225,26 @@ def build_store(configured: str | Path | None) -> SessionStore:
     if value and is_postgres_dsn(value):
         return PostgresSessionStore(value)
     return SQLiteSessionStore(value) if value else SQLiteSessionStore()
+
+
+def build_agent(bundle: HostBundle, setup: HostSetup | None = None) -> HarnessACPAgent:
+    """Compose the ACP agent and host policy from a runtime bundle."""
+    from .host import HarnessACPAgent
+    from .local import thinking_support
+
+    models = setup.advertised_models() if setup else ()
+    resources = ResourceSet(setup.resources if setup else None)
+    if setup and setup.model:
+        resources.bind_if_absent(MODEL, setup.model)
+    policy = HostPolicy(
+        principal=setup.principal if setup else "local",
+        deployment_id=setup.deployment_id if setup else "local",
+        hosted=setup.hosted if setup else False,
+        allowed_cwds=setup.allowed_cwds if setup else None,
+        allow_local_binding_creation=setup.advertise_local_binding_creation if setup else True,
+        models=models,
+        default_model=(setup.default_model() if setup else None),
+        thinking_models=thinking_support(models),
+        resources=resources,
+    )
+    return HarnessACPAgent(bundle, policy)

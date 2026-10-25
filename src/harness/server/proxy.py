@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
 from harness.protocol import HarnessError, decode_frame, encode_frame
-from harness.runtime.host import HarnessACPAgent, serve_agent
+from harness.runtime.cli import serve_agent
+from harness.runtime.host import HarnessACPAgent
 
 from .errors import ACP_SUBPROTOCOL, MAX_MESSAGE_BYTES, ApiError
 from .models import Principal

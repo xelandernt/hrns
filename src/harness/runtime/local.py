@@ -21,8 +21,9 @@ from harness.config import LocalSettings, thinking_from_settings
 from harness.config.mcp import McpServerConfig, default_token_store_path
 from harness.protocol import HarnessError
 
+from .cli import _serve_until_closed
 from .definitions import AgentDefinition, AgentSpec, DefinitionBinding
-from .host import HarnessACPAgent, _serve_until_closed
+from .host import HarnessACPAgent
 from .host_support import HostBundle, HostPolicy, build_store
 from .registry import PluginRegistry
 from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceRequirement
