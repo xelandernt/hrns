@@ -11,7 +11,7 @@ from ..panels import SidePanel
 from ..transcript import TranscriptPane
 
 if TYPE_CHECKING:
-    from ..screens import ChatScreen
+    from .screen import ChatScreen
 
 
 class SessionWorkflow:
@@ -79,7 +79,7 @@ class SessionWorkflow:
                 await self.new()
             return
         pane = screen.query_one("#transcript", TranscriptPane)
-        screen._reset_activity()
+        screen.chrome.reset_activity()
         screen._loading_session = True
         screen._replay_target = session_id
         pane.begin_replay()
@@ -110,7 +110,7 @@ class SessionWorkflow:
         screen.prompts.restore_draft()
         screen._bind_view_context()
         screen.app.session = loaded
-        screen._update_chrome()
+        screen.chrome.update_chrome()
         await screen._notice(f"Loaded session {session_id}.", "success")
         screen.query_one("#composer", Composer).focus()
         screen._refresh_panels()
@@ -154,9 +154,9 @@ class SessionWorkflow:
         screen.prompts.restore_draft()
         screen._bind_view_context()
         screen.app.session = session
-        screen._reset_activity()
+        screen.chrome.reset_activity()
         await screen.query_one("#transcript", TranscriptPane).clear_transcript()
-        screen._update_chrome()
+        screen.chrome.update_chrome()
         await screen._notice(f"Started session {session.session_id}.", "success")
         screen.query_one("#composer", Composer).focus()
         screen._refresh_panels()
@@ -256,6 +256,6 @@ class SessionWorkflow:
             await screen._notice(str(exc), "error")
             return
         screen._session_title = renamed
-        screen._update_chrome()
+        screen.chrome.update_chrome()
         screen.refresh_sessions()
         await screen._notice(f"Session renamed to {screen._session_title}.", "success")

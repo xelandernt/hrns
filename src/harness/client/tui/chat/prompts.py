@@ -17,7 +17,7 @@ from ..composer import AttachmentBar, CommandSuggestions, Composer, PromptQueue
 from ..transcript import TranscriptPane
 
 if TYPE_CHECKING:
-    from ..screens import ChatScreen
+    from .screen import ChatScreen
 
 
 class PromptWorkflow:

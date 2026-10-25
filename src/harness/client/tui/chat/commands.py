@@ -12,7 +12,7 @@ from ..transcript import TranscriptPane
 
 if TYPE_CHECKING:
     from ...client import SessionProxy
-    from ..screens import ChatScreen
+    from .screen import ChatScreen
 
 
 class CommandWorkflow:
