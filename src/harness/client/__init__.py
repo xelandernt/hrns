@@ -8,7 +8,7 @@ WebSocket transport. The UI is Textual; the network layer is ``acp``,
 
 from ._version import __version__
 from .catalog import AgentDeployment, AgentPage, CatalogClient
-from .client import HarnessAcpClient, SessionProxy
+from .client import HarnessAcpClient
 from .errors import (
     CatalogError,
     ConnectionLost,
@@ -58,6 +58,7 @@ from .interactions import (
 )
 from .profiles import Profile, Profiles, default_profiles_path, secret_value
 from .renderers import RendererRegistry, readable_text
+from .session import SessionProxy
 from .transport import StdioAgentTransport, WebSocketAgentTransport
 
 __all__ = [
