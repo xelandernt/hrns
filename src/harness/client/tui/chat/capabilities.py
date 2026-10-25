@@ -346,7 +346,7 @@ class CapabilityWorkflow:
 
         def start_plugin(plugin_id: str | None) -> None:
             if isinstance(plugin_id, str) and plugin_id:
-                asyncio.create_task(self.plugin_add_form(plugin_id))
+                screen._plugin_add_form_worker(plugin_id)
 
         screen.app.push_screen(
             ChoiceDialog(
