@@ -27,9 +27,10 @@ def stepped_value(values: Sequence[T], current: T | None, direction: int) -> T |
     """Return the value one step from ``current``, wrapping at the ends."""
     if not values:
         return None
-    try:
-        index = values.index(current)  # type: ignore[arg-type]
-    except ValueError:
+    for index, value in enumerate(values):
+        if value == current:
+            break
+    else:
         index = -1 if direction > 0 else 0
     return values[(index + direction) % len(values)]
 

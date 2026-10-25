@@ -23,7 +23,6 @@ from harness.protocol import (
     EnableChange,
     HarnessError,
     PluginInfo,
-    RuntimeEvent,
 )
 
 from . import _warnings  # noqa: F401  (the pinned ACP adapter is experimental)
@@ -91,7 +90,6 @@ __all__ = [
     "EnableChange",
     "HarnessError",
     "PluginInfo",
-    "RuntimeEvent",
     # command authoring
     "Command",
     "CommandBinding",

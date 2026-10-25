@@ -517,7 +517,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> schema.ListSessionsResponse:
         cwd_filter = self.policy.validate_cwd(cwd) if cwd is not None else None
-        records = await self.store.list()
+        page = await self.store.list(cwd=cwd_filter, cursor=cursor, limit=50)
         entries = [
             schema.SessionInfo(
                 session_id=record.session_id,
@@ -525,11 +525,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 title=record.title,
                 updated_at=_iso_millis(record.last_active_at),
             )
-            for record in records
-            if cwd_filter is None or acp_map.canonical_root(record.cwd) == cwd_filter
+            for record in page.records
         ]
-        page, next_cursor = paginate(entries, cursor=cursor, limit=50)
-        return schema.ListSessionsResponse(sessions=page, next_cursor=next_cursor)
+        return schema.ListSessionsResponse(sessions=entries, next_cursor=page.next_cursor)
 
     async def delete_session(self, session_id: str, **kwargs: Any) -> DeleteSessionResponse | None:
         record = await self.store.get(session_id)
@@ -844,16 +842,19 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 "Local binding creation is prohibited for this deployment.",
             )
         request_hash = f"{changes_payload_hash(request.changes)}|{request.expected_revision}"
-        cached = self._config_requests.get(session_id, {}).get(request.request_id)
-        if cached is not None:
-            if cached[0] != request_hash:
-                raise HarnessError(
-                    "INVALID_CONFIGURATION",
-                    "A request id cannot be reused with a different configuration payload.",
-                    {"requestId": request.request_id},
-                )
-            return cached[1].to_wire()
         async with self._turn_lock(session_id):
+            # Two identical retries can both miss the cache before either acquires this
+            # lock. Recheck under the lock so the second one replays the first result
+            # instead of evaluating its now-stale expected revision.
+            cached = self._config_requests.get(session_id, {}).get(request.request_id)
+            if cached is not None:
+                if cached[0] != request_hash:
+                    raise HarnessError(
+                        "INVALID_CONFIGURATION",
+                        "A request id cannot be reused with a different configuration payload.",
+                        {"requestId": request.request_id},
+                    )
+                return cached[1].to_wire()
             composition = self._require_composition(session_id)
             if request.expected_revision != composition.snapshot.selected_revision:
                 raise HarnessError(

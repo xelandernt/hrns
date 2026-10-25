@@ -74,7 +74,7 @@ dev = [
 packages = ["src/harness"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/README.md", "/LICENSE", "/CAPABILITIES.md"]
+include = ["/src", "/README.md", "/LICENSE"]
 
 [tool.ruff]
 target-version = "py311"

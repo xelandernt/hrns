@@ -9,6 +9,7 @@ usage totals) lives beside the upstream payload.
 
 from __future__ import annotations
 
+import base64
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -26,13 +27,23 @@ if TYPE_CHECKING:
     from pydantic_ai_harness.experimental.acp import StoredSession
 
 __all__ = [
+    "SESSION_COLUMNS",
+    "SessionPage",
     "SessionRecord",
     "SessionStore",
     "ScopedSessionStore",
     "decode_session",
+    "decode_session_cursor",
     "encode_session",
+    "encode_session_cursor",
     "now_ms",
 ]
+
+#: Metadata projection shared by both stores. Session bodies are only read by ``load_scoped``.
+SESSION_COLUMNS = (
+    "session_id, principal, deployment_id, agent_id, definition_version, cwd, title, effort, "
+    "bindings, usage, model, created_at, last_active_at"
+)
 
 _MESSAGES = TypeAdapter(list[ModelMessage])
 
@@ -104,6 +115,34 @@ def decode_session(messages: str, updates: str, model: str | None) -> "StoredSes
     return StoredSession(messages=parsed_messages, updates=parsed_updates, model=model)
 
 
+def encode_session_cursor(record: SessionRecord) -> str:
+    """Opaque keyset cursor for ``(last_active_at DESC, session_id ASC)``."""
+    payload = {"v": 2, "last": record.last_active_at, "id": record.session_id}
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(encoded).decode("ascii")
+
+
+def decode_session_cursor(cursor: str) -> tuple[int, str]:
+    """Return the ``(last_active_at, session_id)`` position named by *cursor*."""
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+        last = decoded["last"]
+        session_id = decoded["id"]
+        if decoded.get("v") != 2 or type(last) is not int or not isinstance(session_id, str):
+            raise ValueError("invalid cursor")
+    except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+        raise HarnessError("INVALID_CONFIGURATION", "Invalid session pagination cursor") from exc
+    return last, session_id
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPage:
+    """One page of session metadata plus the cursor for the next page."""
+
+    records: list[SessionRecord]
+    next_cursor: str | None = None
+
+
 @dataclass
 class SessionRecord:
     """Host-owned metadata for one ACP session."""
@@ -145,7 +184,15 @@ class SessionStore(ABC):
     ) -> SessionRecord | None: ...
 
     @abstractmethod
-    async def list(self, principal: str, deployment_id: str) -> list[SessionRecord]: ...
+    async def list(
+        self,
+        principal: str,
+        deployment_id: str,
+        *,
+        cwd: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> SessionPage: ...
 
     @abstractmethod
     async def delete(self, principal: str, deployment_id: str, session_id: str) -> bool: ...
@@ -204,8 +251,16 @@ class ScopedSessionStore:
     async def get(self, session_id: str) -> SessionRecord | None:
         return await self.backend.get(self.principal, self.deployment_id, session_id)
 
-    async def list(self) -> list[SessionRecord]:
-        return await self.backend.list(self.principal, self.deployment_id)
+    async def list(
+        self,
+        *,
+        cwd: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> SessionPage:
+        return await self.backend.list(
+            self.principal, self.deployment_id, cwd=cwd, cursor=cursor, limit=limit
+        )
 
     async def delete(self, session_id: str) -> bool:
         return await self.backend.delete(self.principal, self.deployment_id, session_id)

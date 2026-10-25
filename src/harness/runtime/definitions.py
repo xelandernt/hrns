@@ -2,15 +2,15 @@
 
 An :class:`AgentDefinition` is the reusable, versioned description of one agent: its fixed
 behavior (an upstream Pydantic AI ``AgentSpec``, or a Python factory) plus the *managed*
-capability bindings the runtime composes per turn. Definitions are authored in Python or
+capability bindings the runtime composes for a session. Definitions are authored in Python or
 declared in a JSON/YAML :class:`DefinitionManifest` whose bindings reference plugins by
 ``plugin_id``.
 
-Definitions never hold live capability objects: managed capabilities are reconstructed from
-the plugin registry's factories for every turn, so "turning off means omitting the
-capability" (hooks, instructions, toolsets, everything) and fresh compositions are the
-default. Non-serializable callbacks and output classes are Python-only; exporting to a
-manifest fails with an actionable list of non-portable fields instead of dropping behavior.
+Definitions never hold live capability objects. A session composition is built when the
+session is created or loaded and rebuilt when its configuration changes, so "turning off means
+omitting the capability" (hooks, instructions, toolsets, everything) after the next apply.
+Non-serializable callbacks and output classes are Python-only; exporting to a manifest fails
+with an actionable list of non-portable fields instead of dropping behavior.
 """
 
 from __future__ import annotations

@@ -9,7 +9,7 @@ import shlex
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
 from textual import work
@@ -71,6 +71,10 @@ from .dialogs import (
     TranscriptSearchDialog,
 )
 from .local import LocalModelResult, effort_choices, effort_label
+
+if TYPE_CHECKING:
+    from .app import HarnessApp
+
 from .state import (
     Settings,
     activity_label,
@@ -141,7 +145,20 @@ def _short_path(path: str, limit: int = 44) -> str:
     return "…" + path[-limit:]
 
 
-class ConnectScreen(Screen[None]):
+class _HarnessScreen(Screen[None]):
+    """Screen base whose ``app`` is the concrete Harness app for type checking.
+
+    Textual types ``app`` as the generic ``App[object]``; at runtime this class adds no
+    behavior, so the real Textual property remains in effect.
+    """
+
+    if TYPE_CHECKING:
+
+        @property
+        def app(self) -> HarnessApp: ...
+
+
+class ConnectScreen(_HarnessScreen):
     """Searchable profile/agent picker with explicit local versus remote location."""
 
     BINDINGS = [
@@ -716,7 +733,7 @@ class ConnectScreen(Screen[None]):
         self._connecting = True
         self._status.update(f"Connecting to {target.location_text()}…")
         try:
-            await self.app.connect_target(target)  # type: ignore[attr-defined]
+            await self.app.connect_target(target)
         except HarnessClientError as exc:
             self._status.update(f"error · {exc.message}")
         except Exception as exc:  # unexpected startup failures stay on screen
@@ -726,13 +743,13 @@ class ConnectScreen(Screen[None]):
             if self.is_attached:
                 self._list.focus()
 
-    def action_escape_picker(self) -> None:
+    async def action_escape_picker(self) -> None:
         if self._browsing is not None:
             self._browsing = None
             self._render_entries()
             self._status.update("Back to saved connections.")
         else:
-            self.app.action_quit_app()  # type: ignore[attr-defined]
+            await self.app.action_quit_app()
 
     def action_refresh(self) -> None:
         if self._browsing is not None:
@@ -743,11 +760,11 @@ class ConnectScreen(Screen[None]):
                 "Profiles reloaded. Press n to add a target or edit the TOML file directly."
             )
 
-    def action_quit_app(self) -> None:
-        self.app.action_quit_app()  # type: ignore[attr-defined]
+    async def action_quit_app(self) -> None:
+        await self.app.action_quit_app()
 
 
-class ChatScreen(Screen[None]):
+class ChatScreen(_HarnessScreen):
     """The conversation workspace: transcript, composer, status and side panels."""
 
     BINDINGS = [
@@ -1779,7 +1796,7 @@ class ChatScreen(Screen[None]):
             self._attachments.clear()
             self._refresh_queue()
         self._set_busy(True)
-        self.app.start_turn(self, text, blocks)  # type: ignore[attr-defined]
+        self.app.start_turn(self, text, blocks)
         return True
 
     def _remember_prompt(self, text: str) -> None:
@@ -1939,7 +1956,7 @@ class ChatScreen(Screen[None]):
         if name == "attach":
             await self._stage_attachment(rest)
         elif name == "connect":
-            await self.app.choose_agent(self)  # type: ignore[attr-defined]
+            await self.app.choose_agent(self)
         elif name == "rename":
             await self._rename_session(rest)
         elif name == "sessions":
@@ -2766,7 +2783,7 @@ class ChatScreen(Screen[None]):
         self.session = loaded
         self._restore_draft()
         self._bind_view_context()
-        self.app.session = loaded  # type: ignore[attr-defined]
+        self.app.session = loaded
         self._update_chrome()
         await self._notice(f"Loaded session {session_id}.", "success")
         self.query_one("#composer", Composer).focus()
@@ -2822,7 +2839,7 @@ class ChatScreen(Screen[None]):
         self.session = session
         self._restore_draft()
         self._bind_view_context()
-        self.app.session = session  # type: ignore[attr-defined]
+        self.app.session = session
         self._reset_activity()
         await self.query_one("#transcript", TranscriptPane).clear_transcript()
         self._update_chrome()
@@ -3183,7 +3200,7 @@ class ChatScreen(Screen[None]):
                 f"Saved the configuration, but it cannot be used yet: {exc.message}", "error"
             )
             return
-        self.app.target = target  # type: ignore[attr-defined]
+        self.app.target = target
         self.target = target
         await self._notice(
             "Restarting harness-local with the saved provider configuration; "
@@ -3473,7 +3490,7 @@ invents commands the agent did not advertise.
             if mode not in PERMISSION_MODES:
                 return
             self.settings = replace(self.settings, permission_mode=mode)
-            self.app.apply_settings(self.settings)  # type: ignore[attr-defined]
+            self.app.apply_settings(self.settings)
             self._apply_settings()
             asyncio.create_task(self._notice(f"Approvals: {labels[mode]}.", "success"))
 
@@ -3491,13 +3508,13 @@ invents commands the agent did not advertise.
         def apply(settings: Settings | None) -> None:
             if settings is not None:
                 self.settings = settings
-                self.app.apply_settings(settings)  # type: ignore[attr-defined]
+                self.app.apply_settings(settings)
                 self._apply_settings()
 
         self.app.push_screen(
             SettingsDialog(
                 self.settings,
-                can_persist=bool(self.app.profiles.sources),  # type: ignore[attr-defined]
+                can_persist=bool(self.app.profiles.sources),
             ),
             apply,
         )
@@ -3614,7 +3631,7 @@ invents commands the agent did not advertise.
         with contextlib.suppress(Exception):
             await old_client.disconnect()
         try:
-            new_client = self.app.make_client()  # type: ignore[attr-defined]
+            new_client = self.app.make_client()
             await new_client.connect()
         except HarnessClientError as exc:
             self.connected = False
@@ -3627,7 +3644,7 @@ invents commands the agent did not advertise.
                 await new_client.disconnect()
             return
         self.client = new_client
-        self.app.client = new_client  # type: ignore[attr-defined]
+        self.app.client = new_client
         self.connected = True
         self._reset_activity()
         self._subscribe()
@@ -3655,7 +3672,7 @@ invents commands the agent did not advertise.
             if self not in self.app.screen_stack:
                 return
             self.session = loaded
-            self.app.session = loaded  # type: ignore[attr-defined]
+            self.app.session = loaded
             await self._notice(
                 f"Session {session_id} reloaded from authoritative history.", "success"
             )
@@ -3669,5 +3686,5 @@ invents commands the agent did not advertise.
         self.query_one("#composer", Composer).focus()
         self._refresh_panels()
 
-    def action_quit_app(self) -> None:
-        self.app.action_quit_app()  # type: ignore[attr-defined]
+    async def action_quit_app(self) -> None:
+        await self.app.action_quit_app()

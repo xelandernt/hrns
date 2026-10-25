@@ -49,6 +49,10 @@ There are no turn, revision, transaction, workspace, or transcript-owner tables.
 PostgreSQL use the same row shape and scope predicates. Existing databases are opened
 without conversion; only `acp_sessions` is created or used.
 
+The shared connection runs in autocommit mode. Reads therefore never leave an idle
+transaction open, and multi-statement mutations use an explicit transaction that rolls back
+on database errors or cancellation. A failed statement does not poison later sessions.
+
 `save` failures are logged and swallowed by the adapter; the next successful save catches up.
 There is no transactional turn commit or cross-connection ownership claim. Simultaneous
 writers are last-write-wins. These are the upstream ACP persistence semantics, not a Harness

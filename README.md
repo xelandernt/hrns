@@ -114,13 +114,11 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 
 ## Documentation
 
-- [Implementation plan and task checklist](PLAN.md)
 - [Architecture](docs/ARCHITECTURE.md) and [shared contracts](docs/CONTRACTS.md)
 - [Extension protocol and wire examples](docs/PROTOCOL.md)
 - [Runtime Python API](docs/RUNTIME_API.md)
 - [ACP host](docs/ACP.md) and [client usage](docs/CLIENT_API.md)
 - [Embed agents in FastAPI](docs/SERVER.md)
-- [Included capability inventory for rework](CAPABILITIES.md)
 - [Workspace lifecycle](docs/WORKSPACES.md)
 - [Security model](docs/SECURITY.md)
 - [Concept compliance matrix](docs/COMPLIANCE.md)
@@ -131,11 +129,13 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 ```sh
 uv run ruff format --check src examples test.py
 uv run ruff check .
-uv run pyrefly check src examples --no-progress-bar
+uv run pyrefly check src examples test.py --no-progress-bar
 uv build
 ```
 
-Or run `just check` with [just](https://just.systems/) installed. CI exercises the same checks on macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
+Or run `just check` with [just](https://just.systems/) installed; `just fix` applies the
+automatic formatting and lint fixes. CI exercises the same non-mutating checks on
+macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
 
 External provider, sandbox and durability integrations need their upstream extras and credentials. See the coverage matrix for managed, locally verified and deployment-only distinctions.
 

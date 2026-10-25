@@ -44,10 +44,8 @@ __all__ = [
     "BindingOffering",
     "PolicyCatalog",
     "changes_payload_hash",
-    "configuration_payload_hash",
     "is_noop_change",
     "order_enabled_offerings",
-    "payload_hash_matches",
 ]
 
 
@@ -121,45 +119,6 @@ def changes_payload_hash(changes: Sequence[BindingChange]) -> str:
             "Configuration values must be finite, JSON-serializable values.",
             details={"reason": type(exc).__name__},
         ) from exc
-
-
-def configuration_payload_hash(
-    session_id: str,
-    request_id: str,
-    expected_revision: int | None,
-    changes: Sequence[BindingChange],
-) -> str:
-    """Canonical identity of one complete configuration transaction.
-
-    The body (changes) is the legacy canonical payload hash. The expected revision is
-    appended as a suffix so a retry that omits it (``None`` means "skip the revision
-    check") can still be recognised as the same completed transaction. ``session_id`` and
-    ``request_id`` are already part of the transaction key in the store.
-
-    Reusing a request id with changed changes, a different *explicit* expected revision,
-    or a different session is rejected (CONCEPT §10.3).
-    """
-    del session_id, request_id  # already the transaction key
-    expected = "*" if expected_revision is None else str(expected_revision)
-    return f"{changes_payload_hash(changes)}|{expected}"
-
-
-def payload_hash_matches(stored: str, incoming: str) -> bool:
-    """Whether a retry payload matches a stored transaction identity.
-
-    New hashes carry an ``expectedRevision`` suffix. ``*`` (an omitted expected revision)
-    matches any committed expected revision; legacy hashes without a suffix match any
-    expected revision for backward compatibility with stores written before the suffix.
-    """
-    if stored == incoming:
-        return True
-    stored_base, stored_sep, stored_expected = stored.partition("|")
-    incoming_base, incoming_sep, incoming_expected = incoming.partition("|")
-    if stored_base != incoming_base:
-        return False
-    if not stored_sep or not incoming_sep:
-        return True
-    return stored_expected == incoming_expected or incoming_expected == "*"
 
 
 def _path_value(config: Mapping[str, Any], path: str) -> Any:
@@ -251,7 +210,6 @@ class PolicyCatalog:
         self.offerings: dict[str, BindingOffering] = {}
         self.policy_revision = 1
         self._sequence = 0
-        self._active_bindings: dict[str, dict[str, Any]] | None = None
         self._build_offerings(validate_defaults=validate_defaults)
 
     # --- construction -------------------------------------------------
@@ -482,10 +440,6 @@ class PolicyCatalog:
         }
         self._validate_graph_states(work)
 
-    def active_bindings_view(self) -> dict[str, dict[str, Any]]:
-        """The binding dict shown for the current active revision."""
-        return self.export_bindings()
-
     # --- snapshots ----------------------------------------------------
 
     def ordered_offerings(self) -> list[BindingOffering]:
@@ -494,15 +448,6 @@ class PolicyCatalog:
 
     def selected_bindings(self) -> dict[str, BindingState]:
         return {binding_id: offering.state() for binding_id, offering in self.offerings.items()}
-
-    def set_active_bindings(self, bindings: dict[str, dict[str, Any]] | None) -> None:
-        """Record the selected-binding dict of the currently active revision."""
-        self._active_bindings = bindings
-
-    def _active_state_for(self, binding_id: str, fallback: BindingState) -> BindingState:
-        if self._active_bindings is None or binding_id not in self._active_bindings:
-            return fallback
-        return BindingState(**self._active_bindings[binding_id])
 
     def application_status(
         self, active_revision: int | None, selected_revision: int
@@ -551,9 +496,6 @@ class PolicyCatalog:
         result: list[BindingDescriptor] = []
         for offering in self.ordered_offerings():
             active_enabled: bool | None = None
-            if self._active_bindings is not None and offering.binding_id in self._active_bindings:
-                active_state = self._active_bindings[offering.binding_id]
-                active_enabled = bool(active_state.get("enabled", offering.enabled))
             result.append(
                 BindingDescriptor(
                     binding_id=offering.binding_id,

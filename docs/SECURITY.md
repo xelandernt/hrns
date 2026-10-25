@@ -31,9 +31,10 @@ Frames are limited to 16 MiB; duplicate keys, non-finite numbers, batches, and b
 are rejected. Outbound writes have a timeout. Connections are limited to 32 per server and
 four per principal.
 
-The client refuses plaintext `ws://` to non-loopback hosts unless explicitly permitted, so a
-bearer token is not sent over an unencrypted network by default. TLS termination and proxy
-trust belong to the application runner.
+Both the HTTP catalog and WebSocket transport refuse plaintext remote URLs: catalog requests
+require `https://` and agent connections require `wss://`. Plain `http://`/`ws://` is allowed
+only for loopback development, so a bearer token is not sent over an unencrypted network by
+default. TLS termination and proxy trust belong to the application runner.
 
 ## Persistence
 

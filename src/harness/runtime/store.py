@@ -12,16 +12,20 @@ import asyncio
 import json
 import os
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .acp_store import (
+    SESSION_COLUMNS,
+    SessionPage,
     SessionRecord,
     SessionStore,
     decode_session,
+    decode_session_cursor,
     deserialize_bindings,
     encode_session,
+    encode_session_cursor,
     now_ms,
     serialize_bindings,
 )
@@ -64,7 +68,10 @@ def default_store_path() -> Path:
     return Path(platformdirs.user_data_dir("harness", "harness")) / "runtime.sqlite3"
 
 
-def _row_to_record(row: Any) -> SessionRecord:
+_ResultT = TypeVar("_ResultT")
+
+
+def _row_to_record(row: sqlite3.Row) -> SessionRecord:
     values = dict(row)
     return SessionRecord(
         session_id=values["session_id"],
@@ -132,7 +139,7 @@ class SQLiteSessionStore(SessionStore):
             if connection is not None:
                 await asyncio.to_thread(connection.close)
 
-    def _run(self, operation: Any, *args: Any) -> Any:
+    def _run(self, operation: Callable[..., _ResultT], *args: Any) -> _ResultT:
         if not self._initialized:
             raise RuntimeError("SessionStore.initialize() must run before use")
         return operation(*args)
@@ -194,8 +201,8 @@ class SQLiteSessionStore(SessionStore):
                 lambda: (
                     self._connect()
                     .execute(
-                        "SELECT * FROM acp_sessions WHERE session_id = ? AND principal = ? "
-                        "AND deployment_id = ?",
+                        f"SELECT {SESSION_COLUMNS} FROM acp_sessions "
+                        "WHERE session_id = ? AND principal = ? AND deployment_id = ?",
                         (session_id, principal, deployment_id),
                     )
                     .fetchone()
@@ -203,21 +210,41 @@ class SQLiteSessionStore(SessionStore):
             )
         return _row_to_record(row) if row is not None else None
 
-    async def list(self, principal: str, deployment_id: str) -> list[SessionRecord]:
+    async def list(
+        self,
+        principal: str,
+        deployment_id: str,
+        *,
+        cwd: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> SessionPage:
+        if not 1 <= limit <= 100:
+            raise ValueError("Session limit must be between 1 and 100")
+        clauses = ["principal = ?", "deployment_id = ?"]
+        values: list[Any] = [principal, deployment_id]
+        if cwd is not None:
+            clauses.append("cwd = ?")
+            values.append(cwd)
+        if cursor is not None:
+            last_active_at, session_id = decode_session_cursor(cursor)
+            clauses.append("(last_active_at < ? OR (last_active_at = ? AND session_id > ?))")
+            values.extend([last_active_at, last_active_at, session_id])
+        query = (
+            f"SELECT {SESSION_COLUMNS} FROM acp_sessions WHERE {' AND '.join(clauses)} "
+            "ORDER BY last_active_at DESC, session_id ASC LIMIT ?"
+        )
         async with self._lock:
             rows = await asyncio.to_thread(
                 self._run,
-                lambda: (
-                    self._connect()
-                    .execute(
-                        "SELECT * FROM acp_sessions WHERE principal = ? AND deployment_id = ? "
-                        "ORDER BY last_active_at DESC, session_id ASC",
-                        (principal, deployment_id),
-                    )
-                    .fetchall()
-                ),
+                lambda: self._connect().execute(query, [*values, limit + 1]).fetchall(),
             )
-        return [_row_to_record(row) for row in rows]
+        records = [_row_to_record(row) for row in rows]
+        next_cursor = None
+        if len(records) > limit:
+            records = records[:limit]
+            next_cursor = encode_session_cursor(records[-1])
+        return SessionPage(records=records, next_cursor=next_cursor)
 
     async def delete(self, principal: str, deployment_id: str, session_id: str) -> bool:
         async with self._lock:

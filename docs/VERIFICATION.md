@@ -1,18 +1,23 @@
 # Verification and support boundaries
 
-Verification in this revision is manual. No test files were added; the project has no test
-suite.
+The project has no automated test suite. The current CI workflow runs formatting, lint, type
+checking, and distribution builds; the manual walkthroughs below are historical evidence for
+behavior that CI cannot exercise. Treat the dated results as observations from that revision,
+not as a standing guarantee for every later change.
 
 ## Static checks and build
 
-Run from the repository root:
+CI (`.github/workflows/ci.yml`) and `just check` run these non-mutating checks from the
+repository root:
 
 ```sh
 uv run ruff format --check src examples test.py
 uv run ruff check .
-uv run pyrefly check src examples --no-progress-bar
+uv run pyrefly check src examples test.py --no-progress-bar
 uv build
 ```
+
+`just fix` applies the corresponding automatic fixes locally.
 
 Results recorded on 2026-10-22 (macOS, Python 3.13.5, pinned dependencies):
 

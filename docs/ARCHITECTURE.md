@@ -105,5 +105,4 @@ through `_meta.harness`:
 Standard model and effort options remain editable throughout. The `harness.acp.v1` WebSocket
 subprotocol carries one JSON-RPC object per text frame with a 16 MiB limit.
 
-See [contracts](CONTRACTS.md), [ACP behavior](ACP.md), [server operation](SERVER.md), and
-[the capability rework inventory](../CAPABILITIES.md).
+See [contracts](CONTRACTS.md), [ACP behavior](ACP.md), and [server operation](SERVER.md).

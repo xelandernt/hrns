@@ -107,14 +107,24 @@ class CoderTools(AbstractCapability[AgentDepsT]):
             requested = MAX_READ_LINES if limit is None else min(limit, MAX_READ_LINES)
             selected: list[str] = []
             consumed = 0
+            truncated_line = False
             for line in all_lines[start : start + requested]:
-                consumed += len(line) + 1
-                if consumed > MAX_READ_CHARS:
+                cost = len(line) + 1
+                if not selected and cost > MAX_READ_CHARS:
+                    # A single minified line must still make the cursor advance; returning an
+                    # empty page with the same offset would loop forever.
+                    selected.append(line[: MAX_READ_CHARS - 1] + "…")
+                    truncated_line = True
                     break
+                if consumed + cost > MAX_READ_CHARS:
+                    break
+                consumed += cost
                 selected.append(line)
             end = start + len(selected)
             if selected:
                 header = f"{path} (lines {start + 1}-{end} of {len(all_lines)})"
+                if truncated_line:
+                    header += " (line truncated at the read limit)"
             else:
                 header = f"{path} (no lines at offset {start}; {len(all_lines)} lines total)"
             body = _numbered(selected, start)
@@ -128,6 +138,7 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                 "totalLines": len(all_lines),
                 "lines": [[start + index + 1, line] for index, line in enumerate(selected)],
                 "truncated": end < len(all_lines),
+                "lineTruncated": truncated_line,
             }
             return output_return(_tail(model_text), "read_file", payload, fallback=header)
 

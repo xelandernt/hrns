@@ -4,15 +4,21 @@ Ripgrep runs inside the workspace when the backend can run commands, because it 
 ignore files and is fast. A POSIX ``grep`` covers command-capable workspaces without
 ``rg``. A Python walk is the last resort for filesystem-only workspaces, so a sandbox with
 no shell still gets working tools.
+
+The fallbacks are intentionally narrower than ripgrep: ``grep`` uses the fixed exclusion list
+below rather than repository ignore rules, and the Python walk skips hidden entries. Callers
+that need exact ignore-file semantics should prefer a workspace with ``rg``.
 """
 
 from __future__ import annotations
 
 import posixpath
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.workspaces import CommandResult, SupportsCommands, Workspace, WorkspaceError
 
 __all__ = ["Match", "grep_workspace", "list_workspace", "supports_commands"]
@@ -36,6 +42,8 @@ _IGNORED_DIRS = frozenset(
 )
 _MAX_PYTHON_FILE_BYTES = 1_000_000
 _MAX_WALK_FILES = 20_000
+_MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+_BOUNDED_CAPTURE_EXIT = 125
 _BINARY_SAMPLE = 8_192
 
 _POSIX_UNSUPPORTED = re.compile(r"\(\?|\\[dwsDSWbB]|\\[1-9]|\{\d*,\d*\}")
@@ -51,6 +59,10 @@ class Match:
     line: int
     text: str
     context: bool = False
+
+
+class _BoundedCaptureUnavailable(WorkspaceError):
+    """The workspace cannot cap command output; callers must use a filesystem path."""
 
 
 def supports_commands(workspace: Workspace) -> bool:
@@ -70,8 +82,65 @@ def _rg_missing(result: CommandResult) -> bool:
     return "not found" in haystack or "no such file" in haystack
 
 
-async def _run(workspace: Workspace, argv: list[str], *, timeout: float = 120.0) -> CommandResult:
-    return await workspace.run(argv, timeout=timeout)
+def _bounded_command_script(argv: list[str], max_bytes: int) -> str:
+    """A POSIX shell script that caps both streams without changing the command's exit status.
+
+    Each stream is drained completely -- so the child never sees SIGPIPE -- while only the
+    first ``max_bytes`` are retained and returned. The command's own status is written to a
+    temporary file because a pipeline reports its last stage's status instead.
+    """
+    command = shlex.join(argv)
+    return f"""\
+if ! command -v mktemp >/dev/null 2>&1 ||
+   ! command -v head >/dev/null 2>&1 ||
+   ! command -v cat >/dev/null 2>&1 ||
+   ! head -c 1 /dev/null >/dev/null 2>&1; then
+    echo "bounded command capture is unavailable" >&2
+    exit {_BOUNDED_CAPTURE_EXIT}
+fi
+status_file=$(mktemp) || exit {_BOUNDED_CAPTURE_EXIT}
+trap 'rm -f "$status_file"' EXIT HUP INT TERM
+{{
+    {{ {command} 2>&1 1>&3; echo $? >&4; }} |
+        {{ head -c {max_bytes} >&2; cat >/dev/null; }}
+}} 3>&1 4>"$status_file" |
+    {{ head -c {max_bytes}; cat >/dev/null; }}
+status=$(cat "$status_file" 2>/dev/null)
+exit "${{status:-1}}"
+"""
+
+
+async def _run(
+    workspace: Workspace,
+    argv: list[str],
+    *,
+    timeout: float = 120.0,
+    max_bytes: int = _MAX_COMMAND_OUTPUT_BYTES,
+) -> CommandResult:
+    """Run one command, capping both captured streams at the subprocess boundary.
+
+    The workspace API returns complete output, so a POSIX shell pipeline drains stdout and
+    stderr while retaining at most ``max_bytes`` from each. If the workspace cannot provide
+    bounded command capture, callers fall back to the bounded filesystem walk instead of
+    collecting unbounded output.
+    """
+    try:
+        result = await workspace.run(
+            _bounded_command_script(argv, max_bytes), shell=True, timeout=timeout
+        )
+    except (TypeError, ValueError, UserError, NotImplementedError) as exc:
+        raise _BoundedCaptureUnavailable(
+            "this workspace cannot run a shell with bounded output capture"
+        ) from exc
+    if result.exit_code == _BOUNDED_CAPTURE_EXIT:
+        raise _BoundedCaptureUnavailable(
+            result.stderr.strip() or "bounded command capture is unavailable"
+        )
+    return result
+
+
+def _output_truncated(result: CommandResult, max_bytes: int = _MAX_COMMAND_OUTPUT_BYTES) -> bool:
+    return len(result.stdout.encode("utf-8", "replace")) >= max_bytes
 
 
 async def _walk(workspace: Workspace, root: str, *, limit: int) -> tuple[list[str], bool]:
@@ -100,15 +169,19 @@ async def _walk(workspace: Workspace, root: str, *, limit: int) -> tuple[list[st
 
 async def _rg_list(
     workspace: Workspace, path: str, glob: str | None, limit: int
-) -> list[str] | None:
-    argv = ["rg", "--files", "--null"]
+) -> tuple[list[str], bool] | None:
+    argv = ["rg", "--files", "--null", "--sort", "path"]
     if glob:
         argv += ["--glob", glob]
     argv += ["--", path]
     result = await _run(workspace, argv)
     if _rg_missing(result) or result.exit_code not in (0, 1):
         return None
-    return [_clean(part) for part in result.stdout.split("\0") if part][:limit]
+    if result.stderr.strip() and not result.stdout:
+        return None
+    parts = [part for part in result.stdout.split("\0") if part]
+    listed = [_clean(part) for part in parts[:limit]]
+    return listed, len(parts) > limit or _output_truncated(result)
 
 
 async def list_workspace(
@@ -125,7 +198,7 @@ async def list_workspace(
         except (WorkspaceError, OSError):
             listed = None
         if listed is not None:
-            return sorted(listed), len(listed) >= limit
+            return listed
     files, truncated = await _walk(workspace, path, limit=limit)
     if glob:
         files = [name for name in files if PurePosixPath(name).match(glob)]
@@ -140,7 +213,7 @@ def _validate_pattern(pattern: str) -> None:
         raise ValueError("This pattern needs ripgrep: POSIX grep does not support the syntax used.")
 
 
-def _parse_rg(output: str) -> list[Match]:
+def _parse_rg(output: str, limit: int) -> tuple[list[Match], bool]:
     matches: list[Match] = []
     for raw in output.splitlines():
         if not raw or raw == "--":
@@ -151,6 +224,8 @@ def _parse_rg(output: str) -> list[Match]:
         numbered = _NUMBERED.match(rest)
         if numbered is None:
             continue
+        if len(matches) >= limit:
+            return matches, True
         matches.append(
             Match(
                 path=_clean(path),
@@ -159,7 +234,7 @@ def _parse_rg(output: str) -> list[Match]:
                 context=numbered.group("sep") == "-",
             )
         )
-    return matches
+    return matches, False
 
 
 async def _rg_grep(
@@ -171,8 +246,19 @@ async def _rg_grep(
     ignore_case: bool,
     literal: bool,
     context: int,
-) -> list[Match] | None:
-    argv = ["rg", "--line-number", "--no-heading", "--color", "never", "--null"]
+    limit: int,
+) -> tuple[list[Match], bool] | None:
+    argv = [
+        "rg",
+        "--line-number",
+        "--no-heading",
+        "--with-filename",
+        "--color",
+        "never",
+        "--null",
+        "--sort",
+        "path",
+    ]
     if ignore_case:
         argv.append("--ignore-case")
     if literal:
@@ -185,7 +271,10 @@ async def _rg_grep(
     result = await _run(workspace, argv)
     if _rg_missing(result) or result.exit_code not in (0, 1):
         return None
-    return _parse_rg(result.stdout)
+    if result.stderr.strip() and not result.stdout:
+        return None
+    matches, parsed_more = _parse_rg(result.stdout, limit)
+    return matches, parsed_more or _output_truncated(result)
 
 
 async def _posix_grep(
@@ -197,9 +286,12 @@ async def _posix_grep(
     ignore_case: bool,
     literal: bool,
     context: int,
-) -> list[Match] | None:
+    limit: int,
+) -> tuple[list[Match], bool] | None:
     _validate_pattern(pattern)
-    argv = ["grep", "-r", "-n", "-I", "--exclude-dir=.git"]
+    argv = ["grep", "-r", "-n", "-H", "-I"]
+    for ignored in sorted(_IGNORED_DIRS):
+        argv.append(f"--exclude-dir={ignored}")
     if ignore_case:
         argv.append("-i")
     if literal:
@@ -215,6 +307,8 @@ async def _posix_grep(
         return None
     if result.exit_code not in (0, 1):
         return None
+    if result.stderr.strip() and not result.stdout:
+        return None
     matches: list[Match] = []
     for raw in result.stdout.splitlines():
         if not raw or raw == "--":
@@ -222,6 +316,8 @@ async def _posix_grep(
         record = _RECORD.match(raw)
         if record is None:
             continue
+        if len(matches) >= limit:
+            return matches, True
         matches.append(
             Match(
                 path=_clean(record.group("path")),
@@ -230,7 +326,7 @@ async def _posix_grep(
                 context=record.group("sep") == "-",
             )
         )
-    return matches
+    return matches, _output_truncated(result)
 
 
 async def _python_grep(
@@ -250,7 +346,14 @@ async def _python_grep(
         compiled = re.compile(expression, flags)
     except re.error as exc:
         raise ValueError(f"Invalid regular expression: {exc}") from exc
-    files, _ = await _walk(workspace, path, limit=_MAX_WALK_FILES)
+    root = _clean(path)
+    entry = await workspace.stat(root)
+    if entry.is_dir:
+        files, _ = await _walk(workspace, root, limit=_MAX_WALK_FILES)
+    else:
+        # The tool contract allows a single file; walking it would silently return zero
+        # matches because list_dir() fails on a regular file.
+        files = [root]
     if glob:
         files = [name for name in files if PurePosixPath(name).match(glob)]
     matches: list[Match] = []
@@ -308,12 +411,16 @@ async def grep_workspace(
                     ignore_case=ignore_case,
                     literal=literal,
                     context=context,
+                    limit=limit,
                 )
             except (WorkspaceError, OSError, ValueError):
                 found = None
             if found is not None:
-                found.sort(key=lambda match: (match.path, match.line))
-                return found[:limit], len(found) > limit, backend
+                matches, truncated = found
+                # The collection is already bounded by the command cap and result limit,
+                # so sorting it here cannot grow with the size of the repository.
+                matches.sort(key=lambda match: (match.path, match.line))
+                return matches, truncated, backend
     found = await _python_grep(
         workspace,
         pattern,

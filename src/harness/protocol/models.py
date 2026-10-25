@@ -152,11 +152,6 @@ class ExtensionAdvertisement(WireModel):
     local_binding_creation: bool = False
 
 
-class RuntimeEvent(WireModel):
-    type: str
-    data: dict[str, Any] = Field(default_factory=dict)
-
-
 class SessionTitleUpdate(WireModel):
     """Idempotently replace the name of an open session."""
 

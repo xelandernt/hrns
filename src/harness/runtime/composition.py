@@ -1,9 +1,9 @@
 """Native agent composition shared by every Harness entrypoint.
 
-A definition is composed exactly once per session. The result is a native Pydantic AI
-``Agent`` plus the per-session run configuration the upstream ACP adapter applies:
-capabilities, resources, and an optional local workspace. Nothing here owns history,
-transcripts, turns, or ACP execution.
+A definition is composed when a session is created or loaded and recomposed when its
+configuration changes. The result is a native Pydantic AI ``Agent`` plus the per-session run
+configuration the upstream ACP adapter applies: capabilities, resources, and an optional local
+workspace. Nothing here owns history, transcripts, turns, or ACP execution.
 """
 
 from __future__ import annotations
