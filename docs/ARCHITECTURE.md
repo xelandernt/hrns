@@ -32,8 +32,18 @@ Textual / headless client ── ACP stdio ──► harness-host / harness-loca
 | `harness.runtime` | Definitions, registry, policy, resources, native composition, persistence | Terminal and server |
 | `harness.runtime.host` | Thin ACP adapter over composed sessions | Terminal |
 | `harness.runtime.host_support` | Host setup/policy, support types, store selection, agent construction | Terminal |
+| `harness.runtime.configuration_service` | Configuration transactions, request caching, revision checks | Terminal |
+| `harness.runtime.command_service` | Command caching, locking, execution, cancellation | Terminal |
+| `harness.runtime.session_service` | Session composition, metadata, plans, usage, presentation | Terminal |
+| `harness.runtime.policy` | Binding state, change/graph validation, atomic catalog | Terminal |
 | `harness.runtime.cli` | Definition loading, CLI parsing, stdio serving | Terminal |
-| `harness.client` | ACP connections, profiles, terminal, headless runner | Native agent code and provider SDKs |
+| `harness.client` | ACP connection, session, turn, and extension facades | Native agent code and provider SDKs |
+| `harness.client.session` | Session proxy state and session lifecycle | Terminal |
+| `harness.client.connection` | Transport lifecycle, reconnect, connection state | Terminal |
+| `harness.client.turn` | Prompts, cancellation, modes, config options | Terminal |
+| `harness.client.updates` | ACP update-to-event mapping | Terminal |
+| `harness.client.extensions_api` | `_harness` request surface and payload validation | Terminal |
+| `harness.client.tui` | Connections, chat workflows, widgets, panels, and dialogs | Native runtime code |
 | `harness.server` | FastAPI registration, authentication, catalog, in-process ACP | Terminal |
 
 Installing the `client` extra does not install Pydantic AI. The `server` extra includes the
