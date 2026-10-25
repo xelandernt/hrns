@@ -952,10 +952,18 @@ Fill this in during execution:
 
 - Baseline line counts: `screens.py 3690`, `widgets.py 3215`, `host.py 1765`,
   `client.py 1416`, `policy.py 999`
-- Final line counts: `____`
+- Final line counts: `chat/screen.py 887`, `host.py 484`, `client.py 433`,
+  `policy/catalog.py 439`, `policy/validation.py 468`, `session_service.py 446`,
+  all other extracted modules below 500; `widgets.py` and `screens.py` are gone.
 - Baseline Pyrefly suppressed diagnostics: `6`
-- Final Pyrefly suppressed diagnostics: `____`
-- `just check`: `passing at baseline (d235e88)`
-- TUI smoke: `____`
-- Host/client smoke: `baseline: examples/custom_capability.py, harness-host --help, harness-local --catalog, hrns --help all pass`
-- Deferred items and rationale: `____`
+- Final Pyrefly suppressed diagnostics: `6`
+- `just check`: `passing after every task and at final commit`
+- TUI smoke: `headless mounts of ChatScreen, ConnectScreen, SidePanel, blocks,
+  transcript, composer, status/approval, and workflow probes all pass`
+- Host/client smoke: `examples/custom_capability.py`, `harness-host --help`,
+  `harness-local --catalog`, `hrns --help`, stdio prompt, and stdio
+  session resume/reload against a real SQLite store all pass`
+- Deferred items and rationale: `The interactive keyboard-by-key TUI checklist and
+  provider-backed plugin/MCP flows were not run in this headless environment; their
+  logic was exercised with temporary headless probes and the deterministic examples.
+  Adding an automated test suite remains outside repository policy.`
