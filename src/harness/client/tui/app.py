@@ -27,9 +27,9 @@ from ..interactions import (
 from ..launch import ConnectionTarget, transport_for
 from ..local import local_model_catalog
 from ..profiles import Profiles
+from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
 from .dialogs import ElicitationDialog, PermissionDialog
-from .screens import ChatScreen
 from .state import Settings
 
 __all__ = ["HarnessApp", "run_terminal"]

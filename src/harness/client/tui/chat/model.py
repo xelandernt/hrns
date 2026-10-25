@@ -21,7 +21,7 @@ from ..panels import SidePanel
 from ..state import config_option_value, effort_option, model_option, option_values
 
 if TYPE_CHECKING:
-    from ..screens import ChatScreen
+    from .screen import ChatScreen
 
 
 class ModelWorkflow:
@@ -62,7 +62,7 @@ class ModelWorkflow:
                 panel.show_message(exc.message)
                 return
             panel.set_standard_options(list(options))
-            screen._update_chrome()
+            screen.chrome.update_chrome()
             return
         choices = option_values(option)
         if not choices:
@@ -93,7 +93,7 @@ class ModelWorkflow:
             panel.show_message(exc.message)
             return
         panel.set_standard_options(list(options))
-        screen._update_chrome()
+        screen.chrome.update_chrome()
 
     # ------------------------------------------------------------- local model
 
@@ -359,7 +359,7 @@ class ModelWorkflow:
                     # landed; restart so the saved setting is read at startup.
                     restart = True
             if not restart:
-                screen._update_chrome()
+                screen.chrome.update_chrome()
                 suffix = (
                     f" · effort {effort_label(result.effort)}" if result.effort is not None else ""
                 )
@@ -458,5 +458,5 @@ class ModelWorkflow:
         except HarnessClientError as exc:
             await screen._notice(f"Mode change failed: {exc.message}", "error")
             return
-        screen._update_chrome()
+        screen.chrome.update_chrome()
         await screen._notice(f"Mode set to {mode_id}.", "success")

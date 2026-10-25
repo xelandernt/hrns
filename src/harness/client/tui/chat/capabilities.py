@@ -12,7 +12,7 @@ from ..panels import SidePanel
 from ..state import binding_summary, build_form_fields
 
 if TYPE_CHECKING:
-    from ..screens import ChatScreen
+    from .screen import ChatScreen
 
 
 class CapabilityWorkflow:
