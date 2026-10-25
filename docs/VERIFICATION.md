@@ -29,7 +29,7 @@ Results recorded on 2026-10-22 (macOS, Python 3.13.5, pinned dependencies):
 ## Local stdio
 
 A temporary definition module used a real `FunctionModel` with a streaming function. The
-official ACP SDK client launched `python -m harness.runtime.host` as a subprocess and
+official ACP SDK client launched `python -m harness.runtime.cli` as a subprocess and
 exercised:
 
 - `initialize` with `_meta.harness` advertisement;

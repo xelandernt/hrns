@@ -23,7 +23,7 @@ from harness.runtime import (
 ```
 
 `harness.runtime` imports no client, FastAPI, or Textual modules. Importing
-`harness.runtime.host` pulls in the upstream ACP adapter.
+`harness.runtime.host` and `harness.runtime.cli` pull in the upstream ACP adapter.
 
 ## Compose a session
 
