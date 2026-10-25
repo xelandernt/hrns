@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import warnings
 from collections.abc import Mapping
 from typing import Any, cast
@@ -27,7 +26,6 @@ from pydantic_ai_harness.experimental.acp import (
 
 from harness.config import EFFORT_DEFAULT
 from harness.protocol import (
-    EXTENSION_METHODS,
     BindingListResponse,
     CommandCancelRequest,
     CommandInvokeRequest,
@@ -64,10 +62,6 @@ from .session_service import SessionService
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
 __all__ = ["HarnessACPAgent"]
-
-_LOG = logging.getLogger("harness.runtime.host")
-
-_EXTENSION_METHODS = tuple(EXTENSION_METHODS)
 
 
 class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
@@ -442,7 +436,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 return composition.snapshot.to_wire()
             if method == "harness/configuration/update":
                 request = ConfigurationUpdate.model_validate(dict(params))
-                return await self._update_configuration(request)
+                return await self.config.update(request)
             if method == "harness/commands/list":
                 request = CommandListRequest.model_validate(dict(params))
                 composition = self.sessions.require_composition(request.session_id)
@@ -488,11 +482,3 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             ) from exc
         except RequestError:
             raise
-
-    async def _update_configuration(self, request: ConfigurationUpdate) -> dict[str, Any]:
-        return await self.config.update(request)
-
-
-# ---------------------------------------------------------------------------
-# Definition loading and serving
-# ---------------------------------------------------------------------------
