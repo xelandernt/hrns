@@ -91,6 +91,16 @@ from .messages import (
     QueueAction,
     Submitted,
 )
+from .panels import SidePanel, SidePanelCloseRequested
+from .panels.capability import (
+    BindingEditRequested,
+    BindingToggleRequested,
+    CapabilityAddRequested,
+    CapabilityRefreshRequested,
+    ConfigOptionRequested,
+    ConfigOptionStepRequested,
+)
+from .panels.mcp import McpRefreshRequested
 from .panels.session import (
     SessionCloseRequested,
     SessionDeleteRequested,
@@ -116,17 +126,6 @@ from .state import (
 )
 from .status import StatusBar
 from .transcript import TranscriptPane
-from .widgets import (
-    BindingEditRequested,
-    BindingToggleRequested,
-    CapabilityAddRequested,
-    CapabilityRefreshRequested,
-    ConfigOptionRequested,
-    ConfigOptionStepRequested,
-    McpRefreshRequested,
-    SidePanel,
-    SidePanelCloseRequested,
-)
 
 __all__ = ["ChatScreen", "ConnectScreen", "PickEntry"]
 

@@ -1,7 +1,5 @@
 """Side panel widgets."""
 
-from .activity import ActivityPanel
-from .session import SessionPanel
-from .todo import TodoPanel
+from .side import SidePanel, SidePanelCloseRequested
 
-__all__ = ["ActivityPanel", "SessionPanel", "TodoPanel"]
+__all__ = ["SidePanel", "SidePanelCloseRequested"]
