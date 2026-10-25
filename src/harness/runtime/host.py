@@ -34,12 +34,10 @@ from acp.stdio import stdio_streams
 from acp.utils import normalize_result, notify_model, request_model
 from pydantic import ValidationError
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
 )
-from pydantic_ai_harness.planning import PlanItem, PlanStore, SqlitePlanStore
 
 from harness.config import EFFORT_DEFAULT
 from harness.protocol import (
@@ -56,23 +54,18 @@ from harness.protocol import (
     PluginListResponse,
     PresentationListRequest,
     PresentationListResponse,
-    PresentationUpdated,
     SteerRequest,
-    ToolPresentationSnapshot,
     paginate,
 )
 
 from . import acp as acp_map
-from ._unavailable_tools import UnavailableTools
 from .acp_store import (
-    SessionRecord,
     finalize_usage,
     merge_usage,
     usage_payload,
 )
 from .ask_user import QuestionChannel
 from .command_service import CommandService
-from .composition import Composition, compose_definition
 from .configuration_service import ConfigurationService
 from .definitions import (
     AgentDefinition,
@@ -83,17 +76,13 @@ from .host_support import (
     HostBundle,
     HostPolicy,
     HostSetup,
-    SessionDeps,
     _ComposedAgent,
-    _iso_millis,
     _prompt_text,
     build_store,
 )
-from .presentation import snapshot_from_metadata
 from .registry import PluginRegistry
-from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceSet
-from .steering import SteeringCapability, SteeringChannel
-from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
+from .resources import MODEL, ResourceSet
+from .session_service import SessionService
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
@@ -125,9 +114,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self.definition = bundle.definition
         bundle.registry.allow_local_binding_creation = self.policy.can_create_bindings
         self.store = bundle.store.scoped(self.policy.principal, self.policy.deployment_id)
-        self._compositions: dict[str, Composition] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
-        self._turn_usage: dict[str, dict[str, Any]] = {}
         self.config = ConfigurationService(
             agent=self,
             store=self.store,
@@ -136,27 +123,29 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             registry=bundle.registry,
         )
         self.commands = CommandService(agent=self)
-        self._plan_channels: dict[str, PlanChannel] = {}
-        self._steering: dict[str, SteeringChannel] = {}
-        self._pending_initial: list[Any] | None = None
-        self._pending_effort: str | None = None
-        self._new_lock = asyncio.Lock()
         self._client_conn: Any | None = None
         self.question_channel = QuestionChannel()
         models = tuple(self.policy.models)
         default = self.policy.default_model or (models[0] if models else None)
         self._default_model = default
+        self.sessions = SessionService(
+            agent=self,
+            store=self.store,
+            policy=self.policy,
+            definition=self.definition,
+            registry=bundle.registry,
+        )
         super().__init__(
             cast(
                 AbstractAgent[Any, str],
                 _ComposedAgent(
                     name=self.definition.name or self.definition.agent_id,
-                    report_usage=self._report_model_usage,
+                    report_usage=self.sessions.report_model_usage,
                 ),
             ),
             name=self.definition.name or self.definition.agent_id,
             version=self.definition.version,
-            session_config=self._compose_session,
+            session_config=self.sessions.compose_session,
             session_store=self.store,
             models=models or None,
             model_resolver=bundle.model_resolver,
@@ -172,10 +161,10 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
 
     async def shutdown(self) -> None:
         """Close every live session through the public adapter method, then the store."""
-        for session_id in list(self._compositions):
+        for session_id in list(self.sessions.compositions):
             with contextlib.suppress(Exception):
                 await self.close_session(session_id)
-        self._compositions.clear()
+        self.sessions.compositions.clear()
         if self.bundle.close_store:
             with contextlib.suppress(Exception):
                 await self.store.backend.close()
@@ -185,12 +174,10 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
     ) -> schema.CloseSessionResponse | None:
         response = await super().close_session(session_id, **kwargs)
         await self.commands.cancel_session(session_id)
-        self._compositions.pop(session_id, None)
+        self.sessions.forget(session_id)
         self._turn_locks.pop(session_id, None)
         self.config.forget(session_id)
         self.commands.forget(session_id)
-        self._plan_channels.pop(session_id, None)
-        self._steering.pop(session_id, None)
         return response
 
     def _turn_lock(self, session_id: str) -> asyncio.Lock:
@@ -240,8 +227,8 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.NewSessionResponse:
         try:
-            self._reject_additional_directories(additional_directories)
-            self._reject_client_mcp(mcp_servers)
+            self.sessions.reject_additional_directories(additional_directories)
+            self.sessions.reject_client_mcp(mcp_servers)
             self.policy.validate_cwd(cwd)
             meta = kwargs.get("harness")
             initial = acp_map.initial_configuration_changes(meta)
@@ -258,9 +245,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 value = meta.get("effort")
                 if isinstance(value, str):
                     effort = value
-            async with self._new_lock:
-                self._pending_initial = list(initial) or None
-                self._pending_effort = effort
+            async with self.sessions.new_lock:
+                self.sessions.pending_initial = list(initial) or None
+                self.sessions.pending_effort = effort
                 try:
                     response = await super().new_session(
                         cwd,
@@ -269,10 +256,10 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                         **kwargs,
                     )
                 finally:
-                    self._pending_initial = None
-                    self._pending_effort = None
+                    self.sessions.pending_initial = None
+                    self.sessions.pending_effort = None
             return response.model_copy(
-                update={"config_options": self._options_for(response.session_id)}
+                update={"config_options": self.sessions.options_for(response.session_id)}
             )
         except HarnessError as exc:
             raise acp_map.harness_rpc_error(exc) from exc
@@ -288,8 +275,8 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.LoadSessionResponse | None:
         try:
-            self._reject_additional_directories(additional_directories)
-            self._reject_client_mcp(mcp_servers)
+            self.sessions.reject_additional_directories(additional_directories)
+            self.sessions.reject_client_mcp(mcp_servers)
             record = await self.store.get(session_id)
             if record is None:
                 raise RequestError.invalid_params(
@@ -309,36 +296,17 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             raise
         if response is None:
             return response
-        return response.model_copy(update={"config_options": self._options_for(session_id)})
+        return response.model_copy(update={"config_options": self.sessions.options_for(session_id)})
 
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> schema.ListSessionsResponse:
-        cwd_filter = self.policy.validate_cwd(cwd) if cwd is not None else None
-        page = await self.store.list(cwd=cwd_filter, cursor=cursor, limit=50)
-        entries = [
-            schema.SessionInfo(
-                session_id=record.session_id,
-                cwd=record.cwd,
-                title=record.title,
-                updated_at=_iso_millis(record.last_active_at),
-            )
-            for record in page.records
-        ]
-        return schema.ListSessionsResponse(sessions=entries, next_cursor=page.next_cursor)
+        del kwargs
+        return await self.sessions.list_sessions(cwd=cwd, cursor=cursor)
 
     async def delete_session(self, session_id: str, **kwargs: Any) -> DeleteSessionResponse | None:
-        record = await self.store.get(session_id)
-        if record is None:
-            raise RequestError.invalid_params(
-                {"sessionId": session_id, "reason": "no stored session with this id"}
-            )
-        await self.close_session(session_id)
-        await self.store.delete(session_id)
-        database = self._plan_database()
-        if database is not None:
-            await asyncio.to_thread(forget_plan, database, session_id)
-        return DeleteSessionResponse()
+        del kwargs
+        return await self.sessions.delete_session(session_id)
 
     # --- prompts, effort, and metadata -----------------------------------
 
@@ -349,16 +317,16 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.PromptResponse:
         async with self._turn_lock(session_id):
-            self._turn_usage[session_id] = {}
+            self.sessions.turn_usage[session_id] = {}
             response = None
             try:
                 response = await super().prompt(session_id, prompt, **kwargs)
                 return response
             finally:
-                channel = self._steering.get(session_id)
+                channel = self.sessions.steering.get(session_id)
                 if channel is not None:
                     channel.detach()
-                increment = self._turn_usage.pop(session_id, {})
+                increment = self.sessions.turn_usage.pop(session_id, {})
                 if response is not None and response.usage is not None:
                     # The adapter's final totals include approval continuations and limits.
                     # Reconcile without double counting or losing measured usage on cancel.
@@ -378,85 +346,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                         usage=totals,
                         touch=True,
                     )
-                    await self._send_session_usage(session_id, finalize_usage(totals))
+                    await self.sessions.send_session_usage(session_id, finalize_usage(totals))
                     if title and title != record.title:
-                        await self._send_session_title(session_id, title)
-
-    async def _report_model_usage(self, session_id: str, response: ModelResponse) -> None:
-        current = self._turn_usage.get(session_id)
-        if current is None:
-            return
-        payload = usage_payload(response.usage)
-        increment = dict(payload)
-        increment["requests"] = 1
-        current = merge_usage(current, increment)
-        self._turn_usage[session_id] = current
-        record = await self.store.get(session_id)
-        await self._send_session_usage(
-            session_id,
-            finalize_usage(merge_usage(record.usage if record is not None else {}, current)),
-        )
-        await self._send_context_usage(session_id, payload)
-
-    async def _send_context_usage(self, session_id: str, payload: Mapping[str, Any]) -> None:
-        """Publish how full the model's context window is after one model response.
-
-        ACP's ``UsageUpdate`` carries the gauge (tokens in context) separately from the
-        cumulative session counters, so clients can show a context readout that does not
-        grow by the whole history on every turn.
-        """
-        if self._client_conn is None:
-            return
-        input_tokens = payload.get("input_tokens")
-        output_tokens = payload.get("output_tokens")
-        used = payload.get("total_tokens")
-        if not isinstance(used, int):
-            used = int(input_tokens or 0) + int(output_tokens or 0)
-        detail = {
-            key: value
-            for key, value in payload.items()
-            if key
-            in {
-                "input_tokens",
-                "output_tokens",
-                "total_tokens",
-                "cache_read_tokens",
-                "cache_write_tokens",
-            }
-            and isinstance(value, int)
-            and not isinstance(value, bool)
-        }
-        with contextlib.suppress(Exception):
-            await self._client_conn.session_update(
-                session_id=session_id,
-                update=schema.UsageUpdate(
-                    session_update="usage_update",
-                    used=max(0, used),
-                    size=self._context_window(session_id),
-                    field_meta={"harness": {"contextUsage": detail}},
-                ),
-            )
-
-    def _context_window(self, session_id: str) -> int:
-        """The selected model's context window, or 0 when the profile does not say."""
-        composition = self._compositions.get(session_id)
-        model = getattr(composition.agent, "model", None) if composition is not None else None
-        window = getattr(model, "context_window", None)
-        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
-            return window
-        return 0
-
-    async def _send_session_usage(self, session_id: str, totals: Mapping[str, Any]) -> None:
-        if self._client_conn is None:
-            return
-        with contextlib.suppress(Exception):
-            await self._client_conn.session_update(
-                session_id=session_id,
-                update=schema.SessionInfoUpdate(
-                    session_update="session_info_update",
-                    field_meta={"harness": {"sessionUsage": {"scope": "session", **totals}}},
-                ),
-            )
+                        await self.sessions.send_session_title(session_id, title)
 
     async def set_config_option(
         self,
@@ -466,7 +358,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.SetSessionConfigOptionResponse | None:
         if config_id == acp_map.EFFORT_OPTION_ID:
-            composition = self._require_composition(session_id)
+            composition = self.sessions.require_composition(session_id)
             if not isinstance(value, str):
                 raise RequestError.invalid_params(
                     {"configId": config_id, "reason": "effort expects a string"}
@@ -496,11 +388,11 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 touch=True,
             )
             return schema.SetSessionConfigOptionResponse(
-                config_options=self._options_for(session_id)
+                config_options=self.sessions.options_for(session_id)
             )
         response = await super().set_config_option(config_id, session_id, value, **kwargs)
         if config_id == acp_map.MODEL_OPTION_ID and self._default_model is not None:
-            composition = self._compositions.get(session_id)
+            composition = self.sessions.composition(session_id)
             if composition is not None and isinstance(value, str):
                 support = self.policy.effort_support(value)
                 composition.effort.set_model(value, support)
@@ -516,7 +408,9 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 )
         if response is None:
             return response
-        return schema.SetSessionConfigOptionResponse(config_options=self._options_for(session_id))
+        return schema.SetSessionConfigOptionResponse(
+            config_options=self.sessions.options_for(session_id)
+        )
 
     # --- project extension ------------------------------------------------
 
@@ -529,13 +423,13 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 if await self.store.get(request.session_id) is None:
                     raise HarnessError("SESSION_CLOSED", "Load the session before renaming it.")
                 await self.store.update(request.session_id, title=request.title, touch=True)
-                await self._send_session_title(request.session_id, request.title)
+                await self.sessions.send_session_title(request.session_id, request.title)
                 return {"sessionId": request.session_id, "title": request.title}
             if method == "harness/session/steer":
                 request = SteerRequest.model_validate(dict(params))
                 if await self.store.get(request.session_id) is None:
                     raise HarnessError("SESSION_CLOSED", "Load the session before steering it.")
-                channel = self._steering.get(request.session_id)
+                channel = self.sessions.steering.get(request.session_id)
                 if channel is None or not channel.enqueue(request.text):
                     raise HarnessError(
                         "TURN_NOT_RUNNING",
@@ -548,7 +442,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                     raise HarnessError(
                         "INVALID_CONFIGURATION", "sessionId is required for a capability listing."
                     )
-                composition = self._require_composition(request.session_id)
+                composition = self.sessions.require_composition(request.session_id)
                 descriptors = composition.descriptors()
                 page, next_cursor = paginate(
                     descriptors, cursor=request.cursor, limit=request.limit or 50
@@ -575,14 +469,14 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 session_id = params.get("sessionId", params.get("session_id"))
                 if not isinstance(session_id, str) or not session_id:
                     raise HarnessError("INVALID_CONFIGURATION", "sessionId is required.")
-                composition = self._require_composition(session_id)
+                composition = self.sessions.require_composition(session_id)
                 return composition.snapshot.to_wire()
             if method == "harness/configuration/update":
                 request = ConfigurationUpdate.model_validate(dict(params))
                 return await self._update_configuration(request)
             if method == "harness/commands/list":
                 request = CommandListRequest.model_validate(dict(params))
-                composition = self._require_composition(request.session_id)
+                composition = self.sessions.require_composition(request.session_id)
                 page, next_cursor = paginate(
                     composition.commands.descriptors(),
                     cursor=request.cursor,
@@ -607,8 +501,8 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 return self.commands.cancel(request)
             if method == "harness/presentation/get":
                 request = PresentationListRequest.model_validate(dict(params))
-                self._require_composition(request.session_id)
-                snapshots = await self._presentation_snapshots(
+                self.sessions.require_composition(request.session_id)
+                snapshots = await self.sessions.presentation_snapshots(
                     request.session_id, request.tool_call_ids
                 )
                 return PresentationListResponse(snapshots=snapshots).to_wire()
@@ -628,261 +522,6 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
 
     async def _update_configuration(self, request: ConfigurationUpdate) -> dict[str, Any]:
         return await self.config.update(request)
-
-    def _presentation_sink(self, session_id: str) -> Any:
-        async def publish(snapshot: ToolPresentationSnapshot) -> None:
-            if self._client_conn is None:
-                return
-            with contextlib.suppress(Exception):
-                await self._client_conn.ext_notification(
-                    "harness/presentation/updated",
-                    PresentationUpdated(snapshots=[snapshot]).to_wire(),
-                )
-
-        del session_id
-        return publish
-
-    async def _presentation_snapshots(
-        self, session_id: str, tool_call_ids: Sequence[str]
-    ) -> list[ToolPresentationSnapshot]:
-        stored = await self.store.load(session_id)
-        if stored is None:
-            return []
-        wanted = set(tool_call_ids)
-        snapshots: dict[str, ToolPresentationSnapshot] = {}
-        for message in stored.messages:
-            for part in getattr(message, "parts", ()):
-                if not isinstance(part, ToolReturnPart):
-                    continue
-                if part.tool_call_id not in wanted:
-                    continue
-                snapshot = snapshot_from_metadata(
-                    session_id, part.tool_call_id, getattr(part, "metadata", None)
-                )
-                if snapshot is not None:
-                    snapshots[part.tool_call_id] = snapshot
-        return [snapshots[item] for item in tool_call_ids if item in snapshots]
-
-    async def _remembered_tool_names(self, session_id: str) -> frozenset[str]:
-        """Function-tool names already present in the session's native history."""
-        stored = await self.store.load(session_id)
-        if stored is None:
-            return frozenset()
-        names: set[str] = set()
-        for message in stored.messages:
-            for part in getattr(message, "parts", ()):
-                if isinstance(part, ToolCallPart):
-                    name = getattr(part, "tool_name", None)
-                    if isinstance(name, str) and name:
-                        names.add(name)
-        return frozenset(names)
-
-    async def _apply_unavailable_tools(self, session_id: str, composition: Composition) -> None:
-        """Keep disabled tool names callable as failures for existing conversations.
-
-        DeepSeek emits raw DSML text instead of structured calls when a previously used
-        tool disappears from the request. A stub keeps the declaration and returns a
-        clear ``ToolFailed`` if the model still calls it. Active tools always win.
-        """
-        disabled = tuple(
-            offering.binding_id
-            for offering in composition.catalog.ordered_offerings()
-            if not offering.enabled
-        )
-        capabilities = [
-            capability
-            for capability in (composition.config.capabilities or ())
-            if not isinstance(capability, UnavailableTools)
-        ]
-        if disabled:
-            remembered = await self._remembered_tool_names(session_id)
-            if remembered:
-                capabilities.insert(
-                    0,
-                    UnavailableTools(
-                        disabled_bindings=disabled,
-                        remembered_tools=remembered,
-                    ),
-                )
-        composition.config = type(composition.config)(
-            deps=composition.config.deps,
-            capabilities=capabilities,
-            toolsets=composition.config.toolsets,
-            workspace=composition.config.workspace,
-        )
-        composition.capabilities = capabilities
-
-    # --- composition ------------------------------------------------------
-
-    def _plan_channel(self, session_id: str) -> PlanChannel:
-        channel = self._plan_channels.get(session_id)
-        if channel is None:
-            channel = PlanChannel(
-                session_id, self._publish_plan, store=self._plan_store(session_id)
-            )
-            self._plan_channels[session_id] = channel
-        return channel
-
-    def _plan_database(self) -> str | None:
-        """The SQLite file that can hold plans, or ``None`` for Postgres/in-memory stores."""
-        path = getattr(self.store.backend, "path", None)
-        if path is None or str(path) == ":memory:":
-            return None
-        return str(path)
-
-    def _plan_store(self, session_id: str) -> PlanStore | None:
-        """Persist plans in the session database so a reload shows the last plan."""
-        database = self._plan_database()
-        if database is None:
-            return None
-        return SqlitePlanStore(database, session=session_id, table=PLAN_TABLE)
-
-    async def _publish_plan(self, session_id: str, items: list[PlanItem]) -> None:
-        connection = self._client_conn
-        if connection is None:
-            return
-        with contextlib.suppress(Exception):
-            await connection.session_update(
-                session_id=session_id,
-                update=plan_update(items),
-            )
-
-    def _resources(self, cwd: str, session_id: str | None = None) -> ResourceSet:
-        """The deployment's bindings plus the services this session owns.
-
-        A deployment binding always wins: the ACP client's cwd only fills a workspace slot the
-        deployment left empty. That is what lets a host bind a remote or sandboxed workspace
-        backend while the client still sends an ordinary path as its ``cwd``.
-        """
-        resources = ResourceSet(self.policy.resources)
-        resources.bind_if_absent(ANSWERS, self.question_channel)
-        if session_id is not None:
-            resources.bind_if_absent(PLAN, self._plan_channel(session_id))
-        model = self._default_model
-        if model is not None:
-            resources.bind_if_absent(MODEL, model)
-        if self.definition.declares(WORKSPACE):
-            resources.bind_if_absent(WORKSPACE, cwd)
-        return resources
-
-    async def _compose_session(self, session: Any) -> Any:
-        record = await self.store.get(session.session_id)
-        initial = None
-        saved = None
-        effort = self.policy.default_effort
-        if record is None:
-            initial = self._pending_initial
-            if self._pending_effort is not None:
-                effort = self._pending_effort
-        else:
-            saved = record.bindings
-            effort = record.effort or None
-            if effort == EFFORT_DEFAULT:
-                effort = None
-        cwd = self.policy.validate_cwd(session.cwd)
-        model = (record.model if record is not None else None) or self._default_model
-        support = self.policy.effort_support(model)
-        composition = await compose_definition(
-            self.definition,
-            self.bundle.registry,
-            resources=self._resources(cwd, session.session_id),
-            session_id=session.session_id,
-            principal=self.policy.principal,
-            deployment_id=self.policy.deployment_id,
-            initial_configuration=initial,
-            saved_bindings=saved,
-            model_settings=self.policy.model_settings,
-            effort=effort,
-            effort_support=support,
-            presentation_sink=self._presentation_sink(session.session_id),
-        )
-        composition.effort.model = model
-        self._compositions[session.session_id] = composition
-        if record is None:
-            await self.store.create(
-                SessionRecord(
-                    session_id=session.session_id,
-                    principal=self.policy.principal,
-                    deployment_id=self.policy.deployment_id,
-                    agent_id=self.definition.agent_id,
-                    definition_version=self.definition.version,
-                    cwd=cwd,
-                    effort=effort or EFFORT_DEFAULT,
-                    bindings=composition.catalog.export_bindings(),
-                )
-            )
-        else:
-            await self.store.update(
-                session.session_id,
-                bindings=composition.catalog.export_bindings(),
-                touch=True,
-            )
-        steering = SteeringChannel()
-        composition.config = type(composition.config)(
-            deps=SessionDeps(session_id=session.session_id, composition=composition),
-            capabilities=[
-                *(composition.config.capabilities or ()),
-                SteeringCapability(steering),
-            ],
-            toolsets=composition.config.toolsets,
-            workspace=composition.config.workspace,
-        )
-        self._steering[session.session_id] = steering
-        await self._apply_unavailable_tools(session.session_id, composition)
-        channel = self._plan_channels.get(session.session_id)
-        if channel is not None:
-            await channel.publish_current()
-        return composition.config
-
-    def _require_composition(self, session_id: str) -> Composition:
-        composition = self._compositions.get(session_id)
-        if composition is None:
-            raise HarnessError(
-                "CAPABILITY_UNAVAILABLE",
-                "The session is not open in this host; load it before reading configuration.",
-                {"sessionId": session_id},
-            )
-        return composition
-
-    def _options_for(self, session_id: str) -> list[Any]:
-        composition = self._compositions.get(session_id)
-        support = composition.effort.support if composition is not None else None
-        current_effort = (
-            composition.effort.effort if composition is not None else None
-        ) or EFFORT_DEFAULT
-        options: list[Any] = []
-        model = self.session_model_option(session_id)
-        if model is not None:
-            options.append(model)
-        effort = acp_map.effort_option(current_effort, support=support)
-        if effort is not None:
-            options.append(effort)
-        return options
-
-    async def _send_session_title(self, session_id: str, title: str) -> None:
-        if self._client_conn is None:
-            return
-        with contextlib.suppress(Exception):
-            await self._client_conn.session_update(
-                session_id=session_id,
-                update=schema.SessionInfoUpdate(session_update="session_info_update", title=title),
-            )
-
-    # --- small validations ------------------------------------------------
-
-    @staticmethod
-    def _reject_additional_directories(additional_directories: Sequence[str] | None) -> None:
-        if additional_directories:
-            raise HarnessError(
-                "INVALID_CONFIGURATION",
-                "additionalDirectories is not supported by this host.",
-                {"count": len(additional_directories)},
-            )
-
-    def _reject_client_mcp(self, mcp_servers: Sequence[Any] | None) -> None:
-        if not mcp_servers:
-            return
-        raise acp_map.mcp_forbidden_error(hosted=self.policy.hosted, servers=mcp_servers)
 
 
 # ---------------------------------------------------------------------------

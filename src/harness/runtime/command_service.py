@@ -139,7 +139,7 @@ class CommandService:
     async def _execute(self, request: CommandInvokeRequest, digest: str) -> dict[str, Any]:
         agent = self.agent
         session_id = request.session_id
-        composition = agent._require_composition(session_id)
+        composition = agent.sessions.require_composition(session_id)
         if request.expected_revision != composition.snapshot.selected_revision:
             raise HarnessError(
                 "REVISION_CONFLICT",
@@ -169,7 +169,7 @@ class CommandService:
         async with lock:
             # Configuration updates take the same lock, so the binding/revision cannot
             # change between the checks above and the handler call.
-            refreshed = agent._require_composition(session_id)
+            refreshed = agent.sessions.require_composition(session_id)
             if refreshed.snapshot.selected_revision != request.expected_revision:
                 raise HarnessError(
                     "REVISION_CONFLICT",

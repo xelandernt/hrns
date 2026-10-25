@@ -85,7 +85,7 @@ class ConfigurationService:
                         {"requestId": request.request_id},
                     )
                 return cached[1].to_wire()
-            composition = agent._require_composition(session_id)
+            composition = agent.sessions.require_composition(session_id)
             if request.expected_revision != composition.snapshot.selected_revision:
                 raise HarnessError(
                     "REVISION_CONFLICT",
@@ -110,7 +110,9 @@ class ConfigurationService:
             refreshed = await compose_definition(
                 self.definition,
                 self.registry,
-                resources=agent._resources(self.policy.validate_cwd(record.cwd), session_id),
+                resources=agent.sessions.resources(
+                    self.policy.validate_cwd(record.cwd), session_id
+                ),
                 session_id=session_id,
                 principal=self.policy.principal,
                 deployment_id=self.policy.deployment_id,
@@ -121,7 +123,7 @@ class ConfigurationService:
                     composition.effort.model or agent._default_model
                 ),
                 deps=composition.deps,
-                presentation_sink=agent._presentation_sink(session_id),
+                presentation_sink=agent.sessions.presentation_sink(session_id),
             )
             refreshed.effort.model = composition.effort.model or agent._default_model
             snapshot = refreshed.catalog.snapshot(
@@ -154,7 +156,7 @@ class ConfigurationService:
             composition.presentation = refreshed.presentation
             composition.workspace = refreshed.workspace
             composition.deps = refreshed.deps
-            await agent._apply_unavailable_tools(session_id, composition)
+            await agent.sessions.apply_unavailable_tools(session_id, composition)
             cache[request.request_id] = (request_hash, snapshot)
             self._trim(cache)
             await self.send_changed(snapshot)
