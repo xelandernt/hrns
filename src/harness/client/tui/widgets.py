@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import re
@@ -14,24 +13,19 @@ from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
 from rich.color import Color
-from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
-from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.geometry import Offset
 from textual.message import Message
 from textual.strip import Strip
 from textual.widgets import (
     Button,
-    Collapsible,
     DataTable,
     Input,
     Label,
-    Markdown,
     OptionList,
     Static,
     TabbedContent,
@@ -53,7 +47,25 @@ from ..interactions import (
     PermissionRequest,
 )
 from ..renderers import RendererRegistry, readable_text
+from .blocks import MessageBlock, NoticeBlock, ReasoningBlock
 from .choice_keys import choice_direction
+from .formatting import (
+    SPINNER_FRAMES,
+    TOOL_OUTPUT_INDENT,
+    TOOL_PREVIEW_LINES,
+    _restyle_spans,
+    bounded_user_text,
+    truncate_text,
+)
+from .messages import (
+    ApprovalDecided,
+    AskUserAnswered,
+    AttachmentRemoved,
+    CommandSuggestionKey,
+    OutputPending,
+    QueueAction,
+    Submitted,
+)
 from .state import (
     binding_summary,
     config_option_value,
@@ -85,17 +97,6 @@ __all__ = [
     "TranscriptPane",
 ]
 
-# One monochrome marker per tool call; status carries the meaning while it
-# runs. The result body is shown as a short ``⎿`` preview beneath the header.
-SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-# Collapsed cards stay a few rows tall; the rest is one click (or Enter) away.
-TOOL_PREVIEW_LINES = 4
-TOOL_OUTPUT_INDENT = "    ⎿  "
-
-# Retained text per message block is bounded so a single very long streaming
-# reply cannot grow the widget tree or make Markdown re-renders unbounded.
-MAX_STREAM_MESSAGE_CHARS = 24_000
-
 #: ``$skill`` and ``@path`` references in the composer. A match is only coloured when
 #: it names a known, user-invocable skill or a file in the workspace index, so a typo
 #: like ``$dwadawdawda`` stays plain.
@@ -103,40 +104,6 @@ MENTION_PATTERN = re.compile(r"(?<!\S)(\$[A-Za-z0-9][\w-]*|@[^\s]+)")
 
 #: Punctuation that may trail a file reference without being part of the path.
 MENTION_TRAILING = ".,;:!?)]}'\""
-
-
-def bounded_user_text(text: str) -> str:
-    """Keep a very large user prompt from creating an unbounded Static."""
-    if len(text) <= MAX_STREAM_MESSAGE_CHARS:
-        return text
-    return "…" + text[-(MAX_STREAM_MESSAGE_CHARS - 1) :]
-
-
-def truncate_text(text: str, width: int) -> str:
-    """Clip `text` to `width` characters, marking the cut with an ellipsis."""
-    if width <= 0:
-        return ""
-    if len(text) <= width:
-        return text
-    if width == 1:
-        return "…"
-    return text[: width - 1].rstrip() + "…"
-
-
-class Submitted(Message):
-    """The composer wants to submit its text."""
-
-    def __init__(self, text: str) -> None:
-        super().__init__()
-        self.text = text
-
-
-class CommandSuggestionKey(Message):
-    """A navigation key consumed by the inline command picker."""
-
-    def __init__(self, key: str) -> None:
-        super().__init__()
-        self.key = key
 
 
 class CommandSuggestions(OptionList):
@@ -161,45 +128,6 @@ class CommandSuggestions(OptionList):
     def hide_entries(self) -> None:
         self.display = False
         self.clear_options()
-
-
-def _restyle_spans(
-    strip: Strip,
-    spans: list[tuple[int, int, str]],
-    styles: Mapping[str, Style],
-) -> Strip:
-    """Restyle character ranges of an already-rendered strip.
-
-    ``Strip`` is immutable, so a new one is built by splitting segments at span
-    boundaries. Characters keep their existing style; the span style is layered on
-    top so cursor and selection styling still show through.
-    """
-    text = strip.text
-    span_styles: list[Style | None] = [None] * len(text)
-    for start, end, marker in spans:
-        style = styles.get(marker)
-        if style is None:
-            continue
-        for index in range(start, min(end, len(text))):
-            span_styles[index] = style
-
-    segments: list[Segment] = []
-    position = 0
-    for segment in strip._segments:
-        chunk_text = segment.text
-        run_start = 0
-        for offset in range(1, len(chunk_text) + 1):
-            ends_run = offset == len(chunk_text)
-            if not ends_run and span_styles[position + offset] is span_styles[position + run_start]:
-                continue
-            span_style = span_styles[position + run_start]
-            style = segment.style
-            if span_style is not None:
-                style = span_style if style is None else style + span_style
-            segments.append(Segment(chunk_text[run_start:offset], style, segment.control))
-            run_start = offset
-        position += len(chunk_text)
-    return Strip(segments, strip.cell_length)
 
 
 class Composer(TextArea):
@@ -334,19 +262,6 @@ class Composer(TextArea):
         )
 
 
-class QueueAction(Message):
-    def __init__(self, action: str, index: int = 0) -> None:
-        super().__init__()
-        self.action = action
-        self.index = index
-
-
-class AttachmentRemoved(Message):
-    def __init__(self, index: int) -> None:
-        super().__init__()
-        self.index = index
-
-
 class AttachmentBar(OptionList):
     """Persistent attachment metadata; selecting a file removes it from the draft."""
 
@@ -410,12 +325,6 @@ class PromptQueue(Vertical):
         event.stop()
         action = (event.button.id or "").removeprefix("queue-")
         self.post_message(QueueAction(action, self.query_one(OptionList).highlighted or 0))
-
-
-class OutputPending(Message):
-    def __init__(self, pending: bool) -> None:
-        super().__init__()
-        self.pending = pending
 
 
 class CommandResultBlock(Vertical):
@@ -866,269 +775,6 @@ class TranscriptPane(VerticalScroll):
             if isinstance(block, ToolCard) and block.tool_call_id:
                 ids.append(block.tool_call_id)
         return ids
-
-
-class MessageBlock(Vertical):
-    """One message: a small role label and streaming Markdown body.
-
-    Retained text is capped at ``MAX_STREAM_MESSAGE_CHARS``; older characters
-    are dropped from the head and counted so the trim stays visible.
-    """
-
-    ROLE_LABELS = {"you": "You", "agent": "Assistant"}
-    REVEAL_DURATION = 0.35
-    DEFAULT_CSS = """
-    MessageBlock .message-actions {
-        height: 1;
-        align: right middle;
-    }
-    MessageBlock .message-actions Button {
-        height: 1; min-width: 0; padding: 0 1; border: none; margin: 0 0 0 1;
-        color: $text-muted; background: transparent;
-    }
-    MessageBlock .message-actions Button:hover {
-        color: $accent; background: $boost;
-    }
-    """
-
-    def __init__(self, role: str, text: str = "") -> None:
-        super().__init__()
-        self.role = role
-        self._text = text
-        self._dropped = 0
-        self._marked = False
-        self._finished = False
-        # Textual's Markdown parses and mounts the whole document on every update, so a
-        # streaming reply re-rendered its entire history 16 times a second. Remembering
-        # what was already handed over lets each tick append only the new fragment.
-        self._rendered = ""
-        self._render_job: AwaitComplete | None = None
-        self._catch_up: asyncio.Task[None] | None = None
-        label = Text()
-        label.append(self.ROLE_LABELS.get(role, role.title()), style="bold")
-        label.append("  ")
-        label.append(datetime.now().strftime("%H:%M"), style="dim")
-        self._label = Static(label, markup=False)
-        self._label.add_class("message-role")
-        self._body = Markdown(text) if role == "agent" else Static(text, markup=False)
-        self._body.add_class("message-body")
-        self.add_class(f"role-{role}")
-
-    def compose(self) -> ComposeResult:
-        yield self._label
-        yield self._body
-        if self.role == "agent":
-            from textual.containers import Horizontal
-
-            with Horizontal(classes="message-actions"):
-                yield Button("Copy response", id="copy-response", disabled=True)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        event.stop()
-        if event.button.id == "copy-response":
-            self.app.copy_to_clipboard(self._text)
-            self.app.notify("Response copied")
-
-    def append_text(self, text: str) -> None:
-        self._text += text
-        if len(self._text) > MAX_STREAM_MESSAGE_CHARS:
-            overflow = len(self._text) - MAX_STREAM_MESSAGE_CHARS
-            self._dropped += overflow
-            self._text = self._text[overflow:]
-            if not self._marked:
-                self._marked = True
-                self._dropped += 1
-                self._text = "…" + self._text[1:]
-
-    def flush(self) -> None:
-        # Markdown.update needs a live app for its theme; pre-mount callers are
-        # buffered until on_mount rather than raising NoActiveAppError.
-        if not self.is_mounted:
-            return
-        source = self._source_text()
-        if source == self._rendered:
-            return
-        body = self._body
-        if not isinstance(body, Markdown):
-            # "you" blocks are plain Static text; there is nothing to re-parse.
-            self._rendered = source
-            body.update(source)
-            return
-        if self._render_job is not None and not self._render_job.is_done:
-            # The fragment already queued will follow this text; let it land before
-            # appending more instead of piling up full re-parses.
-            self._schedule_catch_up()
-            return
-        if self._rendered and source.startswith(self._rendered):
-            delta = source[len(self._rendered) :]
-            self._rendered = source
-            self._render_job = body.append(delta)
-        else:
-            self._rendered = source
-            self._render_job = body.update(source)
-
-    def _source_text(self) -> str:
-        marker = (
-            f"⋯ {self._dropped:,} earlier characters of this message trimmed from view ⋯\n\n"
-            if self._dropped
-            else ""
-        )
-        return marker + readable_text(self._text)
-
-    def _schedule_catch_up(self) -> None:
-        render = self._render_job
-        if render is None or self._catch_up is not None:
-            return
-
-        async def follow_up() -> None:
-            with contextlib.suppress(BaseException):
-                await render
-            self._catch_up = None
-            self.call_later(self.flush)
-
-        self._catch_up = asyncio.create_task(follow_up())
-
-    def on_mount(self) -> None:
-        self.flush()
-        if self._finished:
-            for button in self.query(Button):
-                button.disabled = False
-            return
-        # The action is revealed when the reply ends, not while it streams.
-        for button in self.query(Button):
-            button.display = False
-
-    def finish(self) -> None:
-        self.flush()
-        if self._finished:
-            return
-        self._finished = True
-        if not self.is_mounted:
-            return
-        for button in self.query(Button):
-            button.disabled = False
-            self._reveal(button)
-
-    def _reveal(self, button: Button) -> None:
-        """Fade the action in from the right once the reply is complete."""
-        button.styles.opacity = 0.0
-        button.styles.offset = Offset(2, 0)
-        button.display = True
-        button.styles.animate("opacity", 1.0, duration=self.REVEAL_DURATION, easing="out_cubic")
-        button.animate("offset", Offset(0, 0), duration=self.REVEAL_DURATION, easing="out_cubic")
-
-
-class ReasoningBlock(Collapsible):
-    """Agent-provided reasoning with a live ``Thinking`` indicator.
-
-    Mirrors OpenCode's presentation: a spinner and ``Thinking`` while tokens
-    arrive, then ``Thought`` with the elapsed time. The body follows the user's
-    reasoning preference; providers that do not stream thoughts never create it.
-    """
-
-    DEFAULT_CSS = """
-    ReasoningBlock {
-        background: transparent;
-        border-top: none;
-        padding: 0 0 0 1;
-        margin: 0 0 1 1;
-        height: auto;
-    }
-    ReasoningBlock CollapsibleTitle {
-        background: transparent;
-        color: $warning;
-        padding: 0;
-        width: auto;
-    }
-    ReasoningBlock CollapsibleTitle:hover,
-    ReasoningBlock CollapsibleTitle:focus {
-        background: transparent;
-        color: $foreground;
-    }
-    ReasoningBlock > Contents {
-        padding: 0 0 0 2;
-    }
-    """
-
-    def __init__(self, *, expanded: bool = False) -> None:
-        self._text = ""
-        self._dropped = 0
-        self._marked = False
-        self._started = time.monotonic()
-        self._finished: float | None = None
-        self._spin_index = 0
-        self._timer: Any = None
-        self._body = Static("", markup=False)
-        self._body.add_class("reasoning-body")
-        super().__init__(self._body, title="Thinking", collapsed=not expanded)
-        self.add_class("reasoning-block")
-
-    def on_mount(self) -> None:
-        self._timer = self.set_interval(0.1, self._tick)
-        self._refresh_title()
-
-    def on_unmount(self) -> None:
-        self._stop_spinner()
-
-    def _stop_spinner(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
-
-    def _tick(self) -> None:
-        if self._finished is not None:
-            self._stop_spinner()
-            return
-        self._spin_index = (self._spin_index + 1) % len(SPINNER_FRAMES)
-        self._refresh_title()
-
-    def _refresh_title(self) -> None:
-        title = Text()
-        if self._finished is None:
-            title.append(f"{SPINNER_FRAMES[self._spin_index]} ", style="bold")
-            title.append("Thinking")
-        else:
-            title.append("Thought")
-            title.append(f" · {self._finished - self._started:.1f}s", style="dim")
-        self.title = title  # type: ignore[assignment]  # Textual accepts rich Content at runtime.
-
-    def append_text(self, text: str) -> None:
-        self._text += text
-        if len(self._text) > MAX_STREAM_MESSAGE_CHARS:
-            overflow = len(self._text) - MAX_STREAM_MESSAGE_CHARS
-            self._dropped += overflow
-            self._text = self._text[overflow:]
-            if not self._marked:
-                self._marked = True
-                self._dropped += 1
-                self._text = "…" + self._text[1:]
-        if self.is_mounted:
-            self._body.update(readable_text(self._text))
-
-    def finish(self) -> None:
-        if self._finished is not None:
-            return
-        self._finished = time.monotonic()
-        self._stop_spinner()
-        if self.is_mounted:
-            self._body.update(readable_text(self._text))
-        self._refresh_title()
-
-
-class NoticeBlock(Static):
-    def __init__(self, text: str, *, severity: str = "info") -> None:
-        self.severity = severity
-        super().__init__(self._render_notice(text, severity), markup=False)
-        self.add_class("notice")
-        self.add_class(f"notice-{severity}")
-
-    @staticmethod
-    def _render_notice(text: str, severity: str) -> Text:
-        prefix = {"info": "·", "warning": "!", "error": "✕", "success": "✓"}.get(severity, "·")
-        rendered = Text()
-        rendered.append(f"{prefix} ", style="bold")
-        rendered.append(text)
-        return rendered
 
 
 def _presentation_of(data: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1723,14 +1369,6 @@ class StatusBar(Static):
         return text
 
 
-class ApprovalDecided(Message):
-    """The local user answered a pending tool approval."""
-
-    def __init__(self, option_id: str | None) -> None:
-        super().__init__()
-        self.option_id = option_id
-
-
 APPROVAL_LABELS: dict[str, tuple[str, str]] = {
     "allow_once": ("Yes, proceed", "y"),
     "allow_always": ("Yes, always allow this exact call", "a"),
@@ -1949,14 +1587,6 @@ class ApprovalBar(Vertical):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         self.post_message(ApprovalDecided(str(event.option_id)))
-
-
-class AskUserAnswered(Message):
-    """The local user finished or declined an agent question."""
-
-    def __init__(self, response: AskUserResponse) -> None:
-        super().__init__()
-        self.response = response
 
 
 class AskUserBar(Vertical):
