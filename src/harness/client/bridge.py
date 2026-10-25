@@ -34,7 +34,7 @@ from .constants import (
 )
 from .errors import HarnessClientError, ProtocolError
 from .profiles import secret_value
-from .transport import require_secure_ws_url
+from .url_policy import require_secure_ws_url
 
 __all__ = ["BridgeSession", "rewrite_session_cwd", "run_bridge", "run_bridge_pump"]
 

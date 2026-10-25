@@ -13,11 +13,13 @@ portable (``PATH`` is usually not a secret).
 
 from __future__ import annotations
 
-import json
 import os
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import tomli_w
 
 from .constants import (
     CONFIG_DIR_NAME,
@@ -26,44 +28,6 @@ from .constants import (
     PROJECT_CONFIG_NAME,
 )
 from .errors import SecretMissing
-
-try:  # Python 3.11+
-    import tomllib
-except ImportError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
-
-
-def _write_toml_line(key: str, value: Any) -> str:
-    if isinstance(value, bool):
-        return f"{key} = {'true' if value else 'false'}"
-    if isinstance(value, (int, float)):
-        return f"{key} = {value}"
-    if isinstance(value, list):
-        if all(isinstance(item, dict) for item in value):
-            return f"{key} = {json.dumps(value, indent=2)}"  # arrays of tables (unusual) - JSON fallback is invalid TOML
-        return f"{key} = [{', '.join(_toml_scalar(item) for item in value)}]"
-    if isinstance(value, dict):
-        lines = [f"\n[{key}]"]
-        for name, item in value.items():
-            if isinstance(item, dict):
-                lines.append(f"\n[{key}.{name}]")
-                for sub, sub_val in item.items():
-                    lines.append(_write_toml_line(sub, sub_val))
-            else:
-                lines.append(_write_toml_line(name, item))
-        return "\n".join(lines)
-    return f"{key} = {_toml_scalar(value)}"
-
-
-def _toml_scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value)
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    return f'"{escaped}"'
 
 
 @dataclass(slots=True)
@@ -164,39 +128,20 @@ class Profile:
 
 
 def toml_from_profiles(profiles: dict[str, Profile], tui: dict[str, Any] | None = None) -> str:
-    """Render profiles (and optional ``tui`` section) as TOML text."""
-    sections: list[str] = [
-        "# Saved by `harness`; secrets are references such as `env:NAME` or `keyring:service/user`.",
-        "",
-    ]
-    names = list(profiles)
-    for name in names:
-        profile = profiles[name]
-        first = profile.to_wire()
-        env_values = first.pop("env", None)
-        sections.append(f"[profile.{_toml_key(name)}]")
-        for key, value in first.items():
-            sections.append(_write_toml_line(key, value))
-        if env_values:
-            sections.append("")
-            sections.append(f"[profile.{_toml_key(name)}.env]")
-            for env_name, env_value in env_values.items():
-                sections.append(_write_toml_line(env_name, env_value))
-        sections.append("")
+    """Render profiles (and optional ``tui`` section) as TOML text.
+
+    ``tomli_w`` owns quoting and escaping, so names such as ``a"b`` or ``café`` round-trip
+    exactly instead of being silently rewritten or producing an invalid document.
+    """
+    for name in profiles:
+        if not name:
+            raise ValueError("Profile name cannot be empty")
+    document: dict[str, Any] = {
+        "profile": {name: profile.to_wire() for name, profile in profiles.items()}
+    }
     if tui:
-        sections.append("[tui]")
-        for key, value in tui.items():
-            sections.append(_write_toml_line(key, value))
-    text = "\n".join(sections).rstrip("\n") + "\n"
-    return text
-
-
-def _toml_key(name: str) -> str:
-    if not name:
-        raise ValueError("Profile name cannot be empty")
-    if name.replace("-", "").replace("_", "").isalnum():
-        return name
-    return '"' + name.replace('"', "") + '"'
+        document["tui"] = tui
+    return tomli_w.dumps(document)
 
 
 def profiles_from_toml(text: str) -> tuple[dict[str, Profile], dict[str, Any]]:
@@ -255,6 +200,8 @@ class Profiles:
             target = self.sources[0]
         target.parent.mkdir(parents=True, exist_ok=True)
         text = toml_from_profiles(self.profiles, self.tui)
+        # Refuse to replace the user's file with a document we cannot read back.
+        tomllib.loads(text)
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, target)

@@ -157,7 +157,7 @@ await store.initialize()
 scoped = store.scoped(principal="user-1", deployment_id=deployment_id)
 
 record = await scoped.get(session_id)
-records = await scoped.list()
+page = await scoped.list(cwd="/workspace", limit=50)
 await scoped.update(session_id, title="Name", effort="high", touch=True)
 await scoped.delete(session_id)
 await store.close()
@@ -167,6 +167,10 @@ await store.close()
 (`save(session_id, StoredSession)` and `load(session_id)`) for one principal and deployment.
 The adapter writes committed turns through it; `session/load` restores native messages,
 transcript, and selected model.
+
+`list()` returns a `SessionPage` with metadata-only `records` and an opaque `next_cursor`.
+Filtering by `cwd`, ordering by `(last_active_at DESC, session_id ASC)`, and keyset pagination
+run in the store query, so listing a page does not load stored conversation bodies.
 
 `SessionRecord` carries host metadata: `cwd`, `title`, `effort`, `model`, selected `bindings`,
 usage totals, and timestamps. The current `ConfigurationSnapshot` and binding descriptors are

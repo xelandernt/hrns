@@ -39,6 +39,7 @@ from .constants import (
 )
 from .errors import ProtocolError, TransportError
 from .profiles import secret_value
+from .url_policy import require_secure_ws_url
 
 __all__ = [
     "AgentTransport",
@@ -299,30 +300,6 @@ class _WriteProtocol(asyncio.BaseProtocol):
 
     async def _drain_helper(self) -> None:
         return None
-
-
-def require_secure_ws_url(url: str) -> None:
-    """Reject bearer-bearing plaintext WebSockets except explicit loopback development."""
-    import ipaddress
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
-        raise TransportError(f"WebSocket URL must start with ws:// or wss://, got '{url}'")
-    if parsed.scheme == "wss":
-        return
-    host = parsed.hostname
-    if host == "localhost":
-        return
-    try:
-        if ipaddress.ip_address(host).is_loopback:
-            return
-    except ValueError:
-        pass
-    raise TransportError(
-        "Refusing to send an authorization token over plaintext ws:// to a remote host; "
-        "use wss:// (plain ws is allowed only for loopback development)."
-    )
 
 
 class WebSocketAgentTransport:

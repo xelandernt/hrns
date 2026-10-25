@@ -12,12 +12,18 @@ upgrade:
 install:
     uv sync --locked --all-extras
 
-# lint the project
-lint:
-    uv run ruff format .
+# apply automatic formatting and lint fixes
+fix:
+    uv run ruff format src examples test.py
     uv run ruff check . --fix
-    uv run pyrefly check . --no-progress-bar
     just --format
+
+# verify formatting, lint, and types without changing files
+lint:
+    uv run ruff format --check src examples test.py
+    uv run ruff check .
+    uv run pyrefly check src examples test.py --no-progress-bar
+    just --fmt --check
 
 # build
 build:
@@ -27,4 +33,3 @@ build:
 check:
     @just lint
     @just build
-    just --fmt --check

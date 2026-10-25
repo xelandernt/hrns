@@ -17,12 +17,53 @@ from typing import Any
 from urllib.parse import quote, urljoin
 
 import httpx
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    ValidationError,
+)
 
 from .constants import DEFAULT_CATALOG_LIMIT
 from .errors import CatalogError
 from .profiles import secret_value
+from .url_policy import require_secure_http_url
 
 __all__ = ["AgentDeployment", "AgentPage", "CatalogClient"]
+
+
+class _DescriptorWire(BaseModel):
+    """Strict projection of one catalog descriptor.
+
+    Unknown fields stay available through the raw payload; only the fields the client
+    actually consumes are typed and validated.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    agent_id: StrictStr = Field(
+        validation_alias=AliasChoices("agentId", "agent_id", "deploymentId", "id")
+    )
+    name: StrictStr | None = Field(default=None, validation_alias=AliasChoices("name", "title"))
+    description: StrictStr | None = None
+    version: StrictStr | None = None
+    recommended: StrictBool | None = None
+    default_working_directory: StrictStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "defaultWorkingDirectory", "defaultWorkspace", "default_working_directory", "cwd"
+        ),
+    )
+    workspaces: StrictStr | list[StrictStr] | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "workspaces", "allowedWorkspaces", "remoteWorkspaces", "workingDirectories"
+        ),
+    )
+    connection: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,41 +92,30 @@ class AgentDeployment:
     def from_wire(cls, payload: dict[str, Any]) -> AgentDeployment:
         if not isinstance(payload, dict):
             raise CatalogError(500, "MALFORMED_DESCRIPTOR", "Catalog returned a non-object item")
-        agent_id = str(
-            payload.get("agentId")
-            or payload.get("agent_id")
-            or payload.get("deploymentId")
-            or payload.get("id")
-            or ""
-        )
-        if not agent_id:
+        try:
+            wire = _DescriptorWire.model_validate(payload)
+        except ValidationError as exc:
+            raise CatalogError(
+                500,
+                "MALFORMED_DESCRIPTOR",
+                "Catalog returned an invalid agent descriptor.",
+                {"errors": exc.errors(include_url=False, include_context=False)[:10]},
+            ) from exc
+        if not wire.agent_id:
             raise CatalogError(500, "MALFORMED_DESCRIPTOR", "Catalog item is missing its agent id")
-        workspaces = (
-            payload.get("workspaces")
-            or payload.get("allowedWorkspaces")
-            or payload.get("remoteWorkspaces")
-            or payload.get("workingDirectories")
-            or []
-        )
-        if isinstance(workspaces, str):
-            workspaces = [workspaces]
-        connection = payload.get("connection") or {}
-        default_cwd = str(
-            payload.get("defaultWorkingDirectory")
-            or payload.get("defaultWorkspace")
-            or payload.get("default_working_directory")
-            or payload.get("cwd")
-            or ""
-        )
+        if isinstance(wire.workspaces, str):
+            workspaces = (wire.workspaces,)
+        else:
+            workspaces = tuple(wire.workspaces or ())
         return cls(
-            agent_id=agent_id,
-            name=str(payload.get("name") or payload.get("title") or agent_id),
-            description=str(payload.get("description") or ""),
-            version=str(payload.get("version") or ""),
-            recommended=bool(payload.get("recommended", False)),
-            default_working_directory=default_cwd,
-            workspaces=tuple(item for item in workspaces if isinstance(item, str)),
-            connection=connection if isinstance(connection, dict) else {},
+            agent_id=wire.agent_id,
+            name=wire.name or wire.agent_id,
+            description=wire.description or "",
+            version=wire.version or "",
+            recommended=bool(wire.recommended),
+            default_working_directory=wire.default_working_directory or "",
+            workspaces=workspaces,
+            connection=wire.connection or {},
             raw=payload,
         )
 
@@ -111,7 +141,9 @@ class CatalogClient:
     ) -> None:
         if not base_url:
             raise ValueError("A server profile needs a base URL")
-        self.base_url = base_url.rstrip("/")
+        canonical_base = base_url.rstrip("/")
+        require_secure_http_url(canonical_base)
+        self.base_url = canonical_base
         self.token_ref = token_ref
         self._token = token
         self.timeout = timeout
@@ -216,6 +248,10 @@ class CatalogClient:
             raise CatalogError(200, "MALFORMED_RESPONSE", "Catalog items must be a list")
         items = tuple(AgentDeployment.from_wire(item) for item in raw_items)
         cursor_out = payload.get("nextCursor", payload.get("next_cursor"))
+        if cursor_out is not None and not isinstance(cursor_out, str):
+            raise CatalogError(
+                200, "MALFORMED_RESPONSE", "Catalog 'nextCursor' must be a string or null"
+            )
         return AgentPage(items=items, next_cursor=cursor_out)
 
     async def get_agent(self, agent_id: str) -> AgentDeployment:
