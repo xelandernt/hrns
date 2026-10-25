@@ -158,7 +158,7 @@ class ConfigurationService:
             cache[request.request_id] = (request_hash, snapshot)
             self._trim(cache)
             await self.send_changed(snapshot)
-            await agent._send_commands_changed(session_id, composition)
+            await agent.commands.send_changed(session_id, composition)
             return snapshot.to_wire()
 
     async def send_changed(self, snapshot: ConfigurationSnapshot) -> None:
