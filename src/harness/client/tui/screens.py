@@ -75,6 +75,7 @@ from .local import LocalModelResult, effort_choices, effort_label
 if TYPE_CHECKING:
     from .app import HarnessApp
 
+from .approval import ApprovalBar, AskUserBar
 from .composer import (
     AttachmentBar,
     CommandSuggestions,
@@ -104,10 +105,9 @@ from .state import (
     option_values,
     permission_mode_label,
 )
+from .status import StatusBar
 from .transcript import TranscriptPane
 from .widgets import (
-    ApprovalBar,
-    AskUserBar,
     BindingEditRequested,
     BindingToggleRequested,
     CapabilityAddRequested,
@@ -124,7 +124,6 @@ from .widgets import (
     SessionResumeRequested,
     SidePanel,
     SidePanelCloseRequested,
-    StatusBar,
 )
 
 __all__ = ["ChatScreen", "ConnectScreen", "PickEntry"]
