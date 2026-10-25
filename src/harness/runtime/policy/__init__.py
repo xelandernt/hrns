@@ -7,12 +7,8 @@ from .binding import (
     is_noop_change,
     jsonable_config,
 )
-from .catalog import (
-    PolicyCatalog,
-    host_editable_fields,
-    order_enabled_offerings,
-    simple_errors,
-)
+from .catalog import PolicyCatalog
+from .validation import host_editable_fields, order_enabled_offerings, simple_errors
 
 __all__ = [
     "BindingOffering",
