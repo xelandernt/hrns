@@ -60,7 +60,6 @@ from .connection_screen import _short_path
 from .dialogs import (
     ChoiceDialog,
     CommandPaletteDialog,
-    ConfirmDialog,
     FormDialog,
     HelpDialog,
     SettingsDialog,
@@ -72,6 +71,7 @@ if TYPE_CHECKING:
     pass
 
 from .approval import ApprovalBar, AskUserBar
+from .chat.session import SessionWorkflow
 from .composer import (
     AttachmentBar,
     CommandSuggestions,
@@ -207,6 +207,7 @@ class ChatScreen(_HarnessScreen):
         self._skills_loading = False
         if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
             self._workspace_root = Path(target.cwd).resolve()
+        self.sessions = SessionWorkflow(self)
 
     # --------------------------------------------------------------- structure
 
@@ -409,13 +410,13 @@ class ChatScreen(_HarnessScreen):
     @work(group="bootstrap", exclusive=True)
     async def _run_bootstrap(self) -> None:
         if self.initial_load and self.initial_session_id:
-            await self._load_session(self.initial_session_id, cwd=self.session.cwd, initial=True)
+            await self.sessions.load(self.initial_session_id, cwd=self.session.cwd, initial=True)
         self._refresh_panels()
 
     @work(group="panels", exclusive=True)
     async def _refresh_panels(self) -> None:
         await self._refresh_capabilities()
-        await self._refresh_sessions()
+        await self.sessions.refresh()
 
     @work(group="panels", exclusive=True)
     async def refresh_capabilities(self) -> None:
@@ -423,7 +424,7 @@ class ChatScreen(_HarnessScreen):
 
     @work(group="panels", exclusive=True)
     async def refresh_sessions(self) -> None:
-        await self._refresh_sessions()
+        await self.sessions.refresh()
 
     def _set_plugin_commands(self, commands: tuple[Any, ...], *, revision: int) -> None:
         self._plugin_commands = tuple(
@@ -482,41 +483,6 @@ class ChatScreen(_HarnessScreen):
         panel.show_message("Loading standard configuration…")
         panel.set_standard_options(list(self.session.config_options))
         await self._refresh_skills()
-
-    async def _refresh_sessions(self, *, load_more: bool = False) -> None:
-        panel = self.query_one("#side-panel", SidePanel).sessions
-        if not self.client.has_session_capability("list"):
-            panel.show_message("This agent does not advertise session/list.")
-            return
-        if not load_more:
-            self._session_rows = []
-            self._session_cursor = None
-        if load_more and not self._session_cursor:
-            panel.show_message("No further session pages are advertised.")
-            return
-        try:
-            listing = await self.client.list_sessions(cursor=self._session_cursor)
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            return
-        known = {
-            str(item.get("sessionId") or item.get("session_id") or "")
-            for item in self._session_rows
-        }
-        for item in listing.sessions:
-            session_id = str(item.get("sessionId") or item.get("session_id") or "")
-            if session_id and session_id not in known:
-                self._session_rows.append(item)
-                known.add(session_id)
-        self._session_cursor = listing.next_cursor
-        panel.set_sessions(
-            list(self._session_rows),
-            can_delete=self.client.has_session_capability("delete"),
-            can_close=self.client.has_session_capability("close"),
-            can_resume=self.client.has_session_capability("resume"),
-            can_load=self.client.supports_load,
-            next_cursor=self._session_cursor,
-        )
 
     # ------------------------------------------------------------------ events
 
@@ -2093,184 +2059,35 @@ class ChatScreen(_HarnessScreen):
 
     @work(group="session", exclusive=True)
     async def _load_session_worker(self, session_id: str) -> None:
-        await self._load_session(session_id, cwd=self._session_cwd(session_id))
-
-    def _session_cwd(self, session_id: str) -> str:
-        panel = self.query_one("#side-panel", SidePanel).sessions
-        cwd = panel.cwd_for(session_id)
-        return cwd or self.target.cwd
-
-    async def _load_session(self, session_id: str, *, cwd: str, initial: bool = False) -> None:
-        if self.busy and not initial:
-            await self._notice("Stop the running turn before switching sessions.", "warning")
-            return
-        if self._loading_session or self._replay_target is not None:
-            await self._notice("Wait for the current load to finish.", "warning")
-            return
-        if not self.client.supports_load:
-            await self._notice(
-                "This agent does not advertise session/load; the conversation cannot be reopened.",
-                "warning",
-            )
-            if initial:
-                await self._new_session()
-            return
-        pane = self.query_one("#transcript", TranscriptPane)
-        self._reset_activity()
-        self._loading_session = True
-        self._replay_target = session_id
-        pane.begin_replay()
-        try:
-            loaded = await self.client.load_session(session_id, cwd)
-            await self.client.drain_events()
-        except HarnessClientError as exc:
-            await pane.end_replay()
-            self._replay_target = None
-            self._loading_session = False
-            await self._notice(f"Could not load session {session_id}: {exc.message}", "error")
-            if initial:
-                await self._new_session()
-            return
-        await pane.end_replay()
-        tool_ids = pane.retained_tool_ids()
-        if tool_ids and self.client.extension.supports("_harness/presentation/get"):
-            try:
-                snapshots = await loaded.presentations(tool_ids)
-            except (ExtensionUnavailable, HarnessClientError):
-                snapshots = ()
-            for snapshot in snapshots:
-                await pane.apply_presentation(snapshot)
-        self._replay_target = None
-        self._loading_session = False
-        self._save_draft()
-        self.session = loaded
-        self._restore_draft()
-        self._bind_view_context()
-        self.app.session = loaded
-        self._update_chrome()
-        await self._notice(f"Loaded session {session_id}.", "success")
-        self.query_one("#composer", Composer).focus()
-        self._refresh_panels()
+        await self.sessions.load(session_id, cwd=self.sessions.session_cwd(session_id))
 
     def on_session_resume_requested(self, event: SessionResumeRequested) -> None:
         self._resume_session_worker(event.session_id)
 
     @work(group="session", exclusive=True)
     async def _resume_session_worker(self, session_id: str) -> None:
-        await self._resume_session(session_id)
-
-    async def _resume_session(self, session_id: str) -> None:
-        # This terminal does not retain a verified complete transcript cache.
-        # CONCEPT §14.2 therefore requires authoritative session/load; resume is
-        # never used as an unverified shortcut.
-        if not self.client.has_session_capability("resume"):
-            await self._notice(
-                "This agent does not advertise session/resume and this terminal has no "
-                "verified cache; authoritative history can be loaded when available.",
-                "warning",
-            )
-            return
-        if self.client.supports_load:
-            await self._load_session(session_id, cwd=self._session_cwd(session_id))
-            return
-        await self._notice(
-            "session/load is not advertised and this terminal has no verified cache; "
-            "session/resume would discard authoritative history, so it was not used.",
-            "warning",
-        )
+        await self.sessions.resume(session_id)
 
     def on_session_new_requested(self, event: SessionNewRequested) -> None:
         self._new_session_worker()
 
     @work(group="session", exclusive=True)
     async def _new_session_worker(self) -> None:
-        await self._new_session()
-
-    async def _new_session(self) -> None:
-        if self.busy:
-            await self._notice("Stop the running turn before creating a session.", "warning")
-            return
-        if self._loading_session or self._replay_target is not None:
-            await self._notice("Wait for the current session load to finish.", "warning")
-            return
-        try:
-            session = await self.client.new_session(self.target.cwd)
-        except HarnessClientError as exc:
-            await self._notice(f"Could not create a session: {exc.message}", "error")
-            return
-        self._save_draft()
-        self.session = session
-        self._restore_draft()
-        self._bind_view_context()
-        self.app.session = session
-        self._reset_activity()
-        await self.query_one("#transcript", TranscriptPane).clear_transcript()
-        self._update_chrome()
-        await self._notice(f"Started session {session.session_id}.", "success")
-        self.query_one("#composer", Composer).focus()
-        self._refresh_panels()
+        await self.sessions.new()
 
     def on_session_delete_requested(self, event: SessionDeleteRequested) -> None:
-        self._confirm_delete(event.session_id)
-
-    def _confirm_delete(self, session_id: str) -> None:
-        def done(result: bool | None) -> None:
-            if result:
-                self._delete_session(session_id)
-
-        self.app.push_screen(
-            ConfirmDialog(
-                "Delete session",
-                f"Delete session {session_id}? Its conversation and owned state are removed. "
-                "This cannot be undone.",
-                confirm_label="Delete session",
-            ),
-            done,
-        )
+        self.sessions.confirm_delete(event.session_id)
 
     @work(group="session", exclusive=True)
     async def _delete_session(self, session_id: str) -> None:
-        if not self.client.has_session_capability("delete"):
-            await self._notice("This agent does not advertise session/delete.", "warning")
-            return
-        if self.busy and session_id == self.session.session_id:
-            await self._notice("Stop the running turn before deleting its session.", "warning")
-            return
-        if self._loading_session or self._replay_target is not None:
-            await self._notice("Wait for the current session load to finish.", "warning")
-            return
-        try:
-            await self.client.delete_session(session_id)
-        except HarnessClientError as exc:
-            await self._notice(f"Delete failed: {exc.message}", "error")
-            return
-        await self._notice(f"Deleted session {session_id}.", "success")
-        if session_id == self.session.session_id:
-            await self._new_session()
-        self.refresh_sessions()
+        await self.sessions.delete(session_id)
 
     def on_session_close_requested(self, event: SessionCloseRequested) -> None:
         self._close_session(event.session_id)
 
     @work(group="session", exclusive=True)
     async def _close_session(self, session_id: str) -> None:
-        if not self.client.has_session_capability("close"):
-            await self._notice("This agent does not advertise session/close.", "warning")
-            return
-        if self._loading_session or self._replay_target is not None:
-            await self._notice("Wait for the current session load to finish.", "warning")
-            return
-        try:
-            await self.client.close_session(session_id)
-        except HarnessClientError as exc:
-            await self._notice(f"Close failed: {exc.message}", "error")
-            return
-        await self._notice(
-            f"Closed session {session_id}; history is retained by the agent.", "success"
-        )
-        if session_id == self.session.session_id:
-            await self._new_session()
-        self.refresh_sessions()
+        await self.sessions.close(session_id)
 
     def on_session_refresh_requested(self, event: SessionRefreshRequested) -> None:
         self.refresh_sessions()
@@ -2280,7 +2097,7 @@ class ChatScreen(_HarnessScreen):
 
     @work(group="panels", exclusive=True)
     async def _load_more_sessions(self) -> None:
-        await self._refresh_sessions(load_more=True)
+        await self.sessions.load_more()
 
     # ------------------------------------------------------------------ models
 
