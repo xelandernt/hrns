@@ -91,6 +91,15 @@ from .messages import (
     QueueAction,
     Submitted,
 )
+from .panels.session import (
+    SessionCloseRequested,
+    SessionDeleteRequested,
+    SessionLoadRequested,
+    SessionMoreRequested,
+    SessionNewRequested,
+    SessionRefreshRequested,
+    SessionResumeRequested,
+)
 from .state import (
     Settings,
     activity_label,
@@ -115,13 +124,6 @@ from .widgets import (
     ConfigOptionRequested,
     ConfigOptionStepRequested,
     McpRefreshRequested,
-    SessionCloseRequested,
-    SessionDeleteRequested,
-    SessionLoadRequested,
-    SessionMoreRequested,
-    SessionNewRequested,
-    SessionRefreshRequested,
-    SessionResumeRequested,
     SidePanel,
     SidePanelCloseRequested,
 )
