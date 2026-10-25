@@ -75,6 +75,12 @@ from .local import LocalModelResult, effort_choices, effort_label
 if TYPE_CHECKING:
     from .app import HarnessApp
 
+from .composer import (
+    AttachmentBar,
+    CommandSuggestions,
+    Composer,
+    PromptQueue,
+)
 from .messages import (
     ApprovalDecided,
     AskUserAnswered,
@@ -102,17 +108,13 @@ from .transcript import TranscriptPane
 from .widgets import (
     ApprovalBar,
     AskUserBar,
-    AttachmentBar,
     BindingEditRequested,
     BindingToggleRequested,
     CapabilityAddRequested,
     CapabilityRefreshRequested,
-    CommandSuggestions,
-    Composer,
     ConfigOptionRequested,
     ConfigOptionStepRequested,
     McpRefreshRequested,
-    PromptQueue,
     SessionCloseRequested,
     SessionDeleteRequested,
     SessionLoadRequested,
