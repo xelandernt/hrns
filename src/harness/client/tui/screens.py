@@ -75,6 +75,15 @@ from .local import LocalModelResult, effort_choices, effort_label
 if TYPE_CHECKING:
     from .app import HarnessApp
 
+from .messages import (
+    ApprovalDecided,
+    AskUserAnswered,
+    AttachmentRemoved,
+    CommandSuggestionKey,
+    OutputPending,
+    QueueAction,
+    Submitted,
+)
 from .state import (
     Settings,
     activity_label,
@@ -89,26 +98,21 @@ from .state import (
     option_values,
     permission_mode_label,
 )
+from .transcript import TranscriptPane
 from .widgets import (
     ApprovalBar,
-    ApprovalDecided,
-    AskUserAnswered,
     AskUserBar,
     AttachmentBar,
-    AttachmentRemoved,
     BindingEditRequested,
     BindingToggleRequested,
     CapabilityAddRequested,
     CapabilityRefreshRequested,
-    CommandSuggestionKey,
     CommandSuggestions,
     Composer,
     ConfigOptionRequested,
     ConfigOptionStepRequested,
     McpRefreshRequested,
-    OutputPending,
     PromptQueue,
-    QueueAction,
     SessionCloseRequested,
     SessionDeleteRequested,
     SessionLoadRequested,
@@ -119,8 +123,6 @@ from .widgets import (
     SidePanel,
     SidePanelCloseRequested,
     StatusBar,
-    Submitted,
-    TranscriptPane,
 )
 
 __all__ = ["ChatScreen", "ConnectScreen", "PickEntry"]
