@@ -16,13 +16,6 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import Button, Static
 
-from harness.config import (
-    EFFORT_DEFAULT,
-    LocalSettings,
-    thinking_from_settings,
-    with_thinking,
-)
-
 from ..attachments import attachment_summary, build_prompt_blocks, validate_attachment
 from ..client import HarnessAcpClient, SessionProxy
 from ..constants import CLIENT_VERSION
@@ -52,8 +45,7 @@ from ..interactions import (
     PermissionRequest,
 )
 from ..launch import ConnectionTarget
-from ..local import local_model_catalog, local_target, local_thinking_support
-from .choice_keys import handle_choice_arrow, stepped_value
+from .choice_keys import handle_choice_arrow
 from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
 from .completion import FileIndex, index_workspace, matching_skills
 from .connection_screen import _short_path
@@ -65,12 +57,12 @@ from .dialogs import (
     SettingsDialog,
     TranscriptSearchDialog,
 )
-from .local import LocalModelResult, effort_choices, effort_label
 
 if TYPE_CHECKING:
     pass
 
 from .approval import ApprovalBar, AskUserBar
+from .chat.model import ModelWorkflow
 from .chat.session import SessionWorkflow
 from .composer import (
     AttachmentBar,
@@ -118,7 +110,6 @@ from .state import (
     format_context_usage,
     format_cost,
     model_option,
-    option_values,
     permission_mode_label,
 )
 from .status import StatusBar
@@ -208,6 +199,7 @@ class ChatScreen(_HarnessScreen):
         if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
             self._workspace_root = Path(target.cwd).resolve()
         self.sessions = SessionWorkflow(self)
+        self.models = ModelWorkflow(self)
 
     # --------------------------------------------------------------- structure
 
@@ -1309,9 +1301,9 @@ class ChatScreen(_HarnessScreen):
         elif name == "mcp":
             self.action_show_mcp()
         elif name == "models":
-            await self._show_models()
+            await self.models.show_models()
         elif name == "effort":
-            await self._show_effort()
+            await self.models.show_effort()
         elif name == "permissions":
             self._show_permissions()
         elif name == "settings":
@@ -1625,7 +1617,7 @@ class ChatScreen(_HarnessScreen):
         self._change_standard_option(event.option_id)
 
     def on_config_option_step_requested(self, event: ConfigOptionStepRequested) -> None:
-        self._step_standard_option(event.option_id, event.direction)
+        self.models.step_standard_option(event.option_id, event.direction)
 
     @work(group="capability", exclusive=True)
     async def _toggle_binding(self, binding_id: str, enabled: bool) -> None:
@@ -1990,67 +1982,13 @@ class ChatScreen(_HarnessScreen):
         await self._refresh_capabilities()
         panel.show_message(f"Configuration saved for {binding_id}.")
 
-    def _step_standard_option(self, option_id: str, direction: int) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        option = panel.option(option_id) or {}
-        if option.get("type") == "boolean":
-            self._change_standard_option(option_id)
-            return
-        choices = option_values(option)
-        if not choices:
-            panel.show_message(f"{option.get('name', option_id)} has no selectable values.")
-            return
-        values = [choice["value"] for choice in choices]
-        current = option.get("currentValue")
-        value = stepped_value(values, None if current is None else str(current), direction)
-        if value is not None:
-            self._set_standard_value(option_id, value)
-
     @work(group="capability", exclusive=True)
     async def _change_standard_option(self, option_id: str) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        option = panel.option(option_id) or {}
-        if option.get("type") == "boolean":
-            try:
-                options = await self.session.set_config_option(
-                    option_id, not bool(option.get("currentValue"))
-                )
-            except HarnessClientError as exc:
-                panel.show_message(exc.message)
-                return
-            panel.set_standard_options(list(options))
-            self._update_chrome()
-            return
-        choices = option_values(option)
-        if not choices:
-            panel.show_message(f"{option.get('name', option_id)} has no selectable values.")
-            return
-        current = option.get("currentValue")
-
-        def apply(value: str | None) -> None:
-            if value is not None:
-                self._set_standard_value(option_id, value)
-
-        self.app.push_screen(
-            ChoiceDialog(
-                str(option.get("name") or option_id),
-                str(option.get("description") or ""),
-                choices,
-                current=str(current) if current is not None else None,
-            ),
-            apply,
-        )
+        await self.models.change_standard_option(option_id)
 
     @work(group="capability", exclusive=True)
     async def _set_standard_value(self, option_id: str, value: str) -> None:
-        panel = self.query_one("#side-panel", SidePanel).capabilities
-        try:
-            options = await self.session.set_config_option(option_id, value)
-        except HarnessClientError as exc:
-            panel.show_message(exc.message)
-            return
-        panel.set_standard_options(list(options))
-        self._update_chrome()
+        await self.models.set_standard_value(option_id, value)
 
     # ----------------------------------------------------------------- sessions
 
@@ -2101,365 +2039,9 @@ class ChatScreen(_HarnessScreen):
 
     # ------------------------------------------------------------------ models
 
-    def _local_settings(self) -> LocalSettings:
-        target = self.target
-        args = (
-            target.profile.args
-            if target is not None and target.profile.command == "harness-local"
-            else []
-        )
-        config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
-        return LocalSettings(config_file=config) if config else LocalSettings()
-
-    async def _show_models(self) -> None:
-        if self.session.client is not self.client:
-            await self._notice(
-                "This session is not attached to the reconnected client. Start a new session first.",
-                "warning",
-            )
-            return
-        if self.target.kind != "local" or self.target.profile.command != "harness-local":
-            await self._show_model_dialog()
-            return
-        try:
-            settings = self._local_settings()
-        except (ValueError, OSError) as exc:
-            await self._notice(f"Local settings are unavailable: {exc}", "error")
-            return
-        models = list(local_model_catalog().get(settings.provider, ()))
-        if not models:
-            self._open_local_model_form(settings)
-            return
-        if settings.model and settings.model not in models:
-            models.insert(0, settings.model)
-        effort = effort_label(thinking_from_settings(settings))
-        current_note = (
-            f"current · effort {effort}"
-            if settings.model and local_thinking_support(settings.provider, settings.model)
-            else "current"
-        )
-        choices = [
-            {
-                "value": model,
-                "name": model,
-                "description": current_note if model == settings.model else "",
-            }
-            for model in models
-        ]
-        choices.append(
-            {
-                "value": "__configure__",
-                "name": "Configure provider or model…",
-                "description": "Add a provider, paste a key, set a base URL or enter a custom model id.",
-            }
-        )
-
-        def apply(value: str | None) -> None:
-            if not value:
-                return
-            if value == "__configure__":
-                self._open_local_model_form(settings)
-                return
-            self._select_local_model(settings, value)
-
-        current_effort = (
-            f" · effort {effort}"
-            if settings.model and local_thinking_support(settings.provider, settings.model)
-            else ""
-        )
-        self.app.push_screen(
-            ChoiceDialog(
-                "Models",
-                f"Provider {settings.provider}{current_effort}. "
-                "The selection applies to the next message.",
-                choices,
-                current=settings.model,
-            ),
-            apply,
-        )
-
-    def _open_local_model_form(self, settings: LocalSettings) -> None:
-        from .local import LocalModelDialog
-
-        self.app.push_screen(
-            LocalModelDialog(settings, accept_label="Save and apply"),
-            self._models_configured,
-        )
-
-    def _select_local_model(self, settings: LocalSettings, model: str) -> None:
-        """Model choice first; prompt for effort when that model can reason.
-
-        Canceling the effort step cancels the whole change, matching Codex.
-        """
-        support = local_thinking_support(settings.provider, model)
-        if support is None:
-            # A model outside the catalog has unknown support: keep a manually
-            # configured thinking level instead of clearing it.
-            known = model in local_model_catalog().get(settings.provider, ())
-            asyncio.create_task(
-                self._save_model_selection(settings, model, None, touch_thinking=known)
-            )
-            return
-        current = thinking_from_settings(settings) if model == settings.model else None
-        self._choose_effort(
-            settings,
-            model,
-            current=current,
-            on_select=lambda effort: asyncio.create_task(
-                self._save_model_selection(settings, model, effort)
-            ),
-        )
-
-    def _choose_effort(
-        self,
-        settings: LocalSettings,
-        model: str,
-        *,
-        current: str | None,
-        on_select: Any,
-    ) -> None:
-        self.app.push_screen(
-            ChoiceDialog(
-                "Reasoning effort",
-                f"{settings.provider}:{model}. Applies to the next message.",
-                effort_choices(settings.provider, model),
-                current=current or EFFORT_DEFAULT,
-            ),
-            lambda value: on_select(value) if value else None,
-        )
-
-    async def _save_model_selection(
-        self,
-        settings: LocalSettings,
-        model: str,
-        effort: str | None,
-        *,
-        touch_thinking: bool = True,
-    ) -> None:
-        try:
-            configured = settings.model_copy(update={"model": model})
-            if touch_thinking:
-                configured = with_thinking(configured, effort)
-            path = configured.save(settings.config_file)
-        except (ValueError, OSError) as exc:
-            await self._notice(f"Could not save the model selection: {exc}", "error")
-            return
-        await self._apply_model_settings(
-            LocalModelResult(
-                path=path,
-                provider=settings.provider,
-                model=model,
-                api_key_ref=None,
-                api_key_changed=False,
-                effort=effort,
-            )
-        )
-
-    async def _show_effort(self) -> None:
-        if self.session.client is not self.client:
-            await self._notice(
-                "This session is not attached to the reconnected client. Start a new session first.",
-                "warning",
-            )
-            return
-        if self.target.kind != "local" or self.target.profile.command != "harness-local":
-            await self._notice(
-                "Reasoning effort is only available for local models.",
-                "warning",
-            )
-            return
-        try:
-            settings = self._local_settings()
-        except (ValueError, OSError) as exc:
-            await self._notice(f"Local settings are unavailable: {exc}", "error")
-            return
-        if not settings.model:
-            await self._notice("Configure a local model before setting reasoning effort.", "error")
-            return
-        support = local_thinking_support(settings.provider, settings.model)
-        if support is None:
-            await self._notice(
-                f"{settings.provider}:{settings.model} does not advertise reasoning effort.",
-                "warning",
-            )
-            return
-        option = effort_option(self.session.config_options)
-        current = (
-            str(option.get("currentValue"))
-            if option is not None
-            else (thinking_from_settings(settings) or EFFORT_DEFAULT)
-        )
-        self._choose_effort(
-            settings,
-            settings.model,
-            current=current,
-            on_select=lambda effort: asyncio.create_task(self._set_local_effort(settings, effort)),
-        )
-
-    async def _set_local_effort(self, settings: LocalSettings, effort: str) -> None:
-        try:
-            configured = with_thinking(settings, effort)
-            path = configured.save(settings.config_file)
-        except (ValueError, OSError) as exc:
-            await self._notice(f"Could not save the reasoning effort: {exc}", "error")
-            return
-        await self._apply_model_settings(
-            LocalModelResult(
-                path=path,
-                provider=settings.provider,
-                model=settings.model,
-                api_key_ref=None,
-                api_key_changed=False,
-                effort=effort,
-            )
-        )
-
-    def _models_configured(self, result: Any) -> None:
-        if result is not None:
-            asyncio.create_task(self._apply_model_settings(result))
-
-    async def _apply_model_settings(self, result: Any) -> None:
-        from .local import LocalModelResult
-
-        if not isinstance(result, LocalModelResult):
-            return
-        try:
-            old = self._local_settings()
-        except (ValueError, OSError):
-            old = None
-        wanted = f"{result.provider}:{result.model}"
-        option = model_option(self.session.config_options)
-        values = {item["value"] for item in option_values(option)} if option else set()
-        restart = (
-            old is None
-            or result.provider != old.provider
-            or result.api_key_changed
-            or option is None
-            or wanted not in values
-        )
-        if not restart:
-            option_id = str(option.get("id") or "model")
-            try:
-                options = await self.session.set_config_option(option_id, wanted)
-            except HarnessClientError as exc:
-                await self._notice(f"Model change failed: {exc.message}", "error")
-                return
-            self.session.remember(options)
-            if result.effort is not None:
-                if effort_option(options) is not None:
-                    try:
-                        options = await self.session.set_config_option("effort", result.effort)
-                    except HarnessClientError as exc:
-                        await self._notice(
-                            f"Reasoning effort change failed: {exc.message}", "error"
-                        )
-                        return
-                    self.session.remember(options)
-                elif result.effort != EFFORT_DEFAULT:
-                    # The new model may not have advertised effort until the switch
-                    # landed; restart so the saved setting is read at startup.
-                    restart = True
-            if not restart:
-                self._update_chrome()
-                suffix = (
-                    f" · effort {effort_label(result.effort)}" if result.effort is not None else ""
-                )
-                await self._notice(
-                    f"Model: {wanted}{suffix}",
-                    "success",
-                )
-                return
-        try:
-            target = local_target(
-                result.path,
-                api_key_ref=result.api_key_ref,
-                cwd=self.target.cwd,
-            )
-        except HarnessClientError as exc:
-            await self._notice(
-                f"Saved the configuration, but it cannot be used yet: {exc.message}", "error"
-            )
-            return
-        self.app.target = target
-        self.target = target
-        await self._notice(
-            "Restarting harness-local with the saved provider configuration; "
-            "reloading this session afterwards.",
-            "warning",
-        )
-        await self._reconnect()
-
-    async def _show_model_dialog(self) -> None:
-        if self.session.client is not self.client:
-            await self._notice(
-                "This session is not attached to the reconnected client. Start a new session first.",
-                "warning",
-            )
-            return
-        option = model_option(self.session.config_options)
-        if option:
-            values = option_values(option)
-            if values:
-
-                def apply(value: str | None) -> None:
-                    if value is not None:
-                        self._set_standard_value(option.get("id"), value)
-
-                reasoning = effort_option(self.session.config_options)
-                subtitle = "Model selection is a standard ACP session config option."
-                if reasoning:
-                    subtitle = (
-                        "Model selection is a standard ACP session config option. "
-                        f"Current effort: {config_option_value(reasoning)}."
-                    )
-                self.app.push_screen(
-                    ChoiceDialog(
-                        "Model",
-                        subtitle,
-                        values,
-                        current=str(option.get("currentValue")),
-                    ),
-                    lambda value: apply(value),
-                )
-                return
-        modes = (self.session.modes or {}).get("availableModes") or []
-        if modes:
-            choices = [
-                {
-                    "value": str(mode.get("id", "")),
-                    "name": str(mode.get("name", "")),
-                    "description": str(mode.get("description") or ""),
-                }
-                for mode in modes
-            ]
-
-            def apply_mode(value: str | None) -> None:
-                if value:
-                    self._set_mode(value)
-
-            self.app.push_screen(
-                ChoiceDialog(
-                    "Mode",
-                    "The agent advertises session modes instead of a model option.",
-                    choices,
-                    current=self.session.current_mode_id,
-                ),
-                lambda value: apply_mode(value),
-            )
-            return
-        await self._notice(
-            "This agent advertises neither a model config option nor session modes.", "warning"
-        )
-
     @work(group="model", exclusive=True)
     async def _set_mode(self, mode_id: str) -> None:
-        try:
-            await self.session.set_mode(mode_id)
-        except HarnessClientError as exc:
-            await self._notice(f"Mode change failed: {exc.message}", "error")
-            return
-        self._update_chrome()
-        await self._notice(f"Mode set to {mode_id}.", "success")
+        await self.models.set_mode(mode_id)
 
     # ----------------------------------------------------------------- actions
 
