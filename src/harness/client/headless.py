@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .attachments import attachment_summary, build_prompt_blocks
-from .client import HarnessAcpClient, SessionProxy
+from .client import HarnessAcpClient
 from .constants import CLIENT_VERSION
 from .errors import HarnessClientError, InteractionRequired
 from .events import (
@@ -28,6 +28,7 @@ from .events import (
     ToolEvent,
     TurnCompleted,
 )
+from .session import SessionProxy
 
 __all__ = ["EXIT_INTERACTION_REQUIRED", "RunOutcome", "HeadlessRun", "run_headless"]
 
