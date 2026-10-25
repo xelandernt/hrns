@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import re
-import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,10 +14,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import Button, Static
 
-from ..attachments import attachment_summary, build_prompt_blocks, validate_attachment
 from ..client import HarnessAcpClient, SessionProxy
 from ..constants import CLIENT_VERSION
-from ..errors import ExtensionUnavailable, HarnessClientError
+from ..errors import HarnessClientError
 from ..events import (
     AgentTextChunk,
     CommandsUpdated,
@@ -46,13 +43,12 @@ from ..interactions import (
 )
 from ..launch import ConnectionTarget
 from .choice_keys import handle_choice_arrow
-from .commands import LOCAL_COMMANDS, command_suggestion_text, resolve_local_command
-from .completion import FileIndex, index_workspace, matching_skills
+from .commands import LOCAL_COMMANDS, resolve_local_command
+from .completion import FileIndex
 from .connection_screen import _short_path
 from .dialogs import (
     ChoiceDialog,
     CommandPaletteDialog,
-    FormDialog,
     HelpDialog,
     SettingsDialog,
     TranscriptSearchDialog,
@@ -63,7 +59,9 @@ if TYPE_CHECKING:
 
 from .approval import ApprovalBar, AskUserBar
 from .chat.capabilities import CapabilityWorkflow
+from .chat.commands import CommandWorkflow
 from .chat.model import ModelWorkflow
+from .chat.prompts import PromptWorkflow
 from .chat.session import SessionWorkflow
 from .composer import (
     AttachmentBar,
@@ -197,6 +195,8 @@ class ChatScreen(_HarnessScreen):
         self._skills_loading = False
         if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
             self._workspace_root = Path(target.cwd).resolve()
+        self.commands = CommandWorkflow(self)
+        self.prompts = PromptWorkflow(self)
         self.sessions = SessionWorkflow(self)
         self.models = ModelWorkflow(self)
         self.capabilities = CapabilityWorkflow(self)
@@ -224,7 +224,7 @@ class ChatScreen(_HarnessScreen):
 
     def on_mount(self) -> None:
         self.query_one("#new-output").display = False
-        self._restore_draft()
+        self.prompts.restore_draft()
         self._index_workspace()
         self._apply_settings()
         self._apply_layout()
@@ -245,9 +245,9 @@ class ChatScreen(_HarnessScreen):
             self._unsubscribe = None
 
     def _bind_view_context(self) -> None:
-        self.query_one("#transcript", TranscriptPane).view_context = self._make_view_context(
-            self.session
-        )
+        self.query_one(
+            "#transcript", TranscriptPane
+        ).view_context = self.commands.make_view_context(self.session)
 
     def _subscribe(self) -> None:
         if self._unsubscribe is not None:
@@ -462,7 +462,7 @@ class ChatScreen(_HarnessScreen):
         if isinstance(event, TurnCompleted):
             if event.stop_reason not in {"end_turn", ""}:
                 self._queue_paused = True
-            self._refresh_queue()
+            self.prompts.refresh_queue()
             await pane.finish_message()
             if event.usage and (not self._usage or self._usage.get("scope") != "session"):
                 self._usage = event.usage
@@ -490,7 +490,7 @@ class ChatScreen(_HarnessScreen):
         if isinstance(event, CommandsUpdated):
             self._commands = event.commands
             self.query_one("#side-panel", SidePanel).activity.set_commands(event.commands)
-            self._sync_command_suggestions()
+            self.prompts.sync_command_suggestions()
             return
         if isinstance(event, PluginCommandsListed):
             self.capabilities.set_plugin_commands(event.commands, revision=event.selected_revision)
@@ -556,7 +556,7 @@ class ChatScreen(_HarnessScreen):
             return
         if isinstance(event, ConnectionEvent) and event.state == "lost":
             self._queue_paused = True
-            self._refresh_queue()
+            self.prompts.refresh_queue()
             self.connected = False
             self._set_busy(False)
             await pane.finish_message()
@@ -684,767 +684,42 @@ class ChatScreen(_HarnessScreen):
     # --------------------------------------------------------------- submitting
 
     def on_text_area_changed(self, event: Any) -> None:
-        composer = self.query_one("#composer", Composer)
-        if getattr(event, "text_area", None) is composer:
-            self._sync_command_suggestions()
+        self.prompts.text_changed(event)
 
     def on_text_area_selection_changed(self, event: Any) -> None:
-        composer = self.query_one("#composer", Composer)
-        if getattr(event, "text_area", None) is composer and composer.has_focus:
-            self._sync_command_suggestions()
+        self.prompts.selection_changed(event)
 
     @work(group="file-index", exclusive=True)
     async def _index_workspace(self) -> None:
-        self._workspace_files, self._file_index = await asyncio.to_thread(
-            index_workspace, self._workspace_root
-        )
-        self._sync_mention_catalog()
-        self._sync_command_suggestions()
-
-    def _sync_mention_catalog(self) -> None:
-        """Tell the composer which ``$skill`` / ``@path`` references are real."""
-        with contextlib.suppress(Exception):
-            self.query_one("#composer", Composer).set_mention_catalog(
-                skills=[
-                    str(skill.get("name", ""))
-                    for skill in self._skills
-                    if bool(skill.get("user_invocable", True))
-                ],
-                files=self._workspace_files,
-            )
-
-    def _sync_skill_suggestions(self) -> bool:
-        composer = self.query_one("#composer", Composer)
-        row, column = composer.cursor_location
-        line = composer.document.get_line(row)[:column]
-        match = re.search(r"(?<!\S)\$([A-Za-z0-9-]*)$", line)
-        if match is None or not composer.has_focus:
-            return False
-        items = [
-            {
-                "kind": "skill",
-                "name": str(skill.get("name", "")),
-                "label": (
-                    f"${skill.get('name', '')}   {str(skill.get('description', ''))[:80]}"
-                ).rstrip(),
-                "start": (row, match.start()),
-                "end": (row, column),
-            }
-            for skill in matching_skills(
-                (skill for skill in self._skills if bool(skill.get("user_invocable", True))),
-                match.group(1),
-            )
-            if skill.get("name")
-        ]
-        if not items:
-            if match.group(1):
-                self._hide_command_suggestions()
-            return False
-        signature = tuple(item["name"] for item in items)
-        if signature != self._suggestion_signature:
-            self._suggestion_index = 0
-            self._suggestion_signature = signature
-        self._suggestion_items = items
-        self._render_command_suggestions()
-        composer.suggestions_open = True
-        return True
-
-    def _sync_file_suggestions(self) -> None:
-        composer = self.query_one("#composer", Composer)
-        row, column = composer.cursor_location
-        line = composer.document.get_line(row)[:column]
-        match = re.search(r"(?<!\S)@([^\s@]*)$", line)
-        if match is None or not composer.has_focus:
-            self._hide_command_suggestions()
-            return
-        items = [
-            {
-                "kind": "file",
-                "name": path,
-                "label": f"@{path}",
-                "start": (row, match.start()),
-                "end": (row, column),
-            }
-            for path in self._file_index.matching(match.group(1))
-        ]
-        if not items:
-            self._hide_command_suggestions()
-            return
-        signature = tuple(item["name"] for item in items)
-        if signature != self._suggestion_signature:
-            self._suggestion_index = 0
-            self._suggestion_signature = signature
-        self._suggestion_items = items
-        self._render_command_suggestions()
-        composer.suggestions_open = True
-
-    def _sync_command_suggestions(self) -> None:
-        composer = self.query_one("#composer", Composer)
-        raw = composer.text
-        if not raw.startswith("/") or "\n" in raw:
-            if not self._sync_skill_suggestions():
-                self._sync_file_suggestions()
-            return
-        body = raw[1:]
-        if " " in body or "\t" in body:
-            self._hide_command_suggestions()
-            return
-        needle = body.strip().lower()
-        local = [
-            command for command in LOCAL_COMMANDS if not command.hidden and command.matches(needle)
-        ]
-        if needle:
-            local.sort(
-                key=lambda command: (
-                    0
-                    if needle
-                    in {command.name.lower(), *(alias.lower() for alias in command.aliases)}
-                    else 1
-                )
-            )
-        local_names = {
-            name for command in LOCAL_COMMANDS for name in (command.name, *command.aliases)
-        }
-        agent = [
-            command
-            for command in self._commands
-            if needle in str(command.get("name", "")).lower()
-            or needle in str(command.get("description", "")).lower()
-        ]
-        if needle:
-            agent.sort(
-                key=lambda command: 0 if needle == str(command.get("name", "")).lower() else 1
-            )
-        plugins = []
-        for command in self._plugin_commands:
-            display = self._plugin_command_display(command)
-            if (
-                not needle
-                or needle in display.lower()
-                or needle in str(command.get("description", "")).lower()
-            ):
-                plugins.append(command)
-        if needle:
-            plugins.sort(
-                key=lambda command: (
-                    0 if needle == self._plugin_command_display(command).lower() else 1
-                )
-            )
-
-        items: list[dict[str, Any]] = []
-        for command in local:
-            items.append(
-                {
-                    "kind": "local",
-                    "name": command.name,
-                    "label": command_suggestion_text(command),
-                    "command": command,
-                }
-            )
-        for command in agent[:100]:
-            name = str(command.get("name", ""))
-            if not name:
-                continue
-            description = str(command.get("description", ""))
-            collision = name in local_names
-            label = f"/{name}   {description}".rstrip()
-            if collision:
-                label += "   (agent command; use /agent)"
-            items.append(
-                {
-                    "kind": "agent",
-                    "name": name,
-                    "label": label,
-                    "collision": collision,
-                }
-            )
-        for command in plugins[:100]:
-            display = self._plugin_command_display(command)
-            description = str(command.get("description", ""))
-            hint = str(command.get("argumentsHint") or command.get("arguments_hint") or "")
-            label = f"/{display}   {description}".rstrip()
-            if hint:
-                label += f"   ({hint})"
-            items.append(
-                {
-                    "kind": "plugin",
-                    "name": display,
-                    "bindingId": command.get("bindingId") or command.get("binding_id"),
-                    "commandName": command.get("commandName") or command.get("command_name"),
-                    "label": label,
-                }
-            )
-        if not items:
-            self._hide_command_suggestions()
-            return
-
-        signature = tuple(f"{item['kind']}:{item['name']}" for item in items)
-        if signature != self._suggestion_signature:
-            self._suggestion_index = 0
-            self._suggestion_signature = signature
-        else:
-            self._suggestion_index = min(self._suggestion_index, len(items) - 1)
-        self._suggestion_items = items
-        self._render_command_suggestions()
-        composer.suggestions_open = True
-
-    def _render_command_suggestions(self) -> None:
-        widget = self.query_one("#command-suggestions", CommandSuggestions)
-        entries = [
-            (str(item["label"]), f"{item['kind']}:{item['name']}")
-            for item in self._suggestion_items
-        ]
-        widget.show_entries(entries, self._suggestion_index)
-        if entries:
-            widget.highlighted = self._suggestion_index
-
-    def _hide_command_suggestions(self) -> None:
-        self._suggestion_items = []
-        self._suggestion_signature = ()
-        self._suggestion_index = 0
-        with contextlib.suppress(Exception):
-            self.query_one("#command-suggestions", CommandSuggestions).hide_entries()
-        with contextlib.suppress(Exception):
-            self.query_one("#composer", Composer).suggestions_open = False
+        await self.prompts.index_workspace()
 
     def on_command_suggestion_key(self, event: CommandSuggestionKey) -> None:
-        if not self._suggestion_items:
-            return
-        key = event.key
-        if key == "escape":
-            self._hide_command_suggestions()
-            return
-        if key in {"up", "down"}:
-            step = -1 if key == "up" else 1
-            self._suggestion_index = (self._suggestion_index + step) % len(self._suggestion_items)
-            self._render_command_suggestions()
-            return
-        if key in {"enter", "tab"}:
-            self._accept_command_suggestion(complete_only=key == "tab")
-
-    def _accept_command_suggestion(self, *, complete_only: bool) -> None:
-        if not (0 <= self._suggestion_index < len(self._suggestion_items)):
-            return
-        item = self._suggestion_items[self._suggestion_index]
-        composer = self.query_one("#composer", Composer)
-        self._hide_command_suggestions()
-        if item["kind"] == "file":
-            self._complete_file(item)
-            return
-        if item["kind"] == "skill":
-            composer.replace(f"${item['name']} ", item["start"], item["end"])
-            composer.focus()
-            return
-        if item["kind"] == "local":
-            command = item["command"]
-            if complete_only or command.takes_argument:
-                composer.load_text(f"/{command.name} ")
-                composer.focus()
-                return
-            composer.clear_composer()
-            composer.focus()
-            asyncio.create_task(self._run_local_command(command.name))
-            return
-        if item["kind"] == "plugin":
-            descriptor = next(
-                (
-                    command
-                    for command in self._plugin_commands
-                    if self._plugin_command_display(command) == item["name"]
-                ),
-                {},
-            )
-            takes_arguments = bool(
-                descriptor.get("takesArguments", descriptor.get("takes_arguments"))
-            )
-            if complete_only or takes_arguments:
-                composer.load_text(f"/{item['name']} ")
-                composer.focus()
-                return
-            composer.clear_composer()
-            composer.focus()
-            asyncio.create_task(
-                self._run_plugin_command(str(item["bindingId"]), str(item["commandName"]), "")
-            )
-            return
-        prefix = "/agent " if item.get("collision") else "/"
-        composer.load_text(f"{prefix}{item['name']} ")
-        composer.focus()
+        self.prompts.handle_suggestion_key(event.key)
 
     @work(group="attach-file", exclusive=False)
     async def _complete_file(self, item: dict[str, Any]) -> None:
-        path = str(self._workspace_root / item["name"])
-        if await self._stage_attachment(path):
-            composer = self.query_one("#composer", Composer)
-            composer.replace(f"@{item['name']} ", item["start"], item["end"])
-            composer.focus()
+        await self.prompts.complete_file(item)
 
     async def on_submitted(self, event: Submitted) -> None:
-        self._hide_command_suggestions()
-        text = event.text.strip()
-        if not text:
-            return
-        if text.startswith("/"):
-            await self._handle_command(text)
-            return
-        await self._start_prompt(text)
-
-    async def _start_prompt(
-        self, text: str, *, attachments: list[str] | None = None, from_queue: bool = False
-    ) -> bool:
-        if not self.connected:
-            await self._notice("Not connected. Press Ctrl+R to reconnect.", "error")
-            return False
-        if self.session.client is not self.client:
-            await self._notice(
-                "This session is not attached to the current connection. "
-                "Press Ctrl+N for a new session or reload it after reconnecting.",
-                "warning",
-            )
-            self.query_one("#composer", Composer).focus()
-            return False
-        if self._loading_session or self._replay_target is not None:
-            await self._notice(
-                "Wait for the session to finish loading; the prompt was kept in the composer.",
-                "warning",
-            )
-            self.query_one("#composer", Composer).focus()
-            return False
-        if self.busy:
-            if not self._attachments and await self._steer(text):
-                return True
-            if len(self._queued_prompts) >= 20:
-                await self._notice(
-                    "The queue is full (20 follow-ups). Edit or remove an item.", "warning"
-                )
-                return False
-            self._queued_prompts.append((text, list(self._attachments)))
-            self._remember_prompt(text)
-            self._attachments.clear()
-            self.query_one("#composer", Composer).clear_composer()
-            self._refresh_queue()
-            return True
-        attachments = list(self._attachments) if attachments is None else attachments
-        try:
-            blocks = build_prompt_blocks(text, attachments) if attachments else None
-        except HarnessClientError as exc:
-            await self._notice(exc.message, "error")
-            if not from_queue:
-                self.query_one("#composer", Composer).load_text(text)
-            return False
-        composer = self.query_one("#composer", Composer)
-        if not from_queue:
-            self._remember_prompt(text)
-            composer.clear_composer()
-        pane = self.query_one("#transcript", TranscriptPane)
-        await pane.finish_message()
-        display = text
-        if attachments:
-            names = ", ".join(item["name"] for item in attachment_summary(attachments))
-            display = f"{text}\n\nattached: {names}"
-        await pane.add_user(display)
-        if not from_queue:
-            self._attachments.clear()
-            self._refresh_queue()
-        self._set_busy(True)
-        self.app.start_turn(self, text, blocks)
-        return True
-
-    def _remember_prompt(self, text: str) -> None:
-        history = self._prompt_history.setdefault(self.session.session_id, [])
-        if not history or history[-1] != text:
-            history.append(text)
-            del history[:-100]
-        self.query_one("#composer", Composer).prompt_history = history
-
-    async def _steer(self, text: str) -> bool:
-        """Deliver a follow-up into the running turn instead of waiting for it to end.
-
-        The host injects it before its next model request, so the agent can act on it
-        after the tool call it is currently running. Peers without the extension, or a
-        turn that just finished, fall back to the local queue.
-        """
-        if not self.client.extension.supports("_harness/session/steer"):
-            return False
-        try:
-            if not await self.session.steer(text):
-                return False
-        except HarnessClientError:
-            return False
-        pane = self.query_one("#transcript", TranscriptPane)
-        await pane.finish_message()
-        await pane.add_user(text)
-        self._remember_prompt(text)
-        self.query_one("#composer", Composer).clear_composer()
-        return True
-
-    def _save_draft(self) -> None:
-        self._drafts[self.session.session_id] = (
-            self.query_one("#composer", Composer).text,
-            list(self._attachments),
-            list(self._queued_prompts),
-        )
-
-    def _restore_draft(self) -> None:
-        if self.target.location().get("kind") == "local":
-            root = Path(self.session.cwd).resolve()
-            if root.is_dir() and root != self._workspace_root:
-                self._workspace_root = root
-                self._workspace_files = []
-                self._file_index = FileIndex(())
-                self._index_workspace()
-        text, attachments, queue = self._drafts.get(self.session.session_id, ("", [], []))
-        composer = self.query_one("#composer", Composer)
-        composer.clear_composer()
-        composer.load_text(text)
-        composer.prompt_history = self._prompt_history.setdefault(self.session.session_id, [])
-        self._attachments = list(attachments)
-        self._queued_prompts = list(queue)
-        self._queue_paused = bool(queue)
-        self._refresh_queue()
-
-    def _refresh_queue(self) -> None:
-        self.query_one(PromptQueue).show_prompts(self._queued_prompts, paused=self._queue_paused)
-        self.query_one(AttachmentBar).show_files(attachment_summary(self._attachments))
+        await self.prompts.submitted(event.text)
 
     def on_attachment_removed(self, event: AttachmentRemoved) -> None:
-        if 0 <= event.index < len(self._attachments):
-            self._attachments.pop(event.index)
-            self._refresh_queue()
-            self.query_one("#composer", Composer).focus()
+        self.prompts.attachment_removed(event.index)
 
     async def on_queue_action(self, event: QueueAction) -> None:
-        if event.action == "resume":
-            self._queue_paused = False
-            self._refresh_queue()
-            await self.send_next_queued()
-        elif 0 <= event.index < len(self._queued_prompts):
-            if event.action == "edit":
-                composer = self.query_one("#composer", Composer)
-                if composer.text.strip() or self._attachments:
-                    await self._notice(
-                        "Send or clear the current draft before editing a queued message.",
-                        "warning",
-                    )
-                    return
-                text, self._attachments = self._queued_prompts.pop(event.index)
-                composer.load_text(text)
-                composer.focus()
-            elif event.action == "remove":
-                self._queued_prompts.pop(event.index)
-            self._refresh_queue()
+        await self.prompts.queue_action(event.action, event.index)
 
     async def send_next_queued(self) -> None:
-        if (
-            self not in self.app.screen_stack
-            or self.busy
-            or self._queue_paused
-            or not self._queued_prompts
-            or not self.connected
-            or self._loading_session
-        ):
-            return
-        text, attachments = self._queued_prompts[0]
-        if await self._start_prompt(text, attachments=attachments, from_queue=True):
-            self._queued_prompts.pop(0)
-        else:
-            self._queue_paused = True
-        self._refresh_queue()
+        await self.prompts.send_next_queued()
 
     async def _handle_command(self, text: str) -> None:
-        body = text[1:].strip()
-        if not body:
-            self.action_command_palette()
-            return
-        name, _, rest = body.partition(" ")
-        name = name.strip()
-        rest = rest.strip()
-        local = resolve_local_command(name)
-        agent_names = {str(command.get("name", "")) for command in self._commands}
-        if ":" in name:
-            descriptor = self._find_plugin_command(name)
-            if descriptor is None:
-                await self._notice(
-                    f"Unknown plugin command '/{name}'. Press Ctrl+K to see available commands.",
-                    "warning",
-                )
-                return
-            await self._run_plugin_command(
-                str(descriptor.get("bindingId") or descriptor.get("binding_id")),
-                str(descriptor.get("commandName") or descriptor.get("command_name")),
-                rest,
-            )
-            return
-        if name == "agent":
-            if not rest:
-                await self._notice("Usage: /agent <agent-command> [arguments]", "warning")
-                return
-            agent_name, _, arguments = rest.partition(" ")
-            await self._send_agent_command(agent_name, arguments)
-            return
-        if local is not None:
-            await self._run_local_command(local.name, rest)
-            if local.name in agent_names:
-                await self._notice(
-                    f"Local /{local.name} ran. Use /agent {local.name} for the agent's "
-                    f"'{local.name}' command.",
-                    "info",
-                )
-            return
-        if name in agent_names:
-            await self._send_agent_command(name, rest)
-            return
-        await self._notice(
-            f"Unknown command '/{name}'. Press Ctrl+K to see local and agent commands.",
-            "warning",
-        )
-        composer = self.query_one("#composer", Composer)
-        composer.load_text(text)
+        await self.commands.handle_command(text)
 
     async def _run_local_command(self, name: str, rest: str = "") -> None:
-        composer = self.query_one("#composer", Composer)
-        composer.clear_composer()
-        if name == "attach":
-            await self._stage_attachment(rest)
-        elif name == "connect":
-            await self.app.choose_agent(self)
-        elif name == "rename":
-            await self._rename_session(rest)
-        elif name == "sessions":
-            self.action_show_sessions()
-        elif name == "find":
-            self._find_transcript(rest)
-        elif name == "copy":
-            response = self.query_one("#transcript", TranscriptPane).latest_response()
-            if response is None:
-                self.app.notify("No completed assistant response to copy")
-            else:
-                self.app.copy_to_clipboard(response._text)
-                self.app.notify("Response copied")
-        elif name == "skills":
-            await self._show_skills(rest)
-        elif name == "todo":
-            self.action_show_todos()
-        elif name == "plugins":
-            self.action_show_capabilities()
-            self.refresh_capabilities()
-        elif name == "mcp":
-            self.action_show_mcp()
-        elif name == "models":
-            await self.models.show_models()
-        elif name == "effort":
-            await self.models.show_effort()
-        elif name == "permissions":
-            self._show_permissions()
-        elif name == "settings":
-            self._show_settings()
-        elif name == "help":
-            self.action_help()
-
-    async def _show_skills(self, query: str = "") -> None:
-        await self._refresh_skills()
-        available = [skill for skill in self._skills if bool(skill.get("user_invocable", True))]
-        if not available:
-            await self._notice(
-                "No skills discovered. Add skill packages under `.agents/skills`, or enable "
-                "the skills plugin in /plugins and set its directories.",
-                "info",
-            )
-            return
-        composer = self.query_one("#composer", Composer)
-        composer.load_text(f"${query.strip().replace(' ', '-')}")
-        composer.focus()
-        self._sync_skill_suggestions()
-
-    async def _refresh_skills(self) -> None:
-        """Fetch the runtime's skill catalog for the `$` picker; discovery is host-side."""
-        if self._skills_loading:
-            return
-        self._skills_loading = True
-        try:
-            binding_id = await self._skills_binding_id()
-            self._skills = [] if binding_id is None else await self._fetch_skill_catalog(binding_id)
-            self._sync_mention_catalog()
-        finally:
-            self._skills_loading = False
-
-    async def _skills_binding_id(self) -> str | None:
-        for binding in self._bindings_raw:
-            plugin_id = str(binding.get("pluginId") or binding.get("plugin_id") or "")
-            binding_id = str(binding.get("bindingId") or binding.get("binding_id") or "")
-            if plugin_id == "harness.skills" and binding_id and binding.get("enabled", True):
-                return binding_id
-        # `capabilities/list` may not be negotiated; the catalog command name is unique.
-        for command in self._plugin_commands:
-            name = str(command.get("commandName") or command.get("command_name") or "")
-            binding_id = str(command.get("bindingId") or command.get("binding_id") or "")
-            if name == "catalog" and binding_id:
-                return binding_id
-        return None
-
-    async def _fetch_skill_catalog(self, binding_id: str) -> list[dict[str, Any]]:
-        if not self.client.extension.supports("_harness/commands/invoke"):
-            return []
-        if self._find_plugin_command(f"{binding_id}:catalog") is None:
-            return []
-        try:
-            response = await self.session.invoke_command(
-                binding_id,
-                "catalog",
-                expected_revision=self._plugin_revision,
-                request_id=f"ui-{uuid.uuid4().hex}",
-            )
-        except (ExtensionUnavailable, HarnessClientError):
-            return []
-        presentation = response.result.presentation
-        data = presentation.data if presentation is not None else {}
-        skills = data.get("skills") if isinstance(data, dict) else None
-        if not isinstance(skills, list):
-            return []
-        return [skill for skill in skills if isinstance(skill, dict)]
-
-    async def _rename_session(self, title: str) -> None:
-        if not self.client.extension.supports("_harness/session/rename"):
-            await self._notice("This agent does not support session renaming.", "warning")
-            return
-        if not title.strip():
-
-            def apply(values: dict[str, Any] | None) -> None:
-                if values:
-                    asyncio.create_task(self._rename_session(str(values["title"])))
-
-            self.app.push_screen(
-                FormDialog(
-                    "Rename session",
-                    "Choose a name for this conversation.",
-                    [
-                        {
-                            "name": "title",
-                            "title": "Session name",
-                            "kind": "string",
-                            "required": True,
-                            "default": self._session_title or "",
-                        }
-                    ],
-                ),
-                apply,
-            )
-            return
-        try:
-            renamed = await self.session.rename(title.strip())
-        except (HarnessClientError, ValueError) as exc:
-            await self._notice(str(exc), "error")
-            return
-        self._session_title = renamed
-        self._update_chrome()
-        self.refresh_sessions()
-        await self._notice(f"Session renamed to {self._session_title}.", "success")
-
-    async def _stage_attachment(self, argument: str) -> bool:
-        """Stage or clear local files for the next prompt (explicit user action only)."""
-        argument = argument.strip()
-        if argument.lower() in {"", "list"}:
-            if not self._attachments:
-                await self._notice("No files staged. Use /attach <path>.", "info")
-            else:
-                await self._notice(
-                    "Staged: " + ", ".join(Path(item).name for item in self._attachments),
-                    "info",
-                )
-            return False
-        if argument.lower() in {"clear", "none"}:
-            count = len(self._attachments)
-            self._attachments.clear()
-            self._refresh_queue()
-            await self._notice(f"Cleared {count} staged attachment(s).", "info")
-            return False
-        capabilities = getattr(
-            getattr(self.client.initialized, "agent_capabilities", None),
-            "prompt_capabilities",
-            None,
-        )
-        if not bool(getattr(capabilities, "embedded_context", False)):
-            await self._notice(
-                "This agent did not advertise embedded-context prompt support; "
-                "attachments cannot be sent. Paste the relevant text instead.",
-                "warning",
-            )
-            return False
-        try:
-            candidate = Path(argument).expanduser()
-            path = validate_attachment(
-                candidate if candidate.is_absolute() else self._workspace_root / candidate
-            )
-        except HarnessClientError as exc:
-            await self._notice(exc.message, "error")
-            return False
-        if str(path) in self._attachments:
-            await self._notice(f"{path.name} is already staged.", "info")
-        else:
-            self._attachments.append(str(path))
-            await self._notice(
-                f"Staged {path.name}; {len(self._attachments)} file(s) will be attached "
-                "to the next message. Use /attach clear to remove them.",
-                "success",
-            )
-        composer = self.query_one("#composer", Composer)
-        self._refresh_queue()
-        composer.focus()
-        return True
-
-    @staticmethod
-    def _plugin_command_display(command: dict[str, Any]) -> str:
-        binding = str(command.get("bindingId") or command.get("binding_id") or "")
-        name = str(command.get("commandName") or command.get("command_name") or "")
-        return f"{binding}:{name}" if binding else name
-
-    def _find_plugin_command(self, display: str) -> dict[str, Any] | None:
-        # A binding id may itself contain colons; the displayed name ends at the final one.
-        for command in self._plugin_commands:
-            if self._plugin_command_display(command) == display:
-                return command
-        return None
-
-    def _make_view_context(self, session: SessionProxy) -> Any:
-        from .extensions import ViewContext
-
-        async def invoke(
-            binding_id: str,
-            command_name: str,
-            arguments: dict[str, Any] | None,
-            text: str | None,
-        ) -> Any:
-            if self.session is not session:
-                raise HarnessClientError(
-                    "This widget belongs to a conversation that is no longer open."
-                )
-            if self._find_plugin_command(f"{binding_id}:{command_name}") is None:
-                raise HarnessClientError(
-                    f"Command '/{binding_id}:{command_name}' is no longer available."
-                )
-            return await self._invoke_plugin_command(
-                binding_id,
-                command_name,
-                text=text,
-                arguments=arguments,
-            )
-
-        return ViewContext(session_id=session.session_id, invoke=invoke)
+        await self.commands.run_local_command(name, rest)
 
     async def _run_plugin_command(self, binding_id: str, command_name: str, arguments: str) -> None:
-        """Slash invocation: dispatch without creating a model turn or tool call."""
-        if not self.client.extension.supports("_harness/commands/invoke"):
-            await self._notice("This agent does not negotiate Harness plugin commands.", "warning")
-            return
-        if self.busy:
-            await self._notice("Stop the running turn before running a plugin command.", "warning")
-            return
-        composer = self.query_one("#composer", Composer)
-        composer.clear_composer()
-        try:
-            await self._invoke_plugin_command(binding_id, command_name, text=arguments)
-        except (ExtensionUnavailable, HarnessClientError):
-            return
+        await self.commands.run_plugin_command(binding_id, command_name, arguments)
 
     async def _invoke_plugin_command(
         self,
@@ -1455,75 +730,22 @@ class ChatScreen(_HarnessScreen):
         arguments: dict[str, Any] | None = None,
         request_id: str | None = None,
     ) -> Any:
-        if not self.client.extension.supports("_harness/commands/invoke"):
-            raise ExtensionUnavailable("_harness/commands/invoke")
-        session = self.session
-        request_id = request_id or f"ui-{uuid.uuid4().hex}"
-        try:
-            response = await session.invoke_command(
-                binding_id,
-                command_name,
-                text=text,
-                arguments=arguments,
-                expected_revision=self._plugin_revision,
-                request_id=request_id,
-            )
-        except (ExtensionUnavailable, HarnessClientError) as exc:
-            await self._notice(f"Command failed: {exc}", "error")
-            raise
-        if self.session is not session:
-            # The user switched sessions while the handler ran; stale output must not be
-            # presented in, or start a turn for, a different conversation.
-            return response
-        result = response.result
-        fallback = (
-            result.presentation.fallback
-            if result.presentation is not None
-            else "Command completed."
+        return await self.commands.invoke_plugin_command(
+            binding_id,
+            command_name,
+            text=text,
+            arguments=arguments,
+            request_id=request_id,
         )
-        await self.query_one("#transcript", TranscriptPane).add_command(
-            {
-                "sessionId": session.session_id,
-                "bindingId": response.binding_id,
-                "commandName": response.command_name,
-                "requestId": request_id,
-                "fallback": fallback,
-                "presentation": (
-                    result.presentation.to_wire() if result.presentation is not None else None
-                ),
-            }
-        )
-        action = result.conversation
-        if action is None:
-            return response
-        key = (session.session_id, request_id)
-        if key in self._consumed_command_actions:
-            return response
-        self._consumed_command_actions.add(key)
-        if len(self._consumed_command_actions) > 200:
-            self._consumed_command_actions.clear()
-            self._consumed_command_actions.add(key)
-        if getattr(action, "type", "") != "start_turn":
-            await self._notice(
-                f"Command '/{binding_id}:{command_name}' requested an unsupported "
-                "conversation action.",
-                "warning",
-            )
-            return response
-        await self._start_prompt(
-            action.prompt,
-            attachments=[],
-            from_queue=True,
-        )
-        return response
 
     async def _send_agent_command(self, name: str, arguments: str) -> None:
-        if not name:
-            return
-        prompt = f"/{name}" + (f" {arguments}" if arguments else "")
-        composer = self.query_one("#composer", Composer)
-        composer.clear_composer()
-        await self._start_prompt(prompt)
+        await self.commands.send_agent_command(name, arguments)
+
+    def _find_plugin_command(self, display: str) -> dict[str, Any] | None:
+        return self.commands.find_plugin_command(display)
+
+    def _make_view_context(self, session: SessionProxy) -> Any:
+        return self.commands.make_view_context(session)
 
     # --------------------------------------------------------------- capability
 
@@ -1700,9 +922,9 @@ class ChatScreen(_HarnessScreen):
                     composer.load_text(f"/{command.name} ")
                     composer.focus()
                 elif command is not None:
-                    asyncio.create_task(self._run_local_command(command.name))
+                    asyncio.create_task(self.commands.run_local_command(command.name))
             elif kind == "plugin":
-                descriptor = self._find_plugin_command(name)
+                descriptor = self.commands.find_plugin_command(name)
                 if descriptor is not None:
                     composer = self.query_one("#composer", Composer)
                     takes_arguments = bool(
@@ -1713,7 +935,7 @@ class ChatScreen(_HarnessScreen):
                         composer.focus()
                     else:
                         asyncio.create_task(
-                            self._run_plugin_command(
+                            self.commands.run_plugin_command(
                                 str(descriptor.get("bindingId") or descriptor.get("binding_id")),
                                 str(
                                     descriptor.get("commandName") or descriptor.get("command_name")
@@ -1730,7 +952,7 @@ class ChatScreen(_HarnessScreen):
 
         plugin_entries = [
             {
-                "display": self._plugin_command_display(command),
+                "display": self.commands.plugin_command_display(command),
                 "description": str(command.get("description", "")),
             }
             for command in self._plugin_commands
@@ -1764,7 +986,7 @@ class ChatScreen(_HarnessScreen):
             )
             local_lines.append(f"- `/{command.name}` — {command.description}{aliases}")
         plugin_lines = [
-            f"- `/{self._plugin_command_display(command)}` — {command.get('description', '')}"
+            f"- `/{self.commands.plugin_command_display(command)}` — {command.get('description', '')}"
             for command in self._plugin_commands
         ]
         plugin_section = (
@@ -1948,7 +1170,7 @@ invents commands the agent did not advertise.
     @work(group="cancel", exclusive=False)
     async def _cancel_turn(self) -> None:
         self._queue_paused = True
-        self._refresh_queue()
+        self.prompts.refresh_queue()
         try:
             await self.session.cancel()
         except HarnessClientError as exc:
