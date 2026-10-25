@@ -45,7 +45,6 @@ from pydantic_ai_harness.planning import PlanItem, PlanStore, SqlitePlanStore
 from harness.config import EFFORT_DEFAULT
 from harness.protocol import (
     EXTENSION_METHODS,
-    AddChange,
     BindingListResponse,
     CommandCancelRequest,
     CommandCancelResponse,
@@ -54,7 +53,6 @@ from harness.protocol import (
     CommandInvokeResponse,
     CommandListRequest,
     CommandListResponse,
-    ConfigurationSnapshot,
     ConfigurationUpdate,
     ExtensionAdvertisement,
     HarnessError,
@@ -79,6 +77,7 @@ from .acp_store import (
 )
 from .ask_user import QuestionChannel
 from .composition import Composition, compose_definition
+from .configuration_service import ConfigurationService
 from .definitions import (
     AgentDefinition,
     DefinitionManifest,
@@ -94,7 +93,6 @@ from .host_support import (
     _prompt_text,
     build_store,
 )
-from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
 from .presentation import snapshot_from_metadata
 from .registry import PluginRegistry
 from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceSet
@@ -135,7 +133,13 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         self._compositions: dict[str, Composition] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self._turn_usage: dict[str, dict[str, Any]] = {}
-        self._config_requests: dict[str, dict[str, tuple[str, ConfigurationSnapshot]]] = {}
+        self.config = ConfigurationService(
+            agent=self,
+            store=self.store,
+            policy=self.policy,
+            definition=self.definition,
+            registry=bundle.registry,
+        )
         self._command_tasks: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
         self._command_active: set[str] = set()
         self._command_results: dict[str, OrderedDict[str, tuple[str, dict[str, Any]]]] = {}
@@ -199,7 +203,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 await task
         self._compositions.pop(session_id, None)
         self._turn_locks.pop(session_id, None)
-        self._config_requests.pop(session_id, None)
+        self.config.forget(session_id)
         self._command_results.pop(session_id, None)
         self._command_locks.pop(session_id, None)
         self._plan_channels.pop(session_id, None)
@@ -645,107 +649,7 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
             raise
 
     async def _update_configuration(self, request: ConfigurationUpdate) -> dict[str, Any]:
-        session_id = request.session_id
-        if not self.policy.can_create_bindings and any(
-            isinstance(change, AddChange) for change in request.changes
-        ):
-            raise HarnessError(
-                "POLICY_DENIED",
-                "Local binding creation is prohibited for this deployment.",
-            )
-        request_hash = f"{changes_payload_hash(request.changes)}|{request.expected_revision}"
-        async with self._turn_lock(session_id):
-            # Two identical retries can both miss the cache before either acquires this
-            # lock. Recheck under the lock so the second one replays the first result
-            # instead of evaluating its now-stale expected revision.
-            cached = self._config_requests.get(session_id, {}).get(request.request_id)
-            if cached is not None:
-                if cached[0] != request_hash:
-                    raise HarnessError(
-                        "INVALID_CONFIGURATION",
-                        "A request id cannot be reused with a different configuration payload.",
-                        {"requestId": request.request_id},
-                    )
-                return cached[1].to_wire()
-            composition = self._require_composition(session_id)
-            if request.expected_revision != composition.snapshot.selected_revision:
-                raise HarnessError(
-                    "REVISION_CONFLICT",
-                    "The configuration changed since the client's expected revision.",
-                    {
-                        "snapshot": composition.snapshot.to_wire(),
-                        "expectedRevision": request.expected_revision,
-                    },
-                )
-            outcome = composition.catalog.apply_changes(list(request.changes))
-            if outcome.noop:
-                snapshot = composition.snapshot
-                self._config_requests.setdefault(session_id, {})[request.request_id] = (
-                    request_hash,
-                    snapshot,
-                )
-                return snapshot.to_wire()
-            record = await self.store.get(session_id)
-            if record is None:
-                raise HarnessError(
-                    "SESSION_CLOSED", "Load the session before updating configuration."
-                )
-            next_revision = composition.snapshot.selected_revision + 1
-            refreshed = await compose_definition(
-                self.definition,
-                self.bundle.registry,
-                resources=self._resources(self.policy.validate_cwd(record.cwd), session_id),
-                session_id=session_id,
-                principal=self.policy.principal,
-                deployment_id=self.policy.deployment_id,
-                saved_bindings=self._bindings_payload(outcome),
-                model_settings=self.policy.model_settings,
-                effort=composition.effort.effort,
-                effort_support=self.policy.effort_support(
-                    composition.effort.model or self._default_model
-                ),
-                deps=composition.deps,
-                presentation_sink=self._presentation_sink(session_id),
-            )
-            refreshed.effort.model = composition.effort.model or self._default_model
-            snapshot = refreshed.catalog.snapshot(
-                selected_revision=next_revision,
-                active_revision=next_revision,
-                application_status="applied",
-            )
-            refreshed.snapshot = snapshot
-            refreshed.config = type(refreshed.config)(
-                deps=SessionDeps(session_id=session_id, composition=composition),
-                capabilities=refreshed.config.capabilities,
-                toolsets=refreshed.config.toolsets,
-                workspace=refreshed.config.workspace,
-            )
-            await self.store.update(
-                session_id,
-                bindings=refreshed.catalog.export_bindings(),
-                touch=True,
-            )
-            # Preserve the Composition/SessionDeps identity used by the adapter's live
-            # sessions; only its contents are replaced.
-            composition.agent = refreshed.agent
-            composition.catalog = refreshed.catalog
-            composition.snapshot = refreshed.snapshot
-            composition.resources = refreshed.resources
-            composition.effort = refreshed.effort
-            composition.config = refreshed.config
-            composition.capabilities = refreshed.capabilities
-            composition.commands = refreshed.commands
-            composition.presentation = refreshed.presentation
-            composition.workspace = refreshed.workspace
-            composition.deps = refreshed.deps
-            await self._apply_unavailable_tools(session_id, composition)
-            self._config_requests.setdefault(session_id, {})[request.request_id] = (
-                request_hash,
-                snapshot,
-            )
-            await self._send_configuration_changed(snapshot)
-            await self._send_commands_changed(session_id, composition)
-            return snapshot.to_wire()
+        return await self.config.update(request)
 
     def _command_lock(self, session_id: str) -> asyncio.Lock:
         return self._command_locks.setdefault(session_id, asyncio.Lock())
@@ -879,25 +783,6 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
         while len(cache) > _COMMAND_CACHE_PER_SESSION:
             cache.popitem(last=False)
         return response
-
-    def _bindings_payload(self, outcome: ChangeOutcome) -> dict[str, dict[str, Any]]:
-        added = {binding_id: plugin_id for binding_id, plugin_id, _, _ in outcome.added}
-        return {
-            binding_id: {
-                "enabled": enabled,
-                "config": jsonable_config(config),
-                **({"plugin_id": added[binding_id]} if binding_id in added else {}),
-            }
-            for binding_id, (enabled, config) in outcome.states.items()
-        }
-
-    async def _send_configuration_changed(self, snapshot: ConfigurationSnapshot) -> None:
-        if self._client_conn is None:
-            return
-        with contextlib.suppress(Exception):
-            await self._client_conn.ext_notification(
-                "harness/configuration/changed", snapshot.to_wire()
-            )
 
     def _presentation_sink(self, session_id: str) -> Any:
         async def publish(snapshot: ToolPresentationSnapshot) -> None:
