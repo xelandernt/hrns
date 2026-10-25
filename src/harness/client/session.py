@@ -5,14 +5,28 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from acp import RequestError
+
 from harness.protocol import (
     CommandInvokeResponse,
     ConfigurationSnapshot,
     ToolPresentationSnapshot,
 )
 
-from .events import CapabilitiesListed, PluginCommandsListed, PluginListed
-from .extension import CapabilityListResult, CommandListResult, PluginListResult
+from .errors import HarnessClientError, ProtocolError, describe_rpc_error
+from .events import (
+    CapabilitiesListed,
+    PluginCommandsListed,
+    PluginListed,
+    SessionsListed,
+)
+from .extension import (
+    CapabilityListResult,
+    CommandListResult,
+    PluginListResult,
+    validate_changes,
+)
+from .payloads import absolute_path
 
 if TYPE_CHECKING:
     from .client import HarnessAcpClient
@@ -165,3 +179,199 @@ class SessionProxy:
 
     async def delete(self) -> None:
         await self.client.delete_session(self.session_id)
+
+
+def _deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Merge metadata dictionaries without losing sibling keys."""
+    result = dict(base)
+    for key, value in extra.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+class SessionLifecycle:
+    """Owns session create/load/resume/list/close/delete for one client."""
+
+    def __init__(self, client: HarnessAcpClient) -> None:
+        self.client = client
+
+    def has_capability(self, name: str) -> bool:
+        """Ask whether the agent advertised a session lifecycle feature."""
+        client = self.client
+        if client.initialized is None:
+            return False
+        caps = getattr(client.initialized, "agent_capabilities", None)
+        sessions = getattr(caps, "session_capabilities", None)
+        return bool(getattr(sessions, name, None))
+
+    @property
+    def supports_load(self) -> bool:
+        client = self.client
+        if client.initialized is None:
+            return False
+        caps = getattr(client.initialized, "agent_capabilities", None)
+        return bool(getattr(caps, "load_session", False))
+
+    def check_additional_directories(self, directories: list[str] | None) -> None:
+        if not directories:
+            return
+        for directory in directories:
+            absolute_path(directory, label="additional directory")
+        if not self.has_capability("additional_directories"):
+            raise ProtocolError(
+                "This agent does not advertise additionalDirectories support; "
+                "start the session inside its workspace instead."
+            )
+
+    def check_local_add(self, changes: list[Any]) -> None:
+        client = self.client
+        if not any(getattr(change, "type", None) == "add" for change in changes):
+            return
+        if not client.extension.local_binding_creation:
+            raise HarnessClientError(
+                "The host did not advertise local binding creation; 'add' changes are "
+                "unavailable. Enable an existing offered binding instead."
+            )
+
+    async def new_session(
+        self,
+        cwd: str,
+        *,
+        additional_directories: list[str] | None = None,
+        initial_configuration: list[dict[str, Any]] | None = None,
+    ) -> SessionProxy:
+        client = self.client
+        absolute_path(cwd, label="working directory")
+        self.check_additional_directories(additional_directories)
+        meta: dict[str, Any] = {}
+        if initial_configuration:
+            try:
+                validated = validate_changes(initial_configuration)
+            except ValueError as exc:
+                raise HarnessClientError(f"Invalid initial configuration: {exc}") from exc
+            self.check_local_add(validated)
+            meta = {
+                "harness": {
+                    "initialConfiguration": [
+                        change.model_dump(mode="json", by_alias=True, exclude_none=True)
+                        for change in validated
+                    ]
+                }
+            }
+        if client.session_new_meta:
+            meta = _deep_merge(meta, client.session_new_meta)
+        try:
+            response = await client.connection.new_session(
+                cwd=cwd,
+                additional_directories=additional_directories,
+                mcp_servers=[],
+                **(meta or {}),
+            )
+        except RequestError as exc:
+            raise HarnessClientError(describe_rpc_error("session/new", exc)) from exc
+        session = SessionProxy(client, response.session_id, cwd)
+        session.apply_state(response.modes, response.config_options)
+        return session
+
+    async def load_session(
+        self,
+        session_id: str,
+        cwd: str,
+        *,
+        additional_directories: list[str] | None = None,
+        replay: bool = True,
+    ) -> SessionProxy:
+        client = self.client
+        absolute_path(cwd, label="working directory")
+        self.check_additional_directories(additional_directories)
+        if not self.supports_load:
+            raise ProtocolError(
+                "This agent does not advertise session/load; reopening the conversation is unavailable."
+            )
+        if not replay:
+            raise ProtocolError("session/load always replays history in ACP v1.")
+        try:
+            response = await client.connection.load_session(
+                cwd=cwd,
+                session_id=session_id,
+                mcp_servers=[],
+                additional_directories=additional_directories,
+            )
+        except RequestError as exc:
+            raise HarnessClientError(describe_rpc_error("session/load", exc)) from exc
+        session = SessionProxy(client, session_id, cwd)
+        if response is not None:
+            session.apply_state(response.modes, response.config_options)
+        return session
+
+    async def resume_session(
+        self,
+        session_id: str,
+        cwd: str,
+        *,
+        additional_directories: list[str] | None = None,
+    ) -> SessionProxy:
+        client = self.client
+        absolute_path(cwd, label="working directory")
+        self.check_additional_directories(additional_directories)
+        if not self.has_capability("resume"):
+            raise ProtocolError("This agent does not advertise session/resume; use session/load.")
+        try:
+            response = await client.connection.resume_session(
+                session_id=session_id,
+                cwd=cwd,
+                mcp_servers=[],
+                additional_directories=additional_directories,
+            )
+        except RequestError as exc:
+            raise HarnessClientError(describe_rpc_error("session/resume", exc)) from exc
+        session = SessionProxy(client, session_id, cwd)
+        session.apply_state(response.modes, response.config_options)
+        return session
+
+    async def list_sessions(
+        self, cwd: str | None = None, cursor: str | None = None
+    ) -> SessionsListed:
+        client = self.client
+        if cwd is not None:
+            absolute_path(cwd, label="working directory filter")
+        if not self.has_capability("list"):
+            raise ProtocolError("This agent does not advertise session/list.")
+        try:
+            response = await client.connection.list_sessions(cwd=cwd, cursor=cursor)
+        except RequestError as exc:
+            raise HarnessClientError(describe_rpc_error("session/list", exc)) from exc
+        sessions = tuple(
+            item.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for item in response.sessions
+        )
+        result = SessionsListed(sessions=sessions, next_cursor=response.next_cursor)
+        client.bus.publish(result)
+        return result
+
+    async def close_session(self, session_id: str) -> None:
+        client = self.client
+        if not self.has_capability("close"):
+            raise ProtocolError(
+                "This agent does not advertise session/close; use session/cancel for "
+                "portable turn cleanup."
+            )
+        try:
+            await client.connection.close_session(session_id=session_id)
+        except RequestError as exc:
+            raise HarnessClientError(describe_rpc_error("session/close", exc)) from exc
+
+    async def delete_session(self, session_id: str) -> None:
+        client = self.client
+        if not self.has_capability("delete"):
+            raise ProtocolError("This agent does not advertise session/delete.")
+        # ACP SDK 0.11.1 exposes the request model but not a convenience method.
+        try:
+            result = await client._raw_request("session/delete", {"sessionId": session_id})
+        except RequestError as exc:
+            raise HarnessClientError(describe_rpc_error("session/delete", exc)) from exc
+        if result is not None and not isinstance(result, dict):
+            raise ProtocolError("session/delete returned an unexpected response")

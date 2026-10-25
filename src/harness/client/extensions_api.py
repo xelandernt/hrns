@@ -6,13 +6,19 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from acp import RequestError
+
 from harness.protocol import (
+    CommandCatalogChanged,
     CommandInvokeResponse,
     ConfigurationSnapshot,
+    PresentationUpdated,
     ToolPresentationSnapshot,
 )
 
+from .bus import EventBus
 from .errors import HarnessClientError, ProtocolError
+from .events import ConfigurationChanged, PluginCommandsListed, ToolPresentationUpdated
 from .extension import (
     CapabilityListResult,
     CommandListResult,
@@ -39,9 +45,13 @@ class ExtensionsApi:
         *,
         request: Request,
         check_local_add: Callable[[list[Any]], None],
+        bus: EventBus,
+        answer_questions: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
     ) -> None:
         self._request = request
         self._check_local_add = check_local_add
+        self._bus = bus
+        self._answer_questions = answer_questions
 
     async def capabilities(
         self, session_id: str, *, cursor: str | None = None, limit: int | None = None
@@ -184,3 +194,49 @@ class ExtensionsApi:
             return tuple(parse_presentation_list(raw).snapshots)
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"presentation/get returned malformed data: {exc}") from exc
+
+    async def handle_ext_method(self, method: str, params: dict[str, Any]) -> Any:
+        name = method.lstrip("_")
+        if name == "harness/ask_user":
+            return await self._answer_questions(params)
+        if method in {"harness/configuration/changed", "_harness/configuration/changed"}:
+            snapshot = parse_configuration_snapshot(params)
+            self._bus.publish(
+                ConfigurationChanged(session_id=snapshot.session_id, snapshot=snapshot)
+            )
+            return {}
+        raise RequestError.method_not_found(f"_{method.lstrip('_')}")
+
+    async def handle_notification(self, method: str, params: dict[str, Any]) -> None:
+        name = method.lstrip("_")
+        if name == "harness/configuration/changed":
+            try:
+                snapshot = parse_configuration_snapshot(params)
+            except Exception:
+                return
+            self._bus.publish(
+                ConfigurationChanged(session_id=snapshot.session_id, snapshot=snapshot)
+            )
+            return
+        if name == "harness/commands/changed":
+            try:
+                changed = CommandCatalogChanged.model_validate(params)
+            except Exception:
+                return
+            self._bus.publish(
+                PluginCommandsListed(
+                    session_id=changed.session_id,
+                    commands=tuple(changed.commands),
+                    selected_revision=changed.selected_revision,
+                    supported_operations=tuple(changed.supported_operations),
+                )
+            )
+            return
+        if name == "harness/presentation/updated":
+            try:
+                updated = PresentationUpdated.model_validate(params)
+            except Exception:
+                return
+            self._bus.publish(ToolPresentationUpdated(snapshots=tuple(updated.snapshots)))
+            return
+        return None
