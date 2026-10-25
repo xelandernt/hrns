@@ -14,6 +14,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import Button, Static
 
+from harness.config import LocalSettings
+
 from ..client import HarnessAcpClient, SessionProxy
 from ..constants import CLIENT_VERSION
 from ..errors import HarnessClientError
@@ -53,6 +55,7 @@ from .dialogs import (
     SettingsDialog,
     TranscriptSearchDialog,
 )
+from .local import LocalModelResult
 
 if TYPE_CHECKING:
     pass
@@ -254,6 +257,8 @@ class ChatScreen(_HarnessScreen):
             self._unsubscribe()
         self._unsubscribe = self.client.bus.subscribe(self._enqueue)
         if self._consumer is None or self._consumer.done():
+            # Tracked on the screen and cancelled in on_unmount; _consume_events
+            # handles and reports every caught exception.
             self._consumer = asyncio.create_task(self._consume_events())
 
     def _enqueue(self, event: Any) -> None:
@@ -712,42 +717,58 @@ class ChatScreen(_HarnessScreen):
     async def send_next_queued(self) -> None:
         await self.prompts.send_next_queued()
 
-    async def _handle_command(self, text: str) -> None:
-        await self.commands.handle_command(text)
+    @work(group="capability", exclusive=True)
+    async def _choose_plugin_to_add(self) -> None:
+        await self.capabilities.choose_plugin_to_add()
 
-    async def _run_local_command(self, name: str, rest: str = "") -> None:
-        await self.commands.run_local_command(name, rest)
+    @work(group="command", exclusive=True)
+    async def _dispatch_local_command(self, name: str) -> None:
+        await self.commands.run_local_command(name)
 
-    async def _run_plugin_command(self, binding_id: str, command_name: str, arguments: str) -> None:
-        await self.commands.run_plugin_command(binding_id, command_name, arguments)
+    @work(group="command", exclusive=True)
+    async def _dispatch_plugin_command(self, binding_id: str, command_name: str) -> None:
+        await self.commands.run_plugin_command(binding_id, command_name, "")
 
-    async def _invoke_plugin_command(
+    @work(group="capability", exclusive=True)
+    async def _plugin_add_form_worker(self, plugin_id: str) -> None:
+        await self.capabilities.plugin_add_form(plugin_id)
+
+    @work(group="session", exclusive=True)
+    async def _rename_session_worker(self, title: str) -> None:
+        await self.sessions.rename(title)
+
+    @work(group="model", exclusive=True)
+    async def _save_model_selection_worker(
         self,
-        binding_id: str,
-        command_name: str,
+        settings: LocalSettings,
+        model: str,
+        effort: str | None,
         *,
-        text: str | None = None,
-        arguments: dict[str, Any] | None = None,
-        request_id: str | None = None,
-    ) -> Any:
-        return await self.commands.invoke_plugin_command(
-            binding_id,
-            command_name,
-            text=text,
-            arguments=arguments,
-            request_id=request_id,
+        touch_thinking: bool = True,
+    ) -> None:
+        await self.models.save_model_selection(
+            settings, model, effort, touch_thinking=touch_thinking
         )
 
-    async def _send_agent_command(self, name: str, arguments: str) -> None:
-        await self.commands.send_agent_command(name, arguments)
+    @work(group="model", exclusive=True)
+    async def _set_local_effort_worker(self, settings: LocalSettings, effort: str) -> None:
+        await self.models.set_local_effort(settings, effort)
 
-    def _find_plugin_command(self, display: str) -> dict[str, Any] | None:
-        return self.commands.find_plugin_command(display)
+    @work(group="model", exclusive=True)
+    async def _apply_model_settings_worker(self, result: LocalModelResult) -> None:
+        await self.models.apply_model_settings(result)
 
-    def _make_view_context(self, session: SessionProxy) -> Any:
-        return self.commands.make_view_context(session)
+    def _notice_soon(self, text: str, severity: str = "info") -> None:
+        """Run a notice on a tracked worker so its failure cannot go unobserved."""
+        self.run_worker(
+            self._notice(text, severity),
+            group="notice",
+            exclusive=False,
+            exit_on_error=False,
+        )
 
-    # --------------------------------------------------------------- capability
+    async def _handle_command(self, text: str) -> None:
+        await self.commands.handle_command(text)
 
     def on_capability_refresh_requested(self, event: CapabilityRefreshRequested) -> None:
         self.refresh_capabilities()
@@ -757,7 +778,7 @@ class ChatScreen(_HarnessScreen):
         self._refresh_mcp()
 
     def on_capability_add_requested(self, event: CapabilityAddRequested) -> None:
-        asyncio.create_task(self.capabilities.choose_plugin_to_add())
+        self._choose_plugin_to_add()
 
     def on_binding_toggle_requested(self, event: BindingToggleRequested) -> None:
         self._toggle_binding(event.binding_id, event.enabled)
@@ -922,7 +943,7 @@ class ChatScreen(_HarnessScreen):
                     composer.load_text(f"/{command.name} ")
                     composer.focus()
                 elif command is not None:
-                    asyncio.create_task(self.commands.run_local_command(command.name))
+                    self._dispatch_local_command(command.name)
             elif kind == "plugin":
                 descriptor = self.commands.find_plugin_command(name)
                 if descriptor is not None:
@@ -934,14 +955,9 @@ class ChatScreen(_HarnessScreen):
                         composer.load_text(f"/{name} ")
                         composer.focus()
                     else:
-                        asyncio.create_task(
-                            self.commands.run_plugin_command(
-                                str(descriptor.get("bindingId") or descriptor.get("binding_id")),
-                                str(
-                                    descriptor.get("commandName") or descriptor.get("command_name")
-                                ),
-                                "",
-                            )
+                        self._dispatch_plugin_command(
+                            str(descriptor.get("bindingId") or descriptor.get("binding_id")),
+                            str(descriptor.get("commandName") or descriptor.get("command_name")),
                         )
             elif kind == "agent":
                 composer = self.query_one("#composer", Composer)
@@ -1066,7 +1082,7 @@ invents commands the agent did not advertise.
             self.settings = replace(self.settings, permission_mode=mode)
             self.app.apply_settings(self.settings)
             self._apply_settings()
-            asyncio.create_task(self._notice(f"Approvals: {labels[mode]}.", "success"))
+            self._notice_soon(f"Approvals: {labels[mode]}.", "success")
 
         self.app.push_screen(
             ChoiceDialog(

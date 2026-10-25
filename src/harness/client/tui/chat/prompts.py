@@ -299,7 +299,7 @@ class PromptWorkflow:
                 return
             composer.clear_composer()
             composer.focus()
-            asyncio.create_task(screen.commands.run_local_command(command.name))
+            screen._dispatch_local_command(command.name)
             return
         if item["kind"] == "plugin":
             descriptor = next(
@@ -319,11 +319,7 @@ class PromptWorkflow:
                 return
             composer.clear_composer()
             composer.focus()
-            asyncio.create_task(
-                screen.commands.run_plugin_command(
-                    str(item["bindingId"]), str(item["commandName"]), ""
-                )
-            )
+            screen._dispatch_plugin_command(str(item["bindingId"]), str(item["commandName"]))
             return
         prefix = "/agent " if item.get("collision") else "/"
         composer.load_text(f"{prefix}{item['name']} ")

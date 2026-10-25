@@ -137,7 +137,13 @@ class MessageBlock(Vertical):
             self._catch_up = None
             self.call_later(self.flush)
 
+        # Owned by this block and cancelled on unmount; follow_up() observes errors.
         self._catch_up = asyncio.create_task(follow_up())
+
+    def on_unmount(self) -> None:
+        if self._catch_up is not None:
+            self._catch_up.cancel()
+            self._catch_up = None
 
     def on_mount(self) -> None:
         self.flush()

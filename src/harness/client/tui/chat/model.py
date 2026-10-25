@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -189,23 +188,20 @@ class ModelWorkflow:
 
         Canceling the effort step cancels the whole change, matching Codex.
         """
+        screen = self.screen
         support = local_thinking_support(settings.provider, model)
         if support is None:
             # A model outside the catalog has unknown support: keep a manually
             # configured thinking level instead of clearing it.
             known = model in local_model_catalog().get(settings.provider, ())
-            asyncio.create_task(
-                self.save_model_selection(settings, model, None, touch_thinking=known)
-            )
+            screen._save_model_selection_worker(settings, model, None, touch_thinking=known)
             return
         current = thinking_from_settings(settings) if model == settings.model else None
         self.choose_effort(
             settings,
             model,
             current=current,
-            on_select=lambda effort: asyncio.create_task(
-                self.save_model_selection(settings, model, effort)
-            ),
+            on_select=lambda effort: screen._save_model_selection_worker(settings, model, effort),
         )
 
     def choose_effort(
@@ -295,7 +291,7 @@ class ModelWorkflow:
             settings,
             settings.model,
             current=current,
-            on_select=lambda effort: asyncio.create_task(self.set_local_effort(settings, effort)),
+            on_select=lambda effort: screen._set_local_effort_worker(settings, effort),
         )
 
     async def set_local_effort(self, settings: LocalSettings, effort: str) -> None:
@@ -318,8 +314,9 @@ class ModelWorkflow:
         )
 
     def models_configured(self, result: Any) -> None:
+        screen = self.screen
         if result is not None:
-            asyncio.create_task(self.apply_model_settings(result))
+            screen._apply_model_settings_worker(result)
 
     async def apply_model_settings(self, result: Any) -> None:
         screen = self.screen

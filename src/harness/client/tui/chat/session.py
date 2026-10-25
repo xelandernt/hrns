@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 from ...errors import ExtensionUnavailable, HarnessClientError
@@ -232,7 +231,7 @@ class SessionWorkflow:
 
             def apply(values: dict[str, Any] | None) -> None:
                 if values:
-                    asyncio.create_task(self.rename(str(values["title"])))
+                    screen._rename_session_worker(str(values["title"]))
 
             screen.app.push_screen(
                 FormDialog(
