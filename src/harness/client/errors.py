@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from acp import RequestError
+
 
 class HarnessClientError(Exception):
     """Base class for expected (recoverable, explainable) client failures."""
@@ -78,3 +80,19 @@ class CatalogError(HarnessClientError):
         )
         self.status = status
         self.code = code
+
+
+def describe_rpc_error(method: str, exc: RequestError) -> str:
+    """Format an ACP request failure for display, including harness error details."""
+    data = exc.data if isinstance(exc.data, dict) else {}
+    code = data.get("code")
+    details = data.get("details") or {}
+    detail_text = ""
+    if isinstance(details, dict):
+        for key in ("bindingId", "bindingIds", "currentRevision", "message", "reason"):
+            if key in details:
+                detail_text += f" {key}={details[key]}"
+    elif details:
+        detail_text = f" {details}"
+    suffix = f" [{code}]" if code else ""
+    return f"{method} failed: {exc}{suffix}{detail_text}".strip()
