@@ -21,7 +21,8 @@ from harness.runtime import (
     SessionStore,
 )
 from harness.runtime.acp import canonical_root
-from harness.runtime.host import HarnessACPAgent, HostBundle, HostPolicy
+from harness.runtime.host import HarnessACPAgent
+from harness.runtime.host_support import HostBundle, HostPolicy
 from harness.runtime.local import thinking_support
 
 from .catalog import CursorCodec
