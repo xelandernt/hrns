@@ -703,7 +703,7 @@ class HarnessApp(App[int]):
             if screen in self.screen_stack:
                 await screen._events.join()
                 screen._set_busy(False)
-                screen._refresh_queue()
+                screen.prompts.refresh_queue()
                 self.call_later(screen.send_next_queued)
 
     async def choose_agent(self, screen: ChatScreen) -> None:

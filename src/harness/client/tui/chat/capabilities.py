@@ -32,7 +32,7 @@ class CapabilityWorkflow:
             for command in commands
         )
         screen._plugin_revision = revision
-        screen._sync_command_suggestions()
+        screen.prompts.sync_command_suggestions()
 
     async def refresh_plugin_commands(self) -> None:
         screen = self.screen
@@ -73,7 +73,7 @@ class CapabilityWorkflow:
                     can_write=screen.client.extension.supports("_harness/configuration/update"),
                 )
                 self.sync_mcp_panel(snapshot)
-                await screen._refresh_skills()
+                await screen.prompts.refresh_skills()
                 return
             except ExtensionUnavailable:
                 pass
@@ -82,7 +82,7 @@ class CapabilityWorkflow:
                 return
         panel.show_message("Loading standard configuration…")
         panel.set_standard_options(list(screen.session.config_options))
-        await screen._refresh_skills()
+        await screen.prompts.refresh_skills()
 
     def apply_snapshot(self, snapshot: Any) -> None:
         screen = self.screen
@@ -252,7 +252,7 @@ class CapabilityWorkflow:
     async def probe_mcp(self, binding: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         screen = self.screen
         binding_id = str(binding.get("bindingId") or binding.get("binding_id") or "")
-        if not binding_id or screen._find_plugin_command(f"{binding_id}:status") is None:
+        if not binding_id or screen.commands.find_plugin_command(f"{binding_id}:status") is None:
             return binding_id, {}
         try:
             response = await screen.session.invoke_command(

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+from typing import TYPE_CHECKING, Any
 
 from ...errors import ExtensionUnavailable, HarnessClientError
 from ..composer import Composer
-from ..dialogs import ConfirmDialog
+from ..dialogs import ConfirmDialog, FormDialog
 from ..panels import SidePanel
 from ..transcript import TranscriptPane
 
@@ -105,9 +106,9 @@ class SessionWorkflow:
                 await pane.apply_presentation(snapshot)
         screen._replay_target = None
         screen._loading_session = False
-        screen._save_draft()
+        screen.prompts.save_draft()
         screen.session = loaded
-        screen._restore_draft()
+        screen.prompts.restore_draft()
         screen._bind_view_context()
         screen.app.session = loaded
         screen._update_chrome()
@@ -149,9 +150,9 @@ class SessionWorkflow:
         except HarnessClientError as exc:
             await screen._notice(f"Could not create a session: {exc.message}", "error")
             return
-        screen._save_draft()
+        screen.prompts.save_draft()
         screen.session = session
-        screen._restore_draft()
+        screen.prompts.restore_draft()
         screen._bind_view_context()
         screen.app.session = session
         screen._reset_activity()
@@ -221,3 +222,41 @@ class SessionWorkflow:
 
     async def load_more(self) -> None:
         await self.refresh(load_more=True)
+
+    async def rename(self, title: str) -> None:
+        screen = self.screen
+        if not screen.client.extension.supports("_harness/session/rename"):
+            await screen._notice("This agent does not support session renaming.", "warning")
+            return
+        if not title.strip():
+
+            def apply(values: dict[str, Any] | None) -> None:
+                if values:
+                    asyncio.create_task(self.rename(str(values["title"])))
+
+            screen.app.push_screen(
+                FormDialog(
+                    "Rename session",
+                    "Choose a name for this conversation.",
+                    [
+                        {
+                            "name": "title",
+                            "title": "Session name",
+                            "kind": "string",
+                            "required": True,
+                            "default": screen._session_title or "",
+                        }
+                    ],
+                ),
+                apply,
+            )
+            return
+        try:
+            renamed = await screen.session.rename(title.strip())
+        except (HarnessClientError, ValueError) as exc:
+            await screen._notice(str(exc), "error")
+            return
+        screen._session_title = renamed
+        screen._update_chrome()
+        screen.refresh_sessions()
+        await screen._notice(f"Session renamed to {screen._session_title}.", "success")
