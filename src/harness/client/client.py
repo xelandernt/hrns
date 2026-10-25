@@ -17,39 +17,22 @@ from acp import RequestError
 from acp.client.connection import ClientSideConnection
 from acp.schema import (
     AcceptElicitationResponse,
-    AgentMessageChunk,
-    AgentPlanContentUpdate,
-    AgentPlanRemovedUpdate,
-    AgentPlanUpdate,
-    AgentThoughtChunk,
     AllowedOutcome,
-    AvailableCommandsUpdate,
     BooleanConfigOptionCapabilities,
     CancelElicitationResponse,
     ClientCapabilities,
     ClientSessionCapabilities,
-    ConfigOptionUpdate,
-    CurrentModeUpdate,
     DeclineElicitationResponse,
     DeniedOutcome,
     ElicitationCapabilities,
-    ElicitationFormRequestMode,
-    ElicitationFormSessionMode,
-    ElicitationUrlRequestMode,
-    ElicitationUrlSessionMode,
     FileSystemCapabilities,
     Implementation,
     PermissionOption,
     PlanCapabilities,
     RequestPermissionResponse,
     SessionConfigOptionsCapabilities,
-    SessionInfoUpdate,
     TextContentBlock,
-    ToolCallProgress,
-    ToolCallStart,
     ToolCallUpdate,
-    UsageUpdate,
-    UserMessageChunk,
 )
 
 from harness.protocol import (
@@ -79,22 +62,14 @@ from .errors import (
     TransportError,
 )
 from .events import (
-    AgentTextChunk,
-    CommandsUpdated,
     ConfigOptionsUpdated,
     ConfigurationChanged,
     ConnectionEvent,
-    ModesUpdated,
-    PlanChanged,
     PluginCommandsListed,
-    SessionInfoChanged,
     SessionsListed,
-    ToolEvent,
     ToolPresentationUpdated,
     TurnCompleted,
     TurnStarted,
-    UsageUpdated,
-    UserMessageReplayed,
 )
 from .extension import (
     CapabilityListResult,
@@ -115,15 +90,15 @@ from .extension import (
 )
 from .interactions import (
     AskUserResponse,
-    ElicitationRequest,
     InteractionPolicy,
-    PermissionRequest,
     RequireInteractions,
     ask_user_payload,
     parse_ask_user_request,
 )
+from .payloads import absolute_path, checked_limit, elicitation_record, normalize_permission
 from .session import SessionProxy
 from .transport import AgentTransport, ConnectionBundle
+from .updates import dispatch_update
 
 __all__ = ["HarnessAcpClient", "DEFAULT_INTERACTION_POLICY"]
 
@@ -131,117 +106,6 @@ DEFAULT_INTERACTION_POLICY: InteractionPolicy = RequireInteractions()
 
 #: Text content maximum when the caller has not pre-validated an attachment.
 _TOTAL_PROMPT_BYTES = MAX_MESSAGE_BYTES
-
-
-def _clip(text: str, limit: int = 2000) -> str:
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def _raw_arguments(value: Any) -> Any:
-    """Decode ``raw_input``, which agents send as an object or as a JSON string.
-
-    A string payload left undecoded renders as a JSON blob in approval prompts and hides the
-    argument names every view keys off.
-    """
-    if not isinstance(value, str):
-        return value
-    text = value.strip()
-    if not text.startswith(("{", "[")):
-        return value
-    try:
-        return json.loads(text)
-    except (TypeError, ValueError):
-        return value
-
-
-def _absolute_path(value: str, *, label: str) -> str:
-    if not isinstance(value, str) or not value.startswith("/"):
-        raise HarnessClientError(f"The {label} must be an absolute path, got '{value}'.")
-    return value
-
-
-def _checked_limit(limit: int | None) -> int | None:
-    if limit is None:
-        return None
-    if not 1 <= limit <= 100:
-        raise HarnessClientError("The pagination limit must be between 1 and 100.")
-    return limit
-
-
-def _text_of(content: Any) -> str | None:
-    if getattr(content, "type", None) == "text":
-        return getattr(content, "text", None)
-    kind = getattr(content, "type", None) or "attachment"
-    if kind == "image":
-        return f"[image {getattr(content, 'mime_type', '') or ''}]".strip()
-    if kind == "audio":
-        return "[audio attachment]"
-    if kind == "resource_link":
-        return f"[resource link: {getattr(content, 'name', '')}]"
-    if kind == "resource":
-        return "[embedded resource]"
-    return None
-
-
-def normalize_permission(
-    session_id: str,
-    tool_call: ToolCallUpdate,
-    options: list[PermissionOption],
-) -> PermissionRequest:
-    title = getattr(tool_call, "title", None) or getattr(tool_call, "kind", None) or "tool call"
-    raw_input = _raw_arguments(getattr(tool_call, "raw_input", None))
-    detail = ""
-    if raw_input is not None:
-        try:
-            detail = json.dumps(raw_input, ensure_ascii=False, default=str)
-        except Exception:
-            detail = str(raw_input)
-        detail = _clip(detail, 600)
-    return PermissionRequest(
-        session_id=session_id,
-        tool_call_id=getattr(tool_call, "tool_call_id", "") or "",
-        title=str(title),
-        kind=str(getattr(tool_call, "kind", "") or ""),
-        status=str(getattr(tool_call, "status", "") or ""),
-        options=tuple(
-            {
-                "optionId": option.option_id,
-                "name": option.name,
-                "kind": option.kind,
-            }
-            for option in options
-        ),
-        raw_input=raw_input,
-        detail=detail,
-    )
-
-
-def _elicitation_record(
-    message: str,
-    mode: ElicitationFormSessionMode
-    | ElicitationFormRequestMode
-    | ElicitationUrlSessionMode
-    | ElicitationUrlRequestMode,
-) -> ElicitationRequest:
-    if isinstance(mode, (ElicitationFormSessionMode, ElicitationFormRequestMode)):
-        schema = mode.requested_schema.model_dump(mode="json", by_alias=True)
-        return ElicitationRequest(
-            kind="form",
-            message=message,
-            schema=schema,
-            session_id=getattr(mode, "session_id", None),
-            tool_call_id=getattr(mode, "tool_call_id", None),
-            request_id=getattr(mode, "request_id", None),
-        )
-    return ElicitationRequest(
-        kind="url",
-        message=message,
-        url=getattr(mode, "url", "") or "",
-        session_id=getattr(mode, "session_id", None),
-        tool_call_id=getattr(mode, "tool_call_id", None),
-        request_id=getattr(mode, "request_id", None),
-        elicitation_id=getattr(mode, "elicitation_id", None),
-    )
 
 
 class HarnessAcpClient:
@@ -488,7 +352,7 @@ class HarnessAcpClient:
         if not directories:
             return
         for directory in directories:
-            _absolute_path(directory, label="additional directory")
+            absolute_path(directory, label="additional directory")
         if not self.has_session_capability("additional_directories"):
             raise ProtocolError(
                 "This agent does not advertise additionalDirectories support; "
@@ -513,7 +377,7 @@ class HarnessAcpClient:
         additional_directories: list[str] | None = None,
         initial_configuration: list[dict[str, Any]] | None = None,
     ) -> SessionProxy:
-        _absolute_path(cwd, label="working directory")
+        absolute_path(cwd, label="working directory")
         self._check_additional_directories(additional_directories)
         meta: dict[str, Any] = {}
         if initial_configuration:
@@ -553,7 +417,7 @@ class HarnessAcpClient:
         additional_directories: list[str] | None = None,
         replay: bool = True,
     ) -> SessionProxy:
-        _absolute_path(cwd, label="working directory")
+        absolute_path(cwd, label="working directory")
         self._check_additional_directories(additional_directories)
         if not self.supports_load:
             raise ProtocolError(
@@ -582,7 +446,7 @@ class HarnessAcpClient:
         *,
         additional_directories: list[str] | None = None,
     ) -> SessionProxy:
-        _absolute_path(cwd, label="working directory")
+        absolute_path(cwd, label="working directory")
         self._check_additional_directories(additional_directories)
         if not self.has_session_capability("resume"):
             raise ProtocolError("This agent does not advertise session/resume; use session/load.")
@@ -603,7 +467,7 @@ class HarnessAcpClient:
         self, cwd: str | None = None, cursor: str | None = None
     ) -> SessionsListed:
         if cwd is not None:
-            _absolute_path(cwd, label="working directory filter")
+            absolute_path(cwd, label="working directory filter")
         if not self.has_session_capability("list"):
             raise ProtocolError("This agent does not advertise session/list.")
         try:
@@ -804,9 +668,9 @@ class HarnessAcpClient:
         payload: dict[str, Any] = {"sessionId": session_id}
         if cursor:
             payload["cursor"] = cursor
-        checked_limit = _checked_limit(limit)
-        if checked_limit is not None:
-            payload["limit"] = checked_limit
+        effective_limit = checked_limit(limit)
+        if effective_limit is not None:
+            payload["limit"] = effective_limit
         try:
             raw = await self._ext_request("_harness/capabilities/list", payload)
             return parse_capability_list(raw)
@@ -819,9 +683,9 @@ class HarnessAcpClient:
         payload: dict[str, Any] = {}
         if cursor:
             payload["cursor"] = cursor
-        checked_limit = _checked_limit(limit)
-        if checked_limit is not None:
-            payload["limit"] = checked_limit
+        effective_limit = checked_limit(limit)
+        if effective_limit is not None:
+            payload["limit"] = effective_limit
         try:
             raw = await self._ext_request("_harness/plugins/list", payload)
             return parse_plugin_list(raw)
@@ -870,9 +734,9 @@ class HarnessAcpClient:
         payload: dict[str, Any] = {"sessionId": session_id}
         if cursor:
             payload["cursor"] = cursor
-        checked_limit = _checked_limit(limit)
-        if checked_limit is not None:
-            payload["limit"] = checked_limit
+        effective_limit = checked_limit(limit)
+        if effective_limit is not None:
+            payload["limit"] = effective_limit
         try:
             raw = await self._ext_request("_harness/commands/list", payload)
             return parse_command_list(raw)
@@ -971,169 +835,9 @@ class HarnessAcpClient:
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self._inflight_updates += 1
         try:
-            self._dispatch_update(session_id, update)
+            dispatch_update(self.bus, session_id, update)
         finally:
             self._inflight_updates -= 1
-
-    def _dispatch_update(self, session_id: str, update: Any) -> None:
-        raw_meta = dict(getattr(update, "field_meta", None) or {})
-        if isinstance(update, UserMessageChunk):
-            # Live prompts are rendered by the composer action; user updates only
-            # arrive during session/load replay and belong in the transcript.
-            text = _text_of(update.content) or ""
-            if text:
-                self.bus.publish(
-                    UserMessageReplayed(
-                        session_id=session_id,
-                        text=text,
-                        message_id=getattr(update, "message_id", None),
-                    )
-                )
-            return
-        if isinstance(update, AgentMessageChunk):
-            text = _text_of(update.content) or ""
-            if text:
-                self.bus.publish(
-                    AgentTextChunk(
-                        session_id=session_id,
-                        text=text,
-                        message_id=getattr(update, "message_id", None),
-                        meta=raw_meta,
-                    )
-                )
-            return
-        if isinstance(update, AgentThoughtChunk):
-            text = _text_of(update.content) or ""
-            if text:
-                self.bus.publish(
-                    AgentTextChunk(
-                        session_id=session_id,
-                        text=text,
-                        message_id=getattr(update, "message_id", None),
-                        thought=True,
-                        meta=raw_meta,
-                    )
-                )
-            return
-        if isinstance(update, ToolCallStart):
-            self.bus.publish(self._tool_event(session_id, update, is_new=True))
-            return
-        if isinstance(update, ToolCallProgress):
-            self.bus.publish(self._tool_event(session_id, update, is_new=False))
-            return
-        if isinstance(update, AgentPlanUpdate):
-            entries = tuple(
-                (entry.content, entry.priority, entry.status) for entry in update.entries
-            )
-            self.bus.publish(PlanChanged(session_id=session_id, entries=entries))
-            return
-        if isinstance(update, AgentPlanContentUpdate):
-            plan = update.plan
-            if getattr(plan, "type", "") == "items":
-                entries = tuple(
-                    (entry.content, entry.priority, entry.status) for entry in plan.entries
-                )
-                self.bus.publish(PlanChanged(session_id=session_id, entries=entries))
-            elif getattr(plan, "type", "") == "markdown":
-                content = str(getattr(plan, "content", ""))
-                entries = tuple(
-                    (line.strip(), "medium", "pending")
-                    for line in content.splitlines()
-                    if line.strip()
-                )
-                self.bus.publish(PlanChanged(session_id=session_id, entries=entries))
-            return
-        if isinstance(update, AgentPlanRemovedUpdate):
-            self.bus.publish(PlanChanged(session_id=session_id, cleared=True))
-            return
-        if isinstance(update, AvailableCommandsUpdate):
-            commands = tuple(
-                command.model_dump(mode="json", by_alias=True, exclude_none=True)
-                for command in update.available_commands
-            )
-            self.bus.publish(CommandsUpdated(session_id=session_id, commands=commands))
-            return
-        if isinstance(update, CurrentModeUpdate):
-            self.bus.publish(
-                ModesUpdated(
-                    session_id=session_id,
-                    current_mode_id=update.current_mode_id,
-                    available_modes=(),
-                )
-            )
-            return
-        if isinstance(update, ConfigOptionUpdate):
-            options = tuple(
-                option.model_dump(mode="json", by_alias=True, exclude_none=True)
-                for option in update.config_options
-            )
-            self.bus.publish(ConfigOptionsUpdated(session_id=session_id, options=options))
-            return
-        if isinstance(update, SessionInfoUpdate):
-            self.bus.publish(SessionInfoChanged(session_id=session_id, title=update.title))
-            harness_meta = raw_meta.get("harness", {})
-            if isinstance(harness_meta, dict):
-                usage = harness_meta.get("sessionUsage")
-                if isinstance(usage, dict):
-                    self.bus.publish(UsageUpdated(session_id=session_id, summary=usage))
-            return
-        if isinstance(update, UsageUpdate):
-            harness_meta = raw_meta.get("harness", {})
-            detail = harness_meta.get("contextUsage") if isinstance(harness_meta, dict) else None
-            summary: dict[str, Any] = {
-                "scope": "context",
-                "used": update.used,
-                "size": update.size,
-                "detail": detail if isinstance(detail, dict) else {},
-            }
-            if update.cost is not None:
-                summary["cost"] = {
-                    "amount": update.cost.amount,
-                    "currency": update.cost.currency,
-                }
-            self.bus.publish(UsageUpdated(session_id=session_id, summary=summary))
-            return
-        # Unknown future update kinds degrade to a readable activity event.
-        self.bus.publish(
-            AgentTextChunk(
-                session_id=session_id,
-                text=f"[activity: {getattr(update, 'session_update', 'update')}]",
-                thought=True,
-                meta=raw_meta,
-            )
-        )
-
-    @staticmethod
-    def _tool_event(session_id: str, update: Any, *, is_new: bool) -> ToolEvent:
-        content: list[dict[str, Any]] = []
-        for block in getattr(update, "content", None) or []:
-            try:
-                content.append(block.model_dump(mode="json", by_alias=True, exclude_none=True))
-            except Exception:
-                content.append({"type": "content", "content": {"type": "text", "text": str(block)}})
-        locations = tuple(
-            {
-                "path": getattr(location, "path", "") or "",
-                "line": str(getattr(location, "line", "") or ""),
-            }
-            for location in (getattr(update, "locations", None) or [])
-        )
-        title = getattr(update, "title", "") or ""
-        if is_new and not title:
-            title = getattr(update, "tool_call_id", "") or "tool"
-        return ToolEvent(
-            session_id=session_id,
-            tool_call_id=getattr(update, "tool_call_id", "") or "",
-            title=title,
-            kind=str(getattr(update, "kind", "") or ""),
-            status=str(getattr(update, "status", "") or ""),
-            is_new=is_new,
-            content=tuple(content),
-            locations=locations,
-            raw_input=_raw_arguments(getattr(update, "raw_input", None)),
-            raw_output=getattr(update, "raw_output", None),
-            meta=dict(getattr(update, "field_meta", None) or {}),
-        )
 
     async def request_permission(
         self,
@@ -1157,7 +861,7 @@ class HarnessAcpClient:
         )
 
     async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
-        record = _elicitation_record(message, mode)
+        record = elicitation_record(message, mode)
         try:
             answer = await self.policy.answer_elicitation(record)
         except (InteractionRequired, InteractionRejected) as exc:
