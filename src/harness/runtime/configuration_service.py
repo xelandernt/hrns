@@ -23,9 +23,6 @@ if TYPE_CHECKING:
     from .host import HarnessACPAgent
     from .registry import PluginRegistry
 
-#: At most this many request-id results are retained per session.
-CONFIG_CACHE_PER_SESSION = 100
-
 
 class ConfigurationService:
     """Owns transactional configuration changes for live sessions."""
@@ -99,7 +96,6 @@ class ConfigurationService:
             if outcome.noop:
                 snapshot = composition.snapshot
                 cache[request.request_id] = (request_hash, snapshot)
-                self._trim(cache)
                 return snapshot.to_wire()
             record = await self.store.get(session_id)
             if record is None:
@@ -158,7 +154,6 @@ class ConfigurationService:
             composition.deps = refreshed.deps
             await agent.sessions.apply_unavailable_tools(session_id, composition)
             cache[request.request_id] = (request_hash, snapshot)
-            self._trim(cache)
             await self.send_changed(snapshot)
             await agent.commands.send_changed(session_id, composition)
             return snapshot.to_wire()
@@ -169,8 +164,3 @@ class ConfigurationService:
             return
         with contextlib.suppress(Exception):
             await conn.ext_notification("harness/configuration/changed", snapshot.to_wire())
-
-    @staticmethod
-    def _trim(cache: OrderedDict[str, tuple[str, ConfigurationSnapshot]]) -> None:
-        while len(cache) > CONFIG_CACHE_PER_SESSION:
-            cache.popitem(last=False)
