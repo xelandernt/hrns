@@ -107,6 +107,7 @@ def _field(
     kind: str = "text",
     default: Any = "",
     choices: list[tuple[str, str]] | None = None,
+    placeholder: str = "",
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -116,65 +117,44 @@ def _field(
         "choices": choices or [],
         "required": False,
         "default": default,
+        "placeholder": placeholder,
     }
 
 
 class LocalModelDialog(FormDialog):
-    """Choose a known provider/model or override either with free text."""
+    """Choose a provider and model by typing, either from the known ids or free-form."""
 
     def __init__(self, settings: LocalSettings, *, accept_label: str = "Save and connect") -> None:
         self.settings = settings
         self.catalog = local_model_catalog()
         self._model_choices: dict[str, tuple[str, ...]] = self.catalog
-        self._current_provider = settings.provider
 
         providers = list(self.catalog) or list(_FALLBACK_PROVIDERS)
         current_provider = settings.provider
         if current_provider and current_provider not in providers:
             providers.insert(0, current_provider)
-        provider_known = current_provider in providers
-        provider_value = current_provider if provider_known else ""
 
-        selected_provider = current_provider if provider_known else ""
-        models = self._models_for(selected_provider)
-        model_known = bool(settings.model) and settings.model in models
-        model_value = settings.model if model_known else ""
-        model_options = self._model_options(selected_provider)
+        model_options = self._model_options(current_provider)
 
         fields = [
             _field(
                 "provider",
                 "Provider",
                 description=(
-                    "Known Pydantic AI providers. Use the override below for a provider "
-                    "that is not listed."
+                    "Known Pydantic AI providers. Type to filter; any other id is used as-is."
                 ),
-                kind="select",
-                default=provider_value,
+                kind="combobox",
+                default=current_provider,
                 choices=[(provider, provider) for provider in providers],
-            ),
-            _field(
-                "provider_custom",
-                "Override provider (optional)",
-                description="Takes precedence over the provider list.",
-                default="",
             ),
             _field(
                 "model",
                 "Model",
-                description=(
-                    "Known models for the selected provider. Use the override below for "
-                    "any other model id."
-                ),
-                kind="select",
-                default=model_value,
+                description=self._model_description(current_provider),
+                kind="combobox",
+                default=settings.model,
                 choices=model_options,
-            ),
-            _field(
-                "model_custom",
-                "Override model (optional)",
-                description="Takes precedence over the model list.",
-                default="",
+                placeholder=self._model_placeholder(current_provider),
             ),
             _field(
                 "effort",
@@ -226,72 +206,82 @@ class LocalModelDialog(FormDialog):
             f"Save to {settings.config_file}",
             fields,
             accept_label=accept_label,
-            explanation=(
-                "Runs file tools and commands on this machine, with approval prompts. "
-                "HARNESS_LOCAL_* environment variables override saved settings."
-            ),
+            explanation=self._explanation(),
             on_change=self._field_changed,
         )
 
+    def _explanation(self) -> str:
+        text = (
+            "Runs file tools and commands on this machine, with approval prompts. "
+            "HARNESS_LOCAL_* environment variables override saved settings."
+        )
+        if not self.catalog:
+            text += (
+                " The harness-local catalog could not be read, so no provider or model ids "
+                "are suggested; type them directly."
+            )
+        return text
+
     def _models_for(self, provider: str) -> tuple[str, ...]:
-        models = list(self._model_choices.get(provider, ()))
-        current = self.settings.model
-        if provider == self.settings.provider and current and current not in models:
-            # Preserve a configured custom model when its provider has no known list.
-            models.insert(0, current)
-        return tuple(models)
+        return tuple(self._model_choices.get(provider, ()))
 
     def _model_options(self, provider: str) -> list[tuple[str, str]]:
-        models = self._models_for(provider)
-        if not models:
-            return [("No presets — enter a model override below", "")]
-        return [(model, model) for model in models]
+        return [(model, model) for model in self._models_for(provider)]
+
+    def _model_description(self, provider: str) -> str:
+        if self._models_for(provider):
+            return f"Known models for {provider}. Type to filter; any other model id is used as-is."
+        where = f" for {provider}" if provider else ""
+        return f"No known model ids{where}. Type the model id to use."
+
+    def _model_placeholder(self, provider: str) -> str:
+        return "type to filter" if self._models_for(provider) else "type a model id"
 
     def _refresh_models(self, provider: str) -> None:
         row = self._rows_by_name.get("model")
         if row is None:
             return
-        models = self._models_for(provider)
-        current = str(row.value() or "")
-        row.set_choices(
-            self._model_options(provider), selected=current if current in models else ""
-        )
+        row.set_choices(self._model_options(provider))
+        row.set_placeholder(self._model_placeholder(provider))
+        row.field["description"] = self._model_description(provider)
+        if self._active is row:
+            self._help.update(self._model_description(provider))
 
     def _field_changed(self, row: Any, rows: dict[str, Any]) -> None:
-        if row.field_name == "provider":
-            provider = str(row.value() or "")
-            if provider == self._current_provider:
-                self._refresh_models(provider)
-                return
-            self._current_provider = provider
-            self._reset_provider_fields()
-            self._refresh_models(provider)
-        elif row.field_name == "provider_custom":
-            self._reset_provider_fields(include_custom=False)
-            provider = str(row.value() or "").strip() or str(rows["provider"].value() or "")
-            self._refresh_models(provider)
-
-    def _reset_provider_fields(self, *, include_custom: bool = True) -> None:
-        names = ["model_custom", "api_key", "api_key_env", "base_url"]
-        if include_custom:
-            names.append("provider_custom")
-        for name in names:
-            row = self._rows_by_name.get(name)
-            if row is not None:
-                row.set_value("")
+        """Follow the provider as it is typed: retarget the model suggestions."""
+        if row.field_name != "provider":
+            return
+        provider = str(row.value() or "").strip()
+        self._refresh_models(provider)
+        model_row = rows.get("model")
+        if model_row is None or provider == self.settings.provider:
+            return
+        if provider not in self._model_choices:
+            # A free-form provider has no catalog to check the model against.
+            return
+        current = str(model_row.value() or "").strip()
+        if current and current not in self._models_for(provider):
+            # The old model belongs to the previous provider; start clean.
+            model_row.set_value("")
 
     def action_accept_form(self) -> None:
         values, error = _collect_fields(self.fields, self._rows_by_name)
         if error or values is None:
             self.show_error(error or "The form has no values.")
             return
-        provider = str(values.pop("provider_custom", "") or "").strip()
-        provider = provider or str(values.get("provider") or "").strip()
-        model = str(values.pop("model_custom", "") or "").strip()
-        model = model or str(values.get("model") or "").strip()
+        provider = str(values.get("provider") or "").strip()
+        model = str(values.get("model") or "").strip()
         effort = str(values.pop("effort", "") or EFFORT_DEFAULT).strip()
         api_key = str(values.pop("api_key", "") or "").strip()
         api_key_env = str(values.get("api_key_env") or "").strip()
+        base_url = str(values.get("base_url") or "").strip()
+        if provider != self.settings.provider:
+            # Endpoint settings that were inherited rather than retyped belong to
+            # the previous provider; keep only what this form was changed to.
+            if api_key_env == self.settings.api_key_env:
+                api_key_env = ""
+            if base_url == self.settings.base_url:
+                base_url = ""
         if not provider:
             self.show_error("Provider is required.")
             return
@@ -314,8 +304,8 @@ class LocalModelDialog(FormDialog):
                 return
         values["provider"] = provider
         values["model"] = model
-        values.setdefault("base_url", "")
-        values.setdefault("api_key_env", "")
+        values["base_url"] = base_url
+        values["api_key_env"] = api_key_env
         try:
             configured = LocalSettings(config_file=None, **{**self.settings.model_dump(), **values})
             configured = with_thinking(configured, effort)

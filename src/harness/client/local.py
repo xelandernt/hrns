@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,8 +60,14 @@ def store_api_key(provider: str, api_key_env: str, api_key: str) -> str | None:
         return None
 
 
+def _sibling_script(name: str) -> str | None:
+    """A console script installed next to this interpreter (venv, pipx, uv tool)."""
+    candidate = Path(sys.executable).with_name(name)
+    return str(candidate) if candidate.is_file() else None
+
+
 def _load_catalog() -> LocalCatalog:
-    executable = shutil.which("harness-local")
+    executable = shutil.which("harness-local") or _sibling_script("harness-local")
     if executable is None:
         return LocalCatalog()
     try:

@@ -30,15 +30,20 @@ class MessageBlock(Vertical):
     REVEAL_DURATION = 0.35
     DEFAULT_CSS = """
     MessageBlock .message-actions {
-        height: 1;
+        height: 3;
         align: right middle;
     }
     MessageBlock .message-actions Button {
-        height: 1; min-width: 0; padding: 0 1; border: none; margin: 0 0 0 1;
+        height: 3; min-width: 13; padding: 0 1; border: round $border; margin: 0 0 0 1;
         color: $text-muted; background: transparent;
     }
     MessageBlock .message-actions Button:hover {
-        color: $accent; background: $boost;
+        border: round $accent;
+        background: transparent;
+    }
+    MessageBlock .message-actions Button:focus {
+        background-tint: transparent;
+        text-style: bold;
     }
     """
 
@@ -62,23 +67,30 @@ class MessageBlock(Vertical):
         self._label = Static(label, markup=False)
         self._label.add_class("message-role")
         self._body = Markdown(text) if role == "agent" else Static(text, markup=False)
-        self._body.add_class("message-body")
+        self._body.add_class("message-text" if role == "you" else "message-body")
         self.add_class(f"role-{role}")
 
     def compose(self) -> ComposeResult:
         yield self._label
-        yield self._body
+        if self.role == "you":
+            with Vertical(classes="message-body"):
+                yield Static(classes="transcript-bar")
+                yield self._body
+        else:
+            yield self._body
         if self.role == "agent":
             from textual.containers import Horizontal
 
             with Horizontal(classes="message-actions"):
-                yield Button("Copy response", id="copy-response", disabled=True)
+                button = Button("copy", id="copy-response", disabled=True)
+                button.active_effect_duration = 0
+                yield button
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         if event.button.id == "copy-response":
             self.app.copy_to_clipboard(self._text)
-            self.app.notify("Response copied")
+            event.button.label = "Copied!"
 
     def append_text(self, text: str) -> None:
         self._text += text
@@ -272,12 +284,17 @@ class ReasoningBlock(Collapsible):
         self._refresh_title()
 
 
-class NoticeBlock(Static):
+class NoticeBlock(Vertical):
     def __init__(self, text: str, *, severity: str = "info") -> None:
         self.severity = severity
-        super().__init__(self._render_notice(text, severity), markup=False)
+        super().__init__()
+        self._body = Static(self._render_notice(text, severity), markup=False)
         self.add_class("notice")
         self.add_class(f"notice-{severity}")
+
+    def compose(self) -> ComposeResult:
+        yield Static(classes="transcript-bar")
+        yield self._body
 
     @staticmethod
     def _render_notice(text: str, severity: str) -> Text:

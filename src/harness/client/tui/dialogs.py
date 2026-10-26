@@ -36,6 +36,12 @@ __all__ = [
 ]
 
 
+def _step_focused_choice(screen: Any, event: Any) -> None:
+    """Left/Right change the focused choice control."""
+    if handle_choice_arrow(screen.focused, str(event.key)):
+        event.stop()
+
+
 class _DialogBase(ModalScreen[Any]):
     """Shared esc-to-cancel and dialog chrome."""
 
@@ -59,9 +65,7 @@ class _DialogBase(ModalScreen[Any]):
         self.dismiss(None)
 
     def on_key(self, event: Any) -> None:
-        """Left/Right change the focused choice control."""
-        if handle_choice_arrow(self.focused, str(event.key)):
-            event.stop()
+        _step_focused_choice(self, event)
 
 
 class PermissionDialog(_DialogBase):
@@ -132,11 +136,11 @@ class PermissionDialog(_DialogBase):
 
 
 _FORM_BINDINGS = [
-    Binding("up", "focus_previous", "Previous field", show=False, priority=True),
-    Binding("down", "focus_next", "Next field", show=False, priority=True),
+    Binding("up", "highlight_previous", "Previous field", show=False, priority=True),
+    Binding("down", "highlight_next", "Next field", show=False, priority=True),
     Binding("tab", "focus_next", "Next field", show=False, priority=True),
     Binding("shift+tab", "focus_previous", "Previous field", show=False, priority=True),
-    Binding("enter", "accept_form", "Save", show=False, priority=True),
+    Binding("enter", "enter_field", "Save", show=False, priority=True),
 ]
 
 
@@ -147,11 +151,14 @@ def _field_text(kind: str, value: Any) -> str:
     return "" if value is None else str(value)
 
 
-class _FieldRow(Horizontal):
-    """One form line: indicator, label, and an inline value.
+class _FieldRow(Vertical):
+    """One form block: indicator, label, an inline value, and optional suggestions.
 
     Text kinds mount an ``Input`` with no border so the row reads as a line.
     Choice and boolean kinds render a plain value and react to Left/Right.
+    ``combobox`` rows are both: an ``Input`` you type into, plus a list of the
+    known ids underneath that filters as you type. What you type is the value,
+    so an id outside the list simply reads as ``custom`` next to the field.
     """
 
     can_focus = True
@@ -168,12 +175,24 @@ class _FieldRow(Horizontal):
         ]
         default = field.get("default")
         self._input: Input | None = None
+        self._suggestions: OptionList | None = None
+        self._badge: Static | None = None
+        self._open = False
         self._silent: str | None = None
         self.on_changed: Callable[[_FieldRow], None] | None = None
         if self.kind == "boolean":
             self._flag = bool(default)
         elif self.kind == "select":
             self._selection = "" if default is None else str(default)
+        elif self.kind == "combobox":
+            self._input = Input(
+                _field_text(self.kind, default),
+                placeholder=str(field.get("placeholder") or "type to filter"),
+            )
+            self._suggestions = OptionList(classes="field-suggestions", markup=False)
+            self._suggestions.styles.display = "none"
+            self._badge = Static("custom", markup=False, classes="field-badge")
+            self._badge.styles.display = "none"
         else:
             placeholder = "comma-separated values" if self.kind in {"array", "multi"} else "(none)"
             self._input = Input(
@@ -191,13 +210,89 @@ class _FieldRow(Horizontal):
         self._view = Static(self._display(), markup=False, classes="field-value")
 
     def compose(self) -> ComposeResult:
-        yield Static("›", classes="field-gutter")
-        yield Static(
-            self.title + (" *" if self.required else ""),
-            markup=False,
-            classes="field-name",
-        )
-        yield self._input if self._input is not None else self._view
+        with Horizontal(classes="field-line"):
+            yield Static("›", classes="field-gutter")
+            yield Static(
+                self.title + (" *" if self.required else ""),
+                markup=False,
+                classes="field-name",
+            )
+            yield self._input if self._input is not None else self._view
+            if self._badge is not None:
+                yield self._badge
+        if self._suggestions is not None:
+            yield self._suggestions
+
+    # --------------------------------------------------------- suggestions
+
+    def _sync_badge(self) -> None:
+        """Flag a typed id that is not one of the known choices."""
+        if self._badge is None or self._input is None:
+            return
+        typed = self._input.value.strip()
+        known = any(value == typed for value, _label in self._choices)
+        self._badge.styles.display = "none" if not typed or known else "block"
+
+    def _render_suggestions(self, needle: str | None = None) -> None:
+        """Show the choices, filtered by ``needle``; ``None`` shows them all."""
+        if self._suggestions is None or self._input is None:
+            return
+        folded = needle.casefold() if needle is not None else ""
+        matches = [
+            (value, label)
+            for value, label in self._choices
+            if not folded or folded in value.casefold() or folded in label.casefold()
+        ]
+        self._suggestions.clear_options()
+        for value, label in matches:
+            self._suggestions.add_option(Option(label, id=value))
+        self._suggestions.styles.display = "block" if matches else "none"
+        self._open = bool(matches)
+        if not matches:
+            return
+        values = [value for value, _label in matches]
+        typed = self._input.value
+        self._suggestions.highlighted = values.index(typed) if typed in values else 0
+
+    def _close_suggestions(self) -> None:
+        if self._suggestions is not None:
+            self._suggestions.styles.display = "none"
+        self._open = False
+
+    def _show_suggestions(self) -> None:
+        """Open the full list on focus; the first keystroke replaces the value."""
+        if self._input is not None and self._input.has_focus:
+            self._input.select_all()
+        self._render_suggestions()
+
+    def step_highlight(self, direction: int) -> bool:
+        """Move the suggestion highlight; report whether the key was consumed."""
+        if self._suggestions is None or not self._open:
+            return False
+        if direction < 0:
+            self._suggestions.action_cursor_up()
+        else:
+            self._suggestions.action_cursor_down()
+        return True
+
+    def accept_suggestion(self) -> bool:
+        """Commit the highlighted suggestion into the field."""
+        if self._suggestions is None or not self._open or not self._suggestions.option_count:
+            return False
+        highlighted = self._suggestions.highlighted
+        option = self._suggestions.get_option_at_index(highlighted or 0)
+        if option.id is None:
+            return False
+        self.set_value(str(option.id))
+        self._close_suggestions()
+        return True
+
+    def dismiss_suggestions(self, key: str) -> bool:
+        """Close the suggestion list on Esc; report whether the key was consumed."""
+        if key != "escape" or not self._open:
+            return False
+        self._close_suggestions()
+        return True
 
     def _display(self) -> str:
         if self.kind == "boolean":
@@ -230,12 +325,26 @@ class _FieldRow(Horizontal):
             if self._input.value != text:
                 self._silent = text
                 self._input.value = text
+            if self.kind == "combobox":
+                self._sync_badge()
+                if self._open:
+                    self._render_suggestions()
         self._refresh_view()
 
-    def set_choices(self, choices: list[tuple[str, str]], *, selected: str = "") -> None:
+    def set_choices(self, choices: list[tuple[str, str]]) -> None:
         self._choices = list(choices)
-        self._selection = selected
+        if self.kind == "combobox":
+            self._sync_badge()
+            if self._open:
+                self._render_suggestions()
+            return
+        if self._selection not in [value for value, _label in self._choices]:
+            self._selection = ""
         self._refresh_view()
+
+    def set_placeholder(self, text: str) -> None:
+        if self._input is not None:
+            self._input.placeholder = text
 
     def focus_target(self) -> Any:
         return self._input if self._input is not None else self
@@ -263,15 +372,29 @@ class _FieldRow(Horizontal):
 
     def on_focus(self, event: Any) -> None:
         self._note_focus()
+        if self.kind == "combobox":
+            self._show_suggestions()
 
     def on_descendant_focus(self, event: Any) -> None:
         self._note_focus()
+        if self.kind == "combobox":
+            self._show_suggestions()
+
+    def on_descendant_blur(self, event: Any) -> None:
+        if self.kind == "combobox":
+            self._close_suggestions()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
         if self._silent is not None and event.value == self._silent:
             self._silent = None
+            if self.kind == "combobox":
+                self._sync_badge()
             return
+        if self.kind == "combobox":
+            self._sync_badge()
+            if self._input is not None and self._input.has_focus:
+                self._render_suggestions(event.value)
         self._notify()
 
     def on_key(self, event: Any) -> None:
@@ -325,7 +448,7 @@ class _FormMixin:
             self._on_change(row, self._rows_by_name)
 
     def form_hint(self) -> str:
-        return f"↑/↓ move · ←/→ change · Enter {self.accept_label} · Esc cancel"
+        return f"↑/↓ move · Tab next · ←/→ change · Enter {self.accept_label} · Esc cancel"
 
     def form_body(self) -> ComposeResult:
         """Rows, validation error, focused-field help, and the key hint."""
@@ -360,6 +483,33 @@ class _FormMixin:
 
     def action_focus_previous(self) -> None:
         self._move_row(-1)
+
+    def action_highlight_next(self) -> None:
+        if self._active is not None and self._active.step_highlight(1):
+            return
+        self._move_row(1)
+
+    def action_highlight_previous(self) -> None:
+        if self._active is not None and self._active.step_highlight(-1):
+            return
+        self._move_row(-1)
+
+    def action_enter_field(self) -> None:
+        """Enter commits an open suggestion, otherwise it submits the form."""
+        if self._active is not None and self._active.accept_suggestion():
+            return
+        self.action_accept_form()
+
+    def action_accept_form(self) -> None:
+        """Collect the row values and dismiss; every form dialog overrides this."""
+        raise NotImplementedError
+
+    def on_key(self, event: Any) -> None:
+        """Esc first closes an open suggestion list, then the dialog."""
+        if self._active is not None and self._active.dismiss_suggestions(str(event.key)):
+            event.stop()
+            return
+        _step_focused_choice(self, event)
 
     def _move_row(self, delta: int) -> None:
         if not self._rows:
@@ -455,7 +605,7 @@ class ElicitationDialog(_FormMixin, _DialogBase):
         self._setup_rows(self._fields)
 
     def form_hint(self) -> str:
-        return "↑/↓ move · ←/→ change · Enter accept · d decline · Esc cancel"
+        return "↑/↓ move · Tab next · ←/→ change · Enter accept · d decline · Esc cancel"
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):

@@ -122,8 +122,14 @@ class HarnessApp(App[int]):
     .role-you .message-role { color: $accent; }
     .role-agent .message-role { color: $text-muted; }
     .role-you .message-body {
-        border-left: tall $accent;
-        padding-left: 1;
+        height: auto;
+    }
+    .role-you .message-text { margin-left: 1; }
+    .transcript-bar {
+        dock: left;
+        width: 1;
+        height: 100%;
+        background: $accent;
     }
     .role-agent .message-body {
         padding-left: 1;
@@ -145,22 +151,26 @@ class HarnessApp(App[int]):
     }
     .notice {
         margin: 0 0 1 0;
-        padding: 0 1;
+        padding: 0 1 0 0;
+        height: auto;
         background: $surface 60%;
-        border-left: thick $border;
         color: $text-muted;
     }
-    .notice-warning { border-left: thick $warning; color: $foreground; }
-    .notice-error { border-left: thick $error; color: $error; }
-    .notice-success { border-left: thick $success; color: $foreground; }
+    .notice .transcript-bar { background: $border; margin-right: 1; }
+    .notice-warning { color: $foreground; }
+    .notice-warning .transcript-bar { background: $warning; }
+    .notice-error { color: $error; }
+    .notice-error .transcript-bar { background: $error; }
+    .notice-success { color: $foreground; }
+    .notice-success .transcript-bar { background: $success; }
 
     .tool-card {
         background: $surface 65%;
-        border-left: tall $accent 35%;
-        padding: 0 1;
+        padding: 0 1 0 0;
         margin: 0 0 1 1;
         height: auto;
     }
+    .tool-card .transcript-bar { background: $accent 35%; margin-right: 1; }
     .tool-card:focus { background: $surface 85%; }
     .tool-card .tool-header { height: auto; }
     .tool-card .tool-output,
@@ -524,11 +534,28 @@ class HarnessApp(App[int]):
         scrollbar-size-vertical: 1;
     }
     .field-row {
+        height: auto;
+    }
+    .field-line {
         height: 1;
     }
     .field-row:focus,
     .field-row:focus-within {
         background: $boost 35%;
+    }
+    .field-badge {
+        width: auto;
+        padding-left: 1;
+        color: $warning;
+    }
+    .field-suggestions {
+        height: auto;
+        max-height: 7;
+        margin-left: 28;
+        border: none;
+        padding: 0;
+        background: $panel;
+        scrollbar-size-vertical: 1;
     }
     .field-gutter {
         width: 2;
