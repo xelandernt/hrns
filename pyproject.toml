@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "harness"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Programmable Pydantic AI agents with an interoperable ACP terminal and hosting"
 readme = "README.md"
 license = "MIT"
@@ -68,7 +68,16 @@ dev = [
     "httpx>=0.28",
     "pyrefly>=1.4.0",
     "types-pyyaml>=6",
+    "prek>=0.5.7",
 ]
+docs = [
+    "mkdocstrings-python>=2.0.10",
+    "zensical>=0.0.67,<0.1",
+]
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.1"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness"]

@@ -5,6 +5,8 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+site/
+.cache/
 benchmark-results/
 *.db
 *.db-shm
