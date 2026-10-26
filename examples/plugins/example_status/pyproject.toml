@@ -7,10 +7,7 @@ name = "hrns-example-status"
 version = "0.1.0"
 description = "Example hrns plugin: user-only commands and an independent tool view"
 requires-python = ">=3.11"
-dependencies = ["hrns[runtime]"]
-
-[project.optional-dependencies]
-ui = ["hrns[client]"]
+dependencies = ["hrns"]
 
 [project.entry-points."hrns.capabilities"]
 example_status = "example_status:descriptor"

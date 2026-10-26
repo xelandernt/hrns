@@ -159,10 +159,11 @@ def local_target(
             settings.resolved_api_key()
     except (ValueError, OSError) as exc:
         raise HrnsClientError(str(exc)) from exc
-    if shutil.which("hrns-local") is None:
+    executable = shutil.which("hrns-local") or _sibling_script("hrns-local")
+    if executable is None:
         raise HrnsClientError(
-            "Local mode requires hrns-local in PATH. Install 'hrns[runtime,openai]' "
-            "for DeepSeek and OpenAI-compatible models."
+            "Local mode requires the hrns-local command. Reinstall hrns so its "
+            "console scripts are on PATH."
         )
     path = settings.config_file.expanduser().absolute() if settings.config_file else None
     env = {name: f"env:{name}" for name in os.environ}
@@ -170,7 +171,7 @@ def local_target(
         env["HRNS_LOCAL_API_KEY"] = api_key_ref
     profile = Profile(
         name=f"{settings.provider}:{settings.model}",
-        command="hrns-local",
+        command=executable,
         args=["--config", str(path)] if path and path.is_file() else ["--env-only"],
         cwd=cwd or "",
         # Unlike generic ACP agents, the explicitly selected local runtime needs the

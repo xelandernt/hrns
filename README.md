@@ -44,14 +44,17 @@ dependency sync, run `uv run prek install`.
 
 ## Use a local agent with your model
 
-The local developer agent is the default connection mode. Install the provider
-extra and set the API key for the provider you use:
+The local developer agent is the default connection mode. The base install ships the
+terminal, the runtime, and the OpenAI-compatible providers (DeepSeek, OpenAI, and local
+servers); add the `anthropic` extra for Anthropic models. Set the API key for the provider
+you use:
 
 ```sh
-uv sync --locked --extra client --extra runtime --extra openai
 export DEEPSEEK_API_KEY='your-key'
-uv run hrns
+uvx hrns
 ```
+
+From a checkout, run `uv sync --locked` and then `uv run hrns` instead.
 
 Press **l** to configure a provider and model, type `/models` in a session, or create
 `hrns.local.toml` in the project:
@@ -62,7 +65,8 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
-`uv run hrns` starts a session in the current directory using that model. The bundled
+`uv run hrns` starts a session in the current directory using that model. Run the same
+command from an installed copy (`uvx hrns` or `hrns`). The bundled
 `hrns.coder` capability gives it file tools, content search, and a shell in that
 directory: reads are automatic, while writes, edits, and commands ask for approval first.
 `hrns.ask_user` lets the model ask structured multiple-choice questions in the terminal;
@@ -111,23 +115,22 @@ See [server embedding](docs/SERVER.md) and [the runnable example](examples/fasta
 
 ## Layout
 
-hrns is one distribution with optional extras. Protocol and local settings
-ship by default; the runtime, terminal, and server dependencies are opt-in.
+hrns is one distribution. The terminal, the runtime and the OpenAI-compatible providers
+ship by default; FastAPI hosting, Anthropic models and PostgreSQL are extras.
 
 | Module | Extra | Purpose |
 | --- | --- | --- |
 | `hrns.protocol` | base | Versioned extension schemas and transport contracts |
 | `hrns.config` | base | Shared local settings using pydantic-settings |
-| `hrns.runtime` | `runtime` | Native agent definitions, plugin management, sessions, `hrns-host` and `hrns-local` |
-| `hrns.client` | `client` | Textual terminal, scripted ACP runner and stdio bridge |
+| `hrns.runtime` | base | Native agent definitions, plugin management, sessions, `hrns-host` and `hrns-local` |
+| `hrns.client` | base | Textual terminal, scripted ACP runner and stdio bridge |
 | `hrns.server` | `server` | FastAPI agent registration and in-process WebSocket ACP |
 
-Install only what you need, for example `pip install 'hrns[client]'`,
-`pip install 'hrns[openai]'`, or `pip install 'hrns[all]'`.
+Install only what you need, for example `pip install 'hrns[server]'`,
+`pip install 'hrns[anthropic]'`, or `pip install 'hrns[all]'`.
 
 The `hrns.client` module does not import Pydantic AI or installed agent
-plugins, and installing `hrns[client]` alone does not install the runtime.
-Local stdio agents run in a separate process. Network agents run inside an existing
+plugins. Local stdio agents run in a separate process. Network agents run inside an existing
 FastAPI application through `AgentServer`, sharing an explicit SQLite or PostgreSQL store.
 
 ## Design essentials

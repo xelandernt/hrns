@@ -197,6 +197,10 @@ class TranscriptPane(VerticalScroll):
                 self._following = True
                 self.call_after_refresh(self._resume_following)
             self.post_message(OutputPending(False))
+        elif not self._following:
+            # Keep the jump-to-end affordance visible while the user reads back,
+            # even when no new output arrives after they scroll away.
+            self.post_message(OutputPending(True))
 
     def _resume_following(self) -> None:
         if self._following and self.is_mounted:

@@ -1,7 +1,7 @@
 """Optional local Textual views for the example plugin.
 
 Nothing in this module is imported by the runtime descriptor provider or the protocol
-package. Install the client extra to use these widgets.
+package. The terminal that loads these widgets ships with hrns.
 """
 
 from __future__ import annotations

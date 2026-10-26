@@ -25,7 +25,7 @@ configured live through the capability panel.
 ACP in an existing FastAPI app, and shares an explicit SQLite store:
 
 ```sh
-uv sync --locked --extra server --extra client --extra openai
+uv sync --locked --extra server
 export OPENAI_API_KEY='your-key'
 uv run uvicorn examples.fastapi_app:app --host 127.0.0.1 --port 8080 --ws-max-size 16777216
 uv run hrns connect --url http://127.0.0.1:8080 --agent example.house_style
@@ -37,12 +37,11 @@ are Python dependencies described in [SERVER.md](../docs/SERVER.md).
 ## 3. Installable plugin example
 
 `examples/plugins/example_status` is a complete package: a native echo tool, independent
-user-only `status`/`ask` commands, and optional Textual views installed separately under
+user-only `status`/`ask` commands, and optional Textual views registered under
 `hrns.renderers`.
 
 ```sh
 uv pip install -e examples/plugins/example_status
-uv pip install -e "examples/plugins/example_status[ui]"
 ```
 
 See [its README](plugins/example_status/README.md) and

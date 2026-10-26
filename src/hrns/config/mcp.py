@@ -1,8 +1,8 @@
 """MCP server configuration and client helpers shared by CLI and runtime.
 
 The models are plain Pydantic so the client can read and write ``hrns.local.toml``
-without installing the runtime extras. Everything that touches FastMCP (transports, OAuth,
-token storage) imports lazily, so a base install still imports this module.
+without importing the runtime. Everything that touches FastMCP (transports, OAuth,
+token storage) imports lazily so ``hrns mcp`` stays cheap to start.
 """
 
 from __future__ import annotations

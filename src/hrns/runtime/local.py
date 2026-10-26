@@ -185,7 +185,8 @@ def configured_model(settings: LocalSettings, model_id: str | None = None) -> Mo
     except ImportError as exc:
         raise ValueError(
             f"Install the Pydantic AI provider extra for {provider!r} in the runtime "
-            "environment (DeepSeek/OpenAI-compatible: hrns[runtime,openai])."
+            "environment (for example hrns[anthropic]). OpenAI-compatible providers "
+            "such as DeepSeek ship with hrns."
         ) from exc
     except (ValueError, TypeError, UserError) as exc:
         raise ValueError(
