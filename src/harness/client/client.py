@@ -41,7 +41,6 @@ from .bus import EventBus
 from .connection import ConnectionLifecycle
 from .constants import (
     CLIENT_NAME,
-    CLIENT_VERSION,
     CONNECT_TIMEOUT,
 )
 from .errors import (
@@ -110,7 +109,7 @@ class HarnessAcpClient:
         self.extension = HarnessExtension()
         self.capabilities: ClientCapabilities = self._build_capabilities()
         self.agent_name = CLIENT_NAME
-        self.agent_version = CLIENT_VERSION
+        self.agent_version = ""
         self.agent_title = CLIENT_NAME
         self.auth_methods: list[Any] = []
 
