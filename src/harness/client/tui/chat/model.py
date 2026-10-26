@@ -148,7 +148,9 @@ class ModelWorkflow:
             {
                 "value": "__configure__",
                 "name": "Configure provider or model…",
-                "description": "Add a provider, paste a key, set a base URL or enter a custom model id.",
+                "description": (
+                    "Add a provider, paste a key, set a base URL, or type any provider or model id."
+                ),
             }
         )
 

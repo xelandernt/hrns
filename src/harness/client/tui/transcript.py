@@ -593,6 +593,7 @@ class ToolCard(Vertical):
             self._view_host.mount(view.widget)
 
     def compose(self) -> ComposeResult:
+        yield Static(classes="transcript-bar")
         yield self._header
         yield self._view_host
         yield self._preview
