@@ -1,6 +1,6 @@
 """Session-scoped plan state and ACP plan notifications for the todo capability.
 
-The upstream ``Planning`` capability owns the model-facing tools and the reminder. This
+The upstream planning toolset owns the model-facing tools. This
 module only keeps one store per ACP session and mirrors every mutation to the connected
 client as a standard ``session/update`` plan notification.
 """

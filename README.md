@@ -1,3 +1,26 @@
+# Benchmark results
+
+Three runs per harness on a benchmark task using **GPT-6-Luna with medium reasoning**.
+
+| Harness | Tests pass | All quality gates pass | Model responses | Tool calls | Total cost | Average/run |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Codex | 3/3 | 3/3 | 44 | 56 | $0.03658 | $0.01219 |
+| OpenCode | 3/3 | 2/3 | 43 | 47 | $0.03578 | $0.01193 |
+| **hrns** | **3/3** | **3/3** | **44** | **59** | **$0.03300** | **$0.01100** |
+
+All runs pass **130/130 tests**. Quality gates cover Ruff lint, Ruff formatting,
+and Pyrefly type checking.
+
+Counts and costs are totals across three runs. Model responses include tool-only
+responses and final answers. Tool calls count underlying attempts, including
+failures; Codex's 41 orchestration calls contain 56 underlying attempts.
+Costs are cache-aware **API equivalents in USD** using common Standard model pricing.
+
+Skill loads: **Codex 0/3**, **OpenCode 1/3**, **hrns 3/3**. The loaded skill is
+`incremental-implementation`, with relevant selection and partial adherence.
+
+---
+
 # Harness
 
 **Define an agent once. Run it in Python, open it in a terminal, or host it remotely.**
@@ -116,44 +139,19 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 - **Explicit resources:** workspace and provider bindings belong to the host. A local workspace is a path, not a sandbox.
 - **Standard ACP first:** generic streaming content, tools and approvals work without project-specific extensions.
 
-## Documentation
-
-Run `just docs` to preview the Zensical site at <http://127.0.0.1:8000> with live
-reload. The separate `docs` dependency group is installed automatically. The site
-includes these guides, a Python API reference generated from source and docstrings,
-`llms.txt`, and `llms-full.txt`.
-
-Publishing a GitHub release builds the documentation at the release tag and saves
-the `site/` output as a `docs-<tag>` workflow artifact. Documentation is not built
-by commit hooks or ordinary push/pull-request CI. The site uses root-relative URLs;
-set `site_url` in `zensical.toml` to the public documentation URL when hosting it.
-
-- [Architecture](docs/ARCHITECTURE.md) and [shared contracts](docs/CONTRACTS.md)
-- [Extension protocol and wire examples](docs/PROTOCOL.md)
-- [Runtime Python API](docs/RUNTIME_API.md)
-- [ACP host](docs/ACP.md) and [client usage](docs/CLIENT_API.md)
-- [Embed agents in FastAPI](docs/SERVER.md)
-- [Workspace lifecycle](docs/WORKSPACES.md)
-- [Security model](docs/SECURITY.md)
-- [Concept compliance matrix](docs/COMPLIANCE.md)
-- [Verification and support boundaries](docs/VERIFICATION.md)
-
 ## Checks and distribution builds
 
 ```sh
-uv run ruff format --check src examples
-uv run ruff check .
-uv run pyrefly check src examples --no-progress-bar
-uv build
+just check
+just lint
+just build
+just fix
 ```
 
-Or run `just check` with [just](https://just.systems/) installed; `just fix` applies the
-automatic formatting and lint fixes. CI exercises the same non-mutating checks on
+`just check` runs the checks and builds the package. `just lint` runs formatting,
+lint, and type checks; `just build` builds the package. `just fix` applies automatic
+formatting and lint fixes. CI exercises the same non-mutating checks on
 macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
-
-Package versions come from Git tags through [hatch-vcs](https://pypi.org/project/hatch-vcs/).
-Tag releases as `v1.2.3`; commits between releases receive development versions.
-When version detection is unavailable, the build falls back to `0.0.1`.
 
 External provider, sandbox and durability integrations need their upstream extras and credentials. See the coverage matrix for managed, locally verified and deployment-only distinctions.
 
