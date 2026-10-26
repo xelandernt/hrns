@@ -155,6 +155,28 @@ macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written 
 
 External provider, sandbox and durability integrations need their upstream extras and credentials. See the coverage matrix for managed, locally verified and deployment-only distinctions.
 
+## Releasing
+
+The version comes from the git tag via hatch-vcs, so there is no version string to
+edit. Publishing runs on release: create a GitHub release and
+`.github/workflows/publish.yml` builds the distribution, runs `just check`, verifies
+the tag, and uploads to PyPI.
+
+```sh
+git tag 0.1.0
+git push origin 0.1.0
+gh release create 0.1.0 --generate-notes
+```
+
+The tag must match the version hatch-vcs derives, so `0.1.0` publishes `0.1.0`. A
+mismatched tag fails the build instead of uploading an unintended version, and a
+version that already exists on PyPI is rejected.
+
+Uploads use PyPI Trusted Publishing, so no API token is stored in the repository.
+Before the first release, configure a publisher on PyPI for the `hrns` project with
+this repository's owner and name, workflow `publish.yml`, and environment `pypi`.
+Because `hrns` does not exist on PyPI yet, use the pending publisher form.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

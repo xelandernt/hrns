@@ -1,0 +1,66 @@
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          # hatch-vcs derives the version from git tags, so history must be complete.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - uses: extractions/setup-just@v4
+      - run: just install
+      - run: just check
+      - name: Verify the tag matches the built version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          expected="${TAG#v}"
+          actual="$(uv run python -c 'from importlib.metadata import version; print(version("hrns"))')"
+          echo "tag=$expected built=$actual"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Tag $TAG does not match the built version $actual. Tag the release with the version hatch-vcs should produce (for example 0.1.0)."
+            exit 1
+          fi
+      - name: Validate distribution metadata
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hrns
+    permissions:
+      # Trusted Publishing: PyPI exchanges this OIDC token for a short-lived upload token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
