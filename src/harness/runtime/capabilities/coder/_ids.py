@@ -6,8 +6,7 @@ __all__ = ["RENDERER_IDS", "renderer_id"]
 
 RENDERER_IDS = (
     "harness.tool.read_file",
-    "harness.tool.write_file",
-    "harness.tool.edit_file",
+    "harness.tool.apply_changes",
     "harness.tool.list_files",
     "harness.tool.grep",
     "harness.tool.shell",

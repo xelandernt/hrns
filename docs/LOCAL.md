@@ -10,6 +10,18 @@ terminal. Installed plugins remain available to explicit
 `AgentDefinition` objects; managed bindings are selected when a session is created and stay
 fixed for that conversation.
 
+File mutations use `apply_changes(changes=[...])` for both single-file and multi-file
+work. Each entry has a `path` and either `kind = "write"` with complete `content`, or
+`kind = "edit"` with ordered `replacements` (`old_text`, `new_text`). Include each
+resolved file only once; a batch can contain up to 64 files. `read_file` returns a
+content hash that can be passed as `expected_hash` to guard the original content.
+
+The complete batch is validated before any file is written. One approval covers the
+listed changes, with per-file previews and results in the terminal. Files are committed
+individually: a later execution failure reports which files completed, which failed,
+and which were not attempted. A failed write may have partially changed that file;
+the agent must read affected files before retrying. Batches are not transactions.
+
 ## MCP servers
 
 The local agent can use [Model Context Protocol](https://modelcontextprotocol.io) servers.
@@ -118,7 +130,9 @@ The reference is resolved by the runtime, so it works in pasted prompts and head
 runs too; a name with no matching skill is left as plain text.
 
 The bundled `harness.todo` capability is enabled in the local definition. The model uses
-`write_plan`, `read_plan`, and the task tools to keep a checklist for multi-step work. The
+`write_plan` to maintain a short checklist for multi-step work, replacing the complete
+list at meaningful milestones. Progress updates can accompany independent work in the
+same response, and completed steps require confirmed tool results. The
 first plan of a session opens the **Todos** tab in the right drawer; later updates refresh
 it in place. Close the drawer with `Esc` or `Ctrl+B`; `/todo` opens it again. The list is
 scoped to the session and is not persisted across a runtime restart.

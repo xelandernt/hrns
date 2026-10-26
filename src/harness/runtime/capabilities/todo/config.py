@@ -19,8 +19,8 @@ class TodoConfig(BaseModel):
     enable_subtasks: EditableField[bool] = Field(
         default=False,
         description=(
-            "Add subtask and dependency tools plus the `blocked` status. Subtasks appear "
-            "flat in the terminal panel."
+            "Allow parent steps, dependencies, and the `blocked` status in the full plan. "
+            "Subtasks appear flat in the terminal panel."
         ),
     )
     inject: EditableField[bool] = Field(

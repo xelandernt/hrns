@@ -1,4 +1,4 @@
-"""Harness-owned implementations of the six tools a coding agent needs.
+"""Harness-owned file, batch-change, search, and shell tools.
 
 Each tool returns a model-facing string plus a presentation payload for the terminal. Path
 resolution, read-only protection, hashes, and search backends live next door; this module is
@@ -13,18 +13,20 @@ from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import AgentDepsT, RunContext, Tool
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.workspaces import WorkspaceError, WorkspaceTimeoutError
 
+from ._changes import FileChanges, apply_file_changes
 from ._presentation import input_metadata, output_return
 from ._search import grep_workspace, list_workspace, supports_commands
-from ._workspace import FileGuard, content_hash, is_binary, unified_diff
+from ._workspace import FileGuard, content_hash, is_binary
 from .config import CoderConfig
 
 __all__ = ["CoderTools", "MUTATING_TOOLS"]
 
-MUTATING_TOOLS = frozenset({"write_file", "edit_file", "shell"})
+MUTATING_TOOLS = frozenset({"apply_changes", "shell"})
 """Tools the local host asks the user to approve before they run."""
 
 MAX_READ_LINES = 2_000
@@ -32,7 +34,6 @@ MAX_READ_CHARS = 50_000
 MAX_MODEL_TEXT = 64_000
 MAX_LIST_RESULTS = 2_000
 MAX_MATCHES = 200
-MAX_DIFF_LINES = 400
 MAX_TOOL_RETRIES = 5
 """Consecutive retries each tool allows before the run fails.
 
@@ -127,6 +128,7 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                     header += " (line truncated at the read limit)"
             else:
                 header = f"{path} (no lines at offset {start}; {len(all_lines)} lines total)"
+            header += f" [hash {content_hash(data)}]"
             body = _numbered(selected, start)
             model_text = header if not selected else f"{header}\n{body}"
             if end < len(all_lines):
@@ -136,138 +138,28 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                 "startLine": start + 1,
                 "endLine": end,
                 "totalLines": len(all_lines),
+                "hash": content_hash(data),
                 "lines": [[start + index + 1, line] for index, line in enumerate(selected)],
                 "truncated": end < len(all_lines),
                 "lineTruncated": truncated_line,
             }
             return output_return(_tail(model_text), "read_file", payload, fallback=header)
 
-        async def write_file(
-            ctx: RunContext[Any],
-            path: str,
-            content: str,
-            *,
-            expected_hash: str | None = None,
-        ) -> Any:
-            """Create a file or replace its whole content.
+        async def apply_changes(ctx: RunContext[AgentDepsT], changes: FileChanges) -> ToolReturn:
+            """Apply one or many file changes in one approved batch.
+
+            Batch all known changes to independent files together. Use one entry per file:
+            `write` supplies complete content; `edit` supplies ordered exact replacements.
+            Each replacement's old_text must match exactly once after earlier replacements;
+            include surrounding context to make it unique. Omit line-number prefixes from
+            read_file output. expected_hash optionally checks the original file content.
+            If a batch fails partway, use the per-file results to decide what to retry.
 
             Args:
                 ctx: The current agent run context.
-                path: File path relative to the working directory.
-                content: The complete new text content.
-                expected_hash: Reject the write when the file exists and its hash differs.
+                changes: File writes and edits, with at most one entry per resolved file.
             """
-            workspace = ctx.workspace
-            resolved = await _guard(ctx, config).check(path, write=True)
-            before = ""
-            before_bytes = b""
-            existed = False
-            try:
-                existing = await workspace.read_bytes(resolved)
-                before_bytes = existing
-                before = _read_text(existing)
-                existed = True
-            except (FileNotFoundError, IsADirectoryError):
-                existed = False
-            except (WorkspaceError, OSError) as exc:
-                raise ModelRetry(f"Could not read {path!r}: {exc}") from exc
-            if existed and expected_hash is not None:
-                current = content_hash(before_bytes)
-                if current != expected_hash:
-                    raise ModelRetry(
-                        f"{path!r} changed since it was read (now {current}). "
-                        "Read it again before writing."
-                    )
-            try:
-                await workspace.write_bytes(resolved, content.encode())
-            except (WorkspaceError, OSError) as exc:
-                raise ModelRetry(f"Could not write {path!r}: {exc}") from exc
-            new_hash = content_hash(content.encode())
-            if existed:
-                diff = unified_diff(before, content, limit=MAX_DIFF_LINES)
-                added = sum(1 for line in diff if line.startswith("+"))
-                removed = sum(1 for line in diff if line.startswith("-"))
-            else:
-                added = len(content.splitlines())
-                removed = 0
-                diff = [f"+{line}" for line in content.splitlines()[:MAX_DIFF_LINES]]
-            verb = "Updated" if existed else "Created"
-            model_text = f"{verb} {path} (+{added} -{removed}, hash {new_hash})"
-            payload = {
-                "path": path,
-                "created": not existed,
-                "added": added,
-                "removed": removed,
-                "hash": new_hash,
-                "diff": diff,
-            }
-            return output_return(model_text, "write_file", payload)
-
-        async def edit_file(
-            ctx: RunContext[Any],
-            path: str,
-            old_text: str,
-            new_text: str,
-            *,
-            expected_hash: str | None = None,
-        ) -> Any:
-            """Replace one exact, unique piece of text in a file.
-
-            Args:
-                ctx: The current agent run context.
-                path: File path relative to the working directory.
-                old_text: The exact text to find; it must appear exactly once.
-                new_text: The replacement text.
-                expected_hash: Reject the edit when the file's hash differs.
-            """
-            if not old_text:
-                raise ModelRetry("old_text must not be empty; use write_file to replace a file.")
-            workspace = ctx.workspace
-            resolved = await _guard(ctx, config).check(path, write=True)
-            try:
-                data = await workspace.read_bytes(resolved)
-            except FileNotFoundError as exc:
-                raise ModelRetry(f"Path not found: {path}") from exc
-            except (WorkspaceError, OSError) as exc:
-                raise ModelRetry(f"Could not read {path!r}: {exc}") from exc
-            if is_binary(data):
-                raise ModelRetry(f"{path!r} is a binary file and cannot be edited as text.")
-            before = _read_text(data)
-            if expected_hash is not None:
-                current = content_hash(data)
-                if current != expected_hash:
-                    raise ModelRetry(
-                        f"{path!r} changed since it was read (now {current}). "
-                        "Read it again before editing."
-                    )
-            occurrences = before.count(old_text)
-            if occurrences == 0:
-                raise ModelRetry(
-                    f"old_text was not found in {path!r}. Read the file and copy the exact text."
-                )
-            if occurrences > 1:
-                raise ModelRetry(
-                    f"old_text appears {occurrences} times in {path!r}; include more "
-                    "surrounding lines so it is unique."
-                )
-            after = before.replace(old_text, new_text, 1)
-            try:
-                await workspace.write_bytes(resolved, after.encode())
-            except (WorkspaceError, OSError) as exc:
-                raise ModelRetry(f"Could not write {path!r}: {exc}") from exc
-            new_hash = content_hash(after.encode())
-            diff = unified_diff(before, after, limit=MAX_DIFF_LINES)
-            added = sum(1 for line in diff if line.startswith("+"))
-            removed = sum(1 for line in diff if line.startswith("-"))
-            model_text = f"Edited {path} (+{added} -{removed}, hash {new_hash})"
-            payload = {
-                "path": path,
-                "added": added,
-                "removed": removed,
-                "hash": new_hash,
-                "diff": diff,
-            }
-            return output_return(model_text, "edit_file", payload)
+            return await apply_file_changes(ctx.workspace, config, changes)
 
         async def list_files(
             ctx: RunContext[Any],
@@ -441,16 +333,11 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                     metadata=input_metadata("read_file", pending="Reading file…"),
                 ),
                 Tool(
-                    write_file,
-                    name="write_file",
+                    apply_changes,
+                    name="apply_changes",
                     takes_ctx=True,
-                    metadata=input_metadata("write_file", pending="Writing file…"),
-                ),
-                Tool(
-                    edit_file,
-                    name="edit_file",
-                    takes_ctx=True,
-                    metadata=input_metadata("edit_file", pending="Editing file…"),
+                    sequential=True,
+                    metadata=input_metadata("apply_changes", pending="Applying file changes…"),
                 ),
                 Tool(
                     list_files,

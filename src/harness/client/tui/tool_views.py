@@ -58,21 +58,16 @@ def _more(text: Text, hidden: int, noun: str = "lines") -> None:
     text.append(f"… {hidden} more {noun}", style="dim")
 
 
-def _diff_text(state: ToolViewState) -> Text:
-    data = _data(state)
-    return _diff_body(data) if data else _pending(state)
-
-
-def _diff_body(data: Mapping[str, Any]) -> Text:
+def _diff_body(data: Mapping[str, Any], *, limit: int = _DIFF_ROWS) -> Text:
     text = Text()
-    text.append(str(data.get("path") or ""), style="bold")
+    text.append(readable_text(data.get("path") or "", limit=400), style="bold")
     verb = str(data.get("verb") or ("created" if data.get("created") else "edited"))
     text.append(f"  {verb}  ", style="dim")
     text.append(f"+{int(data.get('added') or 0)}", style="green")
     text.append(" ")
     text.append(f"-{int(data.get('removed') or 0)}", style="red")
     rows = [str(row) for row in (data.get("diff") or [])]
-    for row in rows[:_DIFF_ROWS]:
+    for row in rows[:limit]:
         text.append("\n")
         if row.startswith("@@"):
             style = "cyan"
@@ -83,8 +78,33 @@ def _diff_body(data: Mapping[str, Any]) -> Text:
         else:
             style = "dim"
         text.append(readable_text(row, limit=400), style=style)
-    _more(text, len(rows) - _DIFF_ROWS)
+    _more(text, len(rows) - limit)
     return text
+
+
+def _file_changes(state: ToolViewState) -> Text:
+    files = _data(state).get("files")
+    if not isinstance(files, list) or not files:
+        return _pending(state)
+    text = Text()
+    remaining = _DIFF_ROWS
+    if _data(state).get("success") is False:
+        text.append("Batch incomplete", style="yellow")
+    for item in files[:64]:
+        if not isinstance(item, dict):
+            continue
+        if text:
+            text.append("\n\n")
+        if item.get("status") == "completed":
+            text.append_text(_diff_body(item, limit=remaining))
+            remaining = max(0, remaining - len(item.get("diff") or []))
+        else:
+            text.append(readable_text(item.get("path") or "", limit=400), style="bold")
+            text.append(f"  {item.get('status') or 'unknown'}", style="yellow")
+            if item.get("error"):
+                text.append("\n" + readable_text(item["error"], limit=800), style="red")
+    _more(text, len(files) - 64, "files")
+    return text if text else _pending(state)
 
 
 def _read_file(state: ToolViewState) -> Text:
@@ -232,41 +252,51 @@ def _approval_shell(state: ToolViewState) -> Text:
     return _shell_body({"command": command})
 
 
-def _approval_write(state: ToolViewState) -> Text:
-    args = _args(state)
-    path = args.get("path") or args.get("file_path")
-    content = str(args.get("content") or "")
-    if not path and not content:
+def _approval_changes(state: ToolViewState) -> Text:
+    changes = _args(state).get("changes")
+    if not isinstance(changes, list) or not changes:
         return _pending(state)
-    rows = [f"+ {line}" for line in content.splitlines()]
-    return _diff_body(
-        {
-            "path": path or "",
-            "verb": "write",
-            "added": len(rows),
-            "removed": 0,
-            "diff": rows,
-        }
-    )
-
-
-def _approval_edit(state: ToolViewState) -> Text:
-    args = _args(state)
-    old = str(args.get("old_text") or args.get("old_string") or "")
-    new = str(args.get("new_text") or args.get("new_string") or "")
-    if not old and not new:
-        return _pending(state)
-    old_rows = [f"- {line}" for line in old.splitlines()]
-    new_rows = [f"+ {line}" for line in new.splitlines()]
-    return _diff_body(
-        {
-            "path": args.get("path") or args.get("file_path") or "",
-            "verb": "edit",
-            "added": len(new_rows),
-            "removed": len(old_rows),
-            "diff": old_rows + new_rows,
-        }
-    )
+    text = Text()
+    remaining = _DIFF_ROWS
+    for change in changes[:64]:
+        if not isinstance(change, dict):
+            continue
+        added: list[str] = []
+        removed: list[str] = []
+        rows: list[str] = []
+        if change.get("kind") == "write":
+            added = str(change.get("content") or "").splitlines()
+            rows = [f"+ {line}" for line in added]
+        else:
+            replacements = change.get("replacements") or []
+            if not isinstance(replacements, list):
+                continue
+            for index, replacement in enumerate(replacements, 1):
+                if isinstance(replacement, dict):
+                    old_rows = str(replacement.get("old_text") or "").splitlines()
+                    new_rows = str(replacement.get("new_text") or "").splitlines()
+                    removed.extend(old_rows)
+                    added.extend(new_rows)
+                    rows.append(f"@@ replacement {index} @@")
+                    rows.extend(f"- {line}" for line in old_rows)
+                    rows.extend(f"+ {line}" for line in new_rows)
+        if text:
+            text.append("\n\n")
+        text.append_text(
+            _diff_body(
+                {
+                    "path": readable_text(change.get("path") or "", limit=400),
+                    "verb": change.get("kind") or "change",
+                    "added": len(added),
+                    "removed": len(removed),
+                    "diff": rows,
+                },
+                limit=remaining,
+            )
+        )
+        remaining = max(0, remaining - len(rows))
+    _more(text, len(changes) - 64, "files")
+    return text if text else _pending(state)
 
 
 def _approval_read(state: ToolViewState) -> Text:
@@ -353,8 +383,7 @@ ToolFactory: TypeAlias = Callable[[ToolViewState, ViewContext], ViewHandle[Any]]
 
 _VIEWS: dict[str, ToolFactory] = {
     "harness.tool.read_file": _factory(_read_file),
-    "harness.tool.write_file": _factory(_diff_text),
-    "harness.tool.edit_file": _factory(_diff_text),
+    "harness.tool.apply_changes": _factory(_file_changes),
     "harness.tool.list_files": _factory(_list_files),
     "harness.tool.grep": _factory(_grep),
     "harness.tool.shell": _factory(_shell),
@@ -362,8 +391,7 @@ _VIEWS: dict[str, ToolFactory] = {
 
 _APPROVAL_VIEWS: dict[str, ToolFactory] = {
     "harness.tool.read_file": _factory(_approval_read),
-    "harness.tool.write_file": _factory(_approval_write),
-    "harness.tool.edit_file": _factory(_approval_edit),
+    "harness.tool.apply_changes": _factory(_approval_changes),
     "harness.tool.list_files": _factory(_approval_list),
     "harness.tool.grep": _factory(_approval_grep),
     "harness.tool.shell": _factory(_approval_shell),

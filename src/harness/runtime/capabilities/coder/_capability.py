@@ -43,8 +43,8 @@ class _RequireWorkspace(AbstractCapability[AgentDepsT]):
 class Coder(CombinedCapability[AgentDepsT]):
     """A coding agent's tools, instructions, and context management in the run workspace.
 
-    Six tools run through `ctx.workspace`: `read_file`, `write_file`, `edit_file`,
-    `list_files`, `grep`, and `shell`. Writes and edits are hash-checked, credentials and
+    Five tools run through `ctx.workspace`: `read_file`, `apply_changes`,
+    `list_files`, `grep`, and `shell`. File changes are preflighted as a batch, credentials and
     version-control internals are read-only, and a run without a workspace fails at its
     start.
 
