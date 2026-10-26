@@ -190,9 +190,17 @@ class TranscriptPane(VerticalScroll):
             self._following = False
         if self.is_vertical_scroll_end:
             if not self._following:
-                self.anchor()
-            self._following = True
+                # Re-anchor after the refresh. Calling anchor() here would
+                # force-stop the scroll animation that is currently assigning
+                # scroll_y; the animator would then try to delete an animation
+                # that was already removed, raising KeyError.
+                self._following = True
+                self.call_after_refresh(self._resume_following)
             self.post_message(OutputPending(False))
+
+    def _resume_following(self) -> None:
+        if self._following and self.is_mounted:
+            self.anchor()
 
     def _output_updated(self) -> None:
         if not self._following:
