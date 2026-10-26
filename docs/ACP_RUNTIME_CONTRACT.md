@@ -1,13 +1,13 @@
 # ACP runtime contract
 
 Status: **implemented on the pinned upstream adapter**. ACP execution is owned by
-`pydantic_ai_harness.experimental.acp.PydanticAIACPAgent`; Harness supplies composition,
+`pydantic_ai_harness.experimental.acp.PydanticAIACPAgent`; hrns supplies composition,
 policy, scoped persistence, and a small metadata surface.
 
 ## 1. Composition entry point
 
 ```python
-from harness.runtime.composition import compose_definition
+from hrns.runtime.composition import compose_definition
 
 composition = await compose_definition(
     definition,
@@ -47,7 +47,7 @@ override private execution methods and does not implement a second turn loop.
 ## 3. Session behavior
 
 - `session/new` validates `cwd` against host roots, rejects `additionalDirectories` and
-  client MCP servers, parses `_meta.harness.initialConfiguration`, and composes the initial agent.
+  client MCP servers, parses `_meta.hrns.initialConfiguration`, and composes the initial agent.
 - `session/load` uses the stored cwd and selected bindings, validates scope, and lets the
   adapter replay the upstream transcript.
 - `session/prompt` delegates to the adapter. After a committed turn the host records a
@@ -58,15 +58,15 @@ override private execution methods and does not implement a second turn loop.
   session before removing its row.
 - Model selection uses the adapter's standard `model` option. Reasoning effort is an
   additional standard `effort` option.
-- `_harness/configuration/update` validates a complete change set, checks
+- `_hrns/configuration/update` validates a complete change set, checks
   `expectedRevision`, and records request-id idempotency in memory. It rebuilds the native
   agent and mutates the existing `Composition` in place, preserving the `SessionDeps` object
   the adapter passes to each run.
 - Changes are serialized behind a per-session prompt lock, so they take effect at the next
   turn boundary. `next_turn` bindings can be enabled/disabled/configured/added; `new_session`
   bindings still require a new session.
-- `_harness/plugins/list` is advertised only when local binding creation is enabled.
-  `_harness/configuration/changed` notifies the client of a committed snapshot.
+- `_hrns/plugins/list` is advertised only when local binding creation is enabled.
+  `_hrns/configuration/changed` notifies the client of a committed snapshot.
 - Revisions are in-memory per open session, not durable.
 
 ## 4. Persistence contract
@@ -96,7 +96,7 @@ table, or transcript journal. Simultaneous writers are last-write-wins.
 
 | ID | Decision |
 | --- | --- |
-| D1 | Live next-turn managed configuration. `session/new` selects the initial set; `_harness/configuration/update` applies validated edits at the next turn boundary. `new_session` lifecycle bindings still require a new session. |
+| D1 | Live next-turn managed configuration. `session/new` selects the initial set; `_hrns/configuration/update` applies validated edits at the next turn boundary. `new_session` lifecycle bindings still require a new session. |
 | D2 | Live reasoning effort through a native capability returning per-request model settings. |
 | D3 | Host metadata: list, delete, title, usage. Automatic model-generated titles removed. |
 | D4 | Local workspace path only; no managed lease/job subsystem. |
@@ -105,7 +105,7 @@ table, or transcript journal. Simultaneous writers are last-write-wins.
 
 ## 6. Error mapping
 
-`HarnessError` becomes JSON-RPC `-32000` with `error.data = {code, details}`. Malformed
+`HrnsError` becomes JSON-RPC `-32000` with `error.data = {code, details}`. Malformed
 parameters use invalid-params; missing methods use method-not-found. Stable codes include
 `POLICY_DENIED`, `INVALID_CONFIGURATION`, `CAPABILITY_UNAVAILABLE`, `SESSION_CLOSED`,
 `WORKSPACE_UNAVAILABLE`, `DEPLOYMENT_UNAVAILABLE`, and `RESOURCE_UNAVAILABLE`.

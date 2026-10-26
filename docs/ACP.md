@@ -1,24 +1,24 @@
 # ACP host behavior
 
-`harness-host` and `harness-local` serve native Pydantic AI agents as standard ACP v1
+`hrns-host` and `hrns-local` serve native Pydantic AI agents as standard ACP v1
 endpoints. Both use the upstream `PydanticAIACPAgent`, which owns prompts, updates,
 approvals, cancellation, history, transcript replay, and session locks.
 
 ```
-ACP client ──stdio JSON-RPC──► harness-host / harness-local
+ACP client ──stdio JSON-RPC──► hrns-host / hrns-local
                                    │
                                    └── compose_definition -> native Agent
                                        + session_config -> AcpSessionConfig
                                        + scoped SessionStore
-                                       + _harness configuration/metadata
+                                       + _hrns configuration/metadata
 ```
 
 ## Standard ACP surface
 
 | Method | Behavior |
 | --- | --- |
-| `initialize` | Negotiates v1; advertises load, list, delete, close, and `_harness` v1 |
-| `session/new` | Validates `cwd`, parses `_meta.harness.initialConfiguration`, composes the initial agent |
+| `initialize` | Negotiates v1; advertises load, list, delete, close, and `_hrns` v1 |
+| `session/new` | Validates `cwd`, parses `_meta.hrns.initialConfiguration`, composes the initial agent |
 | `session/prompt` | Streams text/thoughts/tools and returns stop reason plus usage |
 | `session/cancel` | Cancels the active turn through the adapter |
 | `session/load` | Restores native history/transcript from the scoped store and replays updates |
@@ -36,11 +36,11 @@ The installed ACP SDK defines `session/delete` but does not route it from
 
 Managed configuration is live again and applied on the next turn boundary:
 
-- `session/new` may carry `_meta.harness.initialConfiguration` using the normal
+- `session/new` may carry `_meta.hrns.initialConfiguration` using the normal
   `enable`/`configure`/`add` change shapes. It is validated before a session is created.
-- `_harness/configuration/update` accepts the same change shapes for an open session,
+- `_hrns/configuration/update` accepts the same change shapes for an open session,
   checks `expectedRevision`, commits a validated change set, rebuilds the session's native
-  agent, and emits `_harness/configuration/changed`.
+  agent, and emits `_hrns/configuration/changed`.
 - Changes are serialized behind a per-session turn lock. A prompt in progress finishes with
   its captured composition; the edit applies to the next prompt.
 - `next_turn` bindings can be toggled, configured, or added. `new_session`-lifecycle bindings
@@ -62,33 +62,33 @@ are host metadata.
 
 ## Configuration extension
 
-Initialization advertises `_meta.harness` version 1 with:
+Initialization advertises `_meta.hrns` version 1 with:
 
 ```json
-{"harness": {"version": 1, "methods": [
-  "_harness/capabilities/list",
-  "_harness/plugins/list",
-  "_harness/configuration/get",
-  "_harness/configuration/update",
-  "_harness/configuration/changed",
-  "_harness/session/rename",
-  "_harness/session/steer"
+{"hrns": {"version": 1, "methods": [
+  "_hrns/capabilities/list",
+  "_hrns/plugins/list",
+  "_hrns/configuration/get",
+  "_hrns/configuration/update",
+  "_hrns/configuration/changed",
+  "_hrns/session/rename",
+  "_hrns/session/steer"
 ], "localBindingCreation": true}}
 ```
 
-`_harness/plugins/list` and `localBindingCreation: true` are present only for hosts that
+`_hrns/plugins/list` and `localBindingCreation: true` are present only for hosts that
 permit adding bindings. A hosted connection advertises the remaining methods with
 `localBindingCreation: false`.
 
 | Method | Response |
 | --- | --- |
-| `_harness/capabilities/list` | `BindingListResponse` for the current selection |
-| `_harness/plugins/list` | addable `PluginInfo` descriptors (local creation only) |
-| `_harness/configuration/get` | the complete `ConfigurationSnapshot` |
-| `_harness/configuration/update` | the committed snapshot after a validated edit |
-| `_harness/configuration/changed` | host notification carrying the committed snapshot |
-| `_harness/session/rename` | persists a title and emits `session_info_update` |
-| `_harness/session/steer` | injects a follow-up into the running turn at its next model request |
+| `_hrns/capabilities/list` | `BindingListResponse` for the current selection |
+| `_hrns/plugins/list` | addable `PluginInfo` descriptors (local creation only) |
+| `_hrns/configuration/get` | the complete `ConfigurationSnapshot` |
+| `_hrns/configuration/update` | the committed snapshot after a validated edit |
+| `_hrns/configuration/changed` | host notification carrying the committed snapshot |
+| `_hrns/session/rename` | persists a title and emits `session_info_update` |
+| `_hrns/session/steer` | injects a follow-up into the running turn at its next model request |
 
 Descriptors describe identity, config schema, current non-secret values, availability,
 requirements/conflicts, lifecycle, and policy. No descriptor contains executable code or
@@ -125,24 +125,24 @@ scoped metadata row; a foreign session is never leaked. Delete closes active wor
 ## Usage and titles
 
 Per-turn usage comes from `PromptResponse.usage`. After each model response, the host also
-publishes cumulative session usage in `SessionInfoUpdate._meta.harness.sessionUsage` with
+publishes cumulative session usage in `SessionInfoUpdate._meta.hrns.sessionUsage` with
 `scope: "session"`, so clients can refresh token counts while tools and further model
 requests are still running. The same response publishes a separate ACP `usage_update`
 notification whose `used`/`size` are the context gauge for that single request (with the
-per-request counters in `_meta.harness.contextUsage`), so clients can show context-window
+per-request counters in `_meta.hrns.contextUsage`), so clients can show context-window
 fill without treating cumulative counters as a gauge. The session payload also carries
 `cost` (a decimal string, present only
 when Pydantic AI priced the response) and a derived `cost_status`: `estimated` when the total
 includes a price, `unavailable` when the model has no known price. A missing price is never
 reported as free. Final usage is reconciled once and persisted in metadata; measured tokens
 and priced work remain counted if the turn is cancelled or fails. The first prompt supplies a
-fallback title; clients may rename a session through `_harness/session/rename`. There is no
+fallback title; clients may rename a session through `_hrns/session/rename`. There is no
 model-generated title tool.
 
 ## Stdio CLI
 
 ```text
-harness-host [DEFINITION] [options]
+hrns-host [DEFINITION] [options]
   --definition SOURCE | --manifest PATH
   --store PATH
   --model NAME | --models a,b

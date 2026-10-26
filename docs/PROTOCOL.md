@@ -5,40 +5,40 @@ transport framing. It does not redefine ACP.
 
 ## Extension negotiation
 
-Clients and agents may advertise `_meta.harness` on `initialize`:
+Clients and agents may advertise `_meta.hrns` on `initialize`:
 
 ```json
-{"harness": {"version": 1, "methods": ["_harness/capabilities/list"]}}
+{"hrns": {"version": 1, "methods": ["_hrns/capabilities/list"]}}
 ```
 
-Only mutually advertised methods are invoked. A Harness host advertises:
+Only mutually advertised methods are invoked. A hrns host advertises:
 
 ```json
-{"harness": {"version": 1, "methods": [
-  "_harness/capabilities/list",
-  "_harness/plugins/list",
-  "_harness/configuration/get",
-  "_harness/configuration/update",
-  "_harness/configuration/changed",
-  "_harness/session/rename",
-  "_harness/session/steer",
-  "_harness/commands/list",
-  "_harness/commands/invoke",
-  "_harness/commands/cancel",
-  "_harness/commands/changed",
-  "_harness/presentation/updated",
-  "_harness/presentation/get"
+{"hrns": {"version": 1, "methods": [
+  "_hrns/capabilities/list",
+  "_hrns/plugins/list",
+  "_hrns/configuration/get",
+  "_hrns/configuration/update",
+  "_hrns/configuration/changed",
+  "_hrns/session/rename",
+  "_hrns/session/steer",
+  "_hrns/commands/list",
+  "_hrns/commands/invoke",
+  "_hrns/commands/cancel",
+  "_hrns/commands/changed",
+  "_hrns/presentation/updated",
+  "_hrns/presentation/get"
 ], "localBindingCreation": true}}
 ```
 
 `version` is an integer major version. Unknown versions disable the extension; standard ACP
 continues to work. `localBindingCreation` is `true` for local stdio hosts and `false` for
-embedded hosted connections. `_harness/plugins/list` is advertised only when creation is
+embedded hosted connections. `_hrns/plugins/list` is advertised only when creation is
 enabled.
 
 ## Methods
 
-### `_harness/capabilities/list`
+### `_hrns/capabilities/list`
 
 Request:
 
@@ -65,7 +65,7 @@ conflicts, lifecycle, presentation ids, and policy (`available`, `enabledByDefau
 `clientCanToggle`, `editableFields`, `changeMode`). Descriptors never contain executable code,
 imports, credentials, or live objects.
 
-### `_harness/configuration/get`
+### `_hrns/configuration/get`
 
 Request: `{"sessionId": "abc"}`
 
@@ -89,7 +89,7 @@ The snapshot is the current selected state. `selectedRevision` increments after 
 committed edit; `activeRevision` identifies the composition used by the active turn. Because
 updates wait for the per-session turn lock, both are equal when a prompt starts.
 
-### `_harness/configuration/update`
+### `_hrns/configuration/update`
 
 Request:
 
@@ -107,7 +107,7 @@ Request:
 
 Response is the committed `ConfigurationSnapshot` with an incremented
 `selectedRevision`. The host validates the whole change set, rebuilds the native agent,
-persists the selected bindings, and emits `_harness/configuration/changed`.
+persists the selected bindings, and emits `_hrns/configuration/changed`.
 
 - A stale `expectedRevision` returns `REVISION_CONFLICT` with the current snapshot.
 - Reusing a `requestId` with the same payload returns the committed snapshot.
@@ -115,12 +115,12 @@ persists the selected bindings, and emits `_harness/configuration/changed`.
 - `add` is accepted only when `localBindingCreation` is advertised.
 - `new_session`-lifecycle bindings return `NEW_SESSION_REQUIRED`.
 
-### `_harness/plugins/list`
+### `_hrns/plugins/list`
 
 Request: `{"cursor": null, "limit": 50}`. Response is a `PluginListResponse` with addable
 plugin descriptors. The method is available only when local binding creation is enabled.
 
-### `_harness/configuration/changed`
+### `_hrns/configuration/changed`
 
 Server notification:
 
@@ -130,7 +130,7 @@ Server notification:
 
 The client applies the snapshot to its plugins panel. It is a notification, not a request.
 
-### `_harness/session/rename`
+### `_hrns/session/rename`
 
 Request:
 
@@ -141,7 +141,7 @@ Request:
 Response: `{"sessionId": "abc", "title": "Release notes"}`. The agent persists the title and
 may emit a standard `session_info_update`.
 
-### `_harness/session/steer`
+### `_hrns/session/steer`
 
 Request: `{"sessionId": "abc", "text": "skip the docs, fix the test first"}`. Response:
 `{"sessionId": "abc", "steered": true}`.
@@ -152,7 +152,7 @@ history. It is the mid-turn counterpart to `session/prompt`, which is serialized
 running turn. When no turn is live the host answers with an error and the client falls back to
 queueing the text locally.
 
-### `_harness/commands/list`
+### `_hrns/commands/list`
 
 Request: `{"sessionId": "abc", "cursor": null, "limit": 100}`. Response:
 `{"commands": [{"bindingId": "git", "commandName": "status", ...}], "selectedRevision": 2,
@@ -160,7 +160,7 @@ Request: `{"sessionId": "abc", "cursor": null, "limit": 100}`. Response:
 composition contribute commands. These commands are not advertised through standard ACP
 `available_commands_update`; an ordinary ACP client would send them as prompts.
 
-### `_harness/commands/invoke`
+### `_hrns/commands/invoke`
 
 Request contains `sessionId`, `bindingId`, `commandName`, `requestId`, `expectedRevision`, and
 exactly one of `text` or `arguments`. Response is a `CommandInvokeResponse` whose result
@@ -169,26 +169,26 @@ separates an optional `presentation` from at most one `conversation` action
 revision, and arguments before the handler runs. A busy session returns `COMMAND_BUSY`; a
 duplicate `requestId` with identical payload replays one result, conflicting reuse fails.
 
-### `_harness/commands/cancel`
+### `_hrns/commands/cancel`
 
 Request: `{"sessionId": "abc", "requestId": "..."}`. Cancels one known invocation, including
 one waiting to run. Response: `{"cancelled": true|false, "finished": false}`. Cancellation is
 not retried automatically and ambiguous side effects are reported as such.
 
-### `_harness/commands/changed`
+### `_hrns/commands/changed`
 
 Notification with the current `sessionId`, `selectedRevision`, command descriptors and
 supported operations. Sent after a successful configuration change replaces command
 registrations.
 
-### `_harness/presentation/updated`
+### `_hrns/presentation/updated`
 
 Notification carrying bounded `ToolPresentationSnapshot` entries keyed by `sessionId` and
 `toolCallId`, with a monotonic per-call `revision`, optional `bindingId`/`runId`, and optional
 `input`, `output`, `progress` presentation payloads. It supplements ordinary ACP tool updates;
 it never replaces their status or content.
 
-### `_harness/presentation/get`
+### `_hrns/presentation/get`
 
 Request: `{"sessionId": "abc", "toolCallIds": ["call-1"]}`. Response returns final snapshots
 reconstructed from committed native `ToolReturn` metadata. Used only for passive replay after
@@ -203,14 +203,14 @@ reconstructed from committed native `ToolReturn` metadata. Used only for passive
 
 `session/set_config_option` accepts one of those ids and returns the complete option list.
 Both selections apply from the next request. Managed bindings are edited through the
-`_harness/configuration/update` extension, not through standard config options.
+`_hrns/configuration/update` extension, not through standard config options.
 
 ## Initial configuration
 
 `session/new` may carry:
 
 ```json
-{"_meta": {"harness": {"initialConfiguration": [
+{"_meta": {"hrns": {"initialConfiguration": [
   {"type": "enable", "bindingId": "tickets", "enabled": true}
 ]}}}
 ```
@@ -235,7 +235,7 @@ unsupported methods use method-not-found.
 
 ## Network transport
 
-The project WebSocket subprotocol is `harness.acp.v1`:
+The project WebSocket subprotocol is `hrns.acp.v1`:
 
 - one JSON-RPC object per UTF-8 text frame;
 - no batches, binary frames, or duplicate keys;
@@ -250,8 +250,8 @@ not start a subprocess and does not translate JSON-RPC payloads.
 ## Client behavior
 
 - Extension methods are called only when advertised by both sides.
-- The plugins panel is editable when `_harness/configuration/update` is advertised;
-  add controls require `_harness/plugins/list` plus local binding creation.
+- The plugins panel is editable when `_hrns/configuration/update` is advertised;
+  add controls require `_hrns/plugins/list` plus local binding creation.
 - The client never automatically resends an uncertain prompt after reconnect.
 - Session load uses standard `session/load`; a failed or unsupported load is reported rather
   than silently starting a fresh conversation.

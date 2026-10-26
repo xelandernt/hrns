@@ -1,7 +1,7 @@
-# Example Harness plugin
+# Example hrns plugin
 
 This package is the smallest complete extension: a native Pydantic AI tool, two
-user-only commands, and optional Textual views. Harness needs no source changes to
+user-only commands, and optional Textual views. hrns needs no source changes to
 recognize it.
 
 ## Install
@@ -11,9 +11,9 @@ uv pip install -e examples/plugins/example_status
 uv pip install -e "examples/plugins/example_status[ui]"
 ```
 
-The runtime descriptor provider is `harness.capabilities:example_status`. The local widget
+The runtime descriptor provider is `hrns.capabilities:example_status`. The local widget
 provider is registered for `example.git.status@1` and `example.echo@1` under
-`harness.renderers`.
+`hrns.renderers`.
 
 ## Use
 
@@ -22,7 +22,7 @@ Register the plugin in an agent definition and bind it as `example`:
 ```python
 from __future__ import annotations
 
-from harness.runtime import AgentDefinition, DefinitionBinding, PluginRegistry
+from hrns.runtime import AgentDefinition, DefinitionBinding, PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()

@@ -2,7 +2,7 @@
 
 `AgentServer` registers native `AgentDefinition` objects on an existing FastAPI application
 and serves ACP over WebSockets. Agents execute inside that process through the same
-`HarnessACPAgent` and `compose_definition` path as local stdio. There is no server
+`HrnsACPAgent` and `compose_definition` path as local stdio. There is no server
 configuration file, worker command, token registry, or separate server CLI.
 
 ## Register and mount
@@ -13,8 +13,8 @@ uv sync --locked --extra server --extra client --extra openai
 
 ```python
 from fastapi import FastAPI
-from harness.runtime import AgentDefinition, SQLiteSessionStore
-from harness.server import AgentServer
+from hrns.runtime import AgentDefinition, SQLiteSessionStore
+from hrns.server import AgentServer
 
 app = FastAPI()
 agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
@@ -28,7 +28,7 @@ retaining factories and native capability objects. IDs come from `definition.age
 must be URL-safe (`[A-Za-z0-9][A-Za-z0-9._-]*`).
 
 Managed `bindings` are chosen when a session starts and can be edited during the session
-through the validated `_harness/configuration/update` transaction. Edits apply at the next
+through the validated `_hrns/configuration/update` transaction. Edits apply at the next
 turn boundary. `new_session`-lifecycle bindings still require a new session. Model and
 reasoning effort are standard ACP options and can change from the next request.
 
@@ -47,16 +47,16 @@ bearer authentication.
 ## Storage and lifespan
 
 ```python
-from harness.runtime import SQLiteSessionStore
+from hrns.runtime import SQLiteSessionStore
 
 agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
 ```
 
-PostgreSQL (`harness[postgres]`):
+PostgreSQL (`hrns[postgres]`):
 
 ```python
 import os
-from harness.runtime.postgres import PostgresSessionStore
+from hrns.runtime.postgres import PostgresSessionStore
 
 agents = AgentServer(store=PostgresSessionStore(os.environ["DATABASE_URL"]))
 ```
@@ -78,11 +78,11 @@ Without a dependency, every caller is `Principal("local")`. Static bearer tokens
 
 ```python
 import os
-from harness.server import AgentServer, BearerAuth, Principal
+from hrns.server import AgentServer, BearerAuth, Principal
 
 agents = AgentServer(
     store=store,
-    authenticate=BearerAuth({os.environ["HARNESS_TOKEN"]: Principal("alice")}),
+    authenticate=BearerAuth({os.environ["HRNS_TOKEN"]: Principal("alice")}),
 )
 ```
 
@@ -94,7 +94,7 @@ unknown and forbidden IDs both return 404. The principal is fixed for the connec
 ## Resources, models, and workspaces
 
 ```python
-from harness.runtime import MODEL, WORKSPACE
+from hrns.runtime import MODEL, WORKSPACE
 
 bound = coding_definition.bind(
     {MODEL: model, WORKSPACE: "/srv/workspaces/project"}
@@ -129,8 +129,8 @@ ordinary path; workspace execution otherwise falls back to a local path, and san
 management is deployment-owned and never silently executes on the host.
 
 Pass `registry=your_registry` for custom plugins. The default registry contains the bundled
-`harness.coder`, `harness.todo` and `harness.skills` plugins and installed
-`harness.capabilities` entry points; a
+`hrns.coder`, `hrns.todo` and `hrns.skills` plugins and installed
+`hrns.capabilities` entry points; a
 definition still has to bind and enable a plugin before a session can use it. Embedded
 connections can edit existing next-turn bindings; remote clients cannot add local plugins or
 supply MCP commands.
@@ -146,7 +146,7 @@ uv run hrns connect --url http://127.0.0.1:8080 --agent AGENT_ID
 | --- | --- |
 | `GET /v1/agents?limit=50&cursor=...` | Visible agents, signed pagination cursor |
 | `GET /v1/agents/{agent_id}` | One registered definition's descriptor |
-| `WS /v1/agents/{agent_id}/acp` | ACP connection, subprotocol `harness.acp.v1` |
+| `WS /v1/agents/{agent_id}/acp` | ACP connection, subprotocol `hrns.acp.v1` |
 
 `agents.mount(app, prefix="/ai")` prefixes these routes. Catalog errors use
 `{error: {code, message, details}}`. WebSocket framing accepts one JSON-RPC object per UTF-8

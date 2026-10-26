@@ -1,6 +1,6 @@
 # Client usage
 
-`harness.client` is a standalone ACP v1 client module. It does **not** import `harness.runtime`, Pydantic AI, or any installed agent plugin, so the same installation can drive a project host, an editor-style third-party agent, or a hosted deployment.
+`hrns.client` is a standalone ACP v1 client module. It does **not** import `hrns.runtime`, Pydantic AI, or any installed agent plugin, so the same installation can drive a project host, an editor-style third-party agent, or a hosted deployment.
 
 - [Terminal](#terminal)
 - [CLI](#cli)
@@ -33,9 +33,9 @@ Submitting while a turn runs queues a follow-up with its own attachments (up to 
 
 Scrolling upward pauses transcript following. The **New output** button or `Ctrl+End` jumps to the latest output and resumes following. `Alt+Up`/`Alt+Down` jump between user messages. `Ctrl+F` or `/find QUERY` searches retained messages, tool details, and reasoning; selecting a result jumps to its block. `/copy` copies the latest completed assistant response; every completed response also fades in a right-aligned **Copy response** action. Clipboard copying uses the terminal's clipboard support. In the sessions panel, `/` focuses the title/workspace filter and `Enter` returns to the results; `Esc` closes the panel. The current session is marked with `●`, and timestamps show relative ages.
 
-The plugins drawer lists offered bindings with their on/off state and surfaces locked reasons in the status line. A Harness host advertises revision-checked configuration updates: `Space` toggles an offered binding, `e` edits allowed fields, and successful edits apply at the next turn boundary. Model and reasoning-effort changes use standard ACP configuration options. `Ctrl+B` shows or hides the side panel, `F2`/`F3`/`F4` jump to plugins, sessions, or activity, `Tab`/`Shift+Tab` cycle those panels while focus is inside the drawer, and `Esc` closes it.
+The plugins drawer lists offered bindings with their on/off state and surfaces locked reasons in the status line. A hrns host advertises revision-checked configuration updates: `Space` toggles an offered binding, `e` edits allowed fields, and successful edits apply at the next turn boundary. Model and reasoning-effort changes use standard ACP configuration options. `Ctrl+B` shows or hides the side panel, `F2`/`F3`/`F4` jump to plugins, sessions, or activity, `Tab`/`Shift+Tab` cycle those panels while focus is inside the drawer, and `Esc` closes it.
 
-In the plugins panel, `a` adds a binding only when the peer advertises `_harness/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
+In the plugins panel, `a` adds a binding only when the peer advertises `_hrns/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
 
 Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/sessions`, `/find`, `/copy`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
 
@@ -61,7 +61,7 @@ hrns agents show --server team research-assistant
 # Profile management
 hrns profiles list
 hrns profiles add local --stdio -- /usr/bin/my-agent --acp
-hrns profiles add team --server https://agents.example --agent research-assistant --token env:HARNESS_TOKEN
+hrns profiles add team --server https://agents.example --agent research-assistant --token env:HRNS_TOKEN
 
 # Delete local session history (asks first; --dry-run previews, --yes skips)
 hrns clean
@@ -71,7 +71,7 @@ hrns clean
 runtime's default SQLite store, together with their WAL sidecars. It never
 touches saved profiles, local model settings, or sessions hosted on a remote
 server. The command lists what it will delete and asks for confirmation; use
-`--dry-run` to only list, or `--yes` in scripts. A PostgreSQL `HARNESS_STORE` is
+`--dry-run` to only list, or `--yes` in scripts. A PostgreSQL `HRNS_STORE` is
 left untouched.
 
 `hrns run` accepts multiple text prompt words. An explicit `--stdio` target uses
@@ -81,14 +81,14 @@ required.
 
 ## Profiles and secrets
 
-Profiles are TOML in the platform user-config directory. `--profiles PATH` or `HARNESS_PROFILES` loads explicit files; CLI flags override connection fields. A profile never stores a plaintext token by default:
+Profiles are TOML in the platform user-config directory. `--profiles PATH` or `HRNS_PROFILES` loads explicit files; CLI flags override connection fields. A profile never stores a plaintext token by default:
 
 ```toml
 [profiles.team]
 transport = "server"
 url = "https://agents.example"
 agent = "research-assistant"
-token = "env:HARNESS_TOKEN"
+token = "env:HRNS_TOKEN"
 
 [profiles.local]
 transport = "stdio"
@@ -96,7 +96,7 @@ command = "/opt/agents/bin/my-agent"
 args = ["--acp"]
 cwd = "/work/project"
 # Environment names map to secret references; values are resolved at launch.
-env = { OPENAI_API_KEY = "keyring:harness/openai" }
+env = { OPENAI_API_KEY = "keyring:hrns/openai" }
 ```
 
 Secret references are `env:NAME` and `keyring:service[/username]`. A missing secret fails before the agent starts, with the missing reference named. Stdio commands launch directly with an argv array and **no shell interpolation**. Stdout is protocol-only; client diagnostics remain off the wire.
@@ -115,7 +115,7 @@ Application authentication is optional; omit `--token` for a server without it.
 
 ```sh
 hrns connect --url http://127.0.0.1:8080 --agent research
-hrns connect --url http://127.0.0.1:8080 --agent research --token env:HARNESS_TOKEN
+hrns connect --url http://127.0.0.1:8080 --agent research --token env:HRNS_TOKEN
 ```
 
 ## Python API
@@ -123,12 +123,12 @@ hrns connect --url http://127.0.0.1:8080 --agent research --token env:HARNESS_TO
 ```python
 import asyncio
 
-from harness.client import HarnessAcpClient, Profile, StdioAgentTransport
+from hrns.client import HrnsAcpClient, Profile, StdioAgentTransport
 
 
 async def main():
     profile = Profile(name="local", transport="stdio", command="my-agent", args=["--acp"])
-    client = HarnessAcpClient(
+    client = HrnsAcpClient(
         lambda: StdioAgentTransport(command=profile.command, args=profile.args, cwd="."),
         # advertise_extension=True is default; third-party peers may not support it
     )
@@ -169,8 +169,8 @@ Important behavior:
 - `prompt()` returns after the ACP prompt response and drains updates that were already dispatched. Event handlers can run concurrently with the response, so UI code should update from events rather than assuming all notifications arrived before the response.
 - `connect()` negotiates initialization and records the agent's advertised capabilities. `supports_load()` is false when the peer does not advertise `session/load`. If a profile sets `auth_method`, the client verifies that the agent advertised it and performs the standard `authenticate` request before opening a session; an unknown method fails before work starts.
 - `load_session()` restores authoritative history from the agent. `resume_session()` is used only when advertised and the client has a verified complete cache; this terminal does not retain one, so its session switch always uses authoritative `session/load` when available and otherwise explains why it will not resume.
-- Configuration updates are available only when the peer advertises `_harness/configuration/update`; retries reuse the same `request_id`, and a changed payload under that ID is rejected. Harness hosts advertise this method for `next_turn` bindings; `new_session` changes fail with `NEW_SESSION_REQUIRED`.
-- `WebSocketAgentTransport` adds bearer authentication, `harness.acp.v1`, a 16 MiB frame limit and bounded framing. It refuses plaintext `ws://` to a non-loopback host so a bearer token cannot cross the network unencrypted; loopback development may use `ws://`. The catalog client handles `GET /v1/agents` and `GET /v1/agents/{agentId}`.
+- Configuration updates are available only when the peer advertises `_hrns/configuration/update`; retries reuse the same `request_id`, and a changed payload under that ID is rejected. hrns hosts advertise this method for `next_turn` bindings; `new_session` changes fail with `NEW_SESSION_REQUIRED`.
+- `WebSocketAgentTransport` adds bearer authentication, `hrns.acp.v1`, a 16 MiB frame limit and bounded framing. It refuses plaintext `ws://` to a non-loopback host so a bearer token cannot cross the network unencrypted; loopback development may use `ws://`. The catalog client handles `GET /v1/agents` and `GET /v1/agents/{agentId}`.
 
 ## Interactions in headless mode
 
@@ -180,7 +180,7 @@ A headless agent cannot invent approval. Without an explicit policy, a permissio
 hrns run --allow-all "Perform the operation"
 hrns run --deny-all "Perform the operation"
 hrns run --server team --agent form-agent \
-  --answer project=harness --answer dry_run=true "Start"
+  --answer project=hrns --answer dry_run=true "Start"
 ```
 
 `--allow-all` and `--deny-all` are mutually exclusive. `--answer` values accept JSON (`true`, `3`, `{"x":1}`) or plain text.
@@ -188,7 +188,7 @@ hrns run --server team --agent form-agent \
 ## Local renderers
 
 `RendererRegistry` resolves versioned presentation identifiers against locally installed
-`harness.renderers` entry points named `<rendererId>@<schemaVersion>`. Each entry point is a
+`hrns.renderers` entry points named `<rendererId>@<schemaVersion>`. Each entry point is a
 provider object with optional, independent `command_view`, `tool_view` and `approval_view`
 factories. A remote peer supplies only an ID, version, JSON data and readable fallback — never
 an import path or widget code. Unknown versions, missing factories and factory/apply
@@ -196,8 +196,8 @@ exceptions all return the sanitized fallback. Rendered fallback text strips term
 control characters and bidi overrides and is bounded. Generic ACP activity rendering remains
 available without any provider installed. See [EXTENSIONS.md](EXTENSIONS.md).
 
-Plugin commands are discovered with `_harness/commands/list` and invoked with
-`_harness/commands/invoke`; direct output renders as a distinct inline command block. The
+Plugin commands are discovered with `_hrns/commands/list` and invoked with
+`_hrns/commands/invoke`; direct output renders as a distinct inline command block. The
 client-side SDK exposes `SessionProxy.list_commands`, `invoke_command`, `cancel_command` and
 `presentations`.
 
@@ -218,7 +218,7 @@ SSH needs no bespoke client command. Use a normal stdio profile:
 [profiles.remote-box]
 transport = "stdio"
 command = "ssh"
-args = ["build-box", "harness-host", "my_agents.developer:definition"]
+args = ["build-box", "hrns-host", "my_agents.developer:definition"]
 ```
 
 The existing SSH configuration and authentication apply. The remote environment must install the runtime and agent definition.
@@ -248,12 +248,12 @@ opens a dialog. The host falls back to the first prompt text as a title; there i
 model-generated title tool. Manual names always take precedence, including after
 reopening a session.
 
-For Harness hosts, the status bar shows how much of the selected model's context window the
+For hrns hosts, the status bar shows how much of the selected model's context window the
 current turn has filled (hover for the last request's in/out/cached split and the session
 totals), while the activity panel shows cumulative session usage, updated after every
 completed model response, including intermediate responses before
 tool execution. The context readout comes from ACP `usage_update` (a gauge, not a counter);
-session totals come from `_meta.harness.sessionUsage` and are never derived from it.
+session totals come from `_meta.hrns.sessionUsage` and are never derived from it.
 Turn completion reconciles and persists the counters without adding the
 same tokens twice. Other ACP agents can publish usage updates or return usage with the
 prompt response. The client does not reconstruct a historical cost ledger from the old runtime journal.

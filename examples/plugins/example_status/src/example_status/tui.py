@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from textual.widgets import Static
 
-from harness.client.tui.extensions import CommandViewState, ToolViewState, ViewContext, ViewHandle
+from hrns.client.tui.extensions import CommandViewState, ToolViewState, ViewContext, ViewHandle
 
 
 class _StaticView:

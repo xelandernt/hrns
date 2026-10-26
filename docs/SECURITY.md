@@ -26,7 +26,7 @@ grant.
 
 ## Transport
 
-The network subprotocol `harness.acp.v1` carries one JSON-RPC object per UTF-8 text frame.
+The network subprotocol `hrns.acp.v1` carries one JSON-RPC object per UTF-8 text frame.
 Frames are limited to 16 MiB; duplicate keys, non-finite numbers, batches, and binary frames
 are rejected. Outbound writes have a timeout. Connections are limited to 32 per server and
 four per principal.

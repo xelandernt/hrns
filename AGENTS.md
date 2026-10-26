@@ -22,8 +22,8 @@ These documentations should be consulted if relevant:
 
 - https://pydantic.dev/docs/llms.txt
 - https://textual.textualize.io/
-- https://pydantic.dev/docs/ai/harness/acp/
-- https://github.com/pydantic/pydantic-ai/blob/main/docs/harness/acp.md
+- https://pydantic.dev/docs/ai/hrns/acp/
+- https://github.com/pydantic/pydantic-ai/blob/main/docs/hrns/acp.md
 - https://github.com/vstorm-co/pydantic-deepagents
 - https://github.com/anomalyco/opencode
 - https://github.com/openai/codex

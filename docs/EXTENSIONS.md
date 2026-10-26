@@ -1,6 +1,6 @@
 # Plugin extensions: commands and inline views
 
-A Harness plugin packages three independent contributions:
+A hrns plugin packages three independent contributions:
 
 1. a native Pydantic AI capability (tools, instructions, hooks),
 2. optional user commands such as `/git:status`,
@@ -15,15 +15,15 @@ library. Widget code runs only on the client.
 
 ## 1. Descriptor provider
 
-Installed packages register one zero-argument provider under `harness.capabilities`:
+Installed packages register one zero-argument provider under `hrns.capabilities`:
 
 ```toml
-[project.entry-points."harness.capabilities"]
+[project.entry-points."hrns.capabilities"]
 example_status = "example_status:descriptor"
 ```
 
 ```python
-from harness.runtime import Command, PluginDescriptor
+from hrns.runtime import Command, PluginDescriptor
 
 
 def descriptor() -> PluginDescriptor:
@@ -45,9 +45,9 @@ Programmatic `PluginRegistry.register(PluginDescriptor(...))` is the same contra
 ## 2. Commands
 
 ```python
-from harness.protocol import PresentationPayload
-from harness.protocol.extensions import CommandResult
-from harness.runtime import Command, CommandContext, TextArguments
+from hrns.protocol import PresentationPayload
+from hrns.protocol.extensions import CommandResult
+from hrns.runtime import Command, CommandContext, TextArguments
 
 
 async def status(context: CommandContext, arguments: TextArguments) -> CommandResult:
@@ -76,7 +76,7 @@ async def status(context: CommandContext, arguments: TextArguments) -> CommandRe
 Only `StartTurn` is currently supported:
 
 ```python
-from harness.protocol.extensions import CommandResult, StartTurn
+from hrns.protocol.extensions import CommandResult, StartTurn
 
 
 async def ask(context: CommandContext, arguments: TextArguments) -> CommandResult:
@@ -102,7 +102,7 @@ async def echo(ctx, text: str):
     return ToolReturn(
         f"echo: {text}",  # model-facing
         metadata={
-            "harness": {
+            "hrns": {
                 "presentation": {
                     "output": {
                         "rendererId": "example.echo",
@@ -119,7 +119,7 @@ async def echo(ctx, text: str):
 toolset = FunctionToolset(
     tools=[Tool(echo, name="example_echo", takes_ctx=True)],
     metadata={
-        "harness": {
+        "hrns": {
             "presentation": {
                 "bindingId": "example",
                 "input": {
@@ -135,14 +135,14 @@ toolset = FunctionToolset(
 ```
 
 A host-owned observer forwards validated snapshots over the negotiated
-`_harness/presentation/updated` notification and stores final input/output presentation in
+`_hrns/presentation/updated` notification and stores final input/output presentation in
 `ToolReturn.metadata`. UI-only data must never be placed in `return_value` or `content`,
 which can reach the model.
 
 Optional progress uses public `ctx.emit`:
 
 ```python
-from harness.runtime.presentation import ToolPresentationProgressEvent
+from hrns.runtime.presentation import ToolPresentationProgressEvent
 
 await ctx.emit(
     ToolPresentationProgressEvent(
@@ -161,10 +161,10 @@ Progress is live-only. Final input/output presentation is reconstructed passivel
 
 ## 4. Local Textual views
 
-Register a provider under `harness.renderers` as `<rendererId>@<schemaVersion>`:
+Register a provider under `hrns.renderers` as `<rendererId>@<schemaVersion>`:
 
 ```toml
-[project.entry-points."harness.renderers"]
+[project.entry-points."hrns.renderers"]
 "example.git.status@1" = "example_status.tui:provider"
 "example.echo@1" = "example_status.tui:provider"
 ```
@@ -172,7 +172,7 @@ Register a provider under `harness.renderers` as `<rendererId>@<schemaVersion>`:
 ```python
 from textual.widgets import Static
 
-from harness.client.tui.extensions import CommandViewState, ToolViewState, ViewContext, ViewHandle
+from hrns.client.tui.extensions import CommandViewState, ToolViewState, ViewContext, ViewHandle
 
 
 def command_view(state: CommandViewState, context: ViewContext) -> ViewHandle:
@@ -194,10 +194,10 @@ class Provider:
   `input`/`output` carry only the presentation payloads the call has published so far. The
   header, the agent's options and the `y`/`n` shortcuts stay client-owned, so a provider
   cannot hide the reject path.
-- Harness ships providers for its own bundled tools (`harness.tool.*`) and registers them
+- hrns ships providers for its own bundled tools (`hrns.tool.*`) and registers them
   programmatically on the same registry, so first-party views follow this contract exactly.
 - Widgets are ordinary Textual widgets. Plugins own children, CSS, focus, messages and
-  workers. Harness mounts the widget inline and applies successive immutable snapshots to the
+  workers. hrns mounts the widget inline and applies successive immutable snapshots to the
   same instance.
 - `ViewContext.invoke_command(binding_id, command_name, arguments)` submits a structured
   plugin command through the same host route as slash invocation. Mounting, replaying and
@@ -217,7 +217,7 @@ class Provider:
   (clear/compact/edit) require a public upstream ACP replacement operation that these pins do
   not provide.
 - Standard ACP agent-advertised slash commands still use `session/prompt`. That is protocol
-  interoperability, not a compatibility path for Harness plugin commands.
+  interoperability, not a compatibility path for hrns plugin commands.
 - No remote code loading: remote peers send JSON identifiers and data only.
 
 See [examples/plugins/example_status](../examples/plugins/example_status) for a complete

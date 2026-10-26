@@ -28,10 +28,10 @@ from pydantic_ai.capabilities import AbstractCapability  # noqa: E402
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart  # noqa: E402
 from pydantic_ai.models.function import AgentInfo, FunctionModel  # noqa: E402
 
-from harness.protocol import CapabilityPolicy, EnableChange  # noqa: E402
-from harness.runtime.composition import compose_definition  # noqa: E402
-from harness.runtime.definitions import AgentDefinition, DefinitionBinding  # noqa: E402
-from harness.runtime.registry import (  # noqa: E402
+from hrns.protocol import CapabilityPolicy, EnableChange  # noqa: E402
+from hrns.runtime.composition import compose_definition  # noqa: E402
+from hrns.runtime.definitions import AgentDefinition, DefinitionBinding  # noqa: E402
+from hrns.runtime.registry import (  # noqa: E402
     BindingContext,
     PluginDescriptor,
     PluginRegistry,

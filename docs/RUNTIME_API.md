@@ -4,7 +4,7 @@ The runtime is a small composition and persistence layer. It does not execute AC
 that belongs to `pydantic_ai_harness.experimental.acp.PydanticAIACPAgent`.
 
 ```python
-from harness.runtime import (
+from hrns.runtime import (
     AgentDefinition,
     BoundDefinition,
     DefinitionBinding,
@@ -18,17 +18,17 @@ from harness.runtime import (
     ScopedSessionStore,
     Composition,
     compose_definition,
-    HarnessError,
+    HrnsError,
 )
 ```
 
-`harness.runtime` imports no client, FastAPI, or Textual modules. Importing
-`harness.runtime.host` and `harness.runtime.cli` pull in the upstream ACP adapter.
+`hrns.runtime` imports no client, FastAPI, or Textual modules. Importing
+`hrns.runtime.host` and `hrns.runtime.cli` pull in the upstream ACP adapter.
 
 ## Compose a session
 
 ```python
-from harness.runtime import MODEL, WORKSPACE, ResourceSet
+from hrns.runtime import MODEL, WORKSPACE, ResourceSet
 
 composition = await compose_definition(
     definition,
@@ -45,7 +45,7 @@ composition = await compose_definition(
 ```
 
 Bindings are typed slots: `MODEL`, `WORKSPACE`, `ANSWERS`, `PLAN`, or a slot a plugin
-registers with `harness.runtime.resources.SLOTS.register`. A `{name: value}` mapping is also
+registers with `hrns.runtime.resources.SLOTS.register`. A `{name: value}` mapping is also
 accepted — the name resolves to its slot — so values loaded from configuration still work.
 A definition that never declares a slot receives no value for it, even when the deployment
 bound one.
@@ -54,18 +54,18 @@ The result is a native agent plus an upstream `AcpSessionConfig`:
 
 | Field | Meaning |
 | --- | --- |
-| `composition.agent` | the native Pydantic AI agent, with `deps_type=HarnessDeps` when Harness builds it |
+| `composition.agent` | the native Pydantic AI agent, with `deps_type=HrnsDeps` when hrns builds it |
 | `composition.config` | `deps`, capabilities, toolsets, and workspace for every run |
 | `composition.catalog` | live `PolicyCatalog` for the session |
 | `composition.snapshot` | current `ConfigurationSnapshot` |
 | `composition.resources` | resolved `ResourceSet` |
-| `composition.deps` | `HarnessDeps` for the run: `workspace`, `model`, `answers`, `plan`, `custom` |
+| `composition.deps` | `HrnsDeps` for the run: `workspace`, `model`, `answers`, `plan`, `custom` |
 | `composition.effort` | mutable reasoning-effort state |
 | `composition.workspace` | native workspace backend, or `None` |
 
 `composition.deps` is what tools, instructions and capabilities read as `ctx.deps` — the
-framework's own dependency injection, typed as `AbstractCapability[HarnessDeps]`. Pass
-`deps=` to `compose_definition` to supply a deployment's own object instead; Harness then
+framework's own dependency injection, typed as `AbstractCapability[HrnsDeps]`. Pass
+`deps=` to `compose_definition` to supply a deployment's own object instead; hrns then
 leaves `deps_type` alone, because an application that declares its own dependencies must keep
 them.
 
@@ -103,7 +103,7 @@ a `BoundDefinition`. Hosts register that validated value, moving a missing works
 `session/new` to registration:
 
 ```python
-from harness.runtime import MODEL, WORKSPACE
+from hrns.runtime import MODEL, WORKSPACE
 
 bound = definition.bind(
     {MODEL: "openai:gpt-5-mini", WORKSPACE: "/path/to/project"},
@@ -124,7 +124,7 @@ A Python definition can bind a descriptor directly instead of registering it and
 `plugin_id`:
 
 ```python
-from harness.runtime import DefinitionBinding, PluginDescriptor
+from hrns.runtime import DefinitionBinding, PluginDescriptor
 
 plugin: PluginDescriptor[HouseStyleConfig] = PluginDescriptor(
     plugin_id="example.house_style",
@@ -175,11 +175,11 @@ run in the store query, so listing a page does not load stored conversation bodi
 `SessionRecord` carries host metadata: `cwd`, `title`, `effort`, `model`, selected `bindings`,
 usage totals, and timestamps. The current `ConfigurationSnapshot` and binding descriptors are
 Commands contributed by a binding are defined with `Command`/`CommandContext` from
-`harness.runtime` (see [EXTENSIONS.md](EXTENSIONS.md)). They are user-only application
+`hrns.runtime` (see [EXTENSIONS.md](EXTENSIONS.md)). They are user-only application
 actions: the runtime validates arguments and the active revision, then runs the handler under
 the session's existing turn lock without creating a model request or tool event.
 
-served through the `_harness` extension; updates are applied in memory and persisted through
+served through the `_hrns` extension; updates are applied in memory and persisted through
 the `bindings` column.
 
 Durability follows upstream semantics: save errors are logged, not fatal; there is no

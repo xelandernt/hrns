@@ -1,6 +1,6 @@
 """Example plugin: a native tool plus two independent user commands.
 
-This module is the ``harness.capabilities`` descriptor provider. It must not import
+This module is the ``hrns.capabilities`` descriptor provider. It must not import
 Textual; local widgets live in :mod:`example_status.tui`.
 """
 
@@ -16,10 +16,10 @@ from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import Tool
 from pydantic_ai.toolsets import FunctionToolset
 
-from harness.protocol import PresentationPayload
-from harness.protocol.extensions import CommandResult, StartTurn
-from harness.runtime.extensions import Command, CommandContext
-from harness.runtime.registry import BindingContext, PluginDescriptor
+from hrns.protocol import PresentationPayload
+from hrns.protocol.extensions import CommandResult, StartTurn
+from hrns.runtime.extensions import Command, CommandContext
+from hrns.runtime.registry import BindingContext, PluginDescriptor
 
 __all__ = ["descriptor"]
 
@@ -45,7 +45,7 @@ class EchoCapability(AbstractCapability[Any]):
             return ToolReturn(
                 f"echo: {text}",
                 metadata={
-                    "harness": {
+                    "hrns": {
                         "presentation": {
                             "output": PresentationPayload(
                                 renderer_id="example.echo",
@@ -61,7 +61,7 @@ class EchoCapability(AbstractCapability[Any]):
         return FunctionToolset(
             tools=[Tool(echo, name="example_echo", takes_ctx=True)],
             metadata={
-                "harness": {
+                "hrns": {
                     "presentation": {
                         "bindingId": binding_id,
                         "input": PresentationPayload(
@@ -104,7 +104,7 @@ async def ask(context: CommandContext, arguments: Any) -> CommandResult:
 
 
 def descriptor() -> PluginDescriptor:
-    """Zero-argument provider loaded lazily by ``harness.capabilities`` discovery."""
+    """Zero-argument provider loaded lazily by ``hrns.capabilities`` discovery."""
     return PluginDescriptor(
         plugin_id="example_status",
         version="0.1.0",

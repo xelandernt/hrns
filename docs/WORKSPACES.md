@@ -1,12 +1,12 @@
 # Workspaces
 
 A workspace is a native Pydantic AI workspace backend bound through a definition resource.
-In this revision Harness supports a **local path** workspace: the ACP session's canonical
+In this revision hrns supports a **local path** workspace: the ACP session's canonical
 `cwd` is stored in the resource named by the definition's `workspace` requirement, and
 `resolve_workspace_value` maps it to `pydantic_ai.workspaces.LocalWorkspaceBackend`.
 
 ```python
-from harness.runtime import WORKSPACE, ResourceRequirement
+from hrns.runtime import WORKSPACE, ResourceRequirement
 
 definition = AgentDefinition(
     agent_id="developer",
@@ -35,7 +35,7 @@ path outside the current allowed roots fails closed.
 ## Lifecycle
 
 `LocalWorkspaceBackend` owns no external lease. Session close cancels active work through the
-upstream adapter; Harness does not tear down the local filesystem. Sandbox and remote
+upstream adapter; hrns does not tear down the local filesystem. Sandbox and remote
 workspace backends can be supplied as deployment resources, but their lifecycle remains the
 deployment's responsibility. Upstream `AcpSessionConfig` does not close workspace backends.
 
@@ -58,7 +58,7 @@ integration:
 
 ```python
 from pydantic_ai_harness.ssh_workspace import SSHWorkspaceBackend
-from harness.runtime import MODEL, WORKSPACE
+from hrns.runtime import MODEL, WORKSPACE
 
 bound = definition.bind(
     {MODEL: model, WORKSPACE: SSHWorkspaceBackend("dev@build-01", working_dir="/srv/app")}

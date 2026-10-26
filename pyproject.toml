@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "harness"
+name = "hrns"
 dynamic = ["version"]
 description = "Programmable Pydantic AI agents with an interoperable ACP terminal and hosting"
 readme = "README.md"
@@ -34,32 +34,32 @@ runtime = [
     "keyring>=25",
 ]
 server = [
-    "harness[runtime]",
+    "hrns[runtime]",
     "fastapi>=0.156,<1",
     "starlette>=0.47,<2",
     "uvicorn>=0.35",
     "websockets>=15,<18",
 ]
 openai = [
-    "harness[runtime]",
+    "hrns[runtime]",
     "pydantic-ai-slim[openai]==2.57.0",
 ]
 anthropic = [
-    "harness[runtime]",
+    "hrns[runtime]",
     "pydantic-ai-slim[anthropic]==2.57.0",
 ]
 postgres = [
-    "harness[runtime]",
+    "hrns[runtime]",
     "psycopg[binary]>=3.2",
 ]
 all = [
-    "harness[client,runtime,server,openai,anthropic,postgres]",
+    "hrns[client,runtime,server,openai,anthropic,postgres]",
 ]
 
 [project.scripts]
-hrns = "harness.client.cli:main"
-harness-host = "harness.runtime.cli:main"
-harness-local = "harness.runtime.local:main"
+hrns = "hrns.client.cli:main"
+hrns-host = "hrns.runtime.cli:main"
+hrns-local = "hrns.runtime.local:main"
 
 [dependency-groups]
 dev = [
@@ -80,7 +80,7 @@ source = "vcs"
 fallback-version = "0.0.1"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/harness"]
+packages = ["src/hrns"]
 
 [tool.hatch.build.targets.sdist]
 include = ["/src", "/README.md", "/LICENSE"]
@@ -94,7 +94,7 @@ src = ["src"]
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["harness"]
+known-first-party = ["hrns"]
 
 [tool.pyrefly]
 project-includes = [

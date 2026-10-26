@@ -24,15 +24,15 @@ Results recorded on 2026-10-22 (macOS, Python 3.13.5, pinned dependencies):
 - `ruff format --check`: 67 files already formatted.
 - `ruff check .`: clean.
 - `pyrefly check src examples`: 0 errors.
-- `uv build`: wheel and source distribution built (`dist/harness-0.1.0*`).
+- `uv build`: wheel and source distribution built (`dist/hrns-0.1.0*`).
 
 ## Local stdio
 
 A temporary definition module used a real `FunctionModel` with a streaming function. The
-official ACP SDK client launched `python -m harness.runtime.cli` as a subprocess and
+official ACP SDK client launched `python -m hrns.runtime.cli` as a subprocess and
 exercised:
 
-- `initialize` with `_meta.harness` advertisement;
+- `initialize` with `_meta.hrns` advertisement;
 - `session/new`, two `session/prompt` turns, `session/list`;
 - `session/close`, `session/load` replay, and standard `session/delete`;
 - a `FunctionToolset` tool with `requires_approval=True`: the client received
@@ -42,7 +42,7 @@ exercised:
 - cancellation during a streaming turn: `session/cancel` returned `cancelled` after the first
   chunk, and the next prompt on the same session completed normally.
 
-`harness-local --catalog` and `harness-host --help` start successfully. `harness-local`
+`hrns-local --catalog` and `hrns-host --help` start successfully. `hrns-local`
 itself was not run against a real provider because no credentials were used.
 
 ## Network WebSocket
@@ -66,16 +66,16 @@ The effort capability was checked directly: a native capability returned
 ## Live capability configuration
 
 Using the custom managed capability from `examples/custom_capability.py` against
-`HarnessACPAgent`:
+`HrnsACPAgent`:
 
-- `_harness/plugins/list` returned the registered plugin;
-- `_harness/configuration/update` disabled the style binding, returned revision 2, and
-  emitted `_harness/configuration/changed`;
+- `_hrns/plugins/list` returned the registered plugin;
+- `_hrns/configuration/update` disabled the style binding, returned revision 2, and
+  emitted `_hrns/configuration/changed`;
 - the next prompt ran without the capability's instructions (`style=none`);
 - a `configure` change to `style=formal` returned the new config and applied on the next
   prompt;
-- the same flow was exercised through `HarnessAcpClient` + `StdioAgentTransport` against a
-  real `harness-host` subprocess, including local-binding-creation advertisement and the
+- the same flow was exercised through `HrnsAcpClient` + `StdioAgentTransport` against a
+  real `hrns-host` subprocess, including local-binding-creation advertisement and the
   client-side `update_configuration` path;
 - request-id replay returned the cached snapshot, and a stale revision was rejected before
   mutation.
@@ -108,18 +108,18 @@ The SQLite and PostgreSQL implementations share the same row shape and scoped pr
 ## Generic ACP and client boundary
 
 The client connects to standard ACP agents without invoking unadvertised extension methods.
-A Harness host advertises `_harness/capabilities/list`, `_harness/configuration/get`,
-`_harness/configuration/update`, `_harness/configuration/changed`, and
-`_harness/session/rename`; `_harness/plugins/list` is added only when local binding creation
-is enabled. `harness.client` does not import `harness.runtime` or Pydantic AI;
-`harness.runtime` does not import FastAPI or Textual.
+A hrns host advertises `_hrns/capabilities/list`, `_hrns/configuration/get`,
+`_hrns/configuration/update`, `_hrns/configuration/changed`, and
+`_hrns/session/rename`; `_hrns/plugins/list` is added only when local binding creation
+is enabled. `hrns.client` does not import `hrns.runtime` or Pydantic AI;
+`hrns.runtime` does not import FastAPI or Textual.
 
 ## Plugin commands and presentation
 
 Verified offline on 2026-10-22 with a temporary definition module and the real
-`HarnessAcpClient` + `StdioAgentTransport` against a `harness-host` subprocess:
+`HrnsAcpClient` + `StdioAgentTransport` against a `hrns-host` subprocess:
 
-- `_harness/commands/list` returned namespaced commands for the enabled binding;
+- `_hrns/commands/list` returned namespaced commands for the enabled binding;
 - `/demo:status` returned an inline presentation with no conversation action;
 - duplicate `requestId` with the same payload returned the same result; reuse with different
   arguments failed before the handler;
@@ -127,7 +127,7 @@ Verified offline on 2026-10-22 with a temporary definition module and the real
   `session/load` replayed the user prompt but not the command's status output;
 - a native plugin tool produced standard ACP tool events and supplemental snapshots with the
   same `toolCallId`, including an input snapshot before the result and an output snapshot after
-  it; `_harness/presentation/get` restored the final output from committed native metadata
+  it; `_hrns/presentation/get` restored the final output from committed native metadata
   without running the tool again.
 
 A Textual headless app mounted both a custom tool body and a command-result block; the tool
@@ -141,7 +141,7 @@ host method table and client code exercised over stdio.
 ## Retired symbols
 
 A repository search found no remaining imports or calls to `SessionManager`, `Session`,
-`HostedSession`, `HarnessHostAgent`, `SessionJobManager`, `WorkspaceManager`,
+`HostedSession`, `HrnsHostAgent`, `SessionJobManager`, `WorkspaceManager`,
 `WorkspaceLease`, `_events`, or `runtime.session`. The old SQL tables
 and runtime event journal are not created or read.
 
