@@ -107,7 +107,8 @@ class HarnessACPAgent(PydanticAIACPAgent[Any, str]):
                 ),
             ),
             name=self.definition.name or self.definition.agent_id,
-            version=self.definition.version,
+            # ACP requires a string even when the definition has no version.
+            version=self.definition.version or "",
             session_config=self.sessions.compose_session,
             session_store=self.store,
             models=models or None,

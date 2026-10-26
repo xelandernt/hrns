@@ -249,7 +249,7 @@ class DefinitionManifest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=200)
     name: str = Field(min_length=1)
     description: str = ""
-    definition_version: str = Field(default="1.0.0", min_length=1, max_length=100)
+    definition_version: str | None = Field(default=None, min_length=1, max_length=100)
     spec: dict[str, Any] | None = None
     """Upstream ``AgentSpec`` fields, validated by :func:`load_agent_spec`."""
     bindings: list[DefinitionManifestBinding] = Field(default_factory=list)
@@ -304,7 +304,7 @@ class AgentDefinition(BaseModel):
     agent_id: str = Field(min_length=1, max_length=200)
     name: str = Field(min_length=1)
     description: str = ""
-    definition_version: str = Field(default="1.0.0", min_length=1, max_length=100)
+    definition_version: str | None = Field(default=None, min_length=1, max_length=100)
 
     spec: dict[str, Any] | NativeAgentSpec | None = None
     """Upstream ``AgentSpec`` (dict form is validated at load time)."""
@@ -394,7 +394,7 @@ class AgentDefinition(BaseModel):
     # --- runtime accessors ------------------------------------------------
 
     @property
-    def version(self) -> str:
+    def version(self) -> str | None:
         """Alias for :attr:`definition_version`."""
         return self.definition_version
 

@@ -400,7 +400,7 @@ class SessionService:
                     principal=self.policy.principal,
                     deployment_id=self.policy.deployment_id,
                     agent_id=self.definition.agent_id,
-                    definition_version=self.definition.version,
+                    definition_version=self.definition.version or "",
                     cwd=cwd,
                     effort=effort or EFFORT_DEFAULT,
                     bindings=composition.catalog.export_bindings(),

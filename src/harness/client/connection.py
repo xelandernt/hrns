@@ -120,7 +120,7 @@ class ConnectionLifecycle:
         if info is not None:
             client.agent_name = info.name or CLIENT_NAME
             client.agent_title = info.title or client.agent_name
-            client.agent_version = info.version or CLIENT_VERSION
+            client.agent_version = info.version
         client.auth_methods = list(getattr(response, "auth_methods", []) or [])
         client.extension = (
             parse_advertisement(getattr(response, "field_meta", None))
@@ -142,7 +142,7 @@ class ConnectionLifecycle:
                 raise
         self._publish_connection(
             "ready",
-            f"{client.agent_title} {client.agent_version}",
+            f"{client.agent_title} {client.agent_version}".strip(),
         )
         return response
 
