@@ -8,8 +8,9 @@ recognize it.
 
 ```sh
 uv pip install -e examples/plugins/example_status
-uv pip install -e "examples/plugins/example_status[ui]"
 ```
+
+The Textual views ship with hrns, so the same install provides the terminal widgets.
 
 The runtime descriptor provider is `hrns.capabilities:example_status`. The local widget
 provider is registered for `example.git.status@1` and `example.echo@1` under

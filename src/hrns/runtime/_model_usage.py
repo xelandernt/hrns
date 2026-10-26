@@ -15,7 +15,7 @@ def normalize_model_usage(model: Any) -> Any:
         model = infer_model(model)
     if getattr(model, "system", None) != "deepseek":
         return model
-    # OpenAI is an optional runtime extra, so import it only for this provider.
+    # Only DeepSeek responses need the OpenAI types, so import them per provider.
     from openai.types import CompletionUsage
     from openai.types.chat import ChatCompletion, ChatCompletionChunk
     from openai.types.completion_usage import PromptTokensDetails

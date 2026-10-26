@@ -80,10 +80,10 @@ Authorization = "Bearer {env:GH_TOKEN}"
 
 ## Start with DeepSeek
 
-Install the OpenAI extra (also used by DeepSeek):
+Install the base package (DeepSeek and OpenAI-compatible models are included):
 
 ```sh
-uv sync --locked --extra client --extra runtime --extra openai
+uv sync --locked
 export DEEPSEEK_API_KEY='your-key'
 ```
 

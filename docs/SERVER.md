@@ -8,7 +8,7 @@ configuration file, worker command, token registry, or separate server CLI.
 ## Register and mount
 
 ```sh
-uv sync --locked --extra server --extra client --extra openai
+uv sync --locked --extra server
 ```
 
 ```python
