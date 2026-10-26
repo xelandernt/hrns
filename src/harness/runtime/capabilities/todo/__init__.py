@@ -1,4 +1,4 @@
-"""The bundled Todo capability: upstream ``Planning`` plus a session-scoped store.
+"""The bundled Todo capability: upstream plan tools plus a session-scoped store.
 
 The descriptor is metadata only. The factory binds the upstream planning tools to the
 host's ``plan_events`` resource, which owns the per-session store and mirrors every
