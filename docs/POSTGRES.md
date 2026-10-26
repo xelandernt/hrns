@@ -1,6 +1,6 @@
 # Optional PostgreSQL session store
 
-`harness.runtime.postgres.PostgresSessionStore` implements the same scoped ACP persistence
+`hrns.runtime.postgres.PostgresSessionStore` implements the same scoped ACP persistence
 contract as `SQLiteSessionStore`. Importing the module does not import the driver or open a
 connection.
 
@@ -8,7 +8,7 @@ connection.
 
 ```sh
 uv sync --extra postgres
-# or: pip install 'harness[postgres]'
+# or: pip install 'hrns[postgres]'
 ```
 
 The extra is `psycopg[binary]>=3.2`. Without it, `initialize()` raises the driver's
@@ -18,7 +18,7 @@ actionable `ImportError`.
 
 ```python
 import os
-from harness.runtime.postgres import PostgresSessionStore
+from hrns.runtime.postgres import PostgresSessionStore
 
 store = PostgresSessionStore(os.environ["DATABASE_URL"])
 await store.initialize()
@@ -55,7 +55,7 @@ on database errors or cancellation. A failed statement does not poison later ses
 
 `save` failures are logged and swallowed by the adapter; the next successful save catches up.
 There is no transactional turn commit or cross-connection ownership claim. Simultaneous
-writers are last-write-wins. These are the upstream ACP persistence semantics, not a Harness
+writers are last-write-wins. These are the upstream ACP persistence semantics, not a hrns
 durability guarantee.
 
 ## Configuration

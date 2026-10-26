@@ -3,19 +3,19 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "harness-example-status"
+name = "hrns-example-status"
 version = "0.1.0"
-description = "Example Harness plugin: user-only commands and an independent tool view"
+description = "Example hrns plugin: user-only commands and an independent tool view"
 requires-python = ">=3.11"
-dependencies = ["harness[runtime]"]
+dependencies = ["hrns[runtime]"]
 
 [project.optional-dependencies]
-ui = ["harness[client]"]
+ui = ["hrns[client]"]
 
-[project.entry-points."harness.capabilities"]
+[project.entry-points."hrns.capabilities"]
 example_status = "example_status:descriptor"
 
-[project.entry-points."harness.renderers"]
+[project.entry-points."hrns.renderers"]
 "example.git.status@1" = "example_status.tui:provider"
 "example.echo@1" = "example_status.tui:provider"
 

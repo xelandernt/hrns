@@ -5,7 +5,7 @@ claims refer only to checks actually run in this revision; there is no test suit
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| 1 | Define an agent and custom native capability; run through Python and open it in Textual | **Met.** `examples/custom_capability.py` composes a native capability; `harness-local`/`harness-host` serve definitions over ACP; `hrns` connects. |
+| 1 | Define an agent and custom native capability; run through Python and open it in Textual | **Met.** `examples/custom_capability.py` composes a native capability; `hrns-local`/`hrns-host` serve definitions over ACP; `hrns` connects. |
 | 2 | Managed capability contributes or is absent as a whole | **Met.** Enabled bindings are instantiated from the current selection; disabled bindings contribute nothing. Live toggles rebuild the native agent and apply on the next turn boundary. |
 | 3 | Same definition runs remotely with different resources | **Met.** `AgentServer` registers native definitions and Python resources in FastAPI; the client never imports runtime/plugins. |
 | 4 | Remote client cannot bypass mandatory policy | **Met.** Every edit is validated against availability, toggle/edit policy, lifecycle, requirements, conflicts, and schemas before the native agent is rebuilt. |
@@ -15,7 +15,7 @@ claims refer only to checks actually run in this revision; there is no test suit
 | 8 | Standard option and extension outcomes deterministic | **Model and effort** are standard options; managed configuration uses revision-checked extension updates with request-id idempotency. |
 | 9 | Workspace tools use one selected environment | **Met for local paths.** Missing required workspace fails; no fallback. Sandbox providers remain deployment-specific. |
 | 10 | Session load restores transcript/config after restart | **Met for committed turns.** The upstream adapter replays updates and restores native history; host metadata stores cwd/title/effort/bindings. |
-| 11 | Catalog has managed descriptors or explicit constraints | **Partially restored.** The bundled catalog was removed for rework; `harness.coder`, `harness.todo`, and `harness.skills` are restored with managed descriptors, `CAPABILITIES.md` retains the reviewed inventory, and custom plugins still provide managed descriptors. |
+| 11 | Catalog has managed descriptors or explicit constraints | **Partially restored.** The bundled catalog was removed for rework; `hrns.coder`, `hrns.todo`, and `hrns.skills` are restored with managed descriptors, `CAPABILITIES.md` retains the reviewed inventory, and custom plugins still provide managed descriptors. |
 | 12 | Long transcripts, cancellation, connection errors | **Met for bounded rendering and adapter cancellation.** No long-duration performance benchmark is claimed. |
 
 ## Deliberate changes

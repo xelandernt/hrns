@@ -3,9 +3,9 @@
 ```text
 Python application ──────────────────────────────┐
                                                 ▼
-Textual / headless client ── ACP stdio ──► harness-host / harness-local
+Textual / headless client ── ACP stdio ──► hrns-host / hrns-local
          │                                       │
-         └── harness.acp.v1 WebSocket ──► FastAPI AgentServer
+         └── hrns.acp.v1 WebSocket ──► FastAPI AgentServer
                                                  │
                                                  ▼
                                    compose_definition(...)
@@ -27,34 +27,34 @@ Textual / headless client ── ACP stdio ──► harness-host / harness-loca
 
 | Module | Owns | Deliberately independent of |
 | --- | --- | --- |
-| `harness.protocol` | Extension DTOs, errors, framing, pagination | AI runtime, terminal, server |
-| `harness.config` | Shared local settings | AI runtime, terminal, server |
-| `harness.runtime` | Definitions, registry, policy, resources, native composition, persistence | Terminal and server |
-| `harness.runtime.host` | Thin ACP adapter over composed sessions | Terminal |
-| `harness.runtime.host_support` | Host setup/policy, support types, store selection, agent construction | Terminal |
-| `harness.runtime.configuration_service` | Configuration transactions, request caching, revision checks | Terminal |
-| `harness.runtime.command_service` | Command caching, locking, execution, cancellation | Terminal |
-| `harness.runtime.session_service` | Session composition, metadata, plans, usage, presentation | Terminal |
-| `harness.runtime.policy` | Binding state, change/graph validation, atomic catalog | Terminal |
-| `harness.runtime.cli` | Definition loading, CLI parsing, stdio serving | Terminal |
-| `harness.client` | ACP connection, session, turn, and extension facades | Native agent code and provider SDKs |
-| `harness.client.session` | Session proxy state and session lifecycle | Terminal |
-| `harness.client.connection` | Transport lifecycle, reconnect, connection state | Terminal |
-| `harness.client.turn` | Prompts, cancellation, modes, config options | Terminal |
-| `harness.client.updates` | ACP update-to-event mapping | Terminal |
-| `harness.client.extensions_api` | `_harness` request surface and payload validation | Terminal |
-| `harness.client.tui` | Connections, chat workflows, widgets, panels, and dialogs | Native runtime code |
-| `harness.server` | FastAPI registration, authentication, catalog, in-process ACP | Terminal |
+| `hrns.protocol` | Extension DTOs, errors, framing, pagination | AI runtime, terminal, server |
+| `hrns.config` | Shared local settings | AI runtime, terminal, server |
+| `hrns.runtime` | Definitions, registry, policy, resources, native composition, persistence | Terminal and server |
+| `hrns.runtime.host` | Thin ACP adapter over composed sessions | Terminal |
+| `hrns.runtime.host_support` | Host setup/policy, support types, store selection, agent construction | Terminal |
+| `hrns.runtime.configuration_service` | Configuration transactions, request caching, revision checks | Terminal |
+| `hrns.runtime.command_service` | Command caching, locking, execution, cancellation | Terminal |
+| `hrns.runtime.session_service` | Session composition, metadata, plans, usage, presentation | Terminal |
+| `hrns.runtime.policy` | Binding state, change/graph validation, atomic catalog | Terminal |
+| `hrns.runtime.cli` | Definition loading, CLI parsing, stdio serving | Terminal |
+| `hrns.client` | ACP connection, session, turn, and extension facades | Native agent code and provider SDKs |
+| `hrns.client.session` | Session proxy state and session lifecycle | Terminal |
+| `hrns.client.connection` | Transport lifecycle, reconnect, connection state | Terminal |
+| `hrns.client.turn` | Prompts, cancellation, modes, config options | Terminal |
+| `hrns.client.updates` | ACP update-to-event mapping | Terminal |
+| `hrns.client.extensions_api` | `_hrns` request surface and payload validation | Terminal |
+| `hrns.client.tui` | Connections, chat workflows, widgets, panels, and dialogs | Native runtime code |
+| `hrns.server` | FastAPI registration, authentication, catalog, in-process ACP | Terminal |
 
 Installing the `client` extra does not install Pydantic AI. The `server` extra includes the
 runtime and executes definitions in the FastAPI process. Each connection gets its own
-`HarnessACPAgent`; the server owns one explicit shared store.
+`HrnsACPAgent`; the server owns one explicit shared store.
 
 ## Execution ownership
 
 `PydanticAIACPAgent` owns every ACP session: prompt execution, streaming updates, tool
 approval pauses, cancellation, session locks, conversation history, transcript replay, and
-model selection. Harness does not run a second turn loop and does not keep a separate
+model selection. hrns does not run a second turn loop and does not keep a separate
 transcript journal.
 
 `compose_definition` initially builds the native agent and its `AcpSessionConfig` per session:
@@ -67,8 +67,8 @@ transcript journal.
 - a local workspace backend rooted at the session's `cwd`, when the definition declares a
   workspace resource.
 
-`session/new` accepts `_meta.harness.initialConfiguration` (enable/configure/add where policy
-permits). An open session can be edited through `_harness/configuration/update`: the host
+`session/new` accepts `_meta.hrns.initialConfiguration` (enable/configure/add where policy
+permits). An open session can be edited through `_hrns/configuration/update`: the host
 validates the change set, rebuilds the native agent, and mutates the existing `Composition`
 in place so the adapter's next run uses the new capabilities, toolsets, and workspace.
 Changes are serialized behind a per-session turn lock and apply at the next turn boundary.
@@ -103,18 +103,18 @@ resource cleanup beyond the bound backend is owned by the deployment.
 
 ## Protocol versions
 
-ACP v1 is the baseline. `_harness/*` methods are version-one project extensions negotiated
-through `_meta.harness`:
+ACP v1 is the baseline. `_hrns/*` methods are version-one project extensions negotiated
+through `_meta.hrns`:
 
-- `_harness/capabilities/list` — current binding descriptors;
-- `_harness/plugins/list` — addable plugins when local creation is enabled;
-- `_harness/configuration/get` — the session's current configuration snapshot;
-- `_harness/configuration/update` — validated next-turn capability edits;
-- `_harness/configuration/changed` — notification carrying a committed snapshot;
-- `_harness/session/rename` — a persistent title;
-- `_harness/session/steer` — a follow-up injected into the running turn.
+- `_hrns/capabilities/list` — current binding descriptors;
+- `_hrns/plugins/list` — addable plugins when local creation is enabled;
+- `_hrns/configuration/get` — the session's current configuration snapshot;
+- `_hrns/configuration/update` — validated next-turn capability edits;
+- `_hrns/configuration/changed` — notification carrying a committed snapshot;
+- `_hrns/session/rename` — a persistent title;
+- `_hrns/session/steer` — a follow-up injected into the running turn.
 
-Standard model and effort options remain editable throughout. The `harness.acp.v1` WebSocket
+Standard model and effort options remain editable throughout. The `hrns.acp.v1` WebSocket
 subprotocol carries one JSON-RPC object per text frame with a 16 MiB limit.
 
 See [contracts](CONTRACTS.md), [ACP behavior](ACP.md), and [server operation](SERVER.md).

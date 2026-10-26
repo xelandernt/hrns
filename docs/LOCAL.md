@@ -1,11 +1,11 @@
 # Local models and providers
 
 Run the local agent on your machine with a cloud API or a locally served model.
-The client launches `harness-local` over ACP. The bundled `harness.coder` capability is bound
+The client launches `hrns-local` over ACP. The bundled `hrns.coder` capability is bound
 by the built-in local definition and enabled by default: it provides file tools, content
 search, and a shell in the launch directory. Reading the workspace needs no approval; writes,
-edits, and commands are approved per call. The bundled `harness.skills` capability is bound
-next to it for Agent Skills, and `harness.todo` keeps a session-scoped plan visible in the
+edits, and commands are approved per call. The bundled `hrns.skills` capability is bound
+next to it for Agent Skills, and `hrns.todo` keeps a session-scoped plan visible in the
 terminal. Installed plugins remain available to explicit
 `AgentDefinition` objects; managed bindings are selected when a session is created and stay
 fixed for that conversation.
@@ -25,7 +25,7 @@ the agent must read affected files before retrying. Batches are not transactions
 ## MCP servers
 
 The local agent can use [Model Context Protocol](https://modelcontextprotocol.io) servers.
-Servers live in `harness.local.toml` under `[mcp.servers.<name>]` and are managed from the
+Servers live in `hrns.local.toml` under `[mcp.servers.<name>]` and are managed from the
 terminal, in the same shape as Codex and OpenCode:
 
 ```sh
@@ -45,7 +45,7 @@ hrns mcp remove github
 
 `{env:NAME}` references are expanded at connection time, so tokens stay out of the TOML
 file. OAuth tokens are written to JSON files under the user data directory
-(`~/Library/Application Support/harness/mcp-auth` on macOS); set
+(`~/Library/Application Support/hrns/mcp-auth` on macOS); set
 `[mcp] token_store = "keyring"` to use the operating-system keychain instead.
 
 In the terminal, `/mcp` opens the **MCP** tab next to **Todos**, **Plugins** and **Sessions**. It shows
@@ -87,7 +87,7 @@ uv sync --locked --extra client --extra runtime --extra openai
 export DEEPSEEK_API_KEY='your-key'
 ```
 
-Create `harness.local.toml` in your project:
+Create `hrns.local.toml` in your project:
 
 ```toml
 provider = "deepseek"
@@ -115,9 +115,9 @@ TOML file. The **API key environment variable** field takes a variable *name* su
 (or **Save and apply** from a session) persists the non-secret configuration; from the
 connection picker it starts a session in the current directory.
 
-If the selected model is already advertised by `harness-local`, `/models` applies it
+If the selected model is already advertised by `hrns-local`, `/models` applies it
 to the next message without restarting the agent. Changing provider (or entering a new
-key) saves the configuration and restarts `harness-local`, then reloads the current
+key) saves the configuration and restarts `hrns-local`, then reloads the current
 session. Use `/connect` to return to the connection picker, or `/effort` to change
 reasoning effort live. `/plugins` opens the live plugins panel: toggle, configure,
 or add bindings; `next_turn` changes apply to the next message, while `new_session`
@@ -130,7 +130,7 @@ pick a skill and insert a `$skill-name` reference, or `/skills` to open the same
 The reference is resolved by the runtime, so it works in pasted prompts and headless
 runs too; a name with no matching skill is left as plain text.
 
-The bundled `harness.todo` capability is enabled in the local definition. The model uses
+The bundled `hrns.todo` capability is enabled in the local definition. The model uses
 `write_plan` to maintain a short checklist for multi-step work, replacing the complete
 list at meaningful milestones. Progress updates can accompany independent work in the
 same response, and completed steps require confirmed tool results. The
@@ -161,9 +161,9 @@ base_url = "http://127.0.0.1:1234/v1"
 
 No key is needed for an unauthenticated local endpoint. For Ollama, use
 `provider = "ollama"`, the installed model name, and optionally its base URL.
-Harness does not download models or start an inference server.
+hrns does not download models or start an inference server.
 
-Provider and model names are delegated to Pydantic AI without a Harness allowlist.
+Provider and model names are delegated to Pydantic AI without a hrns allowlist.
 Install the relevant `pydantic-ai-slim` extra in the runtime environment and supply
 the provider's documented credentials. For example, Anthropic requires the
 `anthropic` extra and `ANTHROPIC_API_KEY`. Provider capabilities still depend on the
@@ -199,16 +199,16 @@ ask_user = false
 
 ## Configuration and execution
 
-The shared `harness.config` module uses **pydantic-settings** without importing
-the runtime or UI. Precedence is explicit values, `HARNESS_LOCAL_*` environment
+The shared `hrns.config` module uses **pydantic-settings** without importing
+the runtime or UI. Precedence is explicit values, `HRNS_LOCAL_*` environment
 variables, the selected TOML file, then defaults. Example environment names:
-`HARNESS_LOCAL_PROVIDER`, `HARNESS_LOCAL_MODEL`, `HARNESS_LOCAL_BASE_URL`,
-`HARNESS_LOCAL_API_KEY_ENV`, and `HARNESS_LOCAL_API_KEY`. Dictionary settings use JSON
+`HRNS_LOCAL_PROVIDER`, `HRNS_LOCAL_MODEL`, `HRNS_LOCAL_BASE_URL`,
+`HRNS_LOCAL_API_KEY_ENV`, and `HRNS_LOCAL_API_KEY`. Dictionary settings use JSON
 in environment variables. Raw `api_key` values are accepted only from the environment
 or Python, never from TOML; use `api_key_env` in a file.
 
-File selection is `--local-config PATH`, then `HARNESS_LOCAL_CONFIG_FILE`, then
-`./harness.local.toml` if it exists, otherwise `local.toml` in the platform's Harness
+File selection is `--local-config PATH`, then `HRNS_LOCAL_CONFIG_FILE`, then
+`./hrns.local.toml` if it exists, otherwise `local.toml` in the platform's hrns
 user configuration directory. The UI shows the save path. Files are not merged;
 an explicitly selected missing file or an unknown setting is an error.
 
@@ -226,12 +226,12 @@ Headless execution requires `--allow-all`, `--deny-all`, or reports that interac
 is required. The local workspace starts at the selected project; it is **not a
 sandbox**. Approved commands execute with your user's permissions.
 
-Sessions are stored in the platform's Harness user data directory by default.
+Sessions are stored in the platform's hrns user data directory by default.
 Set `store = "/absolute/path/sessions.db"` to select another SQLite store. Existing
 session history can be resumed through the normal session UI or
 `hrns run --local --resume SESSION_ID ...`. The store uses a fresh `acp_sessions`
 table; existing databases are opened without conversion.
 
-If the client cannot find `harness-local`, install the runtime in the same environment
+If the client cannot find `hrns-local`, install the runtime in the same environment
 or put its executable on `PATH`. Missing provider extras and credentials are reported
 as startup errors. Explicit `--stdio` agents and remote profiles remain available.

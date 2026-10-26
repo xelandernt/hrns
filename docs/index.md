@@ -1,8 +1,8 @@
-# Harness
+# hrns
 
 Define an agent once. Run it in Python, open it in a terminal, or host it remotely.
 
-Harness combines native Pydantic AI capabilities with policy-controlled sessions,
+hrns combines native Pydantic AI capabilities with policy-controlled sessions,
 an independent ACP terminal, and authenticated remote hosting.
 
 ## Get started

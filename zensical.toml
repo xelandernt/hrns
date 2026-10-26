@@ -1,8 +1,8 @@
 [project]
-site_name = "Harness"
+site_name = "hrns"
 site_url = "/"
 site_description = "Programmable Pydantic AI agents with an interoperable ACP terminal and hosting"
-repo_url = "https://github.com/xelandernt/harness"
+repo_url = "https://github.com/xelandernt/hrns"
 docs_dir = "docs"
 site_dir = "site"
 nav = [
@@ -35,7 +35,7 @@ features = ["navigation.tabs", "navigation.sections", "content.code.copy", "cont
 [project.plugins.search]
 
 [project.plugins.api-autonav]
-modules = ["src/harness"]
+modules = ["src/hrns"]
 nav_section_title = "API reference"
 
 [project.plugins.mkdocstrings.handlers.python]

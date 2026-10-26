@@ -1,6 +1,6 @@
 # Shared implementation contracts
 
-`harness.protocol` exports typed extension DTOs, errors, framing, and pagination. Wire DTOs
+`hrns.protocol` exports typed extension DTOs, errors, framing, and pagination. Wire DTOs
 accept snake_case and camelCase; `.to_wire()` emits JSON-safe camelCase excluding `None`.
 Unknown fields are rejected. Secrets stay in runtime resources, never wire DTOs.
 
@@ -21,7 +21,7 @@ models=..., allowed_cwds=..., default_cwd=...)` registers an `AgentDefinition`.
 with the existing FastAPI lifespan.
 
 There is no server configuration file or subprocess deployment catalog. Registration passes
-native Python objects. Each connection gets a new `HarnessACPAgent` with a scoped store view;
+native Python objects. Each connection gets a new `HrnsACPAgent` with a scoped store view;
 disconnect closes its sessions. Application shutdown drains connections before closing
 storage.
 
@@ -42,7 +42,7 @@ commit or cross-connection ownership claim is provided. Last writer wins.
 
 ## ACP and transport
 
-ACP v1 is the baseline. The network subprotocol `harness.acp.v1` carries one JSON-RPC object
+ACP v1 is the baseline. The network subprotocol `hrns.acp.v1` carries one JSON-RPC object
 per UTF-8 text frame, no batches or binary, at most 16 MiB. Shared framing rejects duplicate
 keys, non-finite numbers, and ambiguous envelopes. The WebSocket bridge feeds the official
 ACP SDK's newline-framed streams without starting a subprocess.

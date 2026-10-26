@@ -38,7 +38,7 @@ are Python dependencies described in [SERVER.md](../docs/SERVER.md).
 
 `examples/plugins/example_status` is a complete package: a native echo tool, independent
 user-only `status`/`ask` commands, and optional Textual views installed separately under
-`harness.renderers`.
+`hrns.renderers`.
 
 ```sh
 uv pip install -e examples/plugins/example_status
@@ -46,12 +46,12 @@ uv pip install -e "examples/plugins/example_status[ui]"
 ```
 
 See [its README](plugins/example_status/README.md) and
-[EXTENSIONS.md](../docs/EXTENSIONS.md). No Harness source change is needed to recognize it.
+[EXTENSIONS.md](../docs/EXTENSIONS.md). No hrns source change is needed to recognize it.
 
 ## 4. Editable manifests
 
 Definitions can be authored as `DefinitionManifest` schema v1 JSON/YAML with
-`harness.runtime.parse_manifest_text`, `manifest_from_file`, or `definition_to_manifest`.
+`hrns.runtime.parse_manifest_text`, `manifest_from_file`, or `definition_to_manifest`.
 Manifests reference plugins by `plugin_id`; every id and configuration is validated
 against the plugins registered on the host before a session opens.
 

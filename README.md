@@ -1,8 +1,8 @@
 # Benchmark results
 
-Three runs per harness on a benchmark task using **GPT-6-Luna with medium reasoning**.
+Three runs per hrns on a benchmark task using **GPT-6-Luna with medium reasoning**.
 
-| Harness | Tests pass | All quality gates pass | Model responses | Tool calls | Total cost | Average/run |
+| hrns | Tests pass | All quality gates pass | Model responses | Tool calls | Total cost | Average/run |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Codex | 3/3 | 3/3 | 44 | 56 | $0.03658 | $0.01219 |
 | OpenCode | 3/3 | 2/3 | 43 | 47 | $0.03578 | $0.01193 |
@@ -21,11 +21,11 @@ Skill loads: **Codex 0/3**, **OpenCode 1/3**, **hrns 3/3**. The loaded skill is
 
 ---
 
-# Harness
+# hrns
 
 **Define an agent once. Run it in Python, open it in a terminal, or host it remotely.**
 
-Harness combines native Pydantic AI capabilities with policy-controlled sessions, an independent ACP terminal, and authenticated remote hosting. Agent behavior stays in ordinary Python; the terminal can also connect to standard ACP agents that do not use this runtime.
+hrns combines native Pydantic AI capabilities with policy-controlled sessions, an independent ACP terminal, and authenticated remote hosting. Agent behavior stays in ordinary Python; the terminal can also connect to standard ACP agents that do not use this runtime.
 
 ## Start developing
 
@@ -54,7 +54,7 @@ uv run hrns
 ```
 
 Press **l** to configure a provider and model, type `/models` in a session, or create
-`harness.local.toml` in the project:
+`hrns.local.toml` in the project:
 
 ```toml
 provider = "deepseek"
@@ -63,10 +63,10 @@ api_key_env = "DEEPSEEK_API_KEY"
 ```
 
 `uv run hrns` starts a session in the current directory using that model. The bundled
-`harness.coder` capability gives it file tools, content search, and a shell in that
+`hrns.coder` capability gives it file tools, content search, and a shell in that
 directory: reads are automatic, while writes, edits, and commands ask for approval first.
-`harness.ask_user` lets the model ask structured multiple-choice questions in the terminal;
-disable it with `[capabilities] ask_user = false` for headless runs. `harness.todo` gives
+`hrns.ask_user` lets the model ask structured multiple-choice questions in the terminal;
+disable it with `[capabilities] ask_user = false` for headless runs. `hrns.todo` gives
 the model a session-scoped plan and shows it in the **Todos** tab of the right drawer.
 Configuration uses pydantic-settings. See
 [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints, local inference, other
@@ -93,8 +93,8 @@ and the bridge.
 
 ```python
 from fastapi import FastAPI
-from harness.runtime import SQLiteSessionStore
-from harness.server import AgentServer
+from hrns.runtime import SQLiteSessionStore
+from hrns.server import AgentServer
 
 app = FastAPI()
 agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
@@ -111,22 +111,22 @@ See [server embedding](docs/SERVER.md) and [the runnable example](examples/fasta
 
 ## Layout
 
-Harness is one distribution with optional extras. Protocol and local settings
+hrns is one distribution with optional extras. Protocol and local settings
 ship by default; the runtime, terminal, and server dependencies are opt-in.
 
 | Module | Extra | Purpose |
 | --- | --- | --- |
-| `harness.protocol` | base | Versioned extension schemas and transport contracts |
-| `harness.config` | base | Shared local settings using pydantic-settings |
-| `harness.runtime` | `runtime` | Native agent definitions, plugin management, sessions, `harness-host` and `harness-local` |
-| `harness.client` | `client` | Textual terminal, scripted ACP runner and stdio bridge |
-| `harness.server` | `server` | FastAPI agent registration and in-process WebSocket ACP |
+| `hrns.protocol` | base | Versioned extension schemas and transport contracts |
+| `hrns.config` | base | Shared local settings using pydantic-settings |
+| `hrns.runtime` | `runtime` | Native agent definitions, plugin management, sessions, `hrns-host` and `hrns-local` |
+| `hrns.client` | `client` | Textual terminal, scripted ACP runner and stdio bridge |
+| `hrns.server` | `server` | FastAPI agent registration and in-process WebSocket ACP |
 
-Install only what you need, for example `pip install 'harness[client]'`,
-`pip install 'harness[openai]'`, or `pip install 'harness[all]'`.
+Install only what you need, for example `pip install 'hrns[client]'`,
+`pip install 'hrns[openai]'`, or `pip install 'hrns[all]'`.
 
-The `harness.client` module does not import Pydantic AI or installed agent
-plugins, and installing `harness[client]` alone does not install the runtime.
+The `hrns.client` module does not import Pydantic AI or installed agent
+plugins, and installing `hrns[client]` alone does not install the runtime.
 Local stdio agents run in a separate process. Network agents run inside an existing
 FastAPI application through `AgentServer`, sharing an explicit SQLite or PostgreSQL store.
 
