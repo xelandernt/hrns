@@ -6,14 +6,18 @@ Harness combines native Pydantic AI capabilities with policy-controlled sessions
 
 ## Start developing
 
-Requires **Python 3.11+**, macOS or Linux, and [uv](https://docs.astral.sh/uv/).
+Requires **Python 3.11+**, macOS or Linux, [uv](https://docs.astral.sh/uv/),
+and [just](https://just.systems/).
 
 ```sh
-uv sync --locked --all-extras
-uv run ruff check .
+just install
+just check
 ```
 
-The checked-in lockfile pins the tested upstream versions.
+The checked-in lockfile pins the tested upstream versions. `just install` also
+installs the [prek](https://prek.j178.dev/) Git hook, which runs `just check` before
+each commit without applying automatic fixes. To install the hook after a manual
+dependency sync, run `uv run prek install`.
 
 ## Use a local agent with your model
 
@@ -114,6 +118,16 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 
 ## Documentation
 
+Run `just docs` to preview the Zensical site at <http://127.0.0.1:8000> with live
+reload. The separate `docs` dependency group is installed automatically. The site
+includes these guides, a Python API reference generated from source and docstrings,
+`llms.txt`, and `llms-full.txt`.
+
+Publishing a GitHub release builds the documentation at the release tag and saves
+the `site/` output as a `docs-<tag>` workflow artifact. Documentation is not built
+by commit hooks or ordinary push/pull-request CI. The site uses root-relative URLs;
+set `site_url` in `zensical.toml` to the public documentation URL when hosting it.
+
 - [Architecture](docs/ARCHITECTURE.md) and [shared contracts](docs/CONTRACTS.md)
 - [Extension protocol and wire examples](docs/PROTOCOL.md)
 - [Runtime Python API](docs/RUNTIME_API.md)
@@ -127,15 +141,19 @@ FastAPI application through `AgentServer`, sharing an explicit SQLite or Postgre
 ## Checks and distribution builds
 
 ```sh
-uv run ruff format --check src examples test.py
+uv run ruff format --check src examples
 uv run ruff check .
-uv run pyrefly check src examples test.py --no-progress-bar
+uv run pyrefly check src examples --no-progress-bar
 uv build
 ```
 
 Or run `just check` with [just](https://just.systems/) installed; `just fix` applies the
 automatic formatting and lint fixes. CI exercises the same non-mutating checks on
 macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
+
+Package versions come from Git tags through [hatch-vcs](https://pypi.org/project/hatch-vcs/).
+Tag releases as `v1.2.3`; commits between releases receive development versions.
+When version detection is unavailable, the build falls back to `0.0.1`.
 
 External provider, sandbox and durability integrations need their upstream extras and credentials. See the coverage matrix for managed, locally verified and deployment-only distinctions.
 

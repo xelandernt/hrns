@@ -1,0 +1,56 @@
+[project]
+site_name = "Harness"
+site_url = "/"
+site_description = "Programmable Pydantic AI agents with an interoperable ACP terminal and hosting"
+repo_url = "https://github.com/xelandernt/harness"
+docs_dir = "docs"
+site_dir = "site"
+nav = [
+    { Home = "index.md" },
+    { Guides = [
+        { "Local setup" = "LOCAL.md" },
+        { "Client usage" = "CLIENT_API.md" },
+        { "Runtime API guide" = "RUNTIME_API.md" },
+        { "ACP host" = "ACP.md" },
+        { "FastAPI embedding" = "SERVER.md" },
+        { Workspaces = "WORKSPACES.md" },
+        { PostgreSQL = "POSTGRES.md" },
+        { Extensions = "EXTENSIONS.md" },
+    ] },
+    { Design = [
+        { Architecture = "ARCHITECTURE.md" },
+        { Contracts = "CONTRACTS.md" },
+        { Protocol = "PROTOCOL.md" },
+        { "ACP runtime contract" = "ACP_RUNTIME_CONTRACT.md" },
+        { Security = "SECURITY.md" },
+        { Compliance = "COMPLIANCE.md" },
+        { Verification = "VERIFICATION.md" },
+        { "Integration findings" = "INTEGRATION_FINDINGS.md" },
+    ] },
+]
+
+[project.theme]
+features = ["navigation.tabs", "navigation.sections", "content.code.copy", "content.action.copy"]
+
+[project.plugins.search]
+
+[project.plugins.api-autonav]
+modules = ["src/harness"]
+nav_section_title = "API reference"
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+show_source = false
+show_root_heading = true
+show_signature_annotations = true
+show_symbol_type_heading = false
+show_symbol_type_toc = false
+
+[project.plugins.llmstxt]
+full_output = "llms-full.txt"
+
+[project.plugins.llmstxt.sections]
+Guides = ["index.md", "[A-Z]*.md"]
+"API reference" = ["reference/**/*.md"]

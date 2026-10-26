@@ -11,6 +11,11 @@ upgrade:
 # install dependencies
 install:
     uv sync --locked --all-extras
+    uv run prek install
+
+# preview the documentation locally
+docs:
+    uv run --group docs zensical serve
 
 # apply automatic formatting and lint fixes
 fix:
