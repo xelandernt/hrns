@@ -32,8 +32,8 @@ _LOCAL_INSTRUCTIONS = """\
 You are a local Harness agent connected through ACP, working in the user's project.
 
 The bundled coder capability provides file tools, content search, and a shell in the
-workspace. Read before you edit, keep commands non-interactive, and confirm changes with a
-command instead of assuming they work. Answer directly when no tool is needed.
+workspace. Keep commands non-interactive and confirm changes with a command instead of
+assuming they work. Answer directly when no tool is needed.
 """
 
 #: Tools that only read the workspace (or ask the user); everything else needs approval.

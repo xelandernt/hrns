@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+benchmark-results/
 *.db
 *.db-shm
 *.db-wal
