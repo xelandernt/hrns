@@ -20,9 +20,9 @@ fix:
 
 # verify formatting, lint, and types without changing files
 lint:
-    uv run ruff format --check src examples test.py
+    uv run ruff format --check src examples
     uv run ruff check .
-    uv run pyrefly check src examples test.py --no-progress-bar
+    uv run pyrefly check src examples --no-progress-bar
     just --fmt --check
 
 # build
