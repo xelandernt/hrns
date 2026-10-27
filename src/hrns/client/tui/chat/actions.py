@@ -180,6 +180,7 @@ class ChatActions:
 | `Left` / `Right` in a form | change a choice or toggle a switch |
 | `Enter` in a form | save and close |
 | `Esc` in a form | cancel without saving |
+| `Ctrl+G` in the local model form | sign in to a provider with an account login |
 | `Ctrl+T` | focus the transcript for scrolling; `Esc` returns to the composer |
 | `Ctrl+F` | find text in retained messages, tools, and reasoning |
 | `Alt+Up` / `Alt+Down` | jump to the previous / next user message |

@@ -10,10 +10,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hrns.config import LocalSettings
+from hrns.config.credentials import store_api_key, stored_api_key_ref
 
 from .errors import HrnsClientError
 from .launch import ConnectionTarget, local_cwd
 from .profiles import Profile
+
+__all__ = [
+    "LocalCatalog",
+    "local_executable",
+    "local_login_providers",
+    "local_model_catalog",
+    "local_target",
+    "local_thinking_support",
+    "store_api_key",
+    "stored_api_key_ref",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,41 +35,12 @@ class LocalCatalog:
     models: dict[str, tuple[str, ...]] = field(default_factory=dict)
     #: provider -> model -> ``"supported"``/``"always"``
     thinking: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: providers that authenticate through an account login (OAuth device flow)
+    logins: frozenset[str] = frozenset()
 
 
 _CATALOG_LOCK = threading.Lock()
 _CATALOG: LocalCatalog | None = None
-
-_LOCAL_KEYRING_SERVICE = "hrns.local"
-
-
-def _keyring_account(provider: str, api_key_env: str) -> str:
-    return api_key_env or provider or "default"
-
-
-def stored_api_key_ref(provider: str, api_key_env: str) -> str | None:
-    """Keyring reference for a previously saved local provider key."""
-    account = _keyring_account(provider, api_key_env)
-    try:
-        import keyring
-
-        if keyring.get_password(_LOCAL_KEYRING_SERVICE, account) is not None:
-            return f"keyring:{_LOCAL_KEYRING_SERVICE}/{account}"
-    except Exception:
-        return None
-    return None
-
-
-def store_api_key(provider: str, api_key_env: str, api_key: str) -> str | None:
-    """Save a pasted key in the OS keyring; return a reference for the child env."""
-    account = _keyring_account(provider, api_key_env)
-    try:
-        import keyring
-
-        keyring.set_password(_LOCAL_KEYRING_SERVICE, account, api_key)
-        return f"keyring:{_LOCAL_KEYRING_SERVICE}/{account}"
-    except Exception:
-        return None
 
 
 def _sibling_script(name: str) -> str | None:
@@ -66,8 +49,13 @@ def _sibling_script(name: str) -> str | None:
     return str(candidate) if candidate.is_file() else None
 
 
+def local_executable() -> str | None:
+    """Path to the ``hrns-local`` console script, or ``None`` when it is not installed."""
+    return shutil.which("hrns-local") or _sibling_script("hrns-local")
+
+
 def _load_catalog() -> LocalCatalog:
-    executable = shutil.which("hrns-local") or _sibling_script("hrns-local")
+    executable = local_executable()
     if executable is None:
         return LocalCatalog()
     try:
@@ -86,6 +74,7 @@ def _load_catalog() -> LocalCatalog:
         return LocalCatalog()
     models_by_provider: dict[str, tuple[str, ...]] = {}
     thinking_by_provider: dict[str, dict[str, str]] = {}
+    login_providers: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -94,6 +83,8 @@ def _load_catalog() -> LocalCatalog:
         if not isinstance(name, str) or not name or not isinstance(models, list):
             continue
         models_by_provider[name] = tuple(model for model in models if isinstance(model, str))
+        if entry.get("login") is True:
+            login_providers.add(name)
         thinking = entry.get("thinking")
         if isinstance(thinking, dict):
             thinking_by_provider[name] = {
@@ -101,7 +92,11 @@ def _load_catalog() -> LocalCatalog:
                 for model, level in thinking.items()
                 if isinstance(model, str) and level in ("supported", "always")
             }
-    return LocalCatalog(models=models_by_provider, thinking=thinking_by_provider)
+    return LocalCatalog(
+        models=models_by_provider,
+        thinking=thinking_by_provider,
+        logins=frozenset(login_providers),
+    )
 
 
 def _catalog() -> LocalCatalog:
@@ -122,6 +117,11 @@ def local_model_catalog() -> dict[str, tuple[str, ...]]:
     empty catalog so the dialog can still fall back to manual provider/model input.
     """
     return _catalog().models
+
+
+def local_login_providers() -> frozenset[str]:
+    """Providers the runtime can authenticate with an account login."""
+    return _catalog().logins
 
 
 def local_thinking_support(provider: str, model: str) -> str | None:
@@ -159,7 +159,7 @@ def local_target(
             settings.resolved_api_key()
     except (ValueError, OSError) as exc:
         raise HrnsClientError(str(exc)) from exc
-    executable = shutil.which("hrns-local") or _sibling_script("hrns-local")
+    executable = local_executable()
     if executable is None:
         raise HrnsClientError(
             "Local mode requires the hrns-local command. Reinstall hrns so its "

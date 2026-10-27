@@ -72,7 +72,9 @@ directory: reads are automatic, while writes, edits, and commands ask for approv
 `hrns.ask_user` lets the model ask structured multiple-choice questions in the terminal;
 disable it with `[capabilities] ask_user = false` for headless runs. `hrns.todo` gives
 the model a session-scoped plan and shows it in the **Todos** tab of the right drawer.
-Configuration uses pydantic-settings. See
+Configuration uses pydantic-settings. Providers that authenticate with an account
+rather than a key work too: `hrns login github-copilot` runs GitHub's device flow, or
+press **Ctrl+G** in the model form. See
 [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints, local inference, other
 Pydantic AI providers, and headless execution.
 

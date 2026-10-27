@@ -1,5 +1,14 @@
 """Local agent configuration shared by the independent client and runtime."""
 
+from .credentials import (
+    KEYRING_SERVICE,
+    keyring_account,
+    secret_ref,
+    store_api_key,
+    store_secret,
+    stored_api_key_ref,
+    stored_secret,
+)
 from .mcp import McpOAuthConfig, McpServerConfig, McpServerSettings, McpSettings
 from .settings import (
     EFFORT_DEFAULT,
@@ -16,6 +25,7 @@ from .settings import (
 __all__ = [
     "EFFORT_DEFAULT",
     "EFFORT_OFF",
+    "KEYRING_SERVICE",
     "THINKING_LEVELS",
     "CapabilitiesSettings",
     "EffortLevel",
@@ -25,6 +35,12 @@ __all__ = [
     "McpServerSettings",
     "McpSettings",
     "default_local_config_path",
+    "keyring_account",
+    "secret_ref",
+    "store_api_key",
+    "store_secret",
+    "stored_api_key_ref",
+    "stored_secret",
     "thinking_from_settings",
     "with_thinking",
 ]
