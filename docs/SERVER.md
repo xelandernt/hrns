@@ -39,10 +39,7 @@ uv run uvicorn my_app:app --host 127.0.0.1 --port 8080 \
   --ws-max-size 16777216 --ws-ping-interval 30 --ws-ping-timeout 30
 ```
 
-`examples/fastapi_app.py` is a complete application. `test.py` serves the bundled coder with
-its workspace bound to a hand-written `DockerWorkspaceBackend` that runs commands and file
-access through `docker exec` in a container you start separately. It also supports optional
-bearer authentication.
+`examples/fastapi_app.py` is a complete application.
 
 ## Storage and lifespan
 

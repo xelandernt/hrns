@@ -13,5 +13,4 @@ benchmark-results/
 *.db-wal
 .env
 .idea
-test.py
 var

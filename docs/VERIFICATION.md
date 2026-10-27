@@ -11,9 +11,9 @@ CI (`.github/workflows/ci.yml`) and `just check` run these non-mutating checks f
 repository root:
 
 ```sh
-uv run ruff format --check src examples test.py
+uv run ruff format --check src examples
 uv run ruff check .
-uv run pyrefly check src examples test.py --no-progress-bar
+uv run pyrefly check src examples --no-progress-bar
 uv build
 ```
 
