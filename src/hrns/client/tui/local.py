@@ -8,22 +8,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from textual.binding import Binding
+
 from hrns.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
     THINKING_LEVELS,
     LocalSettings,
+    keyring_account,
     thinking_from_settings,
     with_thinking,
 )
 
 from ..local import (
+    local_login_providers,
     local_model_catalog,
     local_thinking_support,
     store_api_key,
     stored_api_key_ref,
 )
+from ..login import LoginResult, LoginTarget
 from .dialogs import FormDialog, _collect_fields
+from .login import DeviceLoginDialog
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,10 +130,16 @@ def _field(
 class LocalModelDialog(FormDialog):
     """Choose a provider and model by typing, either from the known ids or free-form."""
 
+    BINDINGS = [
+        *FormDialog.BINDINGS,
+        Binding("ctrl+g", "sign_in", "Sign in", show=False, priority=True),
+    ]
+
     def __init__(self, settings: LocalSettings, *, accept_label: str = "Save and connect") -> None:
         self.settings = settings
         self.catalog = local_model_catalog()
-        self._model_choices: dict[str, tuple[str, ...]] = self.catalog
+        self._model_choices: dict[str, tuple[str, ...]] = dict(self.catalog)
+        self._login_providers = local_login_providers()
 
         providers = list(self.catalog) or list(_FALLBACK_PROVIDERS)
         current_provider = settings.provider
@@ -222,6 +234,48 @@ class LocalModelDialog(FormDialog):
             )
         return text
 
+    def form_hint(self) -> str:
+        hint = super().form_hint()
+        if not self._login_providers:
+            return hint
+        return f"{hint} · Ctrl+G sign in"
+
+    def _form_value(self, name: str) -> str:
+        row = self._rows_by_name.get(name)
+        return str(row.value() or "").strip() if row is not None else ""
+
+    def action_sign_in(self) -> None:
+        """Start an account login for the provider typed in the form."""
+        provider = self._form_value("provider")
+        if provider not in self._login_providers:
+            known = ", ".join(sorted(self._login_providers)) or "none"
+            self.show_error(
+                f"{provider or 'This provider'} has no account login. Providers with one: {known}."
+            )
+            return
+        api_key_env = self._form_value("api_key_env")
+        if provider != self.settings.provider:
+            # Endpoint settings typed here belong to this provider only once saved.
+            api_key_env = ""
+        self.app.push_screen(
+            DeviceLoginDialog(LoginTarget(provider, keyring_account(provider, api_key_env))),
+            self._signed_in,
+        )
+
+    def _signed_in(self, result: LoginResult | None) -> None:
+        if result is None:
+            return
+        self.show_error("")
+        if result.models:
+            # The provider just told us which ids this account may use: offer them now
+            # instead of making the user type an id from memory.
+            self._model_choices[result.provider] = result.models
+            self._refresh_models(result.provider)
+        self._help.update(
+            f"Signed in to {result.provider}. Token stored in the OS keyring; "
+            "pick a model and save."
+        )
+
     def _models_for(self, provider: str) -> tuple[str, ...]:
         return tuple(self._model_choices.get(provider, ()))
 
@@ -298,8 +352,8 @@ class LocalModelDialog(FormDialog):
             from_env = bool(api_key_env and os.environ.get(api_key_env))
             if not from_env and stored_api_key_ref(provider, api_key_env) is None:
                 self.show_error(
-                    "A new provider needs an API key. Paste it above or name an "
-                    "environment variable that already holds it."
+                    "A new provider needs an API key. Paste it above, name an "
+                    "environment variable that already holds it, or press Ctrl+G to sign in."
                 )
                 return
         values["provider"] = provider

@@ -34,6 +34,7 @@ from .launch import (
     transport_for,
 )
 from .local import local_target
+from .login import DeviceAuthorization, login, login_target
 from .profiles import Profile, Profiles, default_profiles_path
 
 __all__ = ["main", "build_parser"]
@@ -134,6 +135,15 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     remove = profiles_sub.add_parser("remove", help="Remove a saved profile")
     remove.add_argument("name")
+
+    login = sub.add_parser("login", help="Sign in to a local provider with an account login")
+    login.add_argument("provider", nargs="?", help="Provider id (default: the configured provider)")
+    login.add_argument(
+        "--local-config",
+        type=Path,
+        metavar="PATH",
+        help="Local settings TOML that names the default provider",
+    )
 
     clean = sub.add_parser("clean", help="Delete local session history")
     clean.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
@@ -575,6 +585,31 @@ def _command_profiles(args: argparse.Namespace) -> int:
     return EXIT_USAGE
 
 
+async def _command_login(args: argparse.Namespace) -> int:
+    target = login_target(args.provider, args.local_config)
+    print(f"Signing in to {target.provider} (account {target.account})", flush=True)
+
+    def announce(authorization: DeviceAuthorization) -> None:
+        minutes = max(1, authorization.expires_in // 60)
+        print(
+            f"Open {authorization.verification_uri} and enter code: {authorization.user_code}",
+            flush=True,
+        )
+        print(f"The code expires in about {minutes} min. Waiting for approval…", flush=True)
+
+    result = await login(target, on_authorization=announce)
+    print(f"Signed in. Token stored in the OS keyring as {result.reference}.", flush=True)
+    if result.models:
+        print("Models this account can use:\n  " + "\n  ".join(result.models), flush=True)
+    if not target.configured:
+        print(
+            f"Saved for {result.provider}, which is not the configured provider yet. Set "
+            f'provider = "{result.provider}" in hrns.local.toml, or pick it from /models.',
+            flush=True,
+        )
+    return EXIT_OK
+
+
 def _command_connect(args: argparse.Namespace) -> int:
     from .tui.app import run_terminal
 
@@ -923,6 +958,8 @@ def main(argv: list[str] | None = None) -> int:
             return _command_profiles(args)
         if args.command == "mcp":
             return _command_mcp(args)
+        if args.command == "login":
+            return asyncio.run(_command_login(args))
         if args.command == "clean":
             from .clean import clean
 

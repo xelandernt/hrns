@@ -78,6 +78,37 @@ defer_loading = true
 Authorization = "Bearer {env:GH_TOKEN}"
 ```
 
+## Account login (GitHub Copilot)
+
+Subscription providers can authenticate with the account itself instead of an API key.
+Local mode supports GitHub Copilot through GitHub's OAuth device flow: the runtime asks
+GitHub for a short code, you approve it in the browser, and the token is written to the
+same OS keyring entry a pasted key would use.
+
+```sh
+hrns login github-copilot
+```
+
+The command prints the verification address and code, waits for approval, lists the
+model ids this plan can use, and stores the token as
+`keyring:hrns.local/github-copilot`. Save the provider once:
+
+```toml
+provider = "github-copilot"
+model = "claude-sonnet-4.5"
+```
+
+In the terminal, press **l** in the connection picker (or `/models` in a session), type
+`github-copilot` in **Provider**, and press **Ctrl+G**. Approving the code closes the
+login window, and the ids this account can reach are offered in the **Model** field, so
+the whole setup stays in one form. `hrns login` without a provider signs in to the
+configured one.
+
+Tokens are not refreshed by hrns: if GitHub expires or revokes one, run the login again.
+No scopes are requested, and the bundled client id belongs to hrns's own GitHub OAuth
+app; set `GITHUB_OAUTH_CLIENT_ID` to use an app of your own (device flow must be enabled
+on it). Only that variable is read for the flow.
+
 ## Start with DeepSeek
 
 Install the base package (DeepSeek and OpenAI-compatible models are included):
@@ -110,7 +141,8 @@ installed Pydantic AI version: focus a field to see the full list, and type to f
 What you type is the value, so a provider or model id that is not listed works too — the
 row marks it `custom` so a typo is visible before saving. Paste an API key into the masked
 **API key** field to store it in your operating system keyring; it is never written to the
-TOML file. The **API key environment variable** field takes a variable *name* such as
+TOML file. For a provider with an account login, press **Ctrl+G** instead — see
+[account login](#account-login-github-copilot). The **API key environment variable** field takes a variable *name* such as
 `DEEPSEEK_API_KEY`, not the key itself. Enter an optional base URL too. **Save and connect**
 (or **Save and apply** from a session) persists the non-secret configuration; from the
 connection picker it starts a session in the current directory.

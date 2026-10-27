@@ -18,6 +18,7 @@ from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.settings import ModelSettings
 
 from hrns.config import LocalSettings, thinking_from_settings
+from hrns.config.credentials import store_secret
 from hrns.config.mcp import McpServerConfig, default_token_store_path
 from hrns.protocol import HrnsError
 
@@ -25,6 +26,7 @@ from .cli import _serve_until_closed
 from .definitions import AgentDefinition, AgentSpec, DefinitionBinding
 from .host import HrnsACPAgent
 from .host_support import HostBundle, HostPolicy, build_store
+from .login import DeviceAuthorization, device_login, login_providers, supports_login
 from .registry import PluginRegistry
 from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceRequirement
 
@@ -136,22 +138,32 @@ def known_models() -> dict[str, list[str]]:
 def provider_catalog() -> dict[str, Any]:
     """Known providers, their model ids, and reasoning support, from Pydantic AI."""
     grouped = known_models()
+    logins = set(login_providers())
     providers: list[dict[str, Any]] = []
     for provider in sorted(grouped, key=_provider_sort_key):
         models = grouped[provider]
         support = thinking_support(f"{provider}:{model}" for model in models)
-        providers.append(
-            {
-                "name": provider,
-                "models": models,
-                "thinking": {
-                    model: level
-                    for model in models
-                    if (level := support.get(f"{provider}:{model}"))
-                },
-            }
-        )
+        entry: dict[str, Any] = {
+            "name": provider,
+            "models": models,
+            "thinking": {
+                model: level for model in models if (level := support.get(f"{provider}:{model}"))
+            },
+        }
+        if provider in logins:
+            entry["login"] = True
+        providers.append(entry)
     return {"providers": providers}
+
+
+def _login_hint(provider: str, key: str | None) -> str:
+    """Point at the account login when a provider supports one and no key was given."""
+    if key is not None or not supports_login(provider):
+        return ""
+    return (
+        f" {provider} also accepts an account login: run `hrns login {provider}` "
+        "or press Ctrl+G in the local model form."
+    )
 
 
 def configured_model(settings: LocalSettings, model_id: str | None = None) -> Model:
@@ -193,6 +205,7 @@ def configured_model(settings: LocalSettings, model_id: str | None = None) -> Mo
             f"Cannot configure provider {provider!r} / model {selected!r}. "
             "Check the provider name, credentials and supported provider_options. "
             "For a custom OpenAI-compatible base_url use provider = 'openai-chat'."
+            + _login_hint(provider, key)
         ) from exc
 
 
@@ -330,6 +343,41 @@ async def _run(settings: LocalSettings) -> None:
     await _serve_until_closed(agent)
 
 
+def _emit_event(event: dict[str, object]) -> None:
+    """One JSON line on stdout; the client renders these while the login runs."""
+    print(json.dumps(event, ensure_ascii=False), flush=True)
+
+
+def _login(provider: str, account: str) -> int:
+    """Run a device flow to completion and store the token in the OS keyring."""
+
+    def announce(authorization: DeviceAuthorization) -> None:
+        _emit_event(
+            {
+                "event": "device",
+                "provider": provider,
+                "userCode": authorization.user_code,
+                "verificationUri": authorization.verification_uri,
+                "expiresIn": authorization.expires_in,
+            }
+        )
+
+    outcome = asyncio.run(device_login(provider, on_authorization=announce))
+    reference = store_secret(account, outcome.token)
+    if reference is None:
+        raise ValueError("Signed in, but the OS keyring is unavailable so the token was not saved.")
+    _emit_event(
+        {
+            "event": "authorized",
+            "provider": provider,
+            "account": account,
+            "reference": reference,
+            "models": list(outcome.models),
+        }
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run the configured local developer agent over ACP."
@@ -342,10 +390,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the known provider/model catalog as JSON and exit",
     )
+    parser.add_argument(
+        "--login",
+        metavar="PROVIDER",
+        help="Sign in to a provider with an account login, print JSON events, and exit",
+    )
+    parser.add_argument(
+        "--account",
+        default="",
+        metavar="NAME",
+        help="Keyring account for --login (default: the provider id)",
+    )
     args = parser.parse_args(argv)
     if args.catalog:
         print(json.dumps(provider_catalog(), ensure_ascii=False))
         return 0
+    if args.login:
+        try:
+            return _login(args.login, args.account or args.login)
+        except (ValueError, OSError, HrnsError) as exc:
+            print(f"hrns-local: {exc}", file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            return 130
     try:
         settings = (
             LocalSettings(config_file=None)

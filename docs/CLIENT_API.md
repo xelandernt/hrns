@@ -63,6 +63,9 @@ hrns profiles list
 hrns profiles add local --stdio -- /usr/bin/my-agent --acp
 hrns profiles add team --server https://agents.example --agent research-assistant --token env:HRNS_TOKEN
 
+# Sign in to a local provider with an account login (device flow)
+hrns login github-copilot
+
 # Delete local session history (asks first; --dry-run previews, --yes skips)
 hrns clean
 ```
@@ -237,8 +240,9 @@ The existing SSH configuration and authentication apply. The remote environment 
 `hrns connect --local` launches the configured local agent; `hrns run --local`
 uses the same settings for headless execution. Use `--local-config PATH` to select
 a TOML file, or press **l** in the connection picker to configure the provider and
-model. See [local setup](LOCAL.md) for DeepSeek, local model servers, credentials,
-approvals, and configuration precedence.
+model. Account logins (for example GitHub Copilot's device flow) are `hrns login
+PROVIDER`, or **Ctrl+G** in the local model form. See [local setup](LOCAL.md) for
+DeepSeek, local model servers, credentials, approvals, and configuration precedence.
 
 ## Session names and totals
 
