@@ -184,7 +184,8 @@ def _grep(state: ToolViewState) -> Text:
     if not data:
         return _pending(state)
     text = Text()
-    text.append(f"{int(data.get('count') or 0)} matches", style="bold")
+    count = int(data.get("count") or 0)
+    text.append(f"{count} {'match' if count == 1 else 'matches'}", style="bold")
     text.append(f"  {data.get('pattern')!r}", style="dim")
     if data.get("truncated"):
         text.append("  (truncated)", style="yellow")

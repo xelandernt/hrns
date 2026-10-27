@@ -22,6 +22,8 @@ from pydantic_ai.agent import AbstractAgent
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
+    chain_presenters,
+    default_coding_presenter,
 )
 
 from hrns.config import EFFORT_DEFAULT
@@ -49,6 +51,7 @@ from .acp_store import (
     usage_payload,
 )
 from .ask_user import QuestionChannel
+from .capabilities.coder._acp import coder_tool_presenter
 from .command_service import CommandService
 from .configuration_service import ConfigurationService
 from .host_support import (
@@ -110,6 +113,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             # ACP requires a string even when the definition has no version.
             version=self.definition.version or "",
             session_config=self.sessions.compose_session,
+            tool_presenter=chain_presenters(coder_tool_presenter, default_coding_presenter),
             session_store=self.store,
             models=models or None,
             model_resolver=bundle.model_resolver,
