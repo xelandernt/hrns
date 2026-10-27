@@ -15,15 +15,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
           # hatch-vcs derives the version from git tags, so history must be complete.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: '3.12'
-          enable-cache: true
       - uses: extractions/setup-just@v4
       - run: just install
       - run: just check
@@ -41,7 +40,7 @@ jobs:
           fi
       - name: Validate distribution metadata
         run: uvx twine check dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -57,7 +56,7 @@ jobs:
       # Trusted Publishing: PyPI exchanges this OIDC token for a short-lived upload token.
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
