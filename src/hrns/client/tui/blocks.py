@@ -10,8 +10,7 @@ from datetime import datetime
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
-from textual.containers import Vertical
-from textual.geometry import Offset
+from textual.containers import Horizontal, Vertical
 from textual.timer import Timer
 from textual.widgets import Button, Collapsible, Markdown, Static
 
@@ -27,23 +26,38 @@ class MessageBlock(Vertical):
     """
 
     ROLE_LABELS = {"you": "You", "agent": "Assistant"}
-    REVEAL_DURATION = 0.35
+    COPY_FEEDBACK_DURATION = 1.5
     DEFAULT_CSS = """
-    MessageBlock .message-actions {
-        height: 3;
-        align: right middle;
+    MessageBlock .message-header {
+        height: 1;
     }
-    MessageBlock .message-actions Button {
-        height: 3; min-width: 13; padding: 0 1; border: round $border; margin: 0 0 0 1;
-        color: $text-muted; background: transparent;
+    MessageBlock .message-role {
+        width: 1fr;
+        height: 1;
+        margin-top: 0;
     }
-    MessageBlock .message-actions Button:hover {
-        border: round $accent;
+    MessageBlock .copy-message {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        min-height: 1;
+        padding: 0;
+        border: none;
+        color: $text-muted;
         background: transparent;
     }
-    MessageBlock .message-actions Button:focus {
-        background-tint: transparent;
+    MessageBlock .copy-message:hover {
+        color: $foreground;
+        background: $accent 15%;
+    }
+    MessageBlock .copy-message:focus {
+        color: $foreground;
+        background: $accent 20%;
         text-style: bold;
+    }
+    MessageBlock .copy-message:disabled {
+        color: $text-disabled;
+        background: transparent;
     }
     """
 
@@ -53,7 +67,8 @@ class MessageBlock(Vertical):
         self._text = text
         self._dropped = 0
         self._marked = False
-        self._finished = False
+        self._finished = role != "agent"
+        self._copy_reset_timer: Timer | None = None
         # Textual's Markdown parses and mounts the whole document on every update, so a
         # streaming reply re-rendered its entire history 16 times a second. Remembering
         # what was already handed over lets each tick append only the new fragment.
@@ -66,31 +81,47 @@ class MessageBlock(Vertical):
         label.append(datetime.now().strftime("%H:%M"), style="dim")
         self._label = Static(label, markup=False)
         self._label.add_class("message-role")
+        self._copy_button = Button(
+            "⧉",
+            id="copy-message",
+            classes="copy-message",
+            disabled=not self._finished,
+            tooltip="Copy message",
+            compact=True,
+        )
+        self._copy_button.active_effect_duration = 0
         self._body = Markdown(text) if role == "agent" else Static(text, markup=False)
         self._body.add_class("message-text" if role == "you" else "message-body")
         self.add_class(f"role-{role}")
 
     def compose(self) -> ComposeResult:
-        yield self._label
+        with Horizontal(classes="message-header"):
+            yield self._label
+            yield self._copy_button
         if self.role == "you":
             with Vertical(classes="message-body"):
                 yield Static(classes="transcript-bar")
                 yield self._body
         else:
             yield self._body
-        if self.role == "agent":
-            from textual.containers import Horizontal
-
-            with Horizontal(classes="message-actions"):
-                button = Button("copy", id="copy-response", disabled=True)
-                button.active_effect_duration = 0
-                yield button
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is not self._copy_button:
+            return
         event.stop()
-        if event.button.id == "copy-response":
-            self.app.copy_to_clipboard(self._text)
-            event.button.label = "Copied!"
+        self.app.copy_to_clipboard(self._text)
+        self._copy_button.label = "✓"
+        self._copy_button.tooltip = "Message copied"
+        if self._copy_reset_timer is not None:
+            self._copy_reset_timer.stop()
+        self._copy_reset_timer = self.set_timer(
+            self.COPY_FEEDBACK_DURATION, self._reset_copy_feedback
+        )
+
+    def _reset_copy_feedback(self) -> None:
+        self._copy_reset_timer = None
+        self._copy_button.label = "⧉"
+        self._copy_button.tooltip = "Copy message"
 
     def append_text(self, text: str) -> None:
         self._text += text
@@ -156,35 +187,21 @@ class MessageBlock(Vertical):
         if self._catch_up is not None:
             self._catch_up.cancel()
             self._catch_up = None
+        if self._copy_reset_timer is not None:
+            self._copy_reset_timer.stop()
+            self._copy_reset_timer = None
 
     def on_mount(self) -> None:
         self.flush()
-        if self._finished:
-            for button in self.query(Button):
-                button.disabled = False
-            return
-        # The action is revealed when the reply ends, not while it streams.
-        for button in self.query(Button):
-            button.display = False
+        self._copy_button.disabled = not self._finished
 
     def finish(self) -> None:
         self.flush()
         if self._finished:
             return
         self._finished = True
-        if not self.is_mounted:
-            return
-        for button in self.query(Button):
-            button.disabled = False
-            self._reveal(button)
-
-    def _reveal(self, button: Button) -> None:
-        """Fade the action in from the right once the reply is complete."""
-        button.styles.opacity = 0.0
-        button.styles.offset = Offset(2, 0)
-        button.display = True
-        button.styles.animate("opacity", 1.0, duration=self.REVEAL_DURATION, easing="out_cubic")
-        button.animate("offset", Offset(0, 0), duration=self.REVEAL_DURATION, easing="out_cubic")
+        if self.is_mounted:
+            self._copy_button.disabled = False
 
 
 class ReasoningBlock(Collapsible):

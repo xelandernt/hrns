@@ -115,8 +115,10 @@ class HrnsApp(App[int]):
     .role-agent {
         height: auto;
     }
-    .message-role {
+    .message-header {
         margin-top: 1;
+    }
+    .message-role {
         text-style: bold;
     }
     .role-you .message-role { color: $accent; }
@@ -450,7 +452,7 @@ class HrnsApp(App[int]):
     .narrow #ask-user-dock,
     .narrow #approval-dock,
     .narrow #suggestions-dock { padding: 0 1; }
-    .narrow .message-role { margin-top: 0; }
+    .narrow .message-header { margin-top: 0; }
 
     /* --------------------------------------------------------- picker */
 
