@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from acp.schema import (
@@ -40,7 +41,7 @@ def _raw_arguments(value: Any) -> Any:
 
 
 def absolute_path(value: str, *, label: str) -> str:
-    if not isinstance(value, str) or not value.startswith("/"):
+    if not isinstance(value, str) or not os.path.isabs(value):
         raise HrnsClientError(f"The {label} must be an absolute path, got '{value}'.")
     return value
 

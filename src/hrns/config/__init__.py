@@ -1,6 +1,7 @@
 """Local agent configuration shared by the independent client and runtime."""
 
 from .credentials import (
+    GITHUB_COPILOT_CLIENT_ID,
     KEYRING_SERVICE,
     keyring_account,
     secret_ref,
@@ -25,6 +26,7 @@ from .settings import (
 __all__ = [
     "EFFORT_DEFAULT",
     "EFFORT_OFF",
+    "GITHUB_COPILOT_CLIENT_ID",
     "KEYRING_SERVICE",
     "THINKING_LEVELS",
     "CapabilitiesSettings",

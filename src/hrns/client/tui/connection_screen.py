@@ -19,7 +19,7 @@ from hrns.config import LocalSettings, thinking_from_settings
 from ..catalog import AgentDeployment
 from ..errors import HrnsClientError
 from ..launch import ConnectionTarget, catalog_for, default_remote_cwd, local_cwd
-from ..local import local_target
+from ..local import is_local_hrns, local_target
 from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow
 from .dialogs import FormDialog
@@ -383,7 +383,7 @@ class ConnectScreen(_HrnsScreen):
             return
         try:
             target = self.initial_target
-            args = target.profile.args if target and target.profile.command == "hrns-local" else []
+            args = target.profile.args if target and is_local_hrns(target.profile) else []
             config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
             settings = LocalSettings(config_file=config) if config else LocalSettings()
         except (ValueError, OSError) as exc:

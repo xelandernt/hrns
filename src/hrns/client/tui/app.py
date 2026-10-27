@@ -737,6 +737,12 @@ class HrnsApp(App[int]):
         if screen.busy:
             await screen._notice("Stop the running turn before switching agents.", "warning")
             return
+        # Pop from an app-owned worker. Textual cancels a node's workers when it
+        # unmounts, so popping from the chat screen's own command worker aborts
+        # pop_screen halfway and leaves the app without a working focus chain.
+        self.run_worker(self._leave_chat(), group="connect", exclusive=True)
+
+    async def _leave_chat(self) -> None:
         await self.disconnect_current()
         with contextlib.suppress(Exception):
             await self.pop_screen()
