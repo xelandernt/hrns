@@ -192,16 +192,35 @@ class HrnsApp(App[int]):
 
     /* --------------------------------------------------------- side panel */
 
-    #side-panel {
-        layer: drawer;
-        dock: right;
+    #side-resize {
+        display: none;
+        layer: base;
+        width: 1;
         height: 1fr;
-        width: 46%;
-        min-width: 36;
-        max-width: 76;
+        background: $border 70%;
+    }
+    #side-resize:hover,
+    #side-resize:focus,
+    #side-resize.dragging {
+        background: $accent 70%;
+    }
+    #side-panel {
+        height: 1fr;
         background: $panel;
         border: round $border;
         border-left: solid $accent 60%;
+    }
+    .sidebar-docked #side-panel {
+        layer: base;
+        min-width: 32;
+        max-width: 76;
+    }
+    .sidebar-overlay #side-panel {
+        layer: drawer;
+        dock: right;
+        width: 46%;
+        min-width: 36;
+        max-width: 76;
     }
     #side-panel Tabs {
         background: $panel;
@@ -820,9 +839,8 @@ class HrnsApp(App[int]):
             **(self.profiles.tui or {}),
             **settings.to_mapping(),
         }
-        if self.profiles.sources:
-            with contextlib.suppress(Exception):
-                self.profiles.save(self.profiles.sources[0])
+        with contextlib.suppress(Exception):
+            self.profiles.save_tui()
 
     # ----------------------------------------------------------------- quitting
 

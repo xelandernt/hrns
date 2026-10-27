@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ...constants import CLIENT_VERSION
+from ..composer import Composer
 from ..connection_screen import _short_path
-from ..panels import SidePanel
+from ..panels import SidebarResizeHandle, SidePanel
 from ..state import (
     config_option_value,
     effort_option,
@@ -51,14 +53,43 @@ class ChromeWorkflow:
         screen = self.screen
         width = screen.app.size.width
         panel = screen.query_one("#side-panel", SidePanel)
+        handle = screen.query_one("#side-resize", SidebarResizeHandle)
         panel.display = screen._panel_open
-        screen_class = "narrow" if width < 96 else "wide"
-        if screen_class not in screen.classes:
-            screen.add_class(screen_class)
-        if width >= 96:
-            screen.remove_class("narrow")
+        wide = width >= 96
+        screen.set_class(wide, "wide")
+        screen.set_class(not wide, "narrow")
+        screen.set_class(wide, "sidebar-docked")
+        screen.set_class(not wide, "sidebar-overlay")
+        show_handle = screen._panel_open and wide
+        if handle.has_focus and not show_handle:
+            screen.query_one("#composer", Composer).focus()
+        handle.display = show_handle
+        if wide:
+            panel.styles.width = self._clamp_sidebar_width(screen._sidebar_width)
         else:
-            screen.remove_class("wide")
+            panel.styles.width = "46%"
+
+    def resize_sidebar(self, delta: int, *, persist: bool) -> None:
+        screen = self.screen
+        if screen.app.size.width < 96 or not screen._panel_open:
+            return
+        panel = screen.query_one("#side-panel", SidePanel)
+        if delta:
+            screen._sidebar_width = self._clamp_sidebar_width(panel.region.width + delta)
+            panel.styles.width = screen._sidebar_width
+        if persist:
+            self.persist_sidebar_width()
+
+    def persist_sidebar_width(self) -> None:
+        screen = self.screen
+        if screen.settings.sidebar_width == screen._sidebar_width:
+            return
+        screen.settings = replace(screen.settings, sidebar_width=screen._sidebar_width)
+        screen.app.apply_settings(screen.settings)
+
+    def _clamp_sidebar_width(self, width: int) -> int:
+        available = self.screen.app.size.width - 48 - 1
+        return max(32, min(76, available, width))
 
     def update_chrome(self) -> None:
         screen = self.screen

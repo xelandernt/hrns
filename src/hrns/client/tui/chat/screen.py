@@ -69,7 +69,12 @@ from ..messages import (
     QueueAction,
     Submitted,
 )
-from ..panels import SidePanel, SidePanelCloseRequested
+from ..panels import (
+    SidebarResizeHandle,
+    SidebarResizeRequested,
+    SidePanel,
+    SidePanelCloseRequested,
+)
 from ..panels.capability import (
     BindingEditRequested,
     BindingToggleRequested,
@@ -162,6 +167,7 @@ class ChatScreen(_HrnsScreen):
         self._consumer: asyncio.Task[None] | None = None
         self._unsubscribe = None
         self._panel_open = False
+        self._sidebar_width = settings.sidebar_width
         self._turns_started = 0
         self._attachments: list[str] = []
         self._drafts: dict[str, tuple[str, list[str], list[tuple[str, list[str]]]]] = {}
@@ -197,6 +203,7 @@ class ChatScreen(_HrnsScreen):
     def compose(self) -> ComposeResult:
         with Horizontal(id="main"):
             yield TranscriptPane(id="transcript")
+            yield SidebarResizeHandle()
             yield SidePanel()
         yield Button("New output ↓ · Ctrl+End", id="new-output")
         yield PromptQueue(id="prompt-queue")
@@ -758,6 +765,10 @@ class ChatScreen(_HrnsScreen):
     def on_side_panel_close_requested(self, event: SidePanelCloseRequested) -> None:
         event.stop()
         self._close_panel()
+
+    def on_sidebar_resize_requested(self, event: SidebarResizeRequested) -> None:
+        event.stop()
+        self.chrome.resize_sidebar(event.delta, persist=event.final)
 
     def action_show_capabilities(self) -> None:
         self.actions.show_capabilities()

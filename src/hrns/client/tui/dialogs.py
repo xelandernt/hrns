@@ -942,10 +942,9 @@ class SettingsDialog(_FormMixin, _DialogBase):
 
     accept_label = "apply"
 
-    def __init__(self, settings: Settings, *, can_persist: bool) -> None:
+    def __init__(self, settings: Settings) -> None:
         super().__init__("Settings", "These preferences live in the client profile file.")
         self.settings = settings
-        self.can_persist = can_persist
         themes = ("hrns", "textual-dark", "textual-light", "ansi-dark", "ansi-light")
         permission_labels = {
             "ask": "ask every time",
@@ -993,9 +992,7 @@ class SettingsDialog(_FormMixin, _DialogBase):
         with Vertical(classes="dialog"):
             yield from self.dialog_header()
             yield Static(
-                "Saved to the profile file when it exists."
-                if self.can_persist
-                else "No profile file yet; changes apply for this run only.",
+                "Saved to the global profile file.",
                 markup=False,
                 classes="dialog-help",
             )
@@ -1009,5 +1006,6 @@ class SettingsDialog(_FormMixin, _DialogBase):
                 auto_expand_tools=bool(rows["expand"].value()),
                 show_thoughts=bool(rows["thoughts"].value()),
                 permission_mode=str(rows["permission"].value()),
+                sidebar_width=self.settings.sidebar_width,
             )
         )

@@ -748,6 +748,7 @@ class Settings:
     auto_expand_tools: bool = False
     show_thoughts: bool = False
     permission_mode: str = "ask"
+    sidebar_width: int = 52
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -756,6 +757,14 @@ class Settings:
         mode = str(mapping.get("permissionMode", mapping.get("permission_mode", "ask")))
         if mode not in PERMISSION_MODES:
             mode = "ask"
+        raw_sidebar_width = mapping.get("sidebarWidth", mapping.get("sidebar_width", 52))
+        try:
+            sidebar_width = (
+                int(raw_sidebar_width) if not isinstance(raw_sidebar_width, bool) else 52
+            )
+        except (TypeError, ValueError):
+            sidebar_width = 52
+        sidebar_width = max(32, min(76, sidebar_width))
         return cls(
             theme=str(mapping.get("theme", "hrns")),
             auto_expand_tools=bool(
@@ -763,6 +772,7 @@ class Settings:
             ),
             show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
             permission_mode=mode,
+            sidebar_width=sidebar_width,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -771,4 +781,5 @@ class Settings:
             "auto_expand_tools": self.auto_expand_tools,
             "show_thoughts": self.show_thoughts,
             "permission_mode": self.permission_mode,
+            "sidebar_width": self.sidebar_width,
         }
