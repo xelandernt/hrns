@@ -52,7 +52,7 @@ class ChatActions:
         screen = self.screen
         panel = screen.query_one("#side-panel", SidePanel)
         screen._panel_open = True
-        panel.display = True
+        screen.chrome.apply_layout()
         # TabbedContent resolves its private ContentTabs by immediate-child
         # lookup. Assigning ``active`` before compose has mounted it raises
         # NoMatches, so wait until the show/refresh cycle has run.
@@ -63,9 +63,8 @@ class ChatActions:
 
     def close_panel(self) -> None:
         screen = self.screen
-        panel = screen.query_one("#side-panel", SidePanel)
         screen._panel_open = False
-        panel.display = False
+        screen.chrome.apply_layout()
         screen.query_one("#composer", Composer).focus()
 
     def toggle_panel(self) -> None:
@@ -74,7 +73,7 @@ class ChatActions:
             self.close_panel()
             return
         screen._panel_open = True
-        screen.query_one("#side-panel", SidePanel).display = True
+        screen.chrome.apply_layout()
 
     def command_palette(self) -> None:
         screen = self.screen
@@ -260,10 +259,7 @@ invents commands the agent did not advertise.
                 screen.chrome.apply_settings()
 
         screen.app.push_screen(
-            SettingsDialog(
-                screen.settings,
-                can_persist=bool(screen.app.profiles.sources),
-            ),
+            SettingsDialog(screen.settings),
             apply,
         )
 

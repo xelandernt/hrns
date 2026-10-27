@@ -207,6 +207,25 @@ class Profiles:
         os.replace(tmp, target)
         return target
 
+    def save_tui(self, path: Path | None = None) -> Path:
+        """Persist global TUI preferences without copying project profiles."""
+        configured = os.environ.get(CONFIG_ENV_OVERRIDE)
+        target = path or (Path(configured) if configured else default_profiles_path())
+        target = target.expanduser().absolute()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        document: dict[str, Any]
+        if target.is_file():
+            document = tomllib.loads(target.read_text(encoding="utf-8"))
+        else:
+            document = {}
+        document["tui"] = dict(self.tui)
+        text = tomli_w.dumps(document)
+        tomllib.loads(text)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, target)
+        return target
+
     @classmethod
     def load(
         cls,

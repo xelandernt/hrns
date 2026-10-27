@@ -1,5 +1,15 @@
 """Side panel widgets."""
 
-from .side import SidePanel, SidePanelCloseRequested
+from .side import (
+    SidebarResizeHandle,
+    SidebarResizeRequested,
+    SidePanel,
+    SidePanelCloseRequested,
+)
 
-__all__ = ["SidePanel", "SidePanelCloseRequested"]
+__all__ = [
+    "SidebarResizeHandle",
+    "SidebarResizeRequested",
+    "SidePanel",
+    "SidePanelCloseRequested",
+]
