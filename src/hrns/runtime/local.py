@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -264,9 +264,52 @@ def _copilot_responses_model(model_name: str, options: dict[str, Any]) -> Model:
     client (base URL and editor headers) with the Responses model, and the Copilot
     family profile so reasoning settings resolve per vendor.
     """
-    from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
+    from openai import AsyncStream
+    from openai.types import responses
+    from pydantic_ai.models import ModelRequestParameters
+    from pydantic_ai.models.openai import (
+        OpenAIModelName,
+        OpenAIResponsesModel,
+        OpenAIResponsesModelSettings,
+        OpenAIResponsesStreamedResponse,
+    )
     from pydantic_ai.providers.github_copilot import GitHubCopilotProvider
     from pydantic_ai.providers.openai import OpenAIProvider
+
+    class _CopilotResponsesStream(AsyncStream[responses.ResponseStreamEvent]):
+        """Keep one Responses item ID for each Copilot function call."""
+
+        def __init__(self, wrapped: AsyncStream[responses.ResponseStreamEvent]) -> None:
+            self._wrapped = wrapped
+            self._item_ids: dict[str, str] = {}
+
+        def __aiter__(self) -> AsyncIterator[responses.ResponseStreamEvent]:
+            return self
+
+        async def __anext__(self) -> responses.ResponseStreamEvent:
+            return self._normalize(await anext(self._wrapped))
+
+        def _normalize(self, event: responses.ResponseStreamEvent) -> responses.ResponseStreamEvent:
+            if not isinstance(
+                event,
+                responses.ResponseOutputItemAddedEvent | responses.ResponseOutputItemDoneEvent,
+            ):
+                return event
+            item = event.item
+            if not isinstance(item, responses.ResponseFunctionToolCall):
+                return event
+            if item.id is None:
+                return event
+            stable_id = self._item_ids.setdefault(item.call_id, item.id)
+            if item.id == stable_id:
+                return event
+            return event.model_copy(update={"item": item.model_copy(update={"id": stable_id})})
+
+        async def close(self) -> None:
+            await self._wrapped.close()
+
+        async def aclose(self) -> None:
+            await self.close()
 
     class _CopilotResponsesProvider(OpenAIProvider):
         """OpenAI Responses against Copilot's client, reported under its own name."""
@@ -275,11 +318,31 @@ def _copilot_responses_model(model_name: str, options: dict[str, Any]) -> Model:
         def name(self) -> str:
             return "github-copilot"
 
+    class _CopilotResponsesModel(OpenAIResponsesModel):
+        """Normalize Copilot's changing streamed item IDs before Pydantic AI sees them."""
+
+        async def _process_streamed_response(
+            self,
+            response: AsyncStream[responses.ResponseStreamEvent],
+            model_settings: OpenAIResponsesModelSettings,
+            model_request_parameters: ModelRequestParameters,
+            *,
+            expected_model_name: OpenAIModelName | None = None,
+            expected_response_id: str | None = None,
+        ) -> OpenAIResponsesStreamedResponse:
+            return await super()._process_streamed_response(
+                _CopilotResponsesStream(response),
+                model_settings,
+                model_request_parameters,
+                expected_model_name=expected_model_name,
+                expected_response_id=expected_response_id,
+            )
+
     copilot = GitHubCopilotProvider(
         api_key=options.get("api_key"),
         base_url=options.get("base_url"),
     )
-    return OpenAIResponsesModel(
+    return _CopilotResponsesModel(
         model_name,
         provider=_CopilotResponsesProvider(openai_client=copilot.client),
         profile=GitHubCopilotProvider.model_profile(model_name),
