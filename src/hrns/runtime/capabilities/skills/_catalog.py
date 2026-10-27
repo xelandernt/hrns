@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness import Skills
 from pydantic_ai_harness.skills import SkillCatalog
 from pydantic_ai_skills import SkillsCapability
@@ -16,6 +16,7 @@ from hrns.protocol.extensions import CommandResult
 
 from ...extensions import CommandContext, TextArguments
 from ...resources import WORKSPACE, ResourceSet
+from ...workspaces import local_workspace
 from .config import SkillsConfig, resolved_directories
 
 __all__ = [
@@ -70,8 +71,38 @@ def build_skills(directories: Sequence[str]) -> Skills:
         list(directories),
         missing_directories="skip",
         duplicate_names="keep_first",
-        workspace=LocalWorkspaceBackend(Path.cwd()),
+        workspace=local_workspace(Path.cwd()),
     )
+
+
+class _WindowsSkillsCapability(SkillsCapability):
+    """`SkillsCapability` that reads libraries through the Windows workspace.
+
+    `SkillsCapability` builds ``LocalWorkspaceBackend(Path.cwd())`` internally to hand harness
+    the libraries on this machine, and Pydantic AI's backend refuses non-POSIX hosts. The
+    libraries are host paths in both cases, so only the workspace wrapper changes.
+    """
+
+    def _build_harness_skills(
+        self,
+        libraries: Sequence[str | Path],
+        directory_names: frozenset[str],
+        shadowed: frozenset[str],
+    ) -> Skills[Any] | None:
+        if not libraries:
+            return None
+        workspace = local_workspace(Path.cwd())
+        if self.include is not None:
+            return Skills(
+                libraries,
+                include=sorted((self.include & directory_names) - shadowed),
+                workspace=workspace,
+            )
+        return Skills(
+            libraries,
+            exclude=sorted((self.exclude | shadowed) & directory_names),
+            workspace=workspace,
+        )
 
 
 def build_capability(directories: Sequence[str]) -> SkillsCapability | None:
@@ -79,7 +110,8 @@ def build_capability(directories: Sequence[str]) -> SkillsCapability | None:
     libraries = _existing_libraries(directories)
     if not libraries:
         return None
-    return SkillsCapability(
+    capability_type = _WindowsSkillsCapability if os.name == "nt" else SkillsCapability
+    return capability_type(
         libraries,
         id="hrns.skills.files",
         # `$name` injects the skill body, so a loaded skill and an explicitly invoked one

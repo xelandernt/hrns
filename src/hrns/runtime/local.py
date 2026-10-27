@@ -31,6 +31,7 @@ from .host_support import HostBundle, HostPolicy, build_store
 from .login import DeviceAuthorization, device_login, login_providers, supports_login
 from .registry import PluginRegistry
 from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceRequirement
+from .workspaces import require_pwsh
 
 _LOCAL_INSTRUCTIONS = """\
 You are a local hrns agent connected through ACP, working in the user's project.
@@ -39,6 +40,20 @@ The bundled coder capability provides file tools, content search, and a shell in
 workspace. Keep commands non-interactive and confirm changes with a command instead of
 assuming they work. Answer directly when no tool is needed.
 """
+
+_WINDOWS_INSTRUCTIONS = """\
+
+The shell is PowerShell 7 (`pwsh`) on this Windows machine. Write shell commands in
+PowerShell syntax, not POSIX shell syntax. File listing and search use a built-in walk that
+skips common generated directories instead of repository ignore files.
+"""
+
+
+def _instructions() -> str:
+    if os.name == "nt":
+        return _LOCAL_INSTRUCTIONS + _WINDOWS_INSTRUCTIONS
+    return _LOCAL_INSTRUCTIONS
+
 
 #: Tools that only read the workspace (or ask the user); everything else needs approval.
 _READ_ONLY_TOOLS = frozenset(
@@ -402,7 +417,7 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             "Local coding agent with bundled file, search, and shell tools, a live Todo "
             "plan, Agent Skills, and structured user questions."
         ),
-        spec=AgentSpec(instructions=_LOCAL_INSTRUCTIONS),
+        spec=AgentSpec(instructions=_instructions()),
         resources=resources,
         bindings=bindings,
     )
@@ -417,6 +432,9 @@ def build_local_agent(
     model: Model | None = None,
 ) -> HrnsACPAgent:
     """Bind a model and trusted local workspace; workspace-changing tools need approval."""
+    if os.name == "nt":
+        # Fail at startup with an actionable message rather than on the first shell call.
+        require_pwsh()
     workspace = (cwd or Path.cwd()).expanduser().resolve(strict=True)
     if not workspace.is_dir():
         raise ValueError("The local working directory must be a directory.")

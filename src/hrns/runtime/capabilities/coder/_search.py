@@ -69,6 +69,15 @@ def supports_commands(workspace: Workspace) -> bool:
     return isinstance(workspace.backend, SupportsCommands)
 
 
+def _supports_posix_search(workspace: Workspace) -> bool:
+    """Whether the backend's shell can run the POSIX scripts search builds.
+
+    The Windows backend runs PowerShell, so command-based search is skipped there and the
+    filesystem walk below is used instead.
+    """
+    return supports_commands(workspace) and getattr(workspace.backend, "posix_shell", True)
+
+
 def _clean(path: str) -> str:
     cleaned = posixpath.normpath(path)
     return cleaned[2:] if cleaned.startswith("./") else cleaned
@@ -192,7 +201,7 @@ async def list_workspace(
     limit: int,
 ) -> tuple[list[str], bool]:
     """Return workspace-relative file paths under ``path`` and whether they were cut."""
-    if supports_commands(workspace):
+    if _supports_posix_search(workspace):
         try:
             listed = await _rg_list(workspace, path, glob, limit)
         except (WorkspaceError, OSError):
@@ -399,7 +408,7 @@ async def grep_workspace(
     limit: int,
 ) -> tuple[list[Match], bool, str]:
     """Search file contents, returning matches, whether they were cut, and the backend used."""
-    if supports_commands(workspace):
+    if _supports_posix_search(workspace):
         runners = (("rg", _rg_grep), ("grep", _posix_grep))
         for backend, runner in runners:
             try:
