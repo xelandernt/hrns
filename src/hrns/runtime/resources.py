@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Generic, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, Field
@@ -38,6 +37,7 @@ from typing_extensions import TypeIs
 from hrns.protocol import HrnsError
 
 from .todo import PlanChannel
+from .workspaces import local_workspace
 
 __all__ = [
     "ANSWERS",
@@ -478,11 +478,9 @@ def resolve_workspace_value(value: WorkspaceInput) -> ResolvedWorkspace:
     """Coerce a bound workspace value into something ``Agent.run(workspace=...)`` accepts.
 
     Deployment bindings may supply a plain filesystem path; the runtime maps it to a native
-    ``LocalWorkspaceBackend`` rather than failing inside Pydantic AI. Rich bindings
+    backend for the host platform rather than failing inside Pydantic AI. Rich bindings
     (sandbox backends, ``WorkspaceRef``) pass through unchanged.
     """
     if _is_path(value):
-        from pydantic_ai.workspaces import LocalWorkspaceBackend
-
-        return LocalWorkspaceBackend(Path(value))
+        return local_workspace(value)
     return value

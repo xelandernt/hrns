@@ -282,6 +282,15 @@ Headless execution requires `--allow-all`, `--deny-all`, or reports that interac
 is required. The local workspace starts at the selected project; it is **not a
 sandbox**. Approved commands execute with your user's permissions.
 
+### Windows
+
+Local mode runs natively on Windows. The workspace uses the Win32 filesystem API and runs
+shell commands with PowerShell 7 (`pwsh`), which must be installed and on `PATH`; startup
+reports a clear error when it is missing, and no fallback to Windows PowerShell 5.1 is
+attempted. Because the ripgrep shortcut is a POSIX shell script, `list_files` and `grep` use
+the built-in filesystem walk on Windows, and the agent is told to write PowerShell syntax in
+shell commands. Approved commands still run with your user's permissions.
+
 Sessions are stored in the platform's hrns user data directory by default.
 Set `store = "/absolute/path/sessions.db"` to select another SQLite store. Existing
 session history can be resumed through the normal session UI or

@@ -47,7 +47,15 @@ _CATALOG: LocalCatalog | None = None
 def _sibling_script(name: str) -> str | None:
     """A console script installed next to this interpreter (venv, pipx, uv tool)."""
     candidate = Path(sys.executable).with_name(name)
-    return str(candidate) if candidate.is_file() else None
+    if candidate.is_file():
+        return str(candidate)
+    if os.name == "nt":
+        # `pip`/`uv` write `hrns-local.exe` (or a `.cmd` shim) on Windows.
+        for suffix in (".exe", ".cmd", ".bat"):
+            candidate = Path(sys.executable).with_name(name + suffix)
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 def local_executable() -> str | None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import posixpath
+import os
 
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.workspaces import Workspace
@@ -28,7 +28,7 @@ _READ_ONLY_SUFFIXES = (".pem", ".key")
 
 
 def _read_only(relative: str) -> bool:
-    parts = relative.split("/")
+    parts = relative.replace(os.sep, "/").split("/")
     if any(part in _READ_ONLY_DIRS for part in parts):
         return True
     name = parts[-1] if parts else ""
@@ -40,10 +40,15 @@ def _read_only(relative: str) -> bool:
 
 
 def _contains(root: str, path: str) -> bool:
-    if root == "/":
+    root = os.path.normcase(os.path.normpath(root))
+    path = os.path.normcase(os.path.normpath(path))
+    if root == path:
         return True
-    trimmed = root.rstrip("/")
-    return path == trimmed or path.startswith(f"{trimmed}/")
+    try:
+        return os.path.commonpath([root, path]) == root
+    except ValueError:
+        # Different drives on Windows.
+        return False
 
 
 def content_hash(data: bytes) -> str:
@@ -87,18 +92,21 @@ class FileGuard:
         except Exception:
             real = resolved
         root = await self.root()
-        roots = {root}
-        try:
-            roots.add(await self.workspace.realpath(root))
-        except Exception:
-            pass
-        match = next((candidate for candidate in roots if _contains(candidate, real)), None)
-        if match is None:
-            raise ModelRetry(
-                f"Path {path!r} is outside the workspace root. Use a path inside {root!r}."
-            )
+        if self.unrestricted:
+            match = root
+        else:
+            roots = {root}
+            try:
+                roots.add(await self.workspace.realpath(root))
+            except Exception:
+                pass
+            match = next((candidate for candidate in roots if _contains(candidate, real)), None)
+            if match is None:
+                raise ModelRetry(
+                    f"Path {path!r} is outside the workspace root. Use a path inside {root!r}."
+                )
         if write and not self.unrestricted:
-            relative = posixpath.relpath(real, match)
+            relative = os.path.relpath(real, match)
             if _read_only(relative):
                 raise ModelRetry(
                     f"Path {path!r} is read-only for this agent "
