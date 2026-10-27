@@ -316,6 +316,7 @@ class _FieldRow(Vertical):
         return self._input.value if self._input is not None else ""
 
     def set_value(self, value: Any) -> None:
+        before = self.value()
         if self.kind == "boolean":
             self._flag = bool(value)
         elif self.kind == "select":
@@ -330,6 +331,10 @@ class _FieldRow(Vertical):
                 if self._open:
                     self._render_suggestions()
         self._refresh_view()
+        if self.value() != before:
+            # Programmatic writes (picking a suggestion) must reach `on_change`
+            # handlers just like typing does.
+            self._notify()
 
     def set_choices(self, choices: list[tuple[str, str]]) -> None:
         self._choices = list(choices)
@@ -472,11 +477,16 @@ class _FormMixin:
         self._active = row
         self._help.update(str(row.field.get("description") or ""))
 
+    def _visible_rows(self) -> list[_FieldRow]:
+        """Rows the current provider/context shows; hidden ones are not reachable."""
+        return [row for row in self._rows if row.display]
+
     def focus_row(self, index: int) -> None:
-        if not self._rows:
+        rows = self._visible_rows()
+        if not rows:
             return
-        index = max(0, min(index, len(self._rows) - 1))
-        self._rows[index].focus_target().focus()
+        index = max(0, min(index, len(rows) - 1))
+        rows[index].focus_target().focus()
 
     def action_focus_next(self) -> None:
         self._move_row(1)
@@ -512,10 +522,11 @@ class _FormMixin:
         _step_focused_choice(self, event)
 
     def _move_row(self, delta: int) -> None:
-        if not self._rows:
+        rows = self._visible_rows()
+        if not rows:
             return
-        index = self._rows.index(self._active) if self._active in self._rows else 0
-        self.focus_row(index + delta)
+        index = rows.index(self._active) if self._active in rows else 0
+        rows[max(0, min(index + delta, len(rows) - 1))].focus_target().focus()
 
 
 class FormDialog(_FormMixin, _DialogBase):

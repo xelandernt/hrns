@@ -65,6 +65,14 @@ class LocalSettings(BaseSettings):
     provider: str = Field(default="deepseek", min_length=1)
     model: str = ""
     base_url: str = ""
+    copilot_client_id: str = Field(
+        default="",
+        pattern=r"^([A-Za-z0-9._-]+)?$",
+        description=(
+            "GitHub OAuth app used for the Copilot device login. Empty means GitHub Copilot's "
+            "public client, which is the only kind GitHub grants the current model catalog to."
+        ),
+    )
     api_key_env: str = Field(default="", pattern=r"^([A-Za-z_][A-Za-z0-9_]*)?$")
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     provider_options: dict[str, Any] = Field(default_factory=dict)

@@ -13,7 +13,7 @@ from hrns.config import (
 )
 
 from ...errors import HrnsClientError
-from ...local import local_model_catalog, local_target, local_thinking_support
+from ...local import is_local_hrns, local_model_catalog, local_target, local_thinking_support
 from ..choice_keys import stepped_value
 from ..dialogs import ChoiceDialog
 from ..local import LocalModelDialog, LocalModelResult, effort_choices, effort_label
@@ -102,7 +102,7 @@ class ModelWorkflow:
         target = screen.target
         args = (
             target.profile.args
-            if target is not None and target.profile.command == "hrns-local"
+            if is_local_hrns(target.profile if target is not None else None)
             else []
         )
         config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
@@ -116,7 +116,7 @@ class ModelWorkflow:
                 "warning",
             )
             return
-        if screen.target.kind != "local" or screen.target.profile.command != "hrns-local":
+        if screen.target.kind != "local" or not is_local_hrns(screen.target.profile):
             await self.show_model_dialog()
             return
         try:
@@ -260,7 +260,7 @@ class ModelWorkflow:
                 "warning",
             )
             return
-        if screen.target.kind != "local" or screen.target.profile.command != "hrns-local":
+        if screen.target.kind != "local" or not is_local_hrns(screen.target.profile):
             await screen._notice(
                 "Reasoning effort is only available for local models.",
                 "warning",

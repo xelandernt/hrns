@@ -37,12 +37,14 @@ class DeviceAuthorization:
 
 @dataclass(frozen=True, slots=True)
 class LoginTarget:
-    """Which provider to sign in to, and where its credential belongs."""
+    """Which provider to sign in to, where its credential belongs, and as whom."""
 
     provider: str
     account: str
     #: False when the configured provider is a different one.
     configured: bool = True
+    #: GitHub OAuth app to authenticate with; empty uses the provider's default.
+    client_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,10 +69,12 @@ def login_target(provider: str | None = None, config: Path | None = None) -> Log
             "Name the provider to sign in to, for example `hrns login github-copilot`."
         )
     configured = selected == settings.provider
+    client_id = settings.copilot_client_id if selected == "github-copilot" else ""
     return LoginTarget(
         provider=selected,
         account=keyring_account(selected, settings.api_key_env if configured else ""),
         configured=configured,
+        client_id=client_id,
     )
 
 
@@ -116,12 +120,14 @@ async def login(
             "Account login requires the hrns-local command. Reinstall hrns so its "
             "console scripts are on PATH."
         )
+    client_id = ["--client-id", target.client_id] if target.client_id else []
     process = await asyncio.create_subprocess_exec(
         executable,
         "--login",
         target.provider,
         "--account",
         target.account,
+        *client_id,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

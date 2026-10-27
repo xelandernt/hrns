@@ -64,6 +64,15 @@ def canonical_root(path: str | os.PathLike[str]) -> str:
     return os.path.realpath(os.path.expanduser(os.fspath(path)))
 
 
+def _is_within(candidate: str, root: str) -> bool:
+    """Whether ``candidate`` is ``root`` or lives beneath it, ignoring case on Windows."""
+    candidate = os.path.normcase(candidate)
+    root = os.path.normcase(root)
+    if candidate == root:
+        return True
+    return candidate.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def validate_requested_cwd(cwd: Any, *, allowed: Sequence[str] | None, hosted: bool) -> str:
     """Canonicalize a client-requested working directory and enforce host policy."""
     if not isinstance(cwd, str) or not cwd.strip():
@@ -78,7 +87,7 @@ def validate_requested_cwd(cwd: Any, *, allowed: Sequence[str] | None, hosted: b
     if allowed is not None:
         roots = [canonical_root(root) for root in allowed]
         for root in roots:
-            if candidate == root or root == os.sep or candidate.startswith(root + os.sep):
+            if _is_within(candidate, root):
                 return candidate
         raise HrnsError(
             "WORKSPACE_UNAVAILABLE",

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import sys
 from collections.abc import Iterable
 from dataclasses import replace
@@ -166,11 +168,118 @@ def _login_hint(provider: str, key: str | None) -> str:
     )
 
 
+_COPILOT_RESPONSES_ONLY: dict[str, frozenset[str]] = {}
+"""Per-token catalog cache: ids Copilot serves on ``/responses`` only."""
+
+
+def _copilot_token(api_key: str | None) -> str | None:
+    """The Copilot bearer, from settings or the variables its provider reads."""
+    if api_key:
+        return api_key
+    for name in ("GITHUB_COPILOT_API_KEY", "GITHUB_COPILOT_API_TOKEN", "COPILOT_GITHUB_TOKEN"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def _copilot_catalog_key(token: str, base_url: str) -> str:
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    return f"{base_url}\0{digest}"
+
+
+def _responses_only(item: object) -> bool:
+    """Whether a catalog entry lists ``/responses`` without ``/chat/completions``."""
+    extra_object = getattr(item, "model_extra", None)
+    extra: dict[str, object] = extra_object if isinstance(extra_object, dict) else {}
+    endpoints = extra.get("supported_endpoints")
+    if not isinstance(endpoints, list):
+        return False
+    has_responses = any(isinstance(entry, str) and "/responses" in entry for entry in endpoints)
+    has_chat = any(isinstance(entry, str) and "chat/completions" in entry for entry in endpoints)
+    return has_responses and not has_chat
+
+
+async def _prefetch_copilot_catalog(settings: LocalSettings) -> None:
+    """Record which ids this token must be called on ``/responses``.
+
+    Copilot's catalog is the only reliable switch: availability is per plan and per
+    OAuth client, and the split moves as models ship. One fetch per runtime process;
+    a failed fetch leaves every id on Chat Completions, as before.
+    """
+    if settings.provider != "github-copilot":
+        return
+    try:
+        token = _copilot_token(settings.resolved_api_key())
+    except ValueError:
+        return
+    if token is None:
+        return
+    key = _copilot_catalog_key(token, settings.base_url)
+    if key in _COPILOT_RESPONSES_ONLY:
+        return
+    from pydantic_ai.providers.github_copilot import GitHubCopilotProvider
+
+    try:
+        async with GitHubCopilotProvider(
+            api_key=token, base_url=settings.base_url or None
+        ) as provider:
+            listing = await provider.client.models.list()
+    except Exception:  # noqa: BLE001 - the session still works on Chat Completions
+        return
+    _COPILOT_RESPONSES_ONLY[key] = frozenset(
+        item.id for item in listing.data if _responses_only(item)
+    )
+
+
+def _copilot_uses_responses(model_name: str, api_key: str | None, options: dict[str, Any]) -> bool:
+    """Whether the cached catalog says this id is served on ``/responses`` only."""
+    token = _copilot_token(api_key)
+    if token is None:
+        return False
+    key = _copilot_catalog_key(token, str(options.get("base_url") or ""))
+    return model_name in _COPILOT_RESPONSES_ONLY.get(key, frozenset())
+
+
+def _copilot_responses_model(model_name: str, options: dict[str, Any]) -> Model:
+    """Copilot's Responses transport, which Pydantic AI does not ship.
+
+    ``GitHubCopilotModel`` is an ``OpenAIChatModel``, so Responses-only ids such as
+    ``gpt-5.6-luna`` can never reach their endpoint through it. Reuse the Copilot
+    client (base URL and editor headers) with the Responses model, and the Copilot
+    family profile so reasoning settings resolve per vendor.
+    """
+    from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
+    from pydantic_ai.providers.github_copilot import GitHubCopilotProvider
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    class _CopilotResponsesProvider(OpenAIProvider):
+        """OpenAI Responses against Copilot's client, reported under its own name."""
+
+        @property
+        def name(self) -> str:
+            return "github-copilot"
+
+    copilot = GitHubCopilotProvider(
+        api_key=options.get("api_key"),
+        base_url=options.get("base_url"),
+    )
+    return OpenAIResponsesModel(
+        model_name,
+        provider=_CopilotResponsesProvider(openai_client=copilot.client),
+        profile=GitHubCopilotProvider.model_profile(model_name),
+        # Copilot returns an empty reasoning summary unless one is requested, so no
+        # ThinkingPart would reach the client. `auto` asks for the provider's summary;
+        # `model_settings.openai_reasoning_summary` overrides it.
+        settings=OpenAIResponsesModelSettings(openai_reasoning_summary="auto"),
+    )
+
+
 def configured_model(settings: LocalSettings, model_id: str | None = None) -> Model:
     """Delegate provider/model selection to the pinned Pydantic AI registry."""
     settings.require_model()
     selected = model_id or f"{settings.provider}:{settings.model}"
-    provider, _, _ = selected.partition(":")
+    provider, _, model_name = selected.partition(":")
     same_provider = provider == settings.provider
     options = dict(settings.provider_options) if same_provider else {}
     if same_provider and settings.base_url:
@@ -179,6 +288,8 @@ def configured_model(settings: LocalSettings, model_id: str | None = None) -> Mo
     if key is not None:
         options["api_key"] = key
     try:
+        if provider == "github-copilot" and _copilot_uses_responses(model_name, key, options):
+            return _copilot_responses_model(model_name, options)
         if not options:
             return infer_model(selected)
         if provider.startswith("gateway/"):
@@ -338,6 +449,7 @@ def build_local_agent(
 
 
 async def _run(settings: LocalSettings) -> None:
+    await _prefetch_copilot_catalog(settings)
     agent = build_local_agent(settings)
     await agent.store.backend.initialize()
     await _serve_until_closed(agent)
@@ -348,7 +460,7 @@ def _emit_event(event: dict[str, object]) -> None:
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
-def _login(provider: str, account: str) -> int:
+def _login(provider: str, account: str, client_id: str = "") -> int:
     """Run a device flow to completion and store the token in the OS keyring."""
 
     def announce(authorization: DeviceAuthorization) -> None:
@@ -362,7 +474,7 @@ def _login(provider: str, account: str) -> int:
             }
         )
 
-    outcome = asyncio.run(device_login(provider, on_authorization=announce))
+    outcome = asyncio.run(device_login(provider, on_authorization=announce, client_id=client_id))
     reference = store_secret(account, outcome.token)
     if reference is None:
         raise ValueError("Signed in, but the OS keyring is unavailable so the token was not saved.")
@@ -401,13 +513,22 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         help="Keyring account for --login (default: the provider id)",
     )
+    parser.add_argument(
+        "--client-id",
+        default="",
+        metavar="ID",
+        help=(
+            "GitHub OAuth app for --login (default: GitHub Copilot's public client, "
+            "which receives the current model catalog)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.catalog:
         print(json.dumps(provider_catalog(), ensure_ascii=False))
         return 0
     if args.login:
         try:
-            return _login(args.login, args.account or args.login)
+            return _login(args.login, args.account or args.login, args.client_id)
         except (ValueError, OSError, HrnsError) as exc:
             print(f"hrns-local: {exc}", file=sys.stderr)
             return 2

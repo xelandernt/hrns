@@ -9,6 +9,12 @@ from __future__ import annotations
 #: Keyring service that holds local provider credentials.
 KEYRING_SERVICE = "hrns.local"
 
+#: GitHub Copilot's public OAuth client. Copilot decides which model catalog an
+#: account may list from the OAuth app that issued its token: this client sees the
+#: current catalog, while a token from an unrelated app only sees legacy ids.
+#: Override per user with ``copilot_client_id`` or ``GITHUB_OAUTH_CLIENT_ID``.
+GITHUB_COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
+
 
 def keyring_account(provider: str, api_key_env: str = "") -> str:
     """The account a provider's credential is stored under."""

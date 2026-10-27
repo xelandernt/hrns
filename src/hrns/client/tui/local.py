@@ -13,6 +13,7 @@ from textual.binding import Binding
 from hrns.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
+    GITHUB_COPILOT_CLIENT_ID,
     THINKING_LEVELS,
     LocalSettings,
     keyring_account,
@@ -169,6 +170,16 @@ class LocalModelDialog(FormDialog):
                 placeholder=self._model_placeholder(current_provider),
             ),
             _field(
+                "copilot_client_id",
+                "Copilot client ID",
+                description=(
+                    "GitHub OAuth app used by Ctrl+G. GitHub Copilot's public client lists the "
+                    "current catalog; a token from another app only sees legacy model ids."
+                ),
+                default=settings.copilot_client_id or GITHUB_COPILOT_CLIENT_ID,
+                placeholder=GITHUB_COPILOT_CLIENT_ID,
+            ),
+            _field(
                 "effort",
                 "Reasoning effort",
                 description=(
@@ -221,6 +232,13 @@ class LocalModelDialog(FormDialog):
             explanation=self._explanation(),
             on_change=self._field_changed,
         )
+        self._show_copilot_client(current_provider)
+
+    def _show_copilot_client(self, provider: str) -> None:
+        """Only the account-login provider has an OAuth client to choose."""
+        row = self._rows_by_name.get("copilot_client_id")
+        if row is not None:
+            row.display = provider == "github-copilot"
 
     def _explanation(self) -> str:
         text = (
@@ -258,7 +276,13 @@ class LocalModelDialog(FormDialog):
             # Endpoint settings typed here belong to this provider only once saved.
             api_key_env = ""
         self.app.push_screen(
-            DeviceLoginDialog(LoginTarget(provider, keyring_account(provider, api_key_env))),
+            DeviceLoginDialog(
+                LoginTarget(
+                    provider,
+                    keyring_account(provider, api_key_env),
+                    client_id=self._form_value("copilot_client_id"),
+                )
+            ),
             self._signed_in,
         )
 
@@ -307,6 +331,7 @@ class LocalModelDialog(FormDialog):
             return
         provider = str(row.value() or "").strip()
         self._refresh_models(provider)
+        self._show_copilot_client(provider)
         model_row = rows.get("model")
         if model_row is None or provider == self.settings.provider:
             return
@@ -325,6 +350,17 @@ class LocalModelDialog(FormDialog):
             return
         provider = str(values.get("provider") or "").strip()
         model = str(values.get("model") or "").strip()
+        copilot_client_id = str(values.pop("copilot_client_id", "") or "").strip()
+        if provider != "github-copilot":
+            # Keep the saved app when another provider is selected.
+            copilot_client_id = self.settings.copilot_client_id
+        elif copilot_client_id and not re.fullmatch(r"[A-Za-z0-9._-]+", copilot_client_id):
+            self.show_error(
+                "The Copilot client ID may only contain letters, digits, dots, hyphens, "
+                "and underscores."
+            )
+            return
+        values["copilot_client_id"] = copilot_client_id
         effort = str(values.pop("effort", "") or EFFORT_DEFAULT).strip()
         api_key = str(values.pop("api_key", "") or "").strip()
         api_key_env = str(values.get("api_key_env") or "").strip()

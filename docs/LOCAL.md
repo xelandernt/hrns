@@ -105,9 +105,33 @@ the whole setup stays in one form. `hrns login` without a provider signs in to t
 configured one.
 
 Tokens are not refreshed by hrns: if GitHub expires or revokes one, run the login again.
-No scopes are requested, and the bundled client id belongs to hrns's own GitHub OAuth
-app; set `GITHUB_OAUTH_CLIENT_ID` to use an app of your own (device flow must be enabled
-on it). Only that variable is read for the flow.
+No scopes are requested. The login defaults to GitHub Copilot's public OAuth client
+(`Iv1.b507a08c87ecfe98`), because Copilot grants the current model catalog only to
+tokens issued to a recognized client; a token from an unrelated OAuth app sees the
+legacy model ids and is refused premium ones. To use a different app, set **Copilot
+client ID** in the model form (shown for both Copilot providers) or
+`GITHUB_OAUTH_CLIENT_ID`; device flow must be enabled on it.
+
+Copilot serves two APIs, and every id is assigned to one of them: Pydantic AI's
+`GitHubCopilotModel` speaks Chat Completions, while the GPT-5.6/6
+`luna`/`sol`/`terra`/`astra` line, the Grok ids, and Microsoft's `mai-code-*` are on the
+Responses API. Login lists both kinds. The runtime reads the account's catalog once per
+process (`GET /models`, cached per token) and sends each id to the transport its
+`supported_endpoints` names, so one provider covers both:
+
+```toml
+provider = "github-copilot"
+model = "gpt-5.6-luna"
+```
+
+`github-copilot:gpt-5.6-luna` therefore builds an OpenAI Responses model on Copilot's
+client and family profile, while `github-copilot:claude-sonnet-5` stays on Chat
+Completions. Responses ids default to `openai_reasoning_summary = "auto"`, because
+Copilot returns an empty reasoning summary unless one is requested and the terminal
+would then show no Thinking block; set `model_settings.openai_reasoning_summary` in the
+TOML to ask for `detailed` or `concise` instead. If the catalog cannot be read, ids stay on Chat Completions. Pydantic AI
+does not ship a Copilot Responses transport yet
+([pydantic-ai#8230](https://github.com/pydantic/pydantic-ai/issues/8230)).
 
 ## Start with DeepSeek
 

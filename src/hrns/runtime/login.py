@@ -10,6 +10,8 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from hrns.config import GITHUB_COPILOT_CLIENT_ID
+
 
 class LocalLoginError(ValueError):
     """A device login that could not produce a usable token."""
@@ -32,23 +34,26 @@ class LoginOutcome:
     models: tuple[str, ...] = ()
 
 
-#: hrns's GitHub OAuth app: device flow enabled, no scopes requested.
-#: Override with the environment variable below to use a different app.
-GITHUB_OAUTH_CLIENT_ID = "Ov23li5tNkRrbPNDx71L"
+#: Fallback GitHub OAuth app: GitHub Copilot's public client, so the token it
+#: issues can list the current Copilot catalog. Override with the environment
+#: variable below or the ``copilot_client_id`` setting.
+GITHUB_OAUTH_CLIENT_ID = GITHUB_COPILOT_CLIENT_ID
 CLIENT_ID_ENV = "GITHUB_OAUTH_CLIENT_ID"
 
 #: provider -> flow that returns a token once the user approves the device code.
-DeviceFlow = Callable[[Callable[[DeviceAuthorization], None]], Awaitable[LoginOutcome]]
+DeviceFlow = Callable[[Callable[[DeviceAuthorization], None], str], Awaitable[LoginOutcome]]
 
 
 def github_client_id() -> str:
     return os.environ.get(CLIENT_ID_ENV) or GITHUB_OAUTH_CLIENT_ID
 
 
-async def _github_copilot_flow(announce: Callable[[DeviceAuthorization], None]) -> LoginOutcome:
+async def _github_copilot_flow(
+    announce: Callable[[DeviceAuthorization], None], client_id: str = ""
+) -> LoginOutcome:
     from pydantic_ai.providers.github_copilot import GitHubCopilotOAuthFlow
 
-    flow = GitHubCopilotOAuthFlow(client_id=github_client_id())
+    flow = GitHubCopilotOAuthFlow(client_id=client_id or github_client_id())
     try:
         authorization = await flow.start()
     except Exception as exc:  # noqa: BLE001 - user-facing message, not a stack trace
@@ -71,7 +76,7 @@ async def _github_copilot_flow(announce: Callable[[DeviceAuthorization], None]) 
 
 
 async def _copilot_models(token: str) -> tuple[str, ...]:
-    """Model ids this account may use on Chat Completions; empty when it cannot be inspected.
+    """Model ids this account may use on either Copilot transport.
 
     GitHub authorization alone does not prove Copilot access, so a rejected token is
     worth reporting at login time instead of at the first prompt.
@@ -88,7 +93,7 @@ async def _copilot_models(token: str) -> tuple[str, ...]:
                 "this account has an active Copilot subscription."
             ) from exc
         return ()
-    return tuple(item.id for item in listing.data if _serves_chat(item))
+    return tuple(item.id for item in listing.data if _serves(item))
 
 
 def _auth_failure(exc: BaseException) -> bool:
@@ -101,11 +106,11 @@ def _auth_failure(exc: BaseException) -> bool:
     return "unauthorized" in text or "forbidden" in text
 
 
-def _serves_chat(item: object) -> bool:
-    """Whether a catalog entry is reachable through Chat Completions.
+def _serves(item: object) -> bool:
+    """Whether a catalog entry is reachable through one of Copilot's transports.
 
-    Copilot lists the models its Responses API serves too, and those fail at the first
-    request. An entry without the field is kept: hiding a working id is worse.
+    Copilot lists Chat Completions and Responses ids in one catalog; an entry
+    without the field is kept, because hiding a working id is worse.
     """
     extra_object = getattr(item, "model_extra", None)
     extra: dict[str, object] = extra_object if isinstance(extra_object, dict) else {}
@@ -113,7 +118,8 @@ def _serves_chat(item: object) -> bool:
     if not isinstance(endpoints, list):
         return True
     return any(
-        isinstance(endpoint, str) and "chat/completions" in endpoint for endpoint in endpoints
+        isinstance(endpoint, str) and ("chat/completions" in endpoint or "/responses" in endpoint)
+        for endpoint in endpoints
     )
 
 
@@ -135,12 +141,18 @@ async def device_login(
     provider: str,
     *,
     on_authorization: Callable[[DeviceAuthorization], None],
+    client_id: str = "",
 ) -> LoginOutcome:
-    """Run ``provider``'s device flow; ``announce`` runs once the code is available."""
+    """Run ``provider``'s device flow; ``announce`` runs once the code is available.
+
+    ``client_id`` selects the GitHub OAuth app for the token exchange. Empty uses
+    ``GITHUB_OAUTH_CLIENT_ID`` (then GitHub Copilot's public client), which is the
+    only kind that receives the current Copilot model catalog.
+    """
     flow = _FLOWS.get(provider)
     if flow is None:
         known = ", ".join(login_providers())
         raise LocalLoginError(
             f"{provider!r} does not support an account login. Providers with one: {known}."
         )
-    return await flow(on_authorization)
+    return await flow(on_authorization, client_id)
