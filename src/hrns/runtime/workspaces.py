@@ -213,6 +213,9 @@ class WindowsWorkspaceBackend(
     async def _get_working_dir(self) -> Path:
         return await to_thread.run_sync(self._ensure_alive)
 
+    async def working_dir(self) -> str:
+        return str(await self._get_working_dir())
+
     @staticmethod
     def _path(path: str) -> Path:
         target = Path(path)
