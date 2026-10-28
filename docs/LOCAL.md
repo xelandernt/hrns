@@ -271,6 +271,7 @@ an explicitly selected missing file or an unknown setting is an error.
 ```sh
 uv run hrns connect --local-config /path/to/model.toml --cwd /absolute/project
 uv run hrns run --local --allow-all "Run the project tests"
+uv run hrns connect --local --client-io all
 ```
 
 Local mode inherits your shell environment for provider authentication. File edits and
@@ -281,6 +282,15 @@ remains the safe default.
 Headless execution requires `--allow-all`, `--deny-all`, or reports that interaction
 is required. The local workspace starts at the selected project; it is **not a
 sandbox**. Approved commands execute with your user's permissions.
+
+`--client-io` decides what this terminal offers the agent it connects to: `off` (the default)
+offers nothing, `read` serves `fs/read_text_file` in the session directory, and `all` also
+serves writes and `terminal/*` so the agent runs commands in this terminal instead of the
+host's shell. Enabling terminal support lets the agent run commands with your permissions
+without a further prompt, so it is a per-connection choice; a profile stores it as `clientIo`.
+On the agent side the `client.terminal` binding is what routes commands through that terminal,
+and it is offered only when the connected client advertises support. See
+[client capabilities](ACP.md).
 
 ### Windows
 

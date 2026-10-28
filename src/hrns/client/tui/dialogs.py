@@ -19,6 +19,7 @@ from ..interactions import (
     ElicitationRequest,
     PermissionRequest,
 )
+from ..io import parse_client_io
 from .choice_keys import handle_choice_arrow
 from .commands import LocalCommand, command_suggestion_text
 from .state import Settings, build_form_fields, coerce_value
@@ -985,6 +986,22 @@ class SettingsDialog(_FormMixin, _DialogBase):
                         "think calls. Allow all is explicit and is not a sandbox."
                     ),
                 },
+                {
+                    "name": "client_io",
+                    "title": "Client-side tools",
+                    "kind": "select",
+                    "choices": [
+                        ("off", "off: the agent only uses host tools"),
+                        ("read", "read: the agent may read files here"),
+                        ("all", "all: the agent may read, write and run commands here"),
+                    ],
+                    "default": settings.client_io,
+                    "description": (
+                        "What this terminal offers the agent. 'all' also lets it run commands "
+                        "as you, with no ACP approval prompt, so the agent still approves the "
+                        "call first. Applies to the next connection."
+                    ),
+                },
             ]
         )
 
@@ -1006,6 +1023,7 @@ class SettingsDialog(_FormMixin, _DialogBase):
                 auto_expand_tools=bool(rows["expand"].value()),
                 show_thoughts=bool(rows["thoughts"].value()),
                 permission_mode=str(rows["permission"].value()),
+                client_io=parse_client_io(str(rows["client_io"].value())),
                 sidebar_width=self.settings.sidebar_width,
             )
         )

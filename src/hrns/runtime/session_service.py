@@ -22,15 +22,18 @@ from hrns.protocol import (
 from . import acp as acp_map
 from ._unavailable_tools import UnavailableTools
 from .acp_store import SessionRecord, finalize_usage, merge_usage, usage_payload
+from .client_io import ClientSession
 from .composition import Composition, compose_definition
 from .host_support import HostPolicy, SessionDeps, _iso_millis
 from .presentation import snapshot_from_metadata
-from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceSet
+from .resources import ANSWERS, CLIENT, MODEL, PLAN, WORKSPACE, ResourceSet
 from .steering import SteeringCapability, SteeringChannel
 from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from pydantic_ai_harness.experimental.acp import AcpSession
 
     from .acp_store import ScopedSessionStore
     from .definitions import AgentDefinition
@@ -59,6 +62,7 @@ class SessionService:
         self.steering: dict[str, SteeringChannel] = {}
         self.turn_usage: dict[str, dict[str, Any]] = {}
         self.plan_channels: dict[str, PlanChannel] = {}
+        self.client_sessions: dict[str, ClientSession] = {}
         self.new_lock = asyncio.Lock()
         self.pending_initial: list[Any] | None = None
         self.pending_effort: str | None = None
@@ -70,6 +74,26 @@ class SessionService:
         self.steering.pop(session_id, None)
         self.turn_usage.pop(session_id, None)
         self.plan_channels.pop(session_id, None)
+        self.client_sessions.pop(session_id, None)
+
+    def remember_client(self, session: AcpSession, cwd: str) -> ClientSession:
+        """Record the connection handle this session's client-origin tools act through."""
+        known = self.client_sessions.get(session.session_id)
+        if known is not None and known.client is session.client:
+            return known
+        handle = ClientSession(
+            client=session.client,
+            session_id=session.session_id,
+            cwd=cwd,
+            capabilities=session.client_capabilities,
+        )
+        self.client_sessions[session.session_id] = handle
+        return handle
+
+    def client_capabilities(self, session_id: str) -> schema.ClientCapabilities | None:
+        """What the connected client advertised, for recomposition outside ``session_config``."""
+        handle = self.client_sessions.get(session_id)
+        return handle.capabilities if handle is not None else None
 
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None
@@ -352,6 +376,9 @@ class SessionService:
         resources.bind_if_absent(ANSWERS, self.agent.question_channel)
         if session_id is not None:
             resources.bind_if_absent(PLAN, self.plan_channel(session_id))
+            handle = self.client_sessions.get(session_id)
+            if handle is not None:
+                resources.bind_if_absent(CLIENT, handle)
         model = self.agent._default_model
         if model is not None:
             resources.bind_if_absent(MODEL, model)
@@ -375,6 +402,7 @@ class SessionService:
             if effort == EFFORT_DEFAULT:
                 effort = None
         cwd = self.policy.validate_cwd(session.cwd)
+        handle = self.remember_client(session, cwd)
         model = (record.model if record is not None else None) or agent._default_model
         support = self.policy.effort_support(model)
         composition = await compose_definition(
@@ -390,6 +418,7 @@ class SessionService:
             effort=effort,
             effort_support=support,
             presentation_sink=self.presentation_sink(session.session_id),
+            client_capabilities=handle.capabilities,
         )
         composition.effort.model = model
         self.compositions[session.session_id] = composition

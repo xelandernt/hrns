@@ -89,6 +89,7 @@ class StatusBar(Static):
         self._usage = ""
         self._cost = ""
         self._permission = ""
+        self._client_io = ""
         self._activity = ""
         self._hint = ""
         self._context_line = ""
@@ -109,6 +110,7 @@ class StatusBar(Static):
         busy: bool = False,
         activity: str = "",
         permission: str = "",
+        client_io: str = "",
         hint: str = "",
         context: str = "",
     ) -> None:
@@ -120,6 +122,7 @@ class StatusBar(Static):
         self._cost = cost
         self.tooltip = usage_detail or None
         self._permission = permission
+        self._client_io = client_io
         self._activity = activity
         self._hint = hint
         self._context_line = context
@@ -213,6 +216,11 @@ class StatusBar(Static):
             if self._permission and self._permission != "ask"
             else None
         )
+        client_io = (
+            Text(f"io {self._client_io}", style=Style(color=palette.accent, bold=True))
+            if self._client_io and self._client_io != "off"
+            else None
+        )
         usage = (
             Text(f"ctx {self._usage}", style=Style(color=palette.foreground))
             if self._usage
@@ -233,6 +241,7 @@ class StatusBar(Static):
             ("mode", mode),
             ("effort", effort),
             ("permission", permission),
+            ("client_io", client_io),
             ("usage", usage),
             ("cost", cost),
             ("connection", connection),
@@ -253,7 +262,7 @@ class StatusBar(Static):
 
         # Ambiguity is resolved by dropping the least load-bearing field first;
         # the model name and the two usage figures are the last to go.
-        for name in ("permission", "effort", "mode", "cost", "usage", "model"):
+        for name in ("client_io", "permission", "effort", "mode", "cost", "usage", "model"):
             if len(assemble()) <= budget:
                 break
             fields = [(label, None if label == name else piece) for label, piece in fields]

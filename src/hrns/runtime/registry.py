@@ -26,6 +26,7 @@ from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 
 from hrns.protocol import CapabilityPolicy, HrnsError, PluginInfo, ResourceNeed
 
+from .client_io import capability_path_known
 from .resources import ResourceSet, ResourceSlot
 
 __all__ = [
@@ -118,6 +119,26 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     """
     conflicts: list[str] = Field(default_factory=list)
     """``binding_id`` names that may not be enabled side by side with this plugin."""
+    origin: Literal["host", "client"] = "host"
+    """Where this plugin's tools run.
+
+    ``host`` tools act in this deployment's workspace. ``client`` tools ask the connected ACP
+    client to act instead, so they are available only while that client advertises every
+    capability in ``requires_client``.
+    """
+    requires_client: tuple[str, ...] = ()
+    """Paths into ACP's ``clientCapabilities`` this plugin cannot work without.
+
+    Each entry is a dotted field path of the ``initialize`` payload — ``terminal``,
+    ``fs.read_text_file``, ``elicitation.form`` — resolved against what the connected client
+    actually advertised. A path the schema does not define is a registration error.
+    """
+    shadows: tuple[str, ...] = ()
+    """Host tool names this plugin replaces when it is enabled.
+
+    A client-origin plugin declaring ``("shell",)`` means the agent is offered one way to run
+    a command: composition turns off the host binding's matching configuration field.
+    """
     state_mode: CapabilityStateMode = "run"
     presentation: list[str] = Field(default_factory=list)
     """Presentation identifiers for host presenters / client-side renderers."""
@@ -125,6 +146,17 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     compatibility: CompatibilityConstraints = Field(default_factory=CompatibilityConstraints)
     local_hint: dict[str, Any] = Field(default_factory=dict)
     """Non-executable discovery metadata from entry points (name, dist info)."""
+
+    @model_validator(mode="after")
+    def _validate_requires_client(self) -> PluginDescriptor[PluginConfigT]:
+        """Reject a client capability path the ACP schema does not define."""
+        unknown = [path for path in self.requires_client if not capability_path_known(path)]
+        if unknown:
+            raise ValueError(
+                f"Plugin {self.plugin_id!r} requires unknown client capabilities: "
+                + ", ".join(sorted(unknown))
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_commands(self) -> PluginDescriptor:
@@ -248,6 +280,7 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
             presentation=self.presentation[0] if self.presentation else "generic",
             requirements=list(self.requirements),
             needs=self.resource_needs(),
+            origin=self.origin,
             constraint=self.compatibility.constraint,
         )
 
@@ -270,6 +303,13 @@ class BindingContext(BaseModel):
     """The turn's immutable :class:`~hrns.protocol.ConfigurationSnapshot`."""
     agent_context: Any = None
     """The turn's :class:`~hrns.runtime.definitions.AgentFactoryContext` (duck-typed)."""
+    shadowed_tools: frozenset[str] = frozenset()
+    """Tool names an enabled client-origin binding takes over for this composition.
+
+    A binding's own configuration is never rewritten to achieve this: the shadow belongs to
+    the composition, so disabling the client binding restores the host tool exactly as the
+    operator configured it.
+    """
 
 
 def _validate_required_extras(descriptor: PluginDescriptor) -> None:

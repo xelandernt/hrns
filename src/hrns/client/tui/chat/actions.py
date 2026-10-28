@@ -253,10 +253,17 @@ invents commands the agent did not advertise.
         screen = self.screen
 
         def apply(settings: Settings | None) -> None:
-            if settings is not None:
-                screen.settings = settings
-                screen.app.apply_settings(settings)
-                screen.chrome.apply_settings()
+            if settings is None:
+                return
+            previous = screen.settings.client_io
+            screen.settings = settings
+            screen.app.apply_settings(settings)
+            screen.chrome.apply_settings()
+            if settings.client_io != previous:
+                screen._notice_soon(
+                    f"Client-side tools: {settings.client_io}. This applies when you reconnect.",
+                    "success",
+                )
 
         screen.app.push_screen(
             SettingsDialog(screen.settings),

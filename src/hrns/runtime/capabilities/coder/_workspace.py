@@ -15,6 +15,8 @@ import os
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.workspaces import Workspace
 
+from hrns.protocol.paths import read_only_path
+
 __all__ = [
     "FileGuard",
     "content_hash",
@@ -23,20 +25,11 @@ __all__ = [
 ]
 
 _BINARY_SAMPLE = 8_192
-_READ_ONLY_DIRS = frozenset({".git", ".hrns", ".pydantic-ai-harness"})
-_READ_ONLY_SUFFIXES = (".pem", ".key")
 
 
 def _read_only(relative: str) -> bool:
-    parts = relative.replace(os.sep, "/").split("/")
-    if any(part in _READ_ONLY_DIRS for part in parts):
-        return True
-    name = parts[-1] if parts else ""
-    if name == ".env" or name.startswith(".env."):
-        return True
-    if name.startswith("secrets"):
-        return True
-    return name.endswith(_READ_ONLY_SUFFIXES)
+    """Read-only policy, shared with the ACP client so neither can write what the other won't."""
+    return read_only_path(relative)
 
 
 def _contains(root: str, path: str) -> bool:

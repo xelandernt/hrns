@@ -32,6 +32,14 @@ class CoderConfig(BaseModel):
         le=3600.0,
         description="Default timeout in seconds for a foreground shell command.",
     )
+    shell: EditableField[bool] = Field(
+        default=True,
+        description=(
+            "Run commands in this host's shell. While a client-origin binding runs them in "
+            "the connected client's terminal instead, this tool is not composed, whatever "
+            "this setting says; disabling that binding brings it back."
+        ),
+    )
     unrestricted_filesystem: NonEditableField[bool] = Field(
         default=False,
         description=(

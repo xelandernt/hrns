@@ -15,7 +15,7 @@ from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Trunc
 
 from ...registry import BindingContext
 from ...resources import WORKSPACE, ResourceSlot
-from ._instructions import INSTRUCTIONS
+from ._instructions import instructions
 from ._needs import NEEDS
 from ._tools import MAX_MODEL_TEXT, CoderTools
 from .config import CoderConfig
@@ -55,15 +55,24 @@ class Coder(CombinedCapability[AgentDepsT]):
 
     needs: ClassVar[tuple[ResourceSlot[object], ...]] = NEEDS
 
-    def __init__(self, config: CoderConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: CoderConfig | None = None,
+        *,
+        shadowed: frozenset[str] = frozenset(),
+    ) -> None:
         config = config if config is not None else CoderConfig()
-        instructions = INSTRUCTIONS
+        # A client-origin binding can take over a tool this capability would contribute. That
+        # is a fact about the composition, so it is applied here instead of being written back
+        # into the operator's configuration: disabling the other binding restores this one.
+        tool_config = config.model_copy(update={"shell": False}) if "shell" in shadowed else config
+        instructions_text = instructions(client_terminal=not tool_config.shell)
         if config.instructions:
-            instructions = f"{INSTRUCTIONS}\n{config.instructions.strip()}\n"
+            instructions_text = f"{instructions_text}\n{config.instructions.strip()}\n"
         capabilities: list[AbstractCapability[AgentDepsT]] = [
             *([_RequireWorkspace()] if WORKSPACE in NEEDS else []),
-            Capability(id="hrns.coder.instructions", instructions=[instructions]),
-            CoderTools(config=config),
+            Capability(id="hrns.coder.instructions", instructions=[instructions_text]),
+            CoderTools(config=tool_config),
             ClearToolResults(max_fraction=0.7, id="hrns.coder.clear_tool_results"),
             ToolOutputLimits(
                 id="hrns.coder.tool_output_limits",
@@ -86,6 +95,6 @@ class Coder(CombinedCapability[AgentDepsT]):
         )
 
 
-def build_coder(config: CoderConfig, _binding: BindingContext) -> Coder:
+def build_coder(config: CoderConfig, binding: BindingContext) -> Coder:
     """Plugin factory: turn a validated configuration into the native capability."""
-    return Coder(config)
+    return Coder(config, shadowed=binding.shadowed_tools)

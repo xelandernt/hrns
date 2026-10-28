@@ -24,6 +24,7 @@ from ..interactions import (
     PermissionRequest,
     auto_permission,
 )
+from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
 from ..local import local_model_catalog
 from ..profiles import Profiles
@@ -638,12 +639,14 @@ class HrnsApp(App[int]):
         initial_target: ConnectionTarget | None = None,
         initial_session: str | None = None,
         status_message: str | None = None,
+        client_io: ClientIoMode | None = None,
     ) -> None:
         super().__init__()
         self.profiles = profiles
         self.initial_target = initial_target
         self.initial_session = initial_session
         self.status_message = status_message
+        self.client_io = client_io
         self.settings = Settings.from_mapping(profiles.tui)
         self.client: HrnsAcpClient | None = None
         self.session: SessionProxy | None = None
@@ -683,7 +686,20 @@ class HrnsApp(App[int]):
             lambda: transport_for(target),
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
+            client_io=self.client_io_mode(target),
         )
+
+    def client_io_mode(self, target: ConnectionTarget) -> ClientIoMode:
+        """What to offer this target: the flag, then its profile, then the setting.
+
+        The advertisement is decided once, at ``initialize``, so a change here lands on the
+        next connection rather than the live one.
+        """
+        if self.client_io is not None:
+            return self.client_io
+        if target.profile.client_io != "off":
+            return target.profile.client_io
+        return self.settings.client_io
 
     async def connect_target(self, target: ConnectionTarget) -> ChatScreen:
         """Connect, open the initial session, and push the chat workspace."""
@@ -691,6 +707,7 @@ class HrnsApp(App[int]):
             lambda: transport_for(target),
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
+            client_io=self.client_io_mode(target),
         )
         await client.connect()
         self.target = target
@@ -867,6 +884,7 @@ def run_terminal(
     initial_target: ConnectionTarget | None = None,
     initial_session: str | None = None,
     status_message: str | None = None,
+    client_io: ClientIoMode | None = None,
 ) -> int:
     """Run the terminal app to completion and always close the agent connection."""
     app = HrnsApp(
@@ -874,6 +892,7 @@ def run_terminal(
         initial_target=initial_target,
         initial_session=initial_session,
         status_message=status_message,
+        client_io=client_io,
     )
 
     async def _main() -> int:

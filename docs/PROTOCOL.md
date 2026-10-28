@@ -65,6 +65,16 @@ conflicts, lifecycle, presentation ids, and policy (`available`, `enabledByDefau
 `clientCanToggle`, `editableFields`, `changeMode`). Descriptors never contain executable code,
 imports, credentials, or live objects.
 
+Two fields separate client-supplied capabilities from host-side ones:
+
+- `origin` is `"host"` when the tools act in the deployment workspace and `"client"` when they
+  ask the connected ACP client to act instead;
+- `requiresClient` lists the client capability **paths** the binding needs — dotted field paths
+  of the `ClientCapabilities` payload such as `terminal` or `fs.read_text_file`. A binding whose
+  requirement the connected client did not advertise is unavailable, and `availabilityReason`
+  says which paths are missing in ACP's spelling (`fs.readTextFile`). An unknown path is a
+  plugin registration error, never a silently unavailable binding.
+
 ### `_hrns/configuration/get`
 
 Request: `{"sessionId": "abc"}`
@@ -118,7 +128,9 @@ persists the selected bindings, and emits `_hrns/configuration/changed`.
 ### `_hrns/plugins/list`
 
 Request: `{"cursor": null, "limit": 50}`. Response is a `PluginListResponse` with addable
-plugin descriptors. The method is available only when local binding creation is enabled.
+plugin descriptors. The method is available only when local binding creation is enabled. Each
+`PluginInfo` also carries `origin`, so the addable list distinguishes client-supplied plugins
+from host ones.
 
 ### `_hrns/configuration/changed`
 

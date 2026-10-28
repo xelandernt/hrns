@@ -15,6 +15,7 @@ from typing import Any
 
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS
 from ..interactions import PERMISSION_MODES
+from ..io import ClientIoMode, parse_client_io
 
 __all__ = [
     "activity_label",
@@ -748,6 +749,7 @@ class Settings:
     auto_expand_tools: bool = False
     show_thoughts: bool = False
     permission_mode: str = "ask"
+    client_io: ClientIoMode = "off"
     sidebar_width: int = 52
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -772,6 +774,9 @@ class Settings:
             ),
             show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
             permission_mode=mode,
+            client_io=parse_client_io(
+                str(mapping.get("clientIo", mapping.get("client_io", "off")))
+            ),
             sidebar_width=sidebar_width,
         )
 
@@ -781,5 +786,6 @@ class Settings:
             "auto_expand_tools": self.auto_expand_tools,
             "show_thoughts": self.show_thoughts,
             "permission_mode": self.permission_mode,
+            "client_io": self.client_io,
             "sidebar_width": self.sidebar_width,
         }
