@@ -96,7 +96,6 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self.config = ConfigurationService(
             agent=self,
-            store=self.store,
             policy=self.policy,
             definition=self.definition,
             registry=bundle.registry,
@@ -319,6 +318,10 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.PromptResponse:
         async with self._turn_lock(session_id):
+            # A composed session is only in memory; its first turn is what makes it durable, and
+            # the prompt names it so even a turn that fails outright stays recognizable later.
+            await self.sessions.ensure_persisted(session_id)
+            await self.sessions.ensure_title(session_id, _prompt_text(prompt))
             self.sessions.turn_usage[session_id] = {}
             response = None
             try:
@@ -384,11 +387,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     {"configId": config_id, "value": value, "options": sorted(allowed)}
                 )
             composition.effort.effort = None if value == EFFORT_DEFAULT else value
-            await self.store.update(
-                session_id,
-                effort=value,
-                touch=True,
-            )
+            await self.sessions.persist_metadata(session_id, effort=value)
             return schema.SetSessionConfigOptionResponse(
                 config_options=self.sessions.options_for(session_id)
             )
@@ -405,11 +404,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 if keep is not None and acp_map.effort_option(keep, support=support_after) is None:
                     composition.effort.effort = None
                     keep = None
-                await self.store.update(
-                    session_id,
-                    effort=keep or EFFORT_DEFAULT,
-                    touch=True,
-                )
+                await self.sessions.persist_metadata(session_id, effort=keep or EFFORT_DEFAULT)
         if response is None:
             return response
         return schema.SetSessionConfigOptionResponse(
@@ -437,7 +432,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 from hrns.protocol.models import SessionTitleUpdate
 
                 request = SessionTitleUpdate.model_validate(params)
-                if await self.store.get(request.session_id) is None:
+                if not await self.sessions.ensure_persisted(request.session_id):
                     raise HrnsError("SESSION_CLOSED", "Load the session before renaming it.")
                 await self.store.update(request.session_id, title=request.title, touch=True)
                 await self.sessions.send_session_title(request.session_id, request.title)

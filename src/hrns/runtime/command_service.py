@@ -73,7 +73,9 @@ class CommandService:
         plugin command rejects the new invocation instead of building another work queue.
         """
         agent = self.agent
-        if await agent.store.get(request.session_id) is None:
+        # A command needs the live composition, not a stored row: a session that is composed but
+        # not yet used still runs commands, and they stay in memory with it.
+        if agent.sessions.composition(request.session_id) is None:
             raise HrnsError("SESSION_CLOSED", "Load the session before invoking a command.")
         digest = self._hash(request)
         cached = self.results.get(request.session_id, {}).get(request.request_id)

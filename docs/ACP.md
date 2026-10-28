@@ -18,7 +18,7 @@ ACP client ──stdio JSON-RPC──► hrns-host / hrns-local
 | Method | Behavior |
 | --- | --- |
 | `initialize` | Negotiates v1; advertises load, list, delete, close, and `_hrns` v1 |
-| `session/new` | Validates `cwd`, parses `_meta.hrns.initialConfiguration`, composes the initial agent |
+| `session/new` | Validates `cwd`, parses `_meta.hrns.initialConfiguration`, composes the initial agent; the session is staged in memory and only written once used |
 | `session/prompt` | Streams text/thoughts/tools and returns stop reason plus usage |
 | `session/cancel` | Cancels the active turn through the adapter |
 | `session/load` | Restores native history/transcript from the scoped store and replays updates |
@@ -216,7 +216,8 @@ when Pydantic AI priced the response) and a derived `cost_status`: `estimated` w
 includes a price, `unavailable` when the model has no known price. A missing price is never
 reported as free. Final usage is reconciled once and persisted in metadata; measured tokens
 and priced work remain counted if the turn is cancelled or fails. The first prompt supplies a
-fallback title; clients may rename a session through `_hrns/session/rename`. There is no
+fallback title, written before the turn runs; clients may rename a session through
+`_hrns/session/rename`, which also keeps a session that was never prompted. There is no
 model-generated title tool.
 
 ## Stdio CLI

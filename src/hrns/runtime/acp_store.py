@@ -9,6 +9,7 @@ usage totals) lives beside the upstream payload.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from abc import ABC, abstractmethod
@@ -226,27 +227,60 @@ class SessionStore(ABC):
 
 
 class ScopedSessionStore:
-    """The upstream ``SessionStore`` protocol for exactly one principal/deployment scope."""
+    """The upstream ``SessionStore`` protocol for exactly one principal/deployment scope.
+
+    A session that ``session/new`` only composed has no row yet: its metadata is staged here and
+    the row is written the first time the session is used — when its first turn is persisted, or
+    when the host materializes it explicitly (a rename). An unused session therefore leaves
+    nothing behind, and a turn can never be lost to a row that was staged but never written.
+    """
 
     def __init__(self, backend: SessionStore, principal: str, deployment_id: str) -> None:
         self.backend = backend
         self.principal = principal
         self.deployment_id = deployment_id
+        self._staged: dict[str, SessionRecord] = {}
+        self._materialize_lock = asyncio.Lock()
+
+    def stage(self, record: SessionRecord) -> None:
+        """Hold a composed session's metadata in memory until the session is first used."""
+        if record.principal != self.principal or record.deployment_id != self.deployment_id:
+            raise HrnsError(
+                "POLICY_DENIED",
+                "A scoped store can only stage sessions in its own scope.",
+                details={"session_id": record.session_id},
+            )
+        self._staged[record.session_id] = record
+
+    def staged(self, session_id: str) -> SessionRecord | None:
+        """The record of a session that is open but not yet written, if any."""
+        return self._staged.get(session_id)
+
+    def discard(self, session_id: str) -> None:
+        self._staged.pop(session_id, None)
+
+    async def materialize(self, session_id: str) -> bool:
+        """Write the staged record; ``False`` when the session was never staged."""
+        async with self._materialize_lock:
+            record = self._staged.get(session_id)
+            if record is None:
+                return False
+            await self.backend.create(record)
+            self._staged.pop(session_id, None)
+            return True
 
     async def save(self, session_id: str, session: StoredSession) -> None:
+        if not (session.messages or session.updates) and self.staged(session_id) is not None:
+            # ``session/new`` persists an empty session so a client could reopen it before the
+            # first turn. That convenience is what filled history with unused sessions, so a
+            # staged session waits for real content before it gets a row.
+            return
+        # The first content save is also the moment a staged session becomes durable.
+        await self.materialize(session_id)
         await self.backend.save_scoped(self.principal, self.deployment_id, session_id, session)
 
     async def load(self, session_id: str) -> StoredSession | None:
         return await self.backend.load_scoped(self.principal, self.deployment_id, session_id)
-
-    async def create(self, record: SessionRecord) -> None:
-        if record.principal != self.principal or record.deployment_id != self.deployment_id:
-            raise HrnsError(
-                "POLICY_DENIED",
-                "A scoped store can only create sessions in its own scope.",
-                details={"session_id": record.session_id},
-            )
-        await self.backend.create(record)
 
     async def get(self, session_id: str) -> SessionRecord | None:
         return await self.backend.get(self.principal, self.deployment_id, session_id)
