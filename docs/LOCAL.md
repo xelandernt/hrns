@@ -98,18 +98,17 @@ provider = "github-copilot"
 model = "claude-sonnet-4.5"
 ```
 
-In the terminal, press **l** in the connection picker (or `/models` in a session), type
-`github-copilot` in **Provider**, and press **Ctrl+G**. Approving the code closes the
-login window, and the ids this account can reach are offered in the **Model** field, so
-the whole setup stays in one form. `hrns login` without a provider signs in to the
-configured one.
+In the terminal, press **l** in the connection picker and add an entry named
+`github-copilot` (or open `/providers` in a session), then press **Ctrl+G**. Approving the
+code closes the login window, and the ids this account can reach are offered by `/models`
+from then on. `hrns login` without a provider signs in to the active entry.
 
 Tokens are not refreshed by hrns: if GitHub expires or revokes one, run the login again.
 No scopes are requested. The login defaults to GitHub Copilot's public OAuth client
 (`Iv1.b507a08c87ecfe98`), because Copilot grants the current model catalog only to
 tokens issued to a recognized client; a token from an unrelated OAuth app sees the
 legacy model ids and is refused premium ones. To use a different app, set **Copilot
-client ID** in the model form (shown for both Copilot providers) or
+client ID** in the provider form (shown for a `github-copilot` entry) or
 `GITHUB_OAUTH_CLIENT_ID`; device flow must be enabled on it.
 
 Copilot serves two APIs, and every id is assigned to one of them: Pydantic AI's
@@ -147,8 +146,14 @@ Create `hrns.local.toml` in your project:
 ```toml
 provider = "deepseek"
 model = "deepseek-chat"
+
+[providers.deepseek]
 api_key_env = "DEEPSEEK_API_KEY"
 ```
+
+The top level selects the active entry and model; `[providers.<name>]` holds how to reach
+that provider. An entry whose name is a Pydantic AI provider id needs no `type`, and an
+entry with no key of its own reads the provider's usual environment variables.
 
 Then open the terminal:
 
@@ -159,22 +164,27 @@ uv run hrns
 Local mode is the default. `uv run hrns connect --local` selects it explicitly, and
 `hrns run "..."` uses the same settings when no other target is given.
 
-For UI setup, run `uv run hrns` and press **l**, choose **Configure local model…**, or
-type `/models` in a session. The provider and model fields offer the ids known to the
-installed Pydantic AI version: focus a field to see the full list, and type to filter it.
-What you type is the value, so a provider or model id that is not listed works too — the
-row marks it `custom` so a typo is visible before saving. Paste an API key into the masked
-**API key** field to store it in your operating system keyring; it is never written to the
-TOML file. For a provider with an account login, press **Ctrl+G** instead — see
-[account login](#account-login-github-copilot). The **API key environment variable** field takes a variable *name* such as
-`DEEPSEEK_API_KEY`, not the key itself. Enter an optional base URL too. **Save and connect**
-(or **Save and apply** from a session) persists the non-secret configuration; from the
-connection picker it starts a session in the current directory.
+For UI setup, run `uv run hrns` and press **l**, or type `/providers` in a session. A
+provider entry is one endpoint plus its credential: a unique name, the Pydantic AI
+provider it uses, an optional base URL, and either a pasted key (kept in your OS keyring,
+never written to the TOML file) or the *name* of an environment variable such as
+`DEEPSEEK_API_KEY`. The name defaults to the provider id and is unique, so two endpoints
+of the same provider can coexist: `openai-work` and `openai-home` both use `openai-chat`
+with different URLs and keys. In the table, `a` adds, `e` edits and `d` deletes an entry
+(deleting the active one clears the selection), and **Ctrl+G** signs in to a provider that
+supports an account login — see [account login](#account-login-github-copilot).
 
-If the selected model is already advertised by `hrns-local`, `/models` applies it
-to the next message without restarting the agent. Changing provider (or entering a new
-key) saves the configuration and restarts `hrns-local`, then reloads the current
-session. Use `/connect` to return to the connection picker, or `/effort` to change
+`/models` lists every configured entry's models in one grouped, filterable list, active
+entry first. The ids come from the installed Pydantic AI version, so focus the list and
+type to filter it. Picking any model — from any provider — switches the session to it
+**without restarting the agent**, and the reasoning-effort step follows when that model
+can reason. Press `a` there to add a custom model id to the entry you are on: an id the
+catalog does not know is remembered in `hrns.local.toml` under that entry only and is
+offered from then on.
+
+Edits to a provider entry (a new key, a new endpoint) reach a live session on its next
+message, because `hrns-local` re-reads the configuration file rather than being
+restarted. Use `/connect` to return to the connection picker, or `/effort` to change
 reasoning effort live. `/plugins` opens the live plugins panel: toggle, configure,
 or add bindings; `next_turn` changes apply to the next message, while `new_session`
 bindings still require a new session.
@@ -201,6 +211,8 @@ For an explicit compatible endpoint instead:
 ```toml
 provider = "openai-chat"
 model = "deepseek-chat"
+
+[providers.openai-chat]
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
@@ -210,14 +222,18 @@ api_key_env = "DEEPSEEK_API_KEY"
 For an already running local OpenAI-compatible server:
 
 ```toml
-provider = "openai-chat"
+provider = "lmstudio"
 model = "your-loaded-model-name"
+
+[providers.lmstudio]
+type = "openai-chat"
 base_url = "http://127.0.0.1:1234/v1"
 ```
 
-No key is needed for an unauthenticated local endpoint. For Ollama, use
-`provider = "ollama"`, the installed model name, and optionally its base URL.
-hrns does not download models or start an inference server.
+No key is needed for an unauthenticated local endpoint. The entry name is yours to
+choose, which is how a second OpenAI-compatible endpoint gets its own URL and key. For
+Ollama, use `provider = "ollama"`, the installed model name, and optionally a base URL in
+`[providers.ollama]`. hrns does not download models or start an inference server.
 
 Provider and model names are delegated to Pydantic AI without a hrns allowlist.
 Install the relevant `pydantic-ai-slim` extra in the runtime environment and supply
@@ -225,10 +241,16 @@ the provider's documented credentials. For example, Anthropic requires the
 `anthropic` extra and `ANTHROPIC_API_KEY`. Provider capabilities still depend on the
 selected model; filesystem and shell use function tools, so choose a tool-capable model.
 
-Use `[provider_options]` for additional provider constructor arguments (such as
+Use `[providers.<name>.options]` for additional provider constructor arguments (such as
 cloud region/project settings), and `[model_settings]` for Pydantic AI model settings:
 
 ```toml
+provider = "bedrock"
+model = "anthropic.claude-sonnet-4-5"
+
+[providers.bedrock.options]
+region_name = "eu-west-1"
+
 [model_settings]
 temperature = 0.2
 thinking = "high"
@@ -241,8 +263,8 @@ value applies to the next request. Models without thinking support do not advert
 option.
 
 Use environment-based authentication for secrets instead of putting them in
-`provider_options`. Unsupported constructor options fail at startup; custom
-OpenAI-compatible endpoints should use `openai-chat`.
+`[providers.<name>.options]`. Unsupported constructor options fail when a message is
+sent; custom OpenAI-compatible endpoints should use an entry with `type = "openai-chat"`.
 
 The local agent also bundles the Ask User capability, so the model can put structured
 multiple-choice questions to you mid-run. It is on by default; turn it off for headless

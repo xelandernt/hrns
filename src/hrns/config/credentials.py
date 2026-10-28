@@ -1,7 +1,9 @@
 """Local provider secrets in the OS keyring, shared by the client and the runtime.
 
-One account per provider: the provider's ``api_key_env`` name when it has one, so a
-pasted key and an account login for the same provider resolve to the same entry.
+One account per provider entry: the entry's ``api_key_env`` name when it has one, so a
+pasted key and an account login for that entry resolve to the same secret. Entries that
+name no variable are keyed by their own name, which is why two entries of the same
+provider type (``openai-work``, ``openai-home``) can hold different keys.
 """
 
 from __future__ import annotations
@@ -45,6 +47,16 @@ def store_secret(account: str, secret: str) -> str | None:
     except Exception:
         return None
     return secret_ref(account)
+
+
+def delete_secret(account: str) -> None:
+    """Forget an account's secret; a missing keyring entry is not an error."""
+    try:
+        import keyring
+
+        keyring.delete_password(KEYRING_SERVICE, account)
+    except Exception:
+        return
 
 
 def stored_api_key_ref(provider: str, api_key_env: str = "") -> str | None:

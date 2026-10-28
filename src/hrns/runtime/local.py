@@ -118,25 +118,30 @@ def _provider_sort_key(name: str) -> tuple[int, int, str]:
     return (1, 0, name)
 
 
-def thinking_support(model_ids: Iterable[str]) -> dict[str, str]:
-    """Map model ids to ``"supported"``/``"always"`` when the model reasons."""
+def _thinking_map(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Map a target id to ``"supported"``/``"always"``/``"custom"`` for its model id."""
     from pydantic_ai.models import infer_model_profile, known_model_names
 
     known = set(known_model_names())
     support: dict[str, str] = {}
-    for model_id in model_ids:
+    for target, model_id in pairs:
         if model_id not in known:
-            support[model_id] = "custom"
+            support[target] = "custom"
             continue
         try:
             profile = infer_model_profile(model_id)
         except Exception:
             continue
         if profile.get("thinking_always_enabled"):
-            support[model_id] = "always"
+            support[target] = "always"
         elif profile.get("supports_thinking"):
-            support[model_id] = "supported"
+            support[target] = "supported"
     return support
+
+
+def thinking_support(model_ids: Iterable[str]) -> dict[str, str]:
+    """Map model ids to ``"supported"``/``"always"`` when the model reasons."""
+    return _thinking_map((model_id, model_id) for model_id in model_ids)
 
 
 def known_models() -> dict[str, list[str]]:
@@ -150,6 +155,31 @@ def known_models() -> dict[str, list[str]]:
             continue
         grouped.setdefault(provider, set()).add(model)
     return {provider: sorted(models, key=str.lower) for provider, models in grouped.items()}
+
+
+def local_models(settings: LocalSettings) -> tuple[str, ...]:
+    """Every ``entry:model`` target the configured providers can serve.
+
+    The active model comes first because the adapter starts each session on the first
+    advertised id. An entry whose provider type has no catalog still contributes its
+    selected model, so the session can switch back to it.
+    """
+    targets = list(settings.model_targets(known_models()))
+    current = settings.active_target() if settings.provider and settings.model else ""
+    if current:
+        targets = [current, *(target for target in targets if target != current)]
+    return tuple(dict.fromkeys(targets))
+
+
+def local_thinking(settings: LocalSettings) -> dict[str, str]:
+    """Reasoning support keyed by ``entry:model`` target."""
+    catalog = known_models()
+    pairs = [
+        (f"{name}:{model}", f"{settings.provider_id(name)}:{model}")
+        for name in settings.providers
+        for model in settings.models_for(name, catalog)
+    ]
+    return _thinking_map(pairs)
 
 
 def provider_catalog() -> dict[str, Any]:
@@ -216,28 +246,33 @@ def _responses_only(item: object) -> bool:
 
 
 async def _prefetch_copilot_catalog(settings: LocalSettings) -> None:
-    """Record which ids this token must be called on ``/responses``.
+    """Record which ids these tokens must be called on ``/responses``.
 
     Copilot's catalog is the only reliable switch: availability is per plan and per
-    OAuth client, and the split moves as models ship. One fetch per runtime process;
-    a failed fetch leaves every id on Chat Completions, as before.
+    OAuth client, and the split moves as models ship. One fetch per entry per runtime
+    process; a failed fetch leaves every id on Chat Completions, as before.
     """
-    if settings.provider != "github-copilot":
-        return
+    for name in settings.providers:
+        if settings.provider_id(name) == "github-copilot":
+            await _prefetch_copilot_entry(settings, name)
+
+
+async def _prefetch_copilot_entry(settings: LocalSettings, name: str) -> None:
+    entry = settings.require_entry(name)
     try:
-        token = _copilot_token(settings.resolved_api_key())
+        token = _copilot_token(settings.resolved_api_key(name))
     except ValueError:
         return
     if token is None:
         return
-    key = _copilot_catalog_key(token, settings.base_url)
+    key = _copilot_catalog_key(token, entry.base_url)
     if key in _COPILOT_RESPONSES_ONLY:
         return
     from pydantic_ai.providers.github_copilot import GitHubCopilotProvider
 
     try:
         async with GitHubCopilotProvider(
-            api_key=token, base_url=settings.base_url or None
+            api_key=token, base_url=entry.base_url or None
         ) as provider:
             listing = await provider.client.models.list()
     except Exception:  # noqa: BLE001 - the session still works on Chat Completions
@@ -354,34 +389,47 @@ def _copilot_responses_model(model_name: str, options: dict[str, Any]) -> Model:
 
 
 def configured_model(settings: LocalSettings, model_id: str | None = None) -> Model:
-    """Delegate provider/model selection to the pinned Pydantic AI registry."""
+    """Build the model for one configured provider entry.
+
+    Session ids read ``entry:model``. The entry decides which Pydantic AI provider is
+    instantiated, so two entries may share a provider type with different endpoints and
+    keys. ``infer_model`` dispatches on the provider id, so only the entry's type —
+    never its name — reaches it.
+    """
     settings.require_model()
-    selected = model_id or f"{settings.provider}:{settings.model}"
-    provider, _, model_name = selected.partition(":")
-    same_provider = provider == settings.provider
-    options = dict(settings.provider_options) if same_provider else {}
-    if same_provider and settings.base_url:
-        options["base_url"] = settings.base_url
-    key = settings.resolved_api_key() if same_provider else None
+    selected = model_id or settings.active_target()
+    name, _, model_name = selected.partition(":")
+    entry = settings.providers.get(name)
+    if entry is None:
+        raise ValueError(
+            f"Provider {name!r} is not configured. Add it with /providers in the terminal."
+        )
+    if not model_name:
+        raise ValueError(f"Model id {selected!r} must read entry:model.")
+    provider = entry.provider_id(name)
+    options = dict(entry.options)
+    if entry.base_url:
+        options["base_url"] = entry.base_url
+    key = settings.resolved_api_key(name)
     if key is not None:
         options["api_key"] = key
+    pydantic_id = f"{provider}:{model_name}"
     try:
         if provider == "github-copilot" and _copilot_uses_responses(model_name, key, options):
             return _copilot_responses_model(model_name, options)
         if not options:
-            return infer_model(selected)
+            return infer_model(pydantic_id)
         if provider.startswith("gateway/"):
             from pydantic_ai.providers.gateway import gateway_provider
 
+            gateway_name = provider.removeprefix("gateway/")
             return infer_model(
-                selected,
-                provider_factory=lambda name: gateway_provider(
-                    name.removeprefix("gateway/"), **options
-                ),
+                pydantic_id,
+                provider_factory=lambda _name: gateway_provider(gateway_name, **options),
             )
         return infer_model(
-            selected,
-            provider_factory=lambda name: infer_provider_class(name)(**options),
+            pydantic_id,
+            provider_factory=lambda _name: infer_provider_class(provider)(**options),
         )
     except ImportError as exc:
         raise ValueError(
@@ -391,9 +439,8 @@ def configured_model(settings: LocalSettings, model_id: str | None = None) -> Mo
         ) from exc
     except (ValueError, TypeError, UserError) as exc:
         raise ValueError(
-            f"Cannot configure provider {provider!r} / model {selected!r}. "
-            "Check the provider name, credentials and supported provider_options. "
-            "For a custom OpenAI-compatible base_url use provider = 'openai-chat'."
+            f"Cannot configure {name!r} ({provider}) with model {model_name!r}. Check the "
+            "provider id, its endpoint, its key and its options in /providers."
             + _login_hint(provider, key)
         ) from exc
 
@@ -406,18 +453,6 @@ async def _require_tool_approval(_ctx: Any, tools: list[Any]) -> list[Any]:
         else replace(tool, kind="unapproved")
         for tool in tools
     ]
-
-
-def _local_models(settings: LocalSettings) -> tuple[str, ...]:
-    """Known model ids for the configured provider, current model first."""
-    current = f"{settings.provider}:{settings.model}"
-    known = known_models().get(settings.provider)
-    if known:
-        models = [f"{settings.provider}:{model}" for model in known]
-        if current not in models:
-            models.insert(0, current)
-        return tuple(dict.fromkeys(models))
-    return (current,)
 
 
 def local_definition(settings: LocalSettings) -> AgentDefinition:
@@ -500,6 +535,61 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
     return definition
 
 
+class LocalModelSource:
+    """The model targets of the local config, re-read so a live session follows edits.
+
+    Adding a provider or a custom model in the terminal must take effect without
+    restarting ``hrns-local``. Every read therefore checks the config file's mtime first.
+    ``thinking_models`` and ``provider_types`` are handed to the host policy and the
+    session effort state, and updated in place, so a live session sees the new ids.
+    """
+
+    def __init__(self, settings: LocalSettings) -> None:
+        self._settings = settings
+        self._stamp = self._config_stamp()
+        self._models = local_models(settings)
+        self.thinking_models: dict[str, str] = local_thinking(settings)
+        self.provider_types: dict[str, str] = settings.provider_ids()
+
+    def _config_stamp(self) -> tuple[int, int] | None:
+        path = self._settings.config_file
+        if path is None:
+            return None
+        try:
+            stat = path.expanduser().stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _refresh(self) -> None:
+        stamp = self._config_stamp()
+        if stamp == self._stamp:
+            return
+        self._stamp = stamp
+        path = self._settings.config_file
+        try:
+            settings = LocalSettings(config_file=path) if path else LocalSettings(config_file=None)
+        except (ValueError, OSError):
+            # A half-written or invalid file keeps the last known-good view.
+            return
+        self._settings = settings
+        self._models = local_models(settings)
+        self.thinking_models.clear()
+        self.thinking_models.update(local_thinking(settings))
+        self.provider_types.clear()
+        self.provider_types.update(settings.provider_ids())
+
+    def models(self) -> tuple[str, ...]:
+        """The advertised ``entry:model`` ids, current as of the last config write."""
+        self._refresh()
+        return self._models
+
+    def model(self, model_id: str) -> Model:
+        """Resolve one advertised id; the key and endpoint follow the config file."""
+        self._refresh()
+        return configured_model(self._settings, model_id)
+
+
 def build_local_agent(
     settings: LocalSettings,
     *,
@@ -518,26 +608,28 @@ def build_local_agent(
     registry = PluginRegistry()
     registry.discover()
     store = build_store(str(settings.store.expanduser()))
-    models = _local_models(settings)
+    source = LocalModelSource(settings)
     bundle = HostBundle(
         definition=definition,
         registry=registry,
         store=store,
         close_store=True,
-        model_resolver=lambda model_id: configured_model(settings, model_id),
+        model_resolver=source.model,
     )
     return HrnsACPAgent(
         bundle,
         HostPolicy(
             allowed_cwds=(str(workspace),),
             default_cwd=str(workspace),
-            models=models,
-            default_model=f"{settings.provider}:{settings.model}",
+            models=source.models(),
+            default_model=settings.active_target(),
             resources={MODEL: model, WORKSPACE: str(workspace)},
-            thinking_models=thinking_support(models),
+            thinking_models=source.thinking_models,
+            provider_types=source.provider_types,
             default_effort=thinking_from_settings(settings),
             model_settings=ModelSettings(**settings.model_settings),
         ),
+        refresh_models=source.models,
     )
 
 

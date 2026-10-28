@@ -284,17 +284,22 @@ class SessionService:
         return publish
 
     async def remembered_tool_names(self, session_id: str) -> frozenset[str]:
-        """Function-tool names already present in the session's native history."""
+        """Function-tool names already present in the session's native history.
+
+        Parts the framework emits for its own tools — a typed `ToolCallPart` such as
+        `load_capability` or `search_tools` — are skipped: they are not function tools,
+        and stubbing one would shadow the tool the framework installs for the run. A
+        deferred-capability loader then refuses the whole request because the name is
+        reserved, so resuming a session that had loaded a skill failed every turn.
+        """
         stored = await self.store.load(session_id)
         if stored is None:
             return frozenset()
         names: set[str] = set()
         for message in stored.messages:
             for part in getattr(message, "parts", ()):
-                if isinstance(part, ToolCallPart):
-                    name = getattr(part, "tool_name", None)
-                    if isinstance(name, str) and name:
-                        names.add(name)
+                if isinstance(part, ToolCallPart) and part.tool_kind is None and part.tool_name:
+                    names.add(part.tool_name)
         return frozenset(names)
 
     async def apply_unavailable_tools(self, session_id: str, composition: Composition) -> None:
@@ -421,6 +426,7 @@ class SessionService:
             model_settings=self.policy.model_settings,
             effort=effort,
             effort_support=support,
+            provider_types=self.policy.provider_types,
             presentation_sink=self.presentation_sink(session.session_id),
             client_capabilities=handle.capabilities,
             accepts_client_capabilities=self.policy.accepts_client_capabilities,

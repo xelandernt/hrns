@@ -106,6 +106,8 @@ class EffortState:
     support: str | None = None
     model: str | None = None
     base: ModelSettings = field(default_factory=ModelSettings)
+    #: Model-id prefix -> Pydantic AI provider id, when the prefix names a provider entry.
+    provider_types: Mapping[str, str] = field(default_factory=dict)
 
     def set_model(self, model: str | None, support: str | None) -> None:
         self.model = model
@@ -124,7 +126,8 @@ class EffortState:
             merged["thinking"] = False
         elif _is_effort_level(self.effort):
             merged["thinking"] = self.effort
-        provider = (self.model or "").partition(":")[0]
+        prefix = (self.model or "").partition(":")[0]
+        provider = self.provider_types.get(prefix, prefix)
         if self.support == "custom" and provider in _OPENAI_EFFORT_PROVIDERS:
             merged["openai_reasoning_effort"] = "none" if off else _effort_or_none(self.effort)
         return merged
@@ -401,6 +404,7 @@ async def compose_definition(
     model_settings: ModelSettings | None = None,
     effort: str | None = None,
     effort_support: str | None = None,
+    provider_types: Mapping[str, str] | None = None,
     deps: object = None,
     presentation_sink: PresentationSink | None = None,
     client_capabilities: schema.ClientCapabilities | None = None,
@@ -464,6 +468,7 @@ async def compose_definition(
         support=effort_support,
         model=selected_model if isinstance(selected_model, str) else None,
         base=base_settings,
+        provider_types=provider_types or {},
     )
     if effort_state.effort is not None and effort_state.support is None:
         effort_state.effort = None

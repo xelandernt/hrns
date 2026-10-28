@@ -39,7 +39,7 @@ The plugins drawer lists offered bindings with their on/off state and surfaces l
 
 In the plugins panel, `a` adds a binding only when the peer advertises `_hrns/plugins/list` and local binding creation. Local stdio hosts advertise both; embedded hosted connections disable creation. A plugin's `new_session` lifecycle can only be chosen at session creation.
 
-Command palette and slash commands: `/connect`, `/models`, `/plugins`, `/sessions`, `/find`, `/copy`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
+Command palette and slash commands: `/connect`, `/providers`, `/models`, `/plugins`, `/sessions`, `/find`, `/copy`, `/permissions`, `/settings`, `/attach`, `/help`. `/model` and `/capabilities` remain aliases. Typing `/` opens an inline filtered picker; agent-advertised commands appear alongside local ones, and collision-safe invocation is `/agent <command>`. Slash commands never substitute prompt instructions for an unsupported capability edit.
 
 ## CLI
 
@@ -70,14 +70,22 @@ hrns login github-copilot
 
 # Delete local session history (asks first; --dry-run previews, --yes skips)
 hrns clean
+
+# Delete session history and the local provider config, keys included
+hrns clean --yes --config --keys
 ```
 
 `hrns clean` removes the local developer agent's session database and the host
 runtime's default SQLite store, together with their WAL sidecars. It never
-touches saved profiles, local model settings, or sessions hosted on a remote
-server. The command lists what it will delete and asks for confirmation; use
-`--dry-run` to only list, or `--yes` in scripts. A PostgreSQL `HRNS_STORE` is
-left untouched.
+touches saved connection profiles or sessions hosted on a remote server, and it
+leaves the provider configuration alone unless you select it. The command lists
+everything it can delete, then asks per target: session history, the provider
+configuration (the project `hrns.local.toml` and the user `local.toml`), and —
+when that configuration declares entries whose keys are in the OS keyring — the
+stored credentials. Use `--dry-run` to only list. In scripts, `--yes` skips the
+session prompt and `--config` selects the configuration; it is the only way to
+delete it without a terminal, and `--keys` also clears the keyring secrets of the
+entries in those files. A PostgreSQL `HRNS_STORE` is left untouched.
 
 `hrns run` accepts multiple text prompt words. An explicit `--stdio` target uses
 `-- CMD ARGS -- PROMPT`; local-model and remote targets treat the remainder as the

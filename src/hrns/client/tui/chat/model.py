@@ -13,11 +13,27 @@ from hrns.config import (
 )
 
 from ...errors import HrnsClientError
-from ...local import is_local_hrns, local_model_catalog, local_target, local_thinking_support
+from ...local import (
+    is_local_hrns,
+    local_credential_available,
+    local_model_catalog,
+    local_target,
+    local_thinking_support,
+)
 from ..choice_keys import stepped_value
 from ..dialogs import ChoiceDialog
-from ..local import LocalModelDialog, LocalModelResult, effort_choices, effort_label
+from ..local import (
+    CustomModelDialog,
+    CustomModelRequest,
+    LocalModelResult,
+    ModelPick,
+    ModelPickerDialog,
+    effort_choices,
+    effort_label,
+    save_custom_model,
+)
 from ..panels import SidePanel
+from ..providers import ProvidersDialog, ProvidersResult
 from ..state import config_option_value, effort_option, model_option, option_values
 
 if TYPE_CHECKING:
@@ -109,6 +125,7 @@ class ModelWorkflow:
         return LocalSettings(config_file=config) if config else LocalSettings()
 
     async def show_models(self) -> None:
+        """Every configured provider's models, in one list."""
         screen = self.screen
         if screen.session.client is not screen.client:
             await screen._notice(
@@ -124,91 +141,107 @@ class ModelWorkflow:
         except (ValueError, OSError) as exc:
             await screen._notice(f"Local settings are unavailable: {exc}", "error")
             return
-        models = list(local_model_catalog().get(settings.provider, ()))
-        if not models:
-            self.open_local_model_form(settings)
+        if not settings.providers:
+            await screen._notice(
+                "No local providers are configured yet. Add one, then pick a model.",
+                "warning",
+            )
+            self.open_providers(settings)
             return
-        if settings.model and settings.model not in models:
-            models.insert(0, settings.model)
-        effort = effort_label(thinking_from_settings(settings))
-        current_note = (
-            f"current · effort {effort}"
-            if settings.model and local_thinking_support(settings.provider, settings.model)
-            else "current"
-        )
-        choices = [
-            {
-                "value": model,
-                "name": model,
-                "description": current_note if model == settings.model else "",
-            }
-            for model in models
-        ]
-        choices.append(
-            {
-                "value": "__configure__",
-                "name": "Configure provider or model…",
-                "description": (
-                    "Add a provider, paste a key, set a base URL, or type any provider or model id."
-                ),
-            }
-        )
-
-        def apply(value: str | None) -> None:
-            if not value:
-                return
-            if value == "__configure__":
-                self.open_local_model_form(settings)
-                return
-            self.select_local_model(settings, value)
-
-        current_effort = (
-            f" · effort {effort}"
-            if settings.model and local_thinking_support(settings.provider, settings.model)
-            else ""
-        )
         screen.app.push_screen(
-            ChoiceDialog(
-                "Models",
-                f"Provider {settings.provider}{current_effort}. "
-                "The selection applies to the next message.",
-                choices,
-                current=settings.model,
-            ),
-            apply,
+            ModelPickerDialog(settings),
+            lambda result: self.models_picked(settings, result),
         )
 
-    def open_local_model_form(self, settings: LocalSettings) -> None:
+    def models_picked(
+        self, settings: LocalSettings, result: ModelPick | CustomModelRequest | None
+    ) -> None:
+        """React to the model picker: switch model, or add a custom id first."""
+        if isinstance(result, ModelPick):
+            self.select_local_model(settings, result.provider, result.model)
+        elif isinstance(result, CustomModelRequest):
+            self.add_custom_model(settings, result.provider, result.model)
+
+    def open_providers(self, settings: LocalSettings | None = None) -> None:
+        """Open the provider table, reloading the settings when none were passed."""
         screen = self.screen
-        screen.app.push_screen(
-            LocalModelDialog(settings, accept_label="Save and apply"),
-            self.models_configured,
-        )
+        try:
+            current = settings if settings is not None else self.local_settings()
+        except (ValueError, OSError) as exc:
+            screen.app.notify(f"Local settings are unavailable: {exc}", severity="error")
+            return
+        screen.app.push_screen(ProvidersDialog(current), self.providers_saved)
 
-    def select_local_model(self, settings: LocalSettings, model: str) -> None:
+    def providers_saved(self, result: Any) -> None:
+        screen = self.screen
+        if not isinstance(result, ProvidersResult):
+            return
+        if result.cleared:
+            screen.app.notify(
+                f"{result.path} no longer selects a provider. Pick a model with /models "
+                "before the next message.",
+                severity="warning",
+            )
+            return
+        if result.changed:
+            screen.app.notify(f"Providers saved to {result.path}")
+
+    def add_custom_model(self, settings: LocalSettings, provider: str, initial: str = "") -> None:
+        """Remember an id the catalog does not list, then switch to it."""
+        screen = self.screen
+        provider_id = settings.provider_id(provider)
+
+        def apply(values: Any) -> None:
+            if not isinstance(values, dict):
+                return
+            model = str(values.get("model") or "").strip()
+            if not model:
+                return
+            try:
+                _path, updated = save_custom_model(settings, provider, model)
+            except (ValueError, OSError) as exc:
+                screen.app.notify(f"Could not add the model: {exc}", severity="error")
+                return
+            screen.app.notify(f"Added {provider}:{model}")
+            self.select_local_model(updated, provider, model)
+
+        screen.app.push_screen(CustomModelDialog(provider, provider_id, initial), apply)
+
+    def select_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
         """Model choice first; prompt for effort when that model can reason.
 
         Canceling the effort step cancels the whole change, matching Codex.
         """
         screen = self.screen
-        support = local_thinking_support(settings.provider, model)
+        provider_id = settings.provider_id(provider)
+        support = local_thinking_support(provider_id, model)
         if support is None:
             # A model outside the catalog has unknown support: keep a manually
             # configured thinking level instead of clearing it.
-            known = model in local_model_catalog().get(settings.provider, ())
-            screen._save_model_selection_worker(settings, model, None, touch_thinking=known)
+            known = model in local_model_catalog().get(provider_id, ())
+            screen._save_model_selection_worker(
+                settings, provider, model, None, touch_thinking=known
+            )
             return
-        current = thinking_from_settings(settings) if model == settings.model else None
+        current = (
+            thinking_from_settings(settings)
+            if (provider, model) == (settings.provider, settings.model)
+            else None
+        )
         self.choose_effort(
             settings,
+            provider,
             model,
             current=current,
-            on_select=lambda effort: screen._save_model_selection_worker(settings, model, effort),
+            on_select=lambda effort: screen._save_model_selection_worker(
+                settings, provider, model, effort
+            ),
         )
 
     def choose_effort(
         self,
         settings: LocalSettings,
+        provider: str,
         model: str,
         *,
         current: str | None,
@@ -217,8 +250,8 @@ class ModelWorkflow:
         self.screen.app.push_screen(
             ChoiceDialog(
                 "Reasoning effort",
-                f"{settings.provider}:{model}. Applies to the next message.",
-                effort_choices(settings.provider, model),
+                f"{provider}:{model}. Applies to the next message.",
+                effort_choices(settings.provider_id(provider), model),
                 current=current or EFFORT_DEFAULT,
             ),
             lambda value: on_select(value) if value else None,
@@ -227,14 +260,23 @@ class ModelWorkflow:
     async def save_model_selection(
         self,
         settings: LocalSettings,
+        provider: str,
         model: str,
         effort: str | None,
         *,
         touch_thinking: bool = True,
     ) -> None:
         screen = self.screen
+        entry = settings.entry(provider)
+        if entry is not None and not local_credential_available(provider, entry.api_key_env):
+            await screen._notice(
+                f"{provider} has no API key yet. Add one in /providers, or press Ctrl+G there "
+                "to sign in.",
+                "error",
+            )
+            return
         try:
-            configured = settings.model_copy(update={"model": model})
+            configured = settings.model_copy(update={"provider": provider, "model": model})
             if touch_thinking:
                 configured = with_thinking(configured, effort)
             path = configured.save(settings.config_file)
@@ -244,7 +286,7 @@ class ModelWorkflow:
         await self.apply_model_settings(
             LocalModelResult(
                 path=path,
-                provider=settings.provider,
+                provider=provider,
                 model=model,
                 api_key_ref=None,
                 api_key_changed=False,
@@ -271,12 +313,13 @@ class ModelWorkflow:
         except (ValueError, OSError) as exc:
             await screen._notice(f"Local settings are unavailable: {exc}", "error")
             return
-        if not settings.model:
+        if not settings.provider or not settings.model:
             await screen._notice(
                 "Configure a local model before setting reasoning effort.", "error"
             )
             return
-        support = local_thinking_support(settings.provider, settings.model)
+        provider_id = settings.provider_id()
+        support = local_thinking_support(provider_id, settings.model)
         if support is None:
             await screen._notice(
                 f"{settings.provider}:{settings.model} does not advertise reasoning effort.",
@@ -291,6 +334,7 @@ class ModelWorkflow:
         )
         self.choose_effort(
             settings,
+            settings.provider,
             settings.model,
             current=current,
             on_select=lambda effort: screen._set_local_effort_worker(settings, effort),
@@ -315,61 +359,55 @@ class ModelWorkflow:
             )
         )
 
-    def models_configured(self, result: Any) -> None:
-        screen = self.screen
-        if result is not None:
-            screen._apply_model_settings_worker(result)
+    async def apply_model_settings(self, result: LocalModelResult) -> None:
+        """Switch the session's model in place; restart only when it cannot be switched.
 
-    async def apply_model_settings(self, result: Any) -> None:
+        The runtime resolves ``name:model`` ids itself, so a provider change is a config
+        option change like any other. The restart path stays for a runtime that started
+        before the selected id existed, and the effort fallback keeps its restart.
+        """
         screen = self.screen
-        if not isinstance(result, LocalModelResult):
-            return
-        try:
-            old = self.local_settings()
-        except (ValueError, OSError):
-            old = None
         wanted = f"{result.provider}:{result.model}"
         option = model_option(screen.session.config_options)
-        values = {item["value"] for item in option_values(option)} if option else set()
-        restart = (
-            old is None
-            or result.provider != old.provider
-            or result.api_key_changed
-            or option is None
-            or wanted not in values
-        )
-        if not restart:
+        restart = option is None
+        if option is not None:
             option_id = str(option.get("id") or "model")
+            advertised = {item["value"] for item in option_values(option)}
             try:
                 options = await screen.session.set_config_option(option_id, wanted)
             except HrnsClientError as exc:
-                await screen._notice(f"Model change failed: {exc.message}", "error")
-                return
-            screen.session.remember(options)
-            if result.effort is not None:
-                if effort_option(options) is not None:
-                    try:
-                        options = await screen.session.set_config_option("effort", result.effort)
-                    except HrnsClientError as exc:
-                        await screen._notice(
-                            f"Reasoning effort change failed: {exc.message}", "error"
-                        )
-                        return
-                    screen.session.remember(options)
-                elif result.effort != EFFORT_DEFAULT:
-                    # The new model may not have advertised effort until the switch
-                    # landed; restart so the saved setting is read at startup.
-                    restart = True
-            if not restart:
-                screen.chrome.update_chrome()
-                suffix = (
-                    f" · effort {effort_label(result.effort)}" if result.effort is not None else ""
-                )
-                await screen._notice(
-                    f"Model: {wanted}{suffix}",
-                    "success",
-                )
-                return
+                if wanted in advertised:
+                    await screen._notice(f"Model change failed: {exc.message}", "error")
+                    return
+                # The running runtime never advertised this id: reload it instead.
+                restart = True
+            else:
+                screen.session.remember(options)
+                if result.effort is not None:
+                    if effort_option(options) is not None:
+                        try:
+                            options = await screen.session.set_config_option(
+                                "effort", result.effort
+                            )
+                        except HrnsClientError as exc:
+                            await screen._notice(
+                                f"Reasoning effort change failed: {exc.message}", "error"
+                            )
+                            return
+                        screen.session.remember(options)
+                    elif result.effort != EFFORT_DEFAULT:
+                        # The new model may not have advertised effort until the switch
+                        # landed; restart so the saved setting is read at startup.
+                        restart = True
+                if not restart:
+                    screen.chrome.update_chrome()
+                    suffix = (
+                        f" · effort {effort_label(result.effort)}"
+                        if result.effort is not None
+                        else ""
+                    )
+                    await screen._notice(f"Model: {wanted}{suffix}", "success")
+                    return
         try:
             target = local_target(
                 result.path,
@@ -384,8 +422,8 @@ class ModelWorkflow:
         screen.app.target = target
         screen.target = target
         await screen._notice(
-            "Restarting hrns-local with the saved provider configuration; "
-            "reloading this session afterwards.",
+            "Restarting hrns-local so it advertises the saved model; reloading this session "
+            "afterwards.",
             "warning",
         )
         await screen._reconnect()

@@ -1,7 +1,9 @@
-"""``hrns clean``: delete the local session history written by hrns.
+"""``hrns clean``: delete local session history and, on request, the local config.
 
-Only local, hrns-owned SQLite files are removed. Saved profiles, local model
-settings, and sessions hosted on a remote server are never touched.
+Only local, hrns-owned files are removed. Session history is the default target; the
+provider configuration is deleted only when it is selected interactively or with
+``--config``. Stored credentials follow the configuration only when asked for, and
+sessions hosted on a remote server are never touched.
 """
 
 from __future__ import annotations
@@ -9,14 +11,21 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .errors import HrnsClientError
 from .headless import EXIT_OK
 
-__all__ = ["SessionArtifact", "clean", "session_artifacts"]
+__all__ = [
+    "ConfigArtifact",
+    "SessionArtifact",
+    "clean",
+    "config_artifacts",
+    "session_artifacts",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +34,16 @@ class SessionArtifact:
 
     label: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigArtifact:
+    """One local provider configuration file and the entries it declares."""
+
+    label: str
+    path: Path
+    #: ``(entry name, api_key_env)`` for every ``[providers.<name>]`` in the file.
+    entries: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 def _client_store_path() -> Path:
@@ -68,6 +87,66 @@ def session_artifacts() -> list[SessionArtifact]:
         seen.add(resolved)
         artifacts.append(SessionArtifact(label, resolved))
     return artifacts
+
+
+def _config_candidates() -> list[tuple[str, Path]]:
+    """The project file and the user file, in the order the runtime reads them."""
+    from platformdirs import user_config_path
+
+    return [
+        ("project config", Path.cwd() / "hrns.local.toml"),
+        ("user config", user_config_path("hrns") / "local.toml"),
+    ]
+
+
+def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
+    """Provider entries in a config file, read without validating the hrns schema.
+
+    A file written for an older hrns must still be deletable, so this reads the TOML
+    directly instead of through ``LocalSettings``.
+    """
+    try:
+        with path.open("rb") as stream:
+            payload = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ()
+    providers = payload.get("providers")
+    if not isinstance(providers, dict):
+        return ()
+    entries: list[tuple[str, str]] = []
+    for name, entry in providers.items():
+        if not isinstance(name, str):
+            continue
+        api_key_env = entry.get("api_key_env") if isinstance(entry, dict) else None
+        entries.append((name, api_key_env if isinstance(api_key_env, str) else ""))
+    return tuple(entries)
+
+
+def config_artifacts() -> list[ConfigArtifact]:
+    """Existing local provider configuration files, deduplicated by resolved path."""
+    artifacts: list[ConfigArtifact] = []
+    seen: set[Path] = set()
+    for label, path in _config_candidates():
+        resolved = path.expanduser().resolve()
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        artifacts.append(ConfigArtifact(label, resolved, _declared_entries(resolved)))
+    return artifacts
+
+
+def _stored_accounts(artifact: ConfigArtifact) -> list[str]:
+    """Keyring accounts of this file's entries that currently hold a secret."""
+    from hrns.config.credentials import keyring_account, stored_secret
+
+    accounts: list[str] = []
+    for name, api_key_env in artifact.entries:
+        account = keyring_account(name, api_key_env)
+        if account in accounts:
+            continue
+        if stored_secret(account) is not None:
+            accounts.append(account)
+    return accounts
 
 
 def _sidecars(path: Path) -> list[Path]:
@@ -119,6 +198,12 @@ def _describe(artifact: SessionArtifact) -> str:
     )
 
 
+def _describe_config(artifact: ConfigArtifact) -> str:
+    count = len(artifact.entries)
+    entries = f"{count} provider{'s' if count != 1 else ''}" if count else "no providers"
+    return f"  {artifact.label:<18} {_display_path(artifact.path)}  ({entries})"
+
+
 def _confirm(question: str) -> bool:
     try:
         answer = input(question)
@@ -127,41 +212,121 @@ def _confirm(question: str) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
-def clean(*, assume_yes: bool = False, dry_run: bool = False) -> int:
-    """Delete local session databases after confirmation; return an exit code."""
-    artifacts = session_artifacts()
-    if not artifacts:
-        print("Nothing to clean: no local session history found.")
+def _remove(paths: list[Path]) -> tuple[int, list[str]]:
+    """Delete files, returning how many went and one message per failure."""
+    removed = 0
+    failures: list[str] = []
+    for path in paths:
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append(f"{_display_path(path)}: {exc}")
+    return removed, failures
+
+
+def clean(
+    *,
+    assume_yes: bool = False,
+    dry_run: bool = False,
+    config: bool = False,
+    keys: bool = False,
+) -> int:
+    """Delete local session history and, when selected, the local provider config."""
+    sessions = session_artifacts()
+    configs = config_artifacts()
+    if not sessions and not configs:
+        print("Nothing to clean: no local session history or provider config found.")
         return EXIT_OK
 
-    print("This permanently deletes local session history:")
-    for artifact in artifacts:
-        print(_describe(artifact))
+    if sessions:
+        print("This permanently deletes local session history:")
+        for artifact in sessions:
+            print(_describe(artifact))
+    if configs:
+        if sessions:
+            print()
+        print("Local provider configuration:")
+        for artifact in configs:
+            print(_describe_config(artifact))
     if dry_run:
         print("\nDry run: nothing was deleted.")
         return EXIT_OK
 
-    if not assume_yes:
-        if not sys.stdin.isatty():
-            raise HrnsClientError(
-                "Refusing to delete local session history without confirmation in a "
-                "non-interactive shell. Re-run with `--yes`."
+    interactive = sys.stdin.isatty() and not assume_yes
+    remove_sessions = bool(sessions)
+    remove_config = bool(configs) and config
+    if interactive and sessions:
+        remove_sessions = _confirm("\nDelete these sessions? [y/N] ")
+    if interactive and configs and not config:
+        remove_config = _confirm("Delete the provider configuration? [y/N] ")
+    if not interactive and sessions and not assume_yes:
+        raise HrnsClientError(
+            "Refusing to delete local session history without confirmation in a "
+            "non-interactive shell. Re-run with `--yes`, and add `--config` to delete "
+            "the provider configuration too."
+        )
+    if not interactive and not sessions and configs and not config and not keys:
+        raise HrnsClientError(
+            "Refusing to delete the provider configuration in a non-interactive shell. "
+            "Re-run with `--config`."
+        )
+
+    accounts: list[str] = []
+    if remove_config:
+        for artifact in configs:
+            accounts.extend(
+                account for account in _stored_accounts(artifact) if account not in accounts
             )
-        if not _confirm("\nDelete these sessions? [y/N] "):
-            print("Cancelled.")
-            return EXIT_OK
+    elif keys:
+        print("Keys are deleted with the provider configuration; add --config to include it.")
+    remove_keys = False
+    if accounts:
+        if keys:
+            remove_keys = True
+        elif interactive:
+            remove_keys = _confirm(
+                f"Also delete {len(accounts)} stored key"
+                f"{'s' if len(accounts) != 1 else ''} from the OS keyring? [y/N] "
+            )
+
+    if not remove_sessions and not remove_config:
+        print("Cancelled.")
+        return EXIT_OK
 
     removed = 0
     failures: list[str] = []
-    for artifact in artifacts:
-        for path in _files_for(artifact):
-            try:
-                path.unlink()
-                removed += 1
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                failures.append(f"{_display_path(path)}: {exc}")
+    if remove_sessions:
+        for artifact in sessions:
+            count, problems = _remove(_files_for(artifact))
+            removed += count
+            failures.extend(problems)
+        print(f"Removed local session history ({removed} file{'s' if removed != 1 else ''}).")
+    if remove_config:
+        deleted = 0
+        for artifact in configs:
+            count, problems = _remove([artifact.path])
+            deleted += count
+            failures.extend(problems)
+        print(
+            f"Removed local provider configuration ({deleted} file{'s' if deleted != 1 else ''})."
+        )
+    forgotten = 0
+    if remove_keys:
+        from hrns.config.credentials import delete_secret, stored_secret
+
+        for account in accounts:
+            delete_secret(account)
+            if stored_secret(account) is None:
+                forgotten += 1
+        print(f"Deleted {forgotten} stored key{'s' if forgotten != 1 else ''} from the keyring.")
+    elif accounts:
+        print(
+            f"Kept {len(accounts)} stored key{'s' if len(accounts) != 1 else ''} in the "
+            "keyring; re-run with `--keys` to delete them."
+        )
 
     for failure in failures:
         print(f"hrns: error: could not delete {failure}", file=sys.stderr)
@@ -170,5 +335,4 @@ def clean(*, assume_yes: bool = False, dry_run: bool = False) -> int:
             f"Deleted {removed} file{'s' if removed != 1 else ''}, "
             f"but {len(failures)} could not be removed."
         )
-    print(f"Removed local session history ({removed} files).")
     return EXIT_OK
