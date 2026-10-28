@@ -166,7 +166,7 @@ just fix
 `just check` runs the checks and builds the package. `just lint` runs formatting,
 lint, and type checks; `just build` builds the package. `just fix` applies automatic
 formatting and lint fixes. CI exercises the same non-mutating checks on
-macOS/Linux and Python 3.11–3.13. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
+macOS/Linux and Python 3.11–3.15. A wheel and source distribution are written to `dist/`; optional dependencies are declared as extras.
 
 External provider, sandbox and durability integrations need their upstream extras and credentials. See the coverage matrix for managed, locally verified and deployment-only distinctions.
 
