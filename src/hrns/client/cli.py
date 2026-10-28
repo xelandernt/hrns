@@ -959,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
             token=None,
             remainder=[],
             session=None,
+            client_io=None,
         )
         try:
             return _command_connect(defaults)
