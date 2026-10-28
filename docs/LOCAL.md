@@ -61,7 +61,9 @@ of failing the whole turn.
 
 The first `npx` launch may spend time downloading the package, so give those servers a
 generous timeout (`--timeout 60`, or `timeout = 60.0` in the TOML). Later starts reuse the
-local npm cache and are near-instant.```toml
+local npm cache and are near-instant.
+
+```toml
 [mcp]
 token_store = "file"
 
