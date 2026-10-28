@@ -1,8 +1,9 @@
 [project]
 site_name = "hrns"
-site_url = "/"
+site_url = "https://xelandernt.github.io/hrns/"
 site_description = "Programmable Pydantic AI agents with an interoperable ACP terminal and hosting"
 repo_url = "https://github.com/xelandernt/hrns"
+edit_uri = "edit/main/docs/"
 docs_dir = "docs"
 site_dir = "site"
 nav = [
@@ -30,13 +31,60 @@ nav = [
 ]
 
 [project.theme]
-features = ["navigation.tabs", "navigation.sections", "content.code.copy", "content.action.copy"]
+features = [
+    "navigation.tabs",
+    "navigation.sections",
+    "navigation.indexes",
+    "navigation.path",
+    "navigation.footer",
+    "navigation.top",
+    "toc.follow",
+    "search.highlight",
+    "content.action.copy",
+    "content.action.edit",
+    "content.action.view",
+    "content.code.copy",
+    "content.code.select",
+    "content.footnote.tooltips",
+    "content.tooltips",
+]
+
+# Palette toggle for light mode
+[[project.theme.palette]]
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+# Palette toggle for dark mode
+[[project.theme.palette]]
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.theme.icon]
+repo = "fontawesome/brands/github"
 
 [project.plugins.search]
+
+[project.plugins.autorefs]
+
+[project.plugins.gh-admonitions]
+
+[project.plugins.minify]
+minify_html = true
+minify_inline_css = true
+minify_inline_js = true
+
+[project.plugins.privacy]
+
+[project.plugins.social]
+cards = true
 
 [project.plugins.api-autonav]
 modules = ["src/hrns"]
 nav_section_title = "API reference"
+# Default is the mkdocstrings module symbol HTML, which leaks into llms.txt titles.
+nav_item_prefix = ""
 
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]
@@ -50,6 +98,7 @@ show_symbol_type_toc = false
 
 [project.plugins.llmstxt]
 full_output = "llms-full.txt"
+markdown_description = "Documentation for hrns, a Python framework and terminal client for running Pydantic AI agents over ACP."
 
 [project.plugins.llmstxt.sections]
 Guides = ["index.md", "[A-Z]*.md"]

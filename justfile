@@ -13,6 +13,9 @@ install:
 # preview the documentation locally
 docs:
     uv run --group docs zensical serve
+# build the documentation site into site/
+docs-build:
+    uv run --group docs zensical build --clean
 # apply automatic formatting and lint fixes
 fix:
     uv run ruff format src examples
