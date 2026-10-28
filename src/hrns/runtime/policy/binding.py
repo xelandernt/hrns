@@ -46,6 +46,9 @@ class BindingOffering:
     client_capabilities: schema.ClientCapabilities | None = None
     """What the connected ACP client advertised on ``initialize``, for ``requires_client``."""
 
+    accepts_client_capabilities: bool = False
+    """Whether this deployment permits client-origin bindings."""
+
     @property
     def change_mode(self) -> str:
         return self.policy.change_mode
@@ -65,7 +68,8 @@ class BindingOffering:
     @property
     def available(self) -> bool:
         return (
-            self.policy.available
+            (self.descriptor.origin != "client" or self.accepts_client_capabilities)
+            and self.policy.available
             and self.descriptor.compatibility.runtime_compatible
             and self.missing_client is None
         )
@@ -77,6 +81,8 @@ class BindingOffering:
 
     @property
     def availability_reason(self) -> str | None:
+        if self.descriptor.origin == "client" and not self.accepts_client_capabilities:
+            return "the server does not accept client capabilities"
         if not self.policy.available:
             return "host policy marks this binding unavailable in this deployment"
         if not self.descriptor.compatibility.runtime_compatible:

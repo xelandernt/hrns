@@ -43,6 +43,8 @@ class HostSetup:
     deployment_id: str = "local"
     allowed_cwds: tuple[str, ...] | None = None
     local_binding_creation: bool = True
+    accepts_client_capabilities: bool = False
+    """Allow offered client-origin plugins to execute through the connected ACP client."""
 
     @property
     def advertise_local_binding_creation(self) -> bool:
@@ -79,6 +81,8 @@ class HostPolicy:
     hosted: bool = False
     allowed_cwds: tuple[str, ...] | None = None
     allow_local_binding_creation: bool = True
+    accepts_client_capabilities: bool = False
+    """Allow offered client-origin plugins to execute through the connected ACP client."""
     models: tuple[str, ...] = ()
     default_model: str | None = None
     thinking_models: Mapping[str, str] = field(default_factory=dict)
@@ -240,6 +244,7 @@ def build_agent(bundle: HostBundle, setup: HostSetup | None = None) -> HrnsACPAg
         principal=setup.principal if setup else "local",
         deployment_id=setup.deployment_id if setup else "local",
         hosted=setup.hosted if setup else False,
+        accepts_client_capabilities=setup.accepts_client_capabilities if setup else False,
         allowed_cwds=setup.allowed_cwds if setup else None,
         allow_local_binding_creation=setup.advertise_local_binding_creation if setup else True,
         models=models,

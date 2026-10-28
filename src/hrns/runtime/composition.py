@@ -404,6 +404,7 @@ async def compose_definition(
     deps: object = None,
     presentation_sink: PresentationSink | None = None,
     client_capabilities: schema.ClientCapabilities | None = None,
+    accepts_client_capabilities: bool = False,
 ) -> Composition:
     """Compose a definition into a native agent and an ACP session configuration.
 
@@ -425,6 +426,7 @@ async def compose_definition(
         principal=principal,
         deployment_id=deployment_id,
         client_capabilities=client_capabilities,
+        accepts_client_capabilities=accepts_client_capabilities,
     )
     if initial_configuration:
         outcome = catalog.apply_changes(list(initial_configuration), initial_configuration=True)

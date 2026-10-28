@@ -23,7 +23,7 @@ from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 from acp.meta import AGENT_METHODS, CLIENT_METHODS
 from acp.schema import DeleteSessionRequest
 from acp.stdio import stdio_streams
-from acp.utils import normalize_result, notify_model, request_model
+from acp.utils import normalize_result, notify_model, request_model, request_optional_model
 
 from hrns.protocol import HrnsError
 
@@ -191,6 +191,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hosted", action="store_true", help="hosted worker: identity comes from HRNS_* env"
     )
+    parser.add_argument(
+        "--accept-client-capabilities",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="allow offered client plugins to execute through the ACP client (default: off)",
+    )
     parser.add_argument("--log-level", default="warning")
     return parser
 
@@ -268,6 +274,7 @@ def setup_from_args(args: argparse.Namespace) -> HostSetup:
         deployment_id=deployment_id,
         allowed_cwds=allowed_cwds,
         local_binding_creation=local_binding_creation,
+        accepts_client_capabilities=args.accept_client_capabilities,
     )
 
 
@@ -337,6 +344,108 @@ class _AgentClientChannel:
             CLIENT_METHODS["session_request_permission"],
             request,
             schema.RequestPermissionResponse,
+        )
+
+    async def read_text_file(
+        self,
+        session_id: str,
+        path: str,
+        line: int | None = None,
+        limit: int | None = None,
+        **kwargs: object,
+    ) -> schema.ReadTextFileResponse:
+        return await request_model(
+            self._conn,
+            CLIENT_METHODS["fs_read_text_file"],
+            schema.ReadTextFileRequest(
+                session_id=session_id, path=path, line=line, limit=limit, field_meta=kwargs or None
+            ),
+            schema.ReadTextFileResponse,
+        )
+
+    async def write_text_file(
+        self, session_id: str, path: str, content: str, **kwargs: object
+    ) -> schema.WriteTextFileResponse | None:
+        return await request_optional_model(
+            self._conn,
+            CLIENT_METHODS["fs_write_text_file"],
+            schema.WriteTextFileRequest(
+                session_id=session_id, path=path, content=content, field_meta=kwargs or None
+            ),
+            schema.WriteTextFileResponse,
+        )
+
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        args: list[str] | None = None,
+        env: list[schema.EnvVariable] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: object,
+    ) -> schema.CreateTerminalResponse:
+        return await request_model(
+            self._conn,
+            CLIENT_METHODS["terminal_create"],
+            schema.CreateTerminalRequest(
+                session_id=session_id,
+                command=command,
+                args=args,
+                env=env,
+                cwd=cwd,
+                output_byte_limit=output_byte_limit,
+                field_meta=kwargs or None,
+            ),
+            schema.CreateTerminalResponse,
+        )
+
+    async def terminal_output(
+        self, session_id: str, terminal_id: str, **kwargs: object
+    ) -> schema.TerminalOutputResponse:
+        return await request_model(
+            self._conn,
+            CLIENT_METHODS["terminal_output"],
+            schema.TerminalOutputRequest(
+                session_id=session_id, terminal_id=terminal_id, field_meta=kwargs or None
+            ),
+            schema.TerminalOutputResponse,
+        )
+
+    async def wait_for_terminal_exit(
+        self, session_id: str, terminal_id: str, **kwargs: object
+    ) -> schema.WaitForTerminalExitResponse:
+        return await request_model(
+            self._conn,
+            CLIENT_METHODS["terminal_wait_for_exit"],
+            schema.WaitForTerminalExitRequest(
+                session_id=session_id, terminal_id=terminal_id, field_meta=kwargs or None
+            ),
+            schema.WaitForTerminalExitResponse,
+        )
+
+    async def kill_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: object
+    ) -> schema.KillTerminalResponse | None:
+        return await request_optional_model(
+            self._conn,
+            CLIENT_METHODS["terminal_kill"],
+            schema.KillTerminalRequest(
+                session_id=session_id, terminal_id=terminal_id, field_meta=kwargs or None
+            ),
+            schema.KillTerminalResponse,
+        )
+
+    async def release_terminal(
+        self, session_id: str, terminal_id: str, **kwargs: object
+    ) -> schema.ReleaseTerminalResponse | None:
+        return await request_optional_model(
+            self._conn,
+            CLIENT_METHODS["terminal_release"],
+            schema.ReleaseTerminalRequest(
+                session_id=session_id, terminal_id=terminal_id, field_meta=kwargs or None
+            ),
+            schema.ReleaseTerminalResponse,
         )
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

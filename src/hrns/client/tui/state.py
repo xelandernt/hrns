@@ -607,6 +607,7 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
     config = binding.get("config") or {}
     state: dict[str, Any] = {
         "bindingId": binding_id,
+        "origin": binding.get("origin", "host"),
         "name": binding.get("name") or binding_id,
         "description": binding.get("description", ""),
         "pluginId": binding.get("pluginId") or binding.get("plugin_id") or "",

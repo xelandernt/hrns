@@ -71,6 +71,7 @@ class HrnsExtension:
     version: int = 0
     methods: frozenset[str] = field(default_factory=frozenset)
     local_binding_creation: bool = False
+    accepts_client_capabilities: bool = False
 
     def supports(self, method: str) -> bool:
         if not self.enabled:
@@ -115,6 +116,7 @@ def parse_advertisement(meta: dict[str, Any] | None) -> HrnsExtension:
             version=EXTENSION_VERSION,
             methods=[str(method) for method in methods],
             local_binding_creation=bool(payload.get("localBindingCreation", False)),
+            accepts_client_capabilities=payload.get("acceptsClientCapabilities") is True,
         )
         if version != EXTENSION_VERSION:
             return HrnsExtension(version=version)
@@ -127,6 +129,7 @@ def parse_advertisement(meta: dict[str, Any] | None) -> HrnsExtension:
         version=advertisement.version,
         methods=methods,
         local_binding_creation=advertisement.local_binding_creation,
+        accepts_client_capabilities=advertisement.accepts_client_capabilities,
     )
 
 

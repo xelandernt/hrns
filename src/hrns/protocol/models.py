@@ -152,6 +152,7 @@ class PresentationPayload(WireModel):
 
 
 class ExtensionAdvertisement(WireModel):
+    accepts_client_capabilities: bool = False
     version: Literal[1] = 1
     methods: list[str]
     local_binding_creation: bool = False

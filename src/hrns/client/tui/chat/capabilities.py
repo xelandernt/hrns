@@ -71,6 +71,7 @@ class CapabilityWorkflow:
                     active_revision=snapshot.active_revision,
                     selected_revision=snapshot.selected_revision,
                     can_write=screen.client.extension.supports("_hrns/configuration/update"),
+                    accepts_client_capabilities=screen.client.extension.accepts_client_capabilities,
                 )
                 self.sync_mcp_panel(snapshot)
                 await screen.prompts.refresh_skills()
@@ -94,6 +95,7 @@ class CapabilityWorkflow:
                 active_revision=snapshot.active_revision,
                 selected_revision=snapshot.selected_revision,
                 can_write=screen.client.extension.supports("_hrns/configuration/update"),
+                accepts_client_capabilities=screen.client.extension.accepts_client_capabilities,
             )
             self.sync_mcp_panel(snapshot)
 
@@ -314,6 +316,7 @@ class CapabilityWorkflow:
             if plugin.runtime_compatible
             and plugin.change_mode == "next_turn"
             and plugin.plugin_id != "hrns.mcp"
+            and (plugin.origin != "client" or screen.client.extension.accepts_client_capabilities)
         ]
         if not available:
             panel.show_message(
@@ -368,6 +371,9 @@ class CapabilityWorkflow:
         plugin = next((item for item in inventory if item.plugin_id == plugin_id), None)
         if plugin is None:
             panel.show_message(f"Plugin {plugin_id} is no longer available.")
+            return
+        if plugin.origin == "client" and not screen.client.extension.accepts_client_capabilities:
+            panel.show_message("The server does not accept client capabilities.")
             return
         fields = [
             {

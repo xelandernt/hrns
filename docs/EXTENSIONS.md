@@ -229,8 +229,8 @@ PluginDescriptor(
   schema defines. Each path is resolved against what the peer advertised on `initialize`.
   A path the schema does not define is a **registration error**, so a typo fails at startup
   instead of leaving the binding mysteriously unavailable.
-- The binding is then offered as *unavailable* whenever the connected client did not advertise
-  everything required; `availabilityReason` names the missing paths in ACP's spelling
+- The binding is offered as *unavailable* whenever the server refuses client capabilities or
+  the connected client did not advertise everything required; `availabilityReason` names the missing paths in ACP's spelling
   (`fs.readTextFile`), and an `enable` change fails with `CAPABILITY_UNAVAILABLE`. The host
   never substitutes host-local execution.
 - The factory reads `CLIENT` to build its toolset. `ClientSession` carries the live connection,
@@ -240,10 +240,15 @@ PluginDescriptor(
   policy code only resolve paths. If the family is new, the *client* also needs handlers for
   it, and `hrns/client/io.py` is where this terminal keeps them.
 
-`hrns.client_terminal` is a working example; it also declares `shadows=("shell",)` so the host
-tool of that name is not composed while the binding is enabled. The shadow is applied when the
-binding is composed, never written into the other binding's configuration, so disabling the
-client binding restores the host tool as configured.
+`hrns.client_terminal` is a working example. Its `run_command` tool executes on the client;
+the coder's `shell` continues to execute on the server. Both may be enabled independently.
+Plugins exposing matching tool names should use the upstream toolset's `prefixed(...)`
+wrapper to distinguish their client tools from server tools.
+
+The server advertises `acceptsClientCapabilities` in `initialize._meta.hrns`. Set
+`accepts_client_capabilities` on `AgentServer.add_agent(...)` or `HostPolicy` to control it.
+It defaults to `false` for both remote agent registrations and local hosts. This gate
+is enforced separately from each binding's `client_can_toggle` policy.
 
 ## Supported boundaries
 

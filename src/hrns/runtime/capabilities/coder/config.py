@@ -35,9 +35,7 @@ class CoderConfig(BaseModel):
     shell: EditableField[bool] = Field(
         default=True,
         description=(
-            "Run commands in this host's shell. While a client-origin binding runs them in "
-            "the connected client's terminal instead, this tool is not composed, whatever "
-            "this setting says; disabling that binding brings it back."
+            "Run commands in this host's shell, independently of any enabled client terminal."
         ),
     )
     unrestricted_filesystem: NonEditableField[bool] = Field(

@@ -133,12 +133,6 @@ class PluginDescriptor(BaseModel, Generic[PluginConfigT]):
     ``fs.read_text_file``, ``elicitation.form`` — resolved against what the connected client
     actually advertised. A path the schema does not define is a registration error.
     """
-    shadows: tuple[str, ...] = ()
-    """Host tool names this plugin replaces when it is enabled.
-
-    A client-origin plugin declaring ``("shell",)`` means the agent is offered one way to run
-    a command: composition turns off the host binding's matching configuration field.
-    """
     state_mode: CapabilityStateMode = "run"
     presentation: list[str] = Field(default_factory=list)
     """Presentation identifiers for host presenters / client-side renderers."""
@@ -303,13 +297,6 @@ class BindingContext(BaseModel):
     """The turn's immutable :class:`~hrns.protocol.ConfigurationSnapshot`."""
     agent_context: Any = None
     """The turn's :class:`~hrns.runtime.definitions.AgentFactoryContext` (duck-typed)."""
-    shadowed_tools: frozenset[str] = frozenset()
-    """Tool names an enabled client-origin binding takes over for this composition.
-
-    A binding's own configuration is never rewritten to achieve this: the shadow belongs to
-    the composition, so disabling the client binding restores the host tool exactly as the
-    operator configured it.
-    """
 
 
 def _validate_required_extras(descriptor: PluginDescriptor) -> None:
