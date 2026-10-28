@@ -8,7 +8,9 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Annotated, Any, Literal
+
+from cyclopts import App, CycloptsError, Parameter
 
 from ..config import LocalSettings, McpOAuthConfig, McpServerSettings, default_local_config_path
 from ..config.mcp import (
@@ -44,250 +46,443 @@ __all__ = ["main", "build_parser"]
 # --------------------------------------------------------------------- parser
 
 
-class _ArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> NoReturn:  # pragma: no cover - argparse boilerplate
-        self.print_usage(sys.stderr)
-        self.exit(EXIT_USAGE, f"hrns: {message}\n")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = _ArgumentParser(
-        prog="hrns",
-        description="Keyboard-first ACP terminal, headless runner and stdio bridge.",
-    )
-    parser.add_argument("--version", action="version", version=f"hrns {__version__}")
-    parser.add_argument(
-        "--profiles",
-        action="append",
-        default=[],
+ProfilesOption = Annotated[
+    list[str] | None,
+    Parameter(
+        name="--profiles",
         metavar="PATH",
+        negative_iterable=(),
         help="Load an explicit profile TOML file (repeatable). Also HRNS_PROFILES.",
-    )
-    sub = parser.add_subparsers(dest="command")
-
-    connect = sub.add_parser("connect", help="Open the full-screen terminal")
-    _add_target_flags(connect, enable_stdio=True)
-    _add_client_io_flag(connect)
-    connect.add_argument(
-        "--session", metavar="SESSION_ID", help="Load this session after connecting"
-    )
-    connect.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
-
-    run = sub.add_parser("run", help="Run one prompt headlessly and print the result")
-    _add_target_flags(run, enable_stdio=True)
-    _add_client_io_flag(run)
-    run.add_argument("--json", action="store_true", help="Print one JSON summary object")
-    _add_interaction_flags(run)
-    run.add_argument("--resume", metavar="SESSION_ID", help="Load and continue an existing session")
-    run.add_argument("--timeout", type=float, metavar="SECONDS")
-    run.add_argument(
-        "--attach",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Explicitly attach a regular file to this prompt (repeatable)",
-    )
-    run.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
-
-    agents = sub.add_parser("agents", help="Inspect the hosted deployment catalog")
-    agents_sub = agents.add_subparsers(dest="agents_command", required=True)
-    agents_list = agents_sub.add_parser("list", help="List accessible agent deployments")
-    agents_list.add_argument("--server", metavar="PROFILE", help="Server profile name (or URL)")
-    agents_list.add_argument("--url", help="Server base URL when no profile is saved")
-    agents_list.add_argument(
-        "--token", metavar="REF", help="Bearer token reference (env:NAME or keyring:service/user)"
-    )
-    agents_list.add_argument("--limit", type=int, default=50)
-    agents_list.add_argument("--cursor")
-    agents_list.add_argument("--all", action="store_true", help="Follow pagination to the end")
-    agents_list.add_argument("--json", action="store_true")
-    agents_show = agents_sub.add_parser("show", help="Show one deployment descriptor")
-    agents_show.add_argument("--server", metavar="PROFILE", help="Server profile name (or URL)")
-    agents_show.add_argument("--url")
-    agents_show.add_argument("--token", metavar="REF")
-    agents_show.add_argument("agent")
-    agents_show.add_argument("--json", action="store_true")
-
-    bridge = sub.add_parser("bridge", help="Bridge local stdio ACP to a hosted agent")
-    bridge.add_argument("--server", metavar="PROFILE", help="Server profile name (or URL)")
-    bridge.add_argument("--url", help="Server base URL when no profile is saved")
-    bridge.add_argument("--token", metavar="REF")
-    bridge.add_argument("--agent", required=False, metavar="AGENT")
-    bridge.add_argument(
-        "--remote-cwd", metavar="PATH", help="Replace the local cwd with this remote directory"
-    )
-    bridge.add_argument("--profile", metavar="NAME")
-
-    profiles = sub.add_parser("profiles", help="Manage saved connection profiles")
-    profiles_sub = profiles.add_subparsers(dest="profiles_command", required=True)
-    profiles_sub.add_parser("list", help="List saved profiles")
-    profiles_sub.add_parser("path", help="Print the user profile file path")
-    add = profiles_sub.add_parser("add", help="Add or replace a profile")
-    add.add_argument("name")
-    add.add_argument(
-        "--stdio", action="store_true", help="Define a local launch; put the command after --"
-    )
-    add.add_argument("--server", metavar="URL", help="Define a hosted server profile")
-    add.add_argument("--agent", help="Default agent id for a server profile")
-    add.add_argument(
-        "--token", metavar="REF", help="Token secret reference (env:NAME or keyring:service/user)"
-    )
-    add.add_argument("--cwd")
-    add.add_argument("--remote-cwd")
-    add.add_argument("--default", action="store_true", help="Mark as the preferred profile")
-    add.add_argument("remainder", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
-    remove = profiles_sub.add_parser("remove", help="Remove a saved profile")
-    remove.add_argument("name")
-
-    login = sub.add_parser("login", help="Sign in to a local provider with an account login")
-    login.add_argument("provider", nargs="?", help="Provider id (default: the configured provider)")
-    login.add_argument(
-        "--local-config",
-        type=Path,
-        metavar="PATH",
-        help="Local settings TOML that names the default provider",
-    )
-
-    clean = sub.add_parser("clean", help="Delete local session history")
-    clean.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
-    clean.add_argument(
-        "-n", "--dry-run", action="store_true", help="Show what would be deleted, then exit"
-    )
-
-    mcp = sub.add_parser("mcp", help="Manage MCP servers for the local agent")
-    mcp.add_argument(
-        "--local-config",
-        type=Path,
-        metavar="PATH",
-        default=argparse.SUPPRESS,
-        help="Local settings TOML file that holds the MCP servers",
-    )
-    mcp_sub = mcp.add_subparsers(dest="mcp_command")
-    mcp.set_defaults(mcp_parser=mcp)
-
-    def mcp_parser(
-        name: str, help_text: str, *, aliases: tuple[str, ...] = ()
-    ) -> argparse.ArgumentParser:
-        child = mcp_sub.add_parser(name, help=help_text, aliases=list(aliases))
-        child.add_argument(
-            "--local-config",
-            type=Path,
-            metavar="PATH",
-            default=argparse.SUPPRESS,
-            help=argparse.SUPPRESS,
-        )
-        return child
-
-    mcp_add = mcp_parser("add", "Add or replace an MCP server")
-    mcp_add.add_argument("name", metavar="NAME")
-    mcp_add.add_argument("--url", metavar="URL", help="Streamable HTTP or SSE endpoint")
-    mcp_add.add_argument(
-        "--command",
-        dest="stdio_command",
-        metavar="CMD",
-        help="stdio executable (or put it after --)",
-    )
-    mcp_add.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
-    mcp_add.add_argument("--cwd", metavar="DIR")
-    mcp_add.add_argument("--header", action="append", default=[], metavar="KEY=VALUE")
-    mcp_add.add_argument("--oauth-client-id")
-    mcp_add.add_argument("--oauth-client-secret")
-    mcp_add.add_argument("--oauth-scope", action="append", default=[], metavar="SCOPE")
-    mcp_add.add_argument("--oauth-callback-port", type=int)
-    mcp_add.add_argument("--no-oauth", action="store_true", help="Never attempt OAuth")
-    mcp_add.add_argument(
-        "--defer",
-        action="store_true",
-        help="Load this server's tools on demand instead of putting them in every turn",
-    )
-    mcp_add.add_argument(
-        "--tool", dest="include_tools", action="append", default=[], metavar="NAME"
-    )
-    mcp_add.add_argument(
-        "--exclude-tool", dest="exclude_tools", action="append", default=[], metavar="NAME"
-    )
-    mcp_add.add_argument("--timeout", type=float, default=10.0, metavar="SECONDS")
-    mcp_add.add_argument("--disabled", action="store_true", help="Save the server disabled")
-    mcp_add.add_argument("--force", action="store_true", help="Replace an existing server")
-    mcp_add.add_argument(
-        "command_words",
-        nargs="*",
-        metavar="-- COMMAND ARGS",
-        help="stdio command and arguments, after `--`",
-    )
-
-    mcp_list = mcp_parser("list", "List configured MCP servers")
-    mcp_list.add_argument("--json", action="store_true")
-
-    mcp_get = mcp_parser("get", "Show one configured MCP server")
-    mcp_get.add_argument("name")
-    mcp_get.add_argument("--json", action="store_true")
-
-    mcp_remove = mcp_parser("remove", "Remove a configured MCP server")
-    mcp_remove.add_argument("name")
-
-    for verb, verb_help in (
-        ("enable", "Enable a server for new sessions"),
-        ("disable", "Disable a server without removing its configuration"),
-    ):
-        child = mcp_parser(verb, verb_help)
-        child.add_argument("name")
-
-    mcp_auth = mcp_parser("auth", "Authenticate with an MCP server using OAuth", aliases=("login",))
-    mcp_auth.add_argument("name")
-
-    mcp_logout = mcp_parser("logout", "Forget stored OAuth tokens for an MCP server")
-    mcp_logout.add_argument("name")
-    return parser
-
-
-def _add_client_io_flag(parser: argparse.ArgumentParser) -> None:
-    """What this terminal offers the agent it connects to."""
-    parser.add_argument(
-        "--client-io",
-        choices=("off", "read", "all"),
-        default=None,
+    ),
+]
+RepeatedStringOption = Annotated[list[str] | None, Parameter(negative_iterable=())]
+ToolOption = Annotated[
+    list[str] | None,
+    Parameter(name="--tool", metavar="NAME", negative_iterable=()),
+]
+ExcludeToolOption = Annotated[
+    list[str] | None,
+    Parameter(name="--exclude-tool", metavar="NAME", negative_iterable=()),
+]
+ClientIoOption = Annotated[
+    Literal["off", "read", "all"] | None,
+    Parameter(
+        name="--client-io",
         help=(
             "Advertise client-side capabilities to the agent: 'off' offers nothing, 'read' "
             "serves fs/read_text_file, and 'all' also serves writes and terminal/* so the "
             "agent runs commands in this terminal. Defaults to the profile's client_io."
         ),
+    ),
+]
+
+
+def _namespace(**values: object) -> argparse.Namespace:
+    return argparse.Namespace(**values)
+
+
+def _profile_values(profiles: list[str] | None) -> list[str]:
+    return profiles or []
+
+
+def _target_options(
+    *,
+    profiles: ProfilesOption = None,
+    stdio: bool = False,
+    local: bool = False,
+    local_config: Path | None = None,
+    server: str | None = None,
+    agent: str | None = None,
+    profile: str | None = None,
+    cwd: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+) -> dict[str, object]:
+    return {
+        "profiles": _profile_values(profiles),
+        "stdio": stdio,
+        "local": local,
+        "local_config": local_config,
+        "server": server,
+        "agent": agent,
+        "profile": profile,
+        "cwd": cwd,
+        "url": url,
+        "token": token,
+    }
+
+
+def _connect_command(
+    *remainder: str,
+    profiles: ProfilesOption = None,
+    stdio: bool = False,
+    local: bool = False,
+    local_config: Path | None = None,
+    server: str | None = None,
+    agent: str | None = None,
+    profile: str | None = None,
+    cwd: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    client_io: ClientIoOption = None,
+    session: str | None = None,
+) -> int:
+    args = _namespace(
+        **_target_options(
+            profiles=profiles,
+            stdio=stdio,
+            local=local,
+            local_config=local_config,
+            server=server,
+            agent=agent,
+            profile=profile,
+            cwd=cwd,
+            url=url,
+            token=token,
+        ),
+        remainder=list(remainder),
+        client_io=client_io,
+        session=session,
     )
+    return _command_connect(args)
 
 
-def _add_target_flags(parser: argparse.ArgumentParser, *, enable_stdio: bool) -> None:
-    if enable_stdio:
-        parser.add_argument(
-            "--stdio", action="store_true", help="Launch a local ACP agent; put argv after --"
+def _run_command(
+    *remainder: str,
+    profiles: ProfilesOption = None,
+    stdio: bool = False,
+    local: bool = False,
+    local_config: Path | None = None,
+    server: str | None = None,
+    agent: str | None = None,
+    profile: str | None = None,
+    cwd: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    client_io: ClientIoOption = None,
+    json: bool = False,
+    allow_all: bool = False,
+    deny_all: bool = False,
+    answer: RepeatedStringOption = None,
+    resume: str | None = None,
+    timeout: float | None = None,
+    attach: RepeatedStringOption = None,
+) -> int:
+    if allow_all and deny_all:
+        raise CycloptsError("--allow-all cannot be combined with --deny-all.")
+    args = _namespace(
+        **_target_options(
+            profiles=profiles,
+            stdio=stdio,
+            local=local,
+            local_config=local_config,
+            server=server,
+            agent=agent,
+            profile=profile,
+            cwd=cwd,
+            url=url,
+            token=token,
+        ),
+        remainder=list(remainder),
+        client_io=client_io,
+        json=json,
+        allow_all=allow_all,
+        deny_all=deny_all,
+        answer=answer or [],
+        resume=resume,
+        timeout=timeout,
+        attach=attach or [],
+    )
+    return asyncio.run(_command_run(args))
+
+
+def _agents_list_command(
+    *,
+    profiles: ProfilesOption = None,
+    server: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+    all: bool = False,
+    json: bool = False,
+) -> int:
+    return asyncio.run(
+        _command_agents(
+            _namespace(
+                profiles=_profile_values(profiles),
+                agents_command="list",
+                server=server,
+                url=url,
+                token=token,
+                limit=limit,
+                cursor=cursor,
+                all=all,
+                json=json,
+            )
         )
-    parser.add_argument(
-        "--local", action="store_true", help="Run the configured local developer agent (default)"
     )
-    parser.add_argument(
-        "--local-config",
-        type=Path,
-        metavar="PATH",
-        help="Local model settings TOML (implies --local)",
-    )
-    parser.add_argument("--server", metavar="PROFILE", help="Use a saved server profile (or a URL)")
-    parser.add_argument("--agent", metavar="AGENT", help="Agent deployment id or catalog name")
-    parser.add_argument("--profile", metavar="NAME", help="Use a saved profile by name")
-    parser.add_argument("--cwd", metavar="DIR", help="Working directory override")
-    parser.add_argument("--url", help="Server base URL when no profile is saved")
-    parser.add_argument("--token", metavar="REF", help="Bearer token reference")
 
 
-def _add_interaction_flags(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--allow-all", action="store_true", help="Explicitly approve tool requests")
-    group.add_argument("--deny-all", action="store_true", help="Explicitly reject tool requests")
-    parser.add_argument(
-        "--answer",
-        action="append",
-        default=[],
-        metavar="FIELD=VALUE",
-        help="Answer for a structured elicitation field (JSON value accepted)",
+def _agents_show_command(
+    agent: str,
+    *,
+    profiles: ProfilesOption = None,
+    server: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    json: bool = False,
+) -> int:
+    return asyncio.run(
+        _command_agents(
+            _namespace(
+                profiles=_profile_values(profiles),
+                agents_command="show",
+                server=server,
+                url=url,
+                token=token,
+                agent=agent,
+                json=json,
+            )
+        )
     )
+
+
+def _bridge_command(
+    *,
+    profiles: ProfilesOption = None,
+    server: str | None = None,
+    url: str | None = None,
+    token: str | None = None,
+    agent: str | None = None,
+    remote_cwd: str | None = None,
+    profile: str | None = None,
+) -> int:
+    return asyncio.run(
+        _command_bridge(
+            _namespace(
+                profiles=_profile_values(profiles),
+                server=server,
+                url=url,
+                token=token,
+                agent=agent,
+                remote_cwd=remote_cwd,
+                profile=profile,
+            )
+        )
+    )
+
+
+def _profiles_list_command(*, profiles: ProfilesOption = None) -> int:
+    return _command_profiles(
+        _namespace(profiles=_profile_values(profiles), profiles_command="list")
+    )
+
+
+def _profiles_path_command(*, profiles: ProfilesOption = None) -> int:
+    return _command_profiles(
+        _namespace(profiles=_profile_values(profiles), profiles_command="path")
+    )
+
+
+def _profiles_add_command(
+    name: str,
+    *remainder: str,
+    profiles: ProfilesOption = None,
+    stdio: bool = False,
+    server: str | None = None,
+    agent: str | None = None,
+    token: str | None = None,
+    cwd: str | None = None,
+    remote_cwd: str | None = None,
+    default: bool = False,
+) -> int:
+    return _command_profiles(
+        _namespace(
+            profiles=_profile_values(profiles),
+            profiles_command="add",
+            name=name,
+            remainder=list(remainder),
+            stdio=stdio,
+            server=server,
+            agent=agent,
+            token=token,
+            cwd=cwd,
+            remote_cwd=remote_cwd,
+            default=default,
+        )
+    )
+
+
+def _profiles_remove_command(name: str, *, profiles: ProfilesOption = None) -> int:
+    return _command_profiles(
+        _namespace(profiles=_profile_values(profiles), profiles_command="remove", name=name)
+    )
+
+
+def _login_command(provider: str | None = None, *, local_config: Path | None = None) -> int:
+    return asyncio.run(_command_login(_namespace(provider=provider, local_config=local_config)))
+
+
+def _clean_command(*, yes: bool = False, dry_run: bool = False) -> int:
+    from .clean import clean
+
+    return clean(assume_yes=yes, dry_run=dry_run)
+
+
+def _mcp_add_command(
+    name: str,
+    *command_words: str,
+    local_config: Path | None = None,
+    url: str | None = None,
+    stdio_command: Annotated[str | None, Parameter(name="--command", metavar="CMD")] = None,
+    env: RepeatedStringOption = None,
+    cwd: str | None = None,
+    header: RepeatedStringOption = None,
+    oauth_client_id: str | None = None,
+    oauth_client_secret: str | None = None,
+    oauth_scope: RepeatedStringOption = None,
+    oauth_callback_port: int | None = None,
+    no_oauth: bool = False,
+    defer: bool = False,
+    include_tools: ToolOption = None,
+    exclude_tools: ExcludeToolOption = None,
+    timeout: float = 10.0,
+    disabled: bool = False,
+    force: bool = False,
+) -> int:
+    return _mcp_add(
+        _namespace(
+            local_config=local_config,
+            name=name,
+            url=url,
+            stdio_command=stdio_command,
+            env=env or [],
+            cwd=cwd,
+            header=header or [],
+            oauth_client_id=oauth_client_id,
+            oauth_client_secret=oauth_client_secret,
+            oauth_scope=oauth_scope or [],
+            oauth_callback_port=oauth_callback_port,
+            no_oauth=no_oauth,
+            defer=defer,
+            include_tools=include_tools or [],
+            exclude_tools=exclude_tools or [],
+            timeout=timeout,
+            disabled=disabled,
+            force=force,
+            command_words=list(command_words),
+        )
+    )
+
+
+def _mcp_list_command(*, local_config: Path | None = None, json: bool = False) -> int:
+    return _mcp_list(_namespace(local_config=local_config, json=json))
+
+
+def _mcp_get_command(name: str, *, local_config: Path | None = None, json: bool = False) -> int:
+    return _mcp_get(_namespace(local_config=local_config, name=name, json=json))
+
+
+def _mcp_remove_command(name: str, *, local_config: Path | None = None) -> int:
+    return _mcp_remove(_namespace(local_config=local_config, name=name))
+
+
+def _mcp_enable_command(name: str, *, local_config: Path | None = None) -> int:
+    return _mcp_set_enabled(_namespace(local_config=local_config, name=name), True)
+
+
+def _mcp_disable_command(name: str, *, local_config: Path | None = None) -> int:
+    return _mcp_set_enabled(_namespace(local_config=local_config, name=name), False)
+
+
+def _mcp_auth_command(name: str, *, local_config: Path | None = None) -> int:
+    return asyncio.run(_mcp_auth(_namespace(local_config=local_config, name=name)))
+
+
+def _mcp_logout_command(name: str, *, local_config: Path | None = None) -> int:
+    return asyncio.run(_mcp_logout(_namespace(local_config=local_config, name=name)))
+
+
+def _register_commands(app: App) -> None:
+    app.command(_connect_command, name="connect", help="Open the full-screen terminal")
+    app.command(_run_command, name="run", help="Run one prompt headlessly and print the result")
+    app.command(_bridge_command, name="bridge", help="Bridge local stdio ACP to a hosted agent")
+    app.command(
+        _login_command, name="login", help="Sign in to a local provider with an account login"
+    )
+    app.command(_clean_command, name="clean", help="Delete local session history")
+
+    agents = App(name="agents", help="Inspect the hosted deployment catalog")
+    agents.command(_agents_list_command, name="list", help="List accessible agent deployments")
+    agents.command(_agents_show_command, name="show", help="Show one deployment descriptor")
+    app.command(agents)
+
+    profiles = App(name="profiles", help="Manage saved connection profiles")
+    profiles.command(_profiles_list_command, name="list", help="List saved profiles")
+    profiles.command(_profiles_path_command, name="path", help="Print the user profile file path")
+    profiles.command(_profiles_add_command, name="add", help="Add or replace a profile")
+    profiles.command(_profiles_remove_command, name="remove", help="Remove a saved profile")
+    app.command(profiles)
+
+    mcp = App(name="mcp", help="Manage MCP servers for the local agent")
+
+    def mcp_help() -> int:
+        mcp.help_print()
+        return EXIT_OK
+
+    mcp.default(mcp_help)
+    mcp.command(_mcp_add_command, name="add", help="Add or replace an MCP server")
+    mcp.command(_mcp_list_command, name="list", help="List configured MCP servers")
+    mcp.command(_mcp_get_command, name="get", help="Show one configured MCP server")
+    mcp.command(_mcp_remove_command, name="remove", help="Remove a configured MCP server")
+    mcp.command(_mcp_enable_command, name="enable", help="Enable a server for new sessions")
+    mcp.command(
+        _mcp_disable_command,
+        name="disable",
+        help="Disable a server without removing its configuration",
+    )
+    mcp.command(
+        _mcp_auth_command,
+        name="auth",
+        alias="login",
+        help="Authenticate with an MCP server using OAuth",
+    )
+    mcp.command(
+        _mcp_logout_command, name="logout", help="Forget stored OAuth tokens for an MCP server"
+    )
+    app.command(mcp)
+
+
+def _extract_global_profiles(argv: list[str]) -> list[str]:
+    """Move legacy global --profiles options into commands that consume them."""
+    values: list[str] = []
+    while argv and argv[0] == "--profiles":
+        argv.pop(0)
+        if not argv:
+            raise HrnsClientError("argument --profiles: expected one argument")
+        values.append(argv.pop(0))
+    if not values:
+        return argv
+
+    command = argv[0] if argv else "connect"
+    if command not in {"connect", "run", "agents", "bridge", "profiles"}:
+        return argv
+    command_index = 1 if command in {"agents", "profiles"} and len(argv) > 1 else 0
+    options = [item for value in values for item in ("--profiles", value)]
+    argv[command_index + 1 : command_index + 1] = options
+    return argv
+
+
+def build_parser() -> App:
+    parser = App(
+        name="hrns",
+        help="Keyboard-first ACP terminal, headless runner and stdio bridge.",
+        version=f"hrns {__version__}",
+        exit_on_error=False,
+    )
+    _register_commands(parser)
+    return parser
 
 
 # ------------------------------------------------------------------ helpers
@@ -916,88 +1111,35 @@ def _mcp_set_enabled(args: argparse.Namespace, enabled: bool) -> int:
     return EXIT_OK
 
 
-def _command_mcp(args: argparse.Namespace) -> int:
-    if not getattr(args, "mcp_command", None):
-        args.mcp_parser.print_help()
-        return EXIT_OK
-    if args.mcp_command == "add":
-        return _mcp_add(args)
-    if args.mcp_command == "list":
-        return _mcp_list(args)
-    if args.mcp_command == "get":
-        return _mcp_get(args)
-    if args.mcp_command == "remove":
-        return _mcp_remove(args)
-    if args.mcp_command == "enable":
-        return _mcp_set_enabled(args, True)
-    if args.mcp_command == "disable":
-        return _mcp_set_enabled(args, False)
-    if args.mcp_command in {"auth", "login"}:
-        return asyncio.run(_mcp_auth(args))
-    if args.mcp_command == "logout":
-        return asyncio.run(_mcp_logout(args))
-    return EXIT_USAGE
-
-
 # --------------------------------------------------------------------- main
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
-    if not args.command:
-        defaults = argparse.Namespace(
-            profiles=args.profiles,
-            stdio=False,
-            local=False,
-            local_config=None,
-            server=None,
-            agent=None,
-            profile=None,
-            cwd=None,
-            url=None,
-            token=None,
-            remainder=[],
-            session=None,
-            client_io=None,
-        )
-        try:
-            return _command_connect(defaults)
-        except KeyboardInterrupt:
-            return 130
+    tokens = list(sys.argv[1:] if argv is None else argv)
     try:
-        if args.command == "connect":
-            return _command_connect(args)
-        if args.command == "run":
-            return asyncio.run(_command_run(args))
-        if args.command == "agents":
-            return asyncio.run(_command_agents(args))
-        if args.command == "bridge":
-            return asyncio.run(_command_bridge(args))
-        if args.command == "profiles":
-            return _command_profiles(args)
-        if args.command == "mcp":
-            return _command_mcp(args)
-        if args.command == "login":
-            return asyncio.run(_command_login(args))
-        if args.command == "clean":
-            from .clean import clean
-
-            return clean(assume_yes=args.yes, dry_run=args.dry_run)
+        tokens = _extract_global_profiles(tokens)
+        if not tokens or tokens[0] == "--profiles":
+            tokens = ["connect", *tokens]
+        result = parser(
+            tokens,
+            exit_on_error=False,
+            result_action="return_value",
+            print_error=False,
+        )
+        return int(result or EXIT_OK)
     except KeyboardInterrupt:
         return 130
     except InteractionRequired as exc:
         print(f"hrns: interaction-required: {exc.message}", file=sys.stderr)
         return 3
-    except (HrnsClientError, KeyError) as exc:
+    except (CycloptsError, HrnsClientError, KeyError) as exc:
         message = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
         print(f"hrns: error: {message}", file=sys.stderr)
-        return EXIT_USAGE if isinstance(exc, KeyError) else EXIT_FAILURE
+        return EXIT_USAGE if isinstance(exc, (CycloptsError, KeyError)) else EXIT_FAILURE
     except (ValueError, OSError) as exc:
         print(f"hrns: error: {exc}", file=sys.stderr)
         return EXIT_FAILURE
-    parser.print_help()
-    return EXIT_USAGE
 
 
 if __name__ == "__main__":  # pragma: no cover
