@@ -104,6 +104,8 @@ class CommandWorkflow:
             screen.action_show_mcp()
         elif name == "models":
             await screen.models.show_models()
+        elif name == "providers":
+            screen.models.open_providers()
         elif name == "effort":
             await screen.models.show_effort()
         elif name == "permissions":

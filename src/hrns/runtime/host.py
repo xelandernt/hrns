@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from acp import schema
@@ -83,8 +83,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self,
         bundle: HostBundle,
         policy: HostPolicy | None = None,
+        *,
+        refresh_models: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
+        """``refresh_models`` re-advertises ids that appear after the runtime started."""
         self.bundle = bundle
+        self._refresh_models = refresh_models
         self.policy = policy or HostPolicy()
         self.definition = bundle.definition
         bundle.registry.allow_local_binding_creation = self.policy.can_create_bindings
@@ -388,6 +392,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             return schema.SetSessionConfigOptionResponse(
                 config_options=self.sessions.options_for(session_id)
             )
+        if config_id == acp_map.MODEL_OPTION_ID and isinstance(value, str):
+            self._adopt_added_models(value)
         response = await super().set_config_option(config_id, session_id, value, **kwargs)
         if config_id == acp_map.MODEL_OPTION_ID and self._default_model is not None:
             composition = self.sessions.composition(session_id)
@@ -409,6 +415,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         return schema.SetSessionConfigOptionResponse(
             config_options=self.sessions.options_for(session_id)
         )
+
+    def _adopt_added_models(self, model_id: str) -> None:
+        """Adopt ids a config edit added after this runtime started.
+
+        The adapter only accepts advertised ids, and the terminal adds providers and
+        custom models while a session is open. The local runtime re-reads its config
+        file here instead of being restarted, so switching stays live.
+        """
+        if self._refresh_models is None or model_id in self._models:
+            return
+        models = self._refresh_models()
+        if models:
+            self._models = models
 
     # --- project extension ------------------------------------------------
 

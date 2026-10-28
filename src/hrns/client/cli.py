@@ -324,10 +324,16 @@ def _login_command(provider: str | None = None, *, local_config: Path | None = N
     return asyncio.run(_command_login(_namespace(provider=provider, local_config=local_config)))
 
 
-def _clean_command(*, yes: bool = False, dry_run: bool = False) -> int:
+def _clean_command(
+    *,
+    yes: bool = False,
+    dry_run: bool = False,
+    config: bool = False,
+    keys: bool = False,
+) -> int:
     from .clean import clean
 
-    return clean(assume_yes=yes, dry_run=dry_run)
+    return clean(assume_yes=yes, dry_run=dry_run, config=config, keys=keys)
 
 
 def _mcp_add_command(
@@ -411,7 +417,11 @@ def _register_commands(app: App) -> None:
     app.command(
         _login_command, name="login", help="Sign in to a local provider with an account login"
     )
-    app.command(_clean_command, name="clean", help="Delete local session history")
+    app.command(
+        _clean_command,
+        name="clean",
+        help="Delete local session history and, with --config, the local provider config",
+    )
 
     agents = App(name="agents", help="Inspect the hosted deployment catalog")
     agents.command(_agents_list_command, name="list", help="List accessible agent deployments")
@@ -816,8 +826,9 @@ async def _command_login(args: argparse.Namespace) -> int:
         print("Models this account can use:\n  " + "\n  ".join(result.models), flush=True)
     if not target.configured:
         print(
-            f"Saved for {result.provider}, which is not the configured provider yet. Set "
-            f'provider = "{result.provider}" in hrns.local.toml, or pick it from /models.',
+            f"Saved for {result.provider}, which is not the active provider yet. Set "
+            f'provider = "{result.provider}" in hrns.local.toml, or add and select it '
+            "with /providers in the terminal.",
             flush=True,
         )
     return EXIT_OK

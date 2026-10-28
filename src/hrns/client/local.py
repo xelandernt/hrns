@@ -19,6 +19,7 @@ from .profiles import Profile
 __all__ = [
     "LocalCatalog",
     "is_local_hrns",
+    "local_credential_available",
     "local_executable",
     "local_login_providers",
     "local_model_catalog",
@@ -145,9 +146,10 @@ def local_login_providers() -> frozenset[str]:
 def local_thinking_support(provider: str, model: str) -> str | None:
     """``"supported"``, ``"always"``, ``"custom"``, or ``None``.
 
-    ``None`` means the model is known and its profile says it cannot reason.
-    A custom id outside the catalog returns ``"custom"`` so the user can opt in
-    rather than being blocked by a registry that does not know the alias.
+    ``provider`` is the Pydantic AI provider id, not an entry name: two entries of the
+    same type share a catalog line. ``None`` means the model is known and its profile
+    says it cannot reason. A custom id outside the catalog returns ``"custom"`` so the
+    user can opt in rather than being blocked by a registry that does not know it.
     """
     catalog = _catalog()
     support = catalog.thinking.get(provider, {}).get(model)
@@ -156,6 +158,17 @@ def local_thinking_support(provider: str, model: str) -> str | None:
     if model in catalog.models.get(provider, ()):
         return None
     return "custom"
+
+
+def local_credential_available(provider: str, api_key_env: str = "") -> bool:
+    """Whether a provider entry can authenticate right now.
+
+    An entry passes when its environment variable is set or the keyring holds a secret
+    for its account; account logins and pasted keys both land in the keyring.
+    """
+    if api_key_env and os.environ.get(api_key_env):
+        return True
+    return stored_api_key_ref(provider, api_key_env) is not None
 
 
 def local_target(
@@ -167,12 +180,13 @@ def local_target(
     try:
         settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
         settings.require_model()
+        entry = settings.require_entry()
         env_has_key = bool(
             settings.api_key is not None
-            or (settings.api_key_env and os.environ.get(settings.api_key_env))
+            or (entry.api_key_env and os.environ.get(entry.api_key_env))
         )
         if api_key_ref is None and not env_has_key:
-            api_key_ref = stored_api_key_ref(settings.provider, settings.api_key_env)
+            api_key_ref = stored_api_key_ref(settings.provider, entry.api_key_env)
         if api_key_ref is None:
             settings.resolved_api_key()
     except (ValueError, OSError) as exc:

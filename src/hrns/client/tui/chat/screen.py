@@ -620,13 +620,14 @@ class ChatScreen(_HrnsScreen):
     async def _save_model_selection_worker(
         self,
         settings: LocalSettings,
+        provider: str,
         model: str,
         effort: str | None,
         *,
         touch_thinking: bool = True,
     ) -> None:
         await self.models.save_model_selection(
-            settings, model, effort, touch_thinking=touch_thinking
+            settings, provider, model, effort, touch_thinking=touch_thinking
         )
 
     @work(exit_on_error=False, group="model", exclusive=True)

@@ -56,14 +56,20 @@ uvx hrns
 
 From a checkout, run `uv sync --locked` and then `uv run hrns` instead.
 
-Press **l** to configure a provider and model, type `/models` in a session, or create
+Press **l** to configure providers, type `/providers` or `/models` in a session, or create
 `hrns.local.toml` in the project:
 
 ```toml
 provider = "deepseek"
 model = "deepseek-chat"
+
+[providers.deepseek]
 api_key_env = "DEEPSEEK_API_KEY"
 ```
+
+The top level picks the active provider entry and model; each `[providers.<name>]` entry
+owns its endpoint and key, so several providers (even two endpoints of one provider type)
+stay configured side by side.
 
 `uv run hrns` starts a session in the current directory using that model. Run the same
 command from an installed copy (`uvx hrns` or `hrns`). The bundled
@@ -77,12 +83,13 @@ A second family of tools can run in the terminal instead of on the host: `/setti
 terminal, and the `client.terminal` binding routes its commands there.
 Configuration uses pydantic-settings. Providers that authenticate with an account
 rather than a key work too: `hrns login github-copilot` runs GitHub's device flow, or
-press **Ctrl+G** in the model form. See
+press **Ctrl+G** in the provider form. See
 [local setup](docs/LOCAL.md) for OpenAI-compatible endpoints, local inference, other
 Pydantic AI providers, and headless execution.
 
-Useful slash commands include `/connect` (switch or add a target), `/models`
-(configure or select the local model), `/effort` (change reasoning effort live),
+Useful slash commands include `/connect` (switch or add a target), `/providers` (add, edit
+or delete local providers), `/models` (select a model across providers, or add a custom
+model id), `/effort` (change reasoning effort live),
 `/plugins` (toggle, configure, or add plugins), `/mcp` (list MCP servers and their
 tools), `/skills` (browse Agent Skills), and `/todo` (open the session's plan).
 Typing `/` shows an inline filtered list. Type `$` in the composer to find a skill and

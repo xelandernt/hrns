@@ -23,7 +23,15 @@ from ..local import is_local_hrns, local_target
 from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow
 from .dialogs import FormDialog
-from .local import LocalModelResult, effort_label
+from .local import (
+    CustomModelDialog,
+    CustomModelRequest,
+    ModelPick,
+    ModelPickerDialog,
+    effort_label,
+    save_custom_model,
+)
+from .providers import ProvidersResult
 from .screen_base import _HrnsScreen
 
 
@@ -93,7 +101,7 @@ class ConnectScreen(_HrnsScreen):
                 yield self._detail
         yield self._status
         yield Static(
-            "l configure local model · n add target · / filter · r refresh · q quit",
+            "l configure local providers · n add target · / filter · r refresh · q quit",
             markup=False,
             classes="panel-hint",
             id="connect-hint",
@@ -175,13 +183,15 @@ class ConnectScreen(_HrnsScreen):
                 )
         else:
             settings = self._local_settings()
-            local_ready = settings is not None and bool(settings.model)
             if settings is None or not settings.model:
                 self.entries.append(
                     PickEntry(
                         kind="configure_local",
-                        label="Configure local model…",
-                        detail="Choose a cloud or local provider and model, then work in this project.",
+                        label="Configure local providers…",
+                        detail=(
+                            "Add a provider and its key, then pick a model with /models "
+                            "once a session is open."
+                        ),
                     )
                 )
             else:
@@ -217,12 +227,12 @@ class ConnectScreen(_HrnsScreen):
                         profile=profile,
                     )
                 )
-            if local_ready:
+            if settings is not None and settings.model:
                 self.entries.append(
                     PickEntry(
                         kind="configure_local",
-                        label="Change local model…",
-                        detail="Choose another cloud or local provider and model.",
+                        label="Change local providers…",
+                        detail="Edit the configured providers, their endpoints and their keys.",
                     )
                 )
             self.entries.append(
@@ -377,7 +387,7 @@ class ConnectScreen(_HrnsScreen):
         self._connect_worker(target)
 
     def action_configure_local(self) -> None:
-        from .local import LocalModelDialog
+        from .providers import ProvidersDialog
 
         if self._connecting:
             return
@@ -389,7 +399,7 @@ class ConnectScreen(_HrnsScreen):
         except (ValueError, OSError) as exc:
             self._status.update(f"error · {exc}")
             return
-        self.app.push_screen(LocalModelDialog(settings), self._local_configured)
+        self.app.push_screen(ProvidersDialog(settings), self._providers_saved)
 
     def action_add_target(self) -> None:
         if self._connecting:
@@ -546,20 +556,65 @@ class ConnectScreen(_HrnsScreen):
             return
         self._connect_worker(target)
 
-    def _local_configured(
-        self, result: LocalModelResult | tuple[Path, str | None] | Path | None
-    ) -> None:
+    def _providers_saved(self, result: ProvidersResult | None) -> None:
+        """Providers are saved; a model is still needed before the runtime can start."""
         if result is None:
             return
-        if isinstance(result, LocalModelResult):
-            path = result.path
-            api_key_ref = result.api_key_ref
-        elif isinstance(result, tuple):
-            path, api_key_ref = result
-        else:
-            path, api_key_ref = result, None
         try:
-            target = local_target(path, api_key_ref=api_key_ref)
+            settings = LocalSettings(config_file=result.path)
+        except (ValueError, OSError) as exc:
+            self._status.update(f"error · {exc}")
+            return
+        if not settings.provider or not settings.model:
+            self.app.push_screen(
+                ModelPickerDialog(settings, subtitle="Pick the model to start with."),
+                lambda pick: self._local_model_picked(result.path, pick),
+            )
+            return
+        self._connect_local(result.path)
+
+    def _local_model_picked(self, path: Path, pick: ModelPick | CustomModelRequest | None) -> None:
+        if isinstance(pick, CustomModelRequest):
+            self._add_local_custom_model(path, pick)
+            return
+        if pick is None:
+            self._status.update("Providers saved · no model chosen yet")
+            return
+        try:
+            settings = LocalSettings(config_file=path)
+            settings.model_copy(update={"provider": pick.provider, "model": pick.model}).save(path)
+        except (ValueError, OSError) as exc:
+            self._status.update(f"error · {exc}")
+            return
+        self._connect_local(path)
+
+    def _add_local_custom_model(self, path: Path, request: CustomModelRequest) -> None:
+        """Remember an id the catalog does not list, then pick it like any other."""
+        try:
+            settings = LocalSettings(config_file=path)
+        except (ValueError, OSError) as exc:
+            self._status.update(f"error · {exc}")
+            return
+        provider_id = settings.provider_id(request.provider)
+
+        def apply(values: Any) -> None:
+            if not isinstance(values, dict):
+                return
+            model = str(values.get("model") or "").strip()
+            if not model:
+                return
+            try:
+                saved, _updated = save_custom_model(settings, request.provider, model)
+            except (ValueError, OSError) as exc:
+                self._status.update(f"error · {exc}")
+                return
+            self._local_model_picked(saved, ModelPick(request.provider, model))
+
+        self.app.push_screen(CustomModelDialog(request.provider, provider_id, request.model), apply)
+
+    def _connect_local(self, path: Path) -> None:
+        try:
+            target = local_target(path)
         except HrnsClientError as exc:
             self._status.update(f"Saved configuration · {exc.message}")
             return

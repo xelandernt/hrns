@@ -58,7 +58,11 @@ class LoginResult:
 
 
 def login_target(provider: str | None = None, config: Path | None = None) -> LoginTarget:
-    """Resolve the provider to sign in to and the keyring account that holds it."""
+    """Resolve the provider to sign in to and the keyring account that holds it.
+
+    ``provider`` may be a configured entry name (``openai-work``) or a bare Pydantic AI
+    provider id (``github-copilot``) when no entry uses that name yet.
+    """
     try:
         settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
     except (ValueError, OSError) as exc:
@@ -68,12 +72,16 @@ def login_target(provider: str | None = None, config: Path | None = None) -> Log
         raise HrnsClientError(
             "Name the provider to sign in to, for example `hrns login github-copilot`."
         )
-    configured = selected == settings.provider
-    client_id = settings.copilot_client_id if selected == "github-copilot" else ""
+    entry = settings.entry(selected)
+    api_key_env = entry.api_key_env if entry is not None else ""
+    provider_id = settings.provider_id(selected)
+    client_id = ""
+    if provider_id == "github-copilot":
+        client_id = (entry.copilot_client_id if entry is not None else "") or ""
     return LoginTarget(
         provider=selected,
-        account=keyring_account(selected, settings.api_key_env if configured else ""),
-        configured=configured,
+        account=keyring_account(selected, api_key_env),
+        configured=selected == settings.provider,
         client_id=client_id,
     )
 

@@ -86,6 +86,8 @@ class HostPolicy:
     models: tuple[str, ...] = ()
     default_model: str | None = None
     thinking_models: Mapping[str, str] = field(default_factory=dict)
+    provider_types: Mapping[str, str] = field(default_factory=dict)
+    """Model-id prefix -> Pydantic AI provider id, for ids that name a provider entry."""
     default_effort: str | None = None
     model_settings: ModelSettings = field(default_factory=ModelSettings)
     resources: ResourceSet | ResourceBindings = field(default_factory=dict)
