@@ -68,6 +68,7 @@ class CapabilityPanel(Vertical):
         super().__init__(**kwargs)
         self.extension_mode = False
         self.can_write = False
+        self.accepts_client_capabilities = False
         self._plugin_bindings: list[dict[str, Any]] = []
         self._snapshot: dict[str, Any] | None = None
         self._summary: dict[str, dict[str, Any]] = {}
@@ -105,9 +106,11 @@ class CapabilityPanel(Vertical):
         active_revision: int | None = None,
         selected_revision: int | None = None,
         can_write: bool = True,
+        accepts_client_capabilities: bool = False,
     ) -> None:
         self.extension_mode = True
         self.can_write = can_write
+        self.accepts_client_capabilities = accepts_client_capabilities
         self._plugin_bindings = list(bindings)
         self._snapshot = snapshot
         self._render_rows(active_revision=active_revision, selected_revision=selected_revision)
@@ -127,6 +130,12 @@ class CapabilityPanel(Vertical):
         self._list.clear_options()
         for raw in self._plugin_bindings:
             summary = binding_summary(raw, self._snapshot)
+            if summary["origin"] == "client" and not self.accepts_client_capabilities:
+                summary.update(
+                    available=False,
+                    locked=True,
+                    reason="the server does not accept client capabilities",
+                )
             binding_id = summary["bindingId"]
             if not binding_id:
                 continue
@@ -134,8 +143,23 @@ class CapabilityPanel(Vertical):
             self._order.append(binding_id)
             self._options[binding_id] = raw
         self._name_chars = self._name_column()
-        for binding_id in self._order:
-            self._list.add_option(Option(self._row_text(self._summary[binding_id]), id=binding_id))
+        for origin, title in (("host", "Server plugins"), ("client", "Client plugins")):
+            self._list.add_option(Option(Text(title, style="bold"), disabled=True))
+            group = [
+                binding_id
+                for binding_id in self._order
+                if self._summary[binding_id]["origin"] == origin
+            ]
+            for binding_id in group:
+                summary = self._summary[binding_id]
+                self._list.add_option(
+                    Option(
+                        Text(self._row_text(summary), style="dim" if summary["locked"] else ""),
+                        id=binding_id,
+                    )
+                )
+            if not group:
+                self._list.add_option(Option(Text("None offered", style="dim"), disabled=True))
         selected = (
             selected_revision
             if selected_revision is not None
@@ -150,6 +174,8 @@ class CapabilityPanel(Vertical):
         notes = [f"{total} plugin" + ("" if total == 1 else "s")]
         if selected is not None and active is not None and selected != active:
             notes.append("selected changes apply next turn")
+        if not self.accepts_client_capabilities:
+            notes.append("client capabilities unavailable")
         if not self.can_write:
             notes.append("read-only")
         self._status.update(Text(" · ".join(notes), style="dim"))
@@ -158,10 +184,9 @@ class CapabilityPanel(Vertical):
             if not self.can_write
             else "e edit · Space toggle · a add · r refresh · Esc close"
         )
-        if self._list.option_count:
-            index = self._highlight_index(previous)
-            self._list.highlighted = index
-            self._show_detail(self._order[index])
+        if self._order:
+            self._list.highlighted = self._highlight_index(previous)
+            self._show_detail(self.current_binding_id())
         else:
             self._show_detail(None)
 
@@ -232,8 +257,8 @@ class CapabilityPanel(Vertical):
     def _highlight_index(self, previous: str | None) -> int:
         """Keep the edited row selected instead of jumping back to the top."""
         if previous and previous in self._order:
-            return self._order.index(previous)
-        return 0
+            return self._list.get_option_index(previous)
+        return self._list.get_option_index(self._order[0]) if self._order else 0
 
     def _name_column(self) -> int:
         """Width of the name column, so toggles and descriptions line up."""
@@ -253,6 +278,8 @@ class CapabilityPanel(Vertical):
         tail: list[str] = []
         if summary["locked"]:
             tail.append("locked")
+        elif not summary["canToggle"]:
+            tail.append("toggle locked")
         elif summary.get("pending"):
             active = summary.get("state") or {}
             active_on = (
@@ -324,6 +351,9 @@ class CapabilityPanel(Vertical):
         if summary["locked"]:
             self.show_message(f"{summary['name']} is locked: {summary['reason'] or 'unavailable'}")
             return
+        if not summary["canToggle"]:
+            self.show_message(f"{summary['name']} cannot be toggled from this client.")
+            return
         self.post_message(BindingToggleRequested(binding_id, not summary["enabled"]))
 
     def action_refresh(self) -> None:
@@ -337,6 +367,9 @@ class CapabilityPanel(Vertical):
         if not binding_id:
             return
         summary = self._summary.get(binding_id)
+        if summary and summary["locked"]:
+            self.show_message(f"{summary['name']} is locked: {summary['reason'] or 'unavailable'}")
+            return
         if summary and summary["editableFields"]:
             self.post_message(BindingEditRequested(binding_id))
         elif summary:
@@ -361,10 +394,8 @@ class CapabilityPanel(Vertical):
         self._toggle_binding(binding_id)
 
     def current_binding_id(self) -> str | None:
-        index = self._list.highlighted
-        if index is None or index < 0 or index >= len(self._order):
-            return None
-        return self._order[index]
+        option = self._list.highlighted_option
+        return option.id if option is not None else None
 
     def binding(self, binding_id: str) -> dict[str, Any] | None:
         return self._summary.get(binding_id)

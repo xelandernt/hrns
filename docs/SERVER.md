@@ -41,6 +41,14 @@ uv run uvicorn my_app:app --host 127.0.0.1 --port 8080 \
 
 `examples/fastapi_app.py` is a complete application.
 
+Remote registrations reject client capabilities by default. To accept them for an agent,
+use `agents.add_agent(definition, accepts_client_capabilities=True)`. ACP initialization
+advertises the choice as `_meta.hrns.acceptsClientCapabilities`. Client plugins must still
+be offered by the definition, supported by the connected client, and permitted by their
+individual policies. The Plugins tab shows Server plugins and Client plugins separately;
+refused client plugins remain visible but greyed out. Server and client plugins can run
+independently, including the server shell alongside the client terminal.
+
 ## Storage and lifespan
 
 ```python

@@ -69,12 +69,16 @@ class AgentServer:
         models: Sequence[str] = (),
         allowed_cwds: Sequence[str | Path] | None = None,
         default_cwd: str | Path | None = None,
+        accepts_client_capabilities: bool = False,
     ) -> None:
         """Register a validated definition before mounting.
 
         A bare ``AgentDefinition`` is resolved against this server's registry and bound to
         ``resources`` here, so a capability whose requirements are missing fails at
         registration rather than on the first ``session/new``.
+
+        ``accepts_client_capabilities`` permits offered client-origin plugins; it is
+        advertised during ACP initialization and enforced for every session.
         """
         if self._mounted:
             raise RuntimeError("Register agents before calling mount()")
@@ -118,6 +122,7 @@ class AgentServer:
             default_cwd=cwd,
             models=offered,
             resources=bound.resources.values,
+            accepts_client_capabilities=accepts_client_capabilities,
         )
 
     def mount(self, app: FastAPI, *, prefix: str = "") -> None:
@@ -188,6 +193,7 @@ class AgentServer:
                 principal=principal.id,
                 deployment_id=agent.session_namespace,
                 hosted=True,
+                accepts_client_capabilities=agent.accepts_client_capabilities,
                 allowed_cwds=agent.allowed_cwds,
                 default_cwd=agent.default_cwd,
                 allow_local_binding_creation=False,

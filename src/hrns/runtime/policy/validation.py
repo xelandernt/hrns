@@ -207,6 +207,8 @@ def validate_configure(
     offering = catalog.offerings.get(change.binding_id)
     if offering is None:
         raise offering_unknown(catalog, change.binding_id)
+    if offering.descriptor.origin == "client" and not catalog.accepts_client_capabilities:
+        raise HrnsError("POLICY_DENIED", "The server does not accept client capabilities.")
     enabled, config = work[change.binding_id]
     # Deep copy: path replacement must never mutate the live selected value before the
     # whole transaction has been validated and committed.
@@ -261,6 +263,12 @@ def validate_add(
             "CAPABILITY_UNAVAILABLE",
             f"Plugin {change.plugin_id!r} is not registered for local binding creation; "
             "it cannot back a new binding.",
+            details={"plugin_id": change.plugin_id, "binding_id": change.binding_id},
+        )
+    if descriptor.origin == "client" and not catalog.accepts_client_capabilities:
+        raise HrnsError(
+            "POLICY_DENIED",
+            "The server does not accept client capabilities.",
             details={"plugin_id": change.plugin_id, "binding_id": change.binding_id},
         )
     if not descriptor.compatibility.runtime_compatible:

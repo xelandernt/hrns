@@ -54,6 +54,7 @@ class RegisteredAgent:
     default_cwd: str
     models: tuple[str, ...] = ()
     resources: dict[str, object] = field(default_factory=dict)
+    accepts_client_capabilities: bool = False
 
     @property
     def id(self) -> str:

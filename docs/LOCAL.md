@@ -285,11 +285,13 @@ sandbox**. Approved commands execute with your user's permissions.
 
 `--client-io` decides what this terminal offers the agent it connects to: `off` (the default)
 offers nothing, `read` serves `fs/read_text_file` in the session directory, and `all` also
-serves writes and `terminal/*` so the agent runs commands in this terminal instead of the
-host's shell. Enabling terminal support lets the agent run commands with your permissions
+serves writes and `terminal/*` so an accepting agent can run commands in this terminal
+alongside its server shell. Enabling terminal support lets the agent run commands with your permissions
 without a further prompt, so it is a per-connection choice; a profile stores it as `clientIo`.
 On the agent side the `client.terminal` binding is what routes commands through that terminal,
-and it is offered only when the connected client advertises support. See
+and it is usable only when the server accepts client capabilities and the connected client
+advertises support. Local model mode refuses client capabilities by default, so this binding
+remains visible but greyed out in the Plugins tab. See
 [client capabilities](ACP.md).
 
 ### Windows

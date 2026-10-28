@@ -80,17 +80,31 @@ availability and policy code never learns a capability's name.
 
 ### Client-origin bindings
 
+The server advertises `acceptsClientCapabilities` in `initialize._meta.hrns`. Local mode
+and `hrns-host` default to `false`; a custom stdio host can opt in with
+`--accept-client-capabilities` or `HostPolicy(accepts_client_capabilities=True)`.
+Remote `AgentServer.add_agent(...)` registrations also default to `false` and can accept client
+capabilities with `accepts_client_capabilities=True`. Acceptance permits only client plugins
+the agent definition offers; it does not automatically attach plugins from the registry.
+
+The Plugins tab groups bindings into **Server plugins** and **Client plugins**. When the
+server refuses client capabilities, client bindings remain visible but greyed out, with an
+explanation. The server also rejects attempts to enable, configure, or add them. Each
+server plugin's `clientCanToggle` permission remains independent of this acceptance setting.
+
 `hrns.client_terminal` is the client-side counterpart of the coder's `shell`. It is offered as
 the binding `client.terminal`, disabled by default, `origin: "client"`, `requiresClient:
 ["terminal"]`, lifecycle `next_turn`:
 
-- It is **available only while the connected client advertises terminal support**; otherwise
+- It is **available only when the server accepts client capabilities and the connected client
+  advertises terminal support**; otherwise
   its descriptor carries an `availabilityReason` and an `enable` change fails with
   `CAPABILITY_UNAVAILABLE`. The host never silently substitutes host execution.
-- It declares `shadows: ["shell"]`: while this binding is enabled the coder does not compose
-  its `shell` tool, and its instructions name `run_command` instead. The coder's own `shell`
-  setting is left exactly as configured, so disabling this binding brings the host shell back:
-  the model always has exactly one way to run a command, and the other one is never lost.
+- Its `run_command(command, args)` tool runs an executable on the client alongside the coder's
+  server-side `shell` tool. Arguments are separate from the executable, including when its path
+  contains spaces. To run a shell script or pipeline, invoke the client's shell explicitly and
+  pass its command flag and script in `args`.
+  Both bindings can be enabled independently; toggling one never suppresses the other.
 - Its commands still need approval, because the host approves tool calls before they run; the
   client executes only what the model already asked for.
 

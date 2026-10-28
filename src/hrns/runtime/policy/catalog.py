@@ -76,6 +76,7 @@ class PolicyCatalog:
         deployment_id: str,
         validate_defaults: bool = True,
         client_capabilities: schema.ClientCapabilities | None = None,
+        accepts_client_capabilities: bool = False,
     ) -> None:
         self.definition = definition
         self.registry = registry
@@ -83,6 +84,7 @@ class PolicyCatalog:
         self.principal = principal
         self.deployment_id = deployment_id
         self.client_capabilities = client_capabilities
+        self.accepts_client_capabilities = accepts_client_capabilities
         self.offerings: dict[str, BindingOffering] = {}
         self.policy_revision = 1
         self._sequence = 0
@@ -107,6 +109,7 @@ class PolicyCatalog:
                 config=dict(binding.config),
                 sequence=self._sequence,
                 client_capabilities=self.client_capabilities,
+                accepts_client_capabilities=self.accepts_client_capabilities,
             )
         if missing_plugins:
             raise HrnsError(
@@ -267,7 +270,7 @@ class PolicyCatalog:
                     defaults=jsonable_config(offering.descriptor.config_defaults()),
                     enabled=offering.enabled,
                     active_enabled=active_enabled,
-                    policy=offering.policy,
+                    policy=offering.policy.model_copy(update={"available": offering.available}),
                     state_mode=offering.descriptor.state_mode,
                     requires=offering.requirements,
                     needs=offering.descriptor.resource_needs(),
@@ -391,6 +394,7 @@ class PolicyCatalog:
             session_added=True,
             sequence=self._sequence,
             client_capabilities=self.client_capabilities,
+            accepts_client_capabilities=self.accepts_client_capabilities,
         )
         self.offerings[binding_id] = offering
         return offering
@@ -411,7 +415,6 @@ class PolicyCatalog:
         resources: ResourceSet,
         active_configuration: ConfigurationSnapshot | None = None,
         agent_context: Any = None,
-        shadowed_tools: frozenset[str] = frozenset(),
     ) -> AgentCapability:
         """Create one binding's native capability via its plugin factory."""
         context = BindingContext(
@@ -424,22 +427,8 @@ class PolicyCatalog:
             resources=resources,
             active_configuration=active_configuration,
             agent_context=agent_context,
-            shadowed_tools=shadowed_tools,
         )
         return self.registry.instantiate(offering.descriptor, offering.config, context)
-
-    def shadowed_tools(self) -> frozenset[str]:
-        """Host tool names the enabled client-origin bindings take over in this composition.
-
-        Derived from descriptors, never from configuration: it changes when a binding is
-        enabled or disabled and never rewrites another binding's selected config.
-        """
-        return frozenset(
-            name
-            for offering in self.enabled_ordered()
-            if offering.descriptor.origin == "client"
-            for name in offering.descriptor.shadows
-        )
 
     def compose(
         self,
@@ -449,7 +438,6 @@ class PolicyCatalog:
         agent_context: Any = None,
     ) -> list[tuple[str, AgentCapability]]:
         """Instantiate every enabled binding, in stable order, exactly once."""
-        shadowed = self.shadowed_tools()
         composed: list[tuple[str, AgentCapability]] = []
         for offering in self.enabled_ordered():
             capability = self.instantiate(
@@ -457,7 +445,6 @@ class PolicyCatalog:
                 resources=resources,
                 active_configuration=active_configuration,
                 agent_context=agent_context,
-                shadowed_tools=shadowed,
             )
             composed.append((offering.binding_id, capability))
         return composed

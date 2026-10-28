@@ -85,7 +85,9 @@ class SessionService:
             client=session.client,
             session_id=session.session_id,
             cwd=cwd,
-            capabilities=session.client_capabilities,
+            capabilities=(
+                session.client_capabilities if self.policy.accepts_client_capabilities else None
+            ),
         )
         self.client_sessions[session.session_id] = handle
         return handle
@@ -378,6 +380,8 @@ class SessionService:
             resources.bind_if_absent(PLAN, self.plan_channel(session_id))
             handle = self.client_sessions.get(session_id)
             if handle is not None:
+                # Definitions may require the handle even while every client plugin is disabled.
+                # Capability acceptance is enforced by the catalog and the handle's capabilities.
                 resources.bind_if_absent(CLIENT, handle)
         model = self.agent._default_model
         if model is not None:
@@ -419,6 +423,7 @@ class SessionService:
             effort_support=support,
             presentation_sink=self.presentation_sink(session.session_id),
             client_capabilities=handle.capabilities,
+            accepts_client_capabilities=self.policy.accepts_client_capabilities,
         )
         composition.effort.model = model
         self.compositions[session.session_id] = composition

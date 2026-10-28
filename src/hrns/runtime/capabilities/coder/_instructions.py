@@ -20,11 +20,6 @@ SHELL_BULLET = """\
   exit code. Use it for builds, tests, git, and package managers.
 """
 
-CLIENT_COMMAND_BULLET = """\
-- `run_command` runs one foreground command in the connected client's terminal and returns
-  its output and exit code. Use it for builds, tests, git, and package managers.
-"""
-
 WORKING_RULES = """\
 
 Working rules:
@@ -43,7 +38,7 @@ Working rules:
 """
 
 
-def instructions(*, client_terminal: bool) -> str:
+def instructions(*, shell: bool) -> str:
     """Model-facing instructions with the command tool this composition actually exposes."""
-    bullet = CLIENT_COMMAND_BULLET if client_terminal else SHELL_BULLET
+    bullet = SHELL_BULLET if shell else ""
     return f"{INSTRUCTIONS}{bullet}{WORKING_RULES}"

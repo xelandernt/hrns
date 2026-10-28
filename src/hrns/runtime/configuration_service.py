@@ -119,6 +119,7 @@ class ConfigurationService:
                 deps=composition.deps,
                 presentation_sink=agent.sessions.presentation_sink(session_id),
                 client_capabilities=agent.sessions.client_capabilities(session_id),
+                accepts_client_capabilities=self.policy.accepts_client_capabilities,
             )
             refreshed.effort.model = composition.effort.model or agent._default_model
             snapshot = refreshed.catalog.snapshot(

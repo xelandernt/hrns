@@ -35,14 +35,13 @@ def descriptor() -> PluginDescriptor:
         plugin_id=_PLUGIN_ID,
         version="0.1.0",
         description=(
-            "Run the agent's commands in the connected ACP client's terminal instead of this "
-            "host. Needs a client that advertises terminal support."
+            "Run commands in the connected ACP client's terminal alongside the server shell. "
+            "Needs a client that advertises terminal support."
         ),
         factory="hrns.runtime.capabilities.client_terminal:build_client_terminal",
         needs=(CLIENT,),
         origin="client",
         requires_client=_NEEDS_CLIENT,
-        shadows=("shell",),
         state_mode="run",
         presentation=["hrns.tool.shell"],
         default_policy=CapabilityPolicy(

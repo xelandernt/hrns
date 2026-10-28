@@ -214,10 +214,10 @@ class ClientIo:
         for variable in env or []:
             environment[variable.name] = variable.value
         limit = min(output_byte_limit or MAX_OUTPUT_BYTES, self.policy.max_output_bytes)
-        argv = [command, *args] if args else [command]
         try:
             process = await asyncio.create_subprocess_exec(
-                *argv,
+                command,
+                *(args or ()),
                 cwd=str(working),
                 env=environment,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -358,7 +358,10 @@ async def _drain(terminal: _Terminal) -> None:
             if len(chunk) > room:
                 terminal.truncated = True
     code = await terminal.process.wait()
-    terminal.status = TerminalExitStatus(exit_code=code, signal=None)
+    terminal.status = TerminalExitStatus(
+        exit_code=code if code >= 0 else None,
+        signal=str(-code) if code < 0 else None,
+    )
 
 
 def _window(content: str, *, line: int | None, limit: int | None) -> str:

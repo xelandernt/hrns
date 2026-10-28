@@ -171,7 +171,9 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
     ) -> schema.InitializeResponse:
         response = await super().initialize(
             protocol_version,
-            client_capabilities=client_capabilities,
+            client_capabilities=(
+                client_capabilities if self.policy.accepts_client_capabilities else None
+            ),
             client_info=client_info,
             **kwargs,
         )
@@ -186,6 +188,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             version=1,
             methods=list(self.policy.extension_methods()),
             local_binding_creation=self.policy.can_create_bindings,
+            accepts_client_capabilities=self.policy.accepts_client_capabilities,
         )
         return response.model_copy(
             update={
