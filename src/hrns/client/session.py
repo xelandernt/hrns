@@ -39,6 +39,8 @@ class SessionProxy:
         self.client = client
         self.session_id = session_id
         self.cwd = cwd
+        # The agent may ask this client for file I/O and terminal commands from here on.
+        client.io.remember(session_id, cwd)
         self.config_options: tuple[dict[str, Any], ...] = ()
         self.modes: dict[str, Any] | None = None
         self.current_mode_id: str | None = None

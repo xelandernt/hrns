@@ -146,6 +146,7 @@ class ChromeWorkflow:
             busy=screen.busy,
             activity=screen._activity,
             permission=permission_mode_label(screen.settings.permission_mode),
+            client_io=screen.app.client_io_mode(screen.target) if screen.target else "",
             hint=self.hint_text(),
             context=self.status_context(),
         )

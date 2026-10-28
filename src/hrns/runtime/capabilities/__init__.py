@@ -20,6 +20,7 @@ def bundled_descriptors() -> list[PluginDescriptor]:
     until a binding is composed.
     """
     from .ask_user import descriptor as ask_user_descriptor
+    from .client_terminal import descriptor as client_terminal_descriptor
     from .coder import descriptor as coder_descriptor
     from .mcp import descriptor as mcp_descriptor
     from .skills import descriptor as skills_descriptor
@@ -28,6 +29,7 @@ def bundled_descriptors() -> list[PluginDescriptor]:
     return [
         ask_user_descriptor(),
         coder_descriptor(),
+        client_terminal_descriptor(),
         mcp_descriptor(),
         skills_descriptor(),
         todo_descriptor(),

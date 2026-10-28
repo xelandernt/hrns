@@ -32,6 +32,9 @@ from acp.schema import (
 )
 
 from hrns.protocol import (
+    FS_READ_TEXT_FILE,
+    FS_WRITE_TEXT_FILE,
+    TERMINAL,
     CommandInvokeResponse,
     ConfigurationSnapshot,
     ToolPresentationSnapshot,
@@ -70,6 +73,7 @@ from .interactions import (
     ask_user_payload,
     parse_ask_user_request,
 )
+from .io import ClientIo, ClientIoMode, ClientIoPolicy
 from .payloads import elicitation_record, normalize_permission
 from .session import SessionLifecycle, SessionProxy
 from .transport import AgentTransport, ConnectionBundle
@@ -97,12 +101,14 @@ class HrnsAcpClient:
         session_new_meta: dict[str, Any] | None = None,
         connect_timeout: float = CONNECT_TIMEOUT,
         auth_method: str = "",
+        client_io: ClientIoMode = "off",
     ) -> None:
         self.policy: InteractionPolicy = policy or DEFAULT_INTERACTION_POLICY
         self.advertise_extension = advertise_extension
         self.session_new_meta = dict(session_new_meta or {})
         self.connect_timeout = connect_timeout
         self.auth_method = auth_method.strip()
+        self.io = ClientIo(ClientIoPolicy(mode=client_io))
 
         self.bus = EventBus()
         self.initialized: Any = None
@@ -128,9 +134,13 @@ class HrnsAcpClient:
     # ------------------------------------------------------------------ setup
 
     def _build_capabilities(self) -> ClientCapabilities:
+        offered = self.io.policy.offered
         return ClientCapabilities(
-            fs=FileSystemCapabilities(read_text_file=False, write_text_file=False),
-            terminal=False,
+            fs=FileSystemCapabilities(
+                read_text_file=FS_READ_TEXT_FILE in offered,
+                write_text_file=FS_WRITE_TEXT_FILE in offered,
+            ),
+            terminal=TERMINAL in offered,
             session=ClientSessionCapabilities(
                 config_options=SessionConfigOptionsCapabilities(
                     boolean=BooleanConfigOptionCapabilities(),
@@ -163,6 +173,7 @@ class HrnsAcpClient:
 
     async def disconnect(self) -> None:
         await self.connection_lifecycle.disconnect()
+        await self.io.close()
 
     def has_session_capability(self, name: str) -> bool:
         """Ask whether the agent advertised a session lifecycle feature."""
@@ -420,10 +431,43 @@ class HrnsAcpClient:
         limit: int | None = None,
         **kwargs: Any,
     ) -> Any:
-        raise RequestError.method_not_found("fs/read_text_file")  # not advertised by this client
+        return await self.io.read_text_file(session_id, path, line=line, limit=limit)
 
     async def write_text_file(self, session_id: str, path: str, content: str, **kwargs: Any) -> Any:
-        raise RequestError.method_not_found("fs/write_text_file")  # not advertised by this client
+        return await self.io.write_text_file(session_id, path, content)
+
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        args: list[str] | None = None,
+        env: list[Any] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return await self.io.create_terminal(
+            session_id,
+            command,
+            args=args,
+            env=env,
+            cwd=cwd,
+            output_byte_limit=output_byte_limit,
+        )
+
+    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        return await self.io.terminal_output(session_id, terminal_id)
+
+    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        return await self.io.wait_for_terminal_exit(session_id, terminal_id)
+
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        await self.io.kill_terminal(session_id, terminal_id)
+        return None
+
+    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        await self.io.release_terminal(session_id, terminal_id)
+        return None
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> Any:
         return await self.extensions.handle_ext_method(method, params)

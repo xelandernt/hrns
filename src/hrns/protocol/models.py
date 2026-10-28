@@ -96,6 +96,10 @@ class BindingDescriptor(WireModel):
     state_mode: Literal["run", "session", "external"] = "run"
     requires: list[str] = Field(default_factory=list)
     needs: list[ResourceNeed] = Field(default_factory=list)
+    origin: Literal["host", "client"] = "host"
+    """Where this binding's tools run: in the host workspace or through the ACP client."""
+    requires_client: list[str] = Field(default_factory=list)
+    """Client capabilities this binding needs before it can be enabled."""
     conflicts: list[str] = Field(default_factory=list)
     availability_reason: str | None = None
     presentation: list[str] = Field(default_factory=list)
@@ -114,6 +118,7 @@ class PluginInfo(WireModel):
     presentation: str = "generic"
     requirements: list[str] = Field(default_factory=list)
     needs: list[ResourceNeed] = Field(default_factory=list)
+    origin: Literal["host", "client"] = "host"
     constraint: str | None = None
 
 

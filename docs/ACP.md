@@ -32,6 +32,72 @@ ACP client ──stdio JSON-RPC──► hrns-host / hrns-local
 The installed ACP SDK defines `session/delete` but does not route it from
 `build_agent_router`; the host registers that standard route explicitly.
 
+## Client capabilities
+
+ACP negotiates two independent capability sets in one handshake: the client sends
+`clientCapabilities` on `initialize` and the agent answers with `agentCapabilities`. Neither
+constrains the other, and one side having capabilities never stops the other from using its
+own. A *client* capability is a grant for agent-to-client requests —
+`session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, the `terminal/*`
+lifecycle, and `elicitation/create`.
+
+hrns uses both directions. Host bindings act in the deployment workspace; *client-origin*
+bindings ask the connected client to act instead. The two are distinguishable in every
+descriptor, so a client can present them as different kinds of capability.
+
+### What the terminal offers
+
+The `hrns` terminal advertises `session.configOptions.boolean`, `plan`, and `elicitation`, and
+answers `session/request_permission`, `elicitation/create`, `session/update`, and the `_hrns`
+extension. Filesystem and terminal support are opt-in per connection:
+
+| `--client-io` (or `clientIo` in a profile) | Advertised | Agent may |
+| --- | --- | --- |
+| `off` (default) | nothing | nothing; both methods answer method-not-found |
+| `read` | `fs.readTextFile` | read files under the session `cwd` |
+| `all` | adds `fs.writeTextFile` and `terminal` | also write files and run commands there |
+
+Both are answered inside the session's working directory only: paths resolve against `cwd`,
+symlinks are followed before the containment check, files larger than 2 MiB are refused rather
+than truncated, writes are refused inside `.git` and for credential files, terminal output is
+bounded at 1 MiB per terminal, and at most eight terminals stay open at once. Terminal support
+means an agent runs commands as your user with no approval prompt: ACP has no permission
+request for it, which is why it is off by default and lives on the connection profile rather
+than on the agent.
+
+The value is decided once, at `initialize`: the `--client-io` flag wins, then `clientIo` in the
+profile, then the terminal's saved `/settings` value, and a change applies when you reconnect.
+Nothing is advertised by default, and a handler that was not advertised answers
+method-not-found rather than guessing.
+
+The mode is a three-step ladder over the handlers this client implements, not a per-capability
+switch: `all` unlocks filesystem writes and the terminal together. What a binding may require is
+data, not code: `requiresClient` holds dotted paths into `clientCapabilities` (`terminal`,
+`fs.read_text_file`, `elicitation.form`, ...), resolved against the `initialize` payload, and a
+path the schema does not define is a registration error. Adding a client-side capability
+therefore needs a plugin and, only if the family is new, a handler in `hrns/client/io.py` — the
+availability and policy code never learns a capability's name.
+
+### Client-origin bindings
+
+`hrns.client_terminal` is the client-side counterpart of the coder's `shell`. It is offered as
+the binding `client.terminal`, disabled by default, `origin: "client"`, `requiresClient:
+["terminal"]`, lifecycle `next_turn`:
+
+- It is **available only while the connected client advertises terminal support**; otherwise
+  its descriptor carries an `availabilityReason` and an `enable` change fails with
+  `CAPABILITY_UNAVAILABLE`. The host never silently substitutes host execution.
+- It declares `shadows: ["shell"]`: while this binding is enabled the coder does not compose
+  its `shell` tool, and its instructions name `run_command` instead. The coder's own `shell`
+  setting is left exactly as configured, so disabling this binding brings the host shell back:
+  the model always has exactly one way to run a command, and the other one is never lost.
+- Its commands still need approval, because the host approves tool calls before they run; the
+  client executes only what the model already asked for.
+
+The bundled client deliberately does not offer a filesystem binding yet. `apply_changes`
+batches edits with a preflight, credential guards, and content hashes, which
+`fs/write_text_file` cannot express; replacing it would weaken edits rather than move them.
+
 ## Configuration
 
 Managed configuration is live again and applied on the next turn boundary:

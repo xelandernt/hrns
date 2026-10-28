@@ -322,40 +322,44 @@ class CoderTools(AbstractCapability[AgentDepsT]):
                 preview = f"exit {result.exit_code}" + (f"\n{preview}" if preview else "")
             return output_return(model_text, "shell", payload, fallback=preview or "no output")
 
-        return FunctionToolset(
-            id="hrns.coder.files",
-            max_retries=MAX_TOOL_RETRIES,
-            tools=[
-                Tool(
-                    read_file,
-                    name="read_file",
-                    takes_ctx=True,
-                    metadata=input_metadata("read_file", pending="Reading file…"),
-                ),
-                Tool(
-                    apply_changes,
-                    name="apply_changes",
-                    takes_ctx=True,
-                    sequential=True,
-                    metadata=input_metadata("apply_changes", pending="Applying file changes…"),
-                ),
-                Tool(
-                    list_files,
-                    name="list_files",
-                    takes_ctx=True,
-                    metadata=input_metadata("list_files", pending="Listing files…"),
-                ),
-                Tool(
-                    grep,
-                    name="grep",
-                    takes_ctx=True,
-                    metadata=input_metadata("grep", pending="Searching…"),
-                ),
+        tools: list[Tool[AgentDepsT]] = [
+            Tool(
+                read_file,
+                name="read_file",
+                takes_ctx=True,
+                metadata=input_metadata("read_file", pending="Reading file…"),
+            ),
+            Tool(
+                apply_changes,
+                name="apply_changes",
+                takes_ctx=True,
+                sequential=True,
+                metadata=input_metadata("apply_changes", pending="Applying file changes…"),
+            ),
+            Tool(
+                list_files,
+                name="list_files",
+                takes_ctx=True,
+                metadata=input_metadata("list_files", pending="Listing files…"),
+            ),
+            Tool(
+                grep,
+                name="grep",
+                takes_ctx=True,
+                metadata=input_metadata("grep", pending="Searching…"),
+            ),
+        ]
+        if config.shell:
+            tools.append(
                 Tool(
                     shell,
                     name="shell",
                     takes_ctx=True,
                     metadata=input_metadata("shell", pending="Running command…"),
-                ),
-            ],
+                )
+            )
+        return FunctionToolset(
+            id="hrns.coder.files",
+            max_retries=MAX_TOOL_RETRIES,
+            tools=tools,
         )

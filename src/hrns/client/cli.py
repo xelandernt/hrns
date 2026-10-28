@@ -25,6 +25,7 @@ from .client import HrnsAcpClient
 from .errors import HrnsClientError, InteractionRequired
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
+from .io import parse_client_io
 from .launch import (
     ConnectionTarget,
     catalog_for,
@@ -66,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     connect = sub.add_parser("connect", help="Open the full-screen terminal")
     _add_target_flags(connect, enable_stdio=True)
+    _add_client_io_flag(connect)
     connect.add_argument(
         "--session", metavar="SESSION_ID", help="Load this session after connecting"
     )
@@ -73,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Run one prompt headlessly and print the result")
     _add_target_flags(run, enable_stdio=True)
+    _add_client_io_flag(run)
     run.add_argument("--json", action="store_true", help="Print one JSON summary object")
     _add_interaction_flags(run)
     run.add_argument("--resume", metavar="SESSION_ID", help="Load and continue an existing session")
@@ -236,6 +239,20 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_logout = mcp_parser("logout", "Forget stored OAuth tokens for an MCP server")
     mcp_logout.add_argument("name")
     return parser
+
+
+def _add_client_io_flag(parser: argparse.ArgumentParser) -> None:
+    """What this terminal offers the agent it connects to."""
+    parser.add_argument(
+        "--client-io",
+        choices=("off", "read", "all"),
+        default=None,
+        help=(
+            "Advertise client-side capabilities to the agent: 'off' offers nothing, 'read' "
+            "serves fs/read_text_file, and 'all' also serves writes and terminal/* so the "
+            "agent runs commands in this terminal. Defaults to the profile's client_io."
+        ),
+    )
 
 
 def _add_target_flags(parser: argparse.ArgumentParser, *, enable_stdio: bool) -> None:
@@ -459,6 +476,7 @@ async def _command_run(args: argparse.Namespace) -> int:
         lambda: transport_for(target),
         policy=policy,
         auth_method=target.profile.auth_method,
+        client_io=parse_client_io(args.client_io or target.profile.client_io),
     )
     try:
         outcome = await run_headless(
@@ -635,6 +653,7 @@ def _command_connect(args: argparse.Namespace) -> int:
         initial_target=preselect,
         initial_session=args.session,
         status_message=status_message,
+        client_io=parse_client_io(args.client_io) if args.client_io else None,
     )
 
 

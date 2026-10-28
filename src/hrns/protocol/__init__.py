@@ -1,5 +1,11 @@
 """Shared contracts. This package deliberately imports neither AI nor UI libraries."""
 
+from .capabilities import (
+    FS_READ_TEXT_FILE,
+    FS_WRITE_TEXT_FILE,
+    TERMINAL,
+    acp_capability_spelling,
+)
 from .errors import HrnsError
 from .extensions import (
     SUPPORTED_CONVERSATION_OPERATIONS,
@@ -57,6 +63,10 @@ from .transport import (
 __all__ = [
     "SUPPORTED_CONVERSATION_OPERATIONS",
     "SteerRequest",
+    "FS_READ_TEXT_FILE",
+    "FS_WRITE_TEXT_FILE",
+    "TERMINAL",
+    "acp_capability_spelling",
     "CommandCancelRequest",
     "CommandCancelResponse",
     "CommandCatalogChanged",

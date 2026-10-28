@@ -30,7 +30,7 @@ from .host import HrnsACPAgent
 from .host_support import HostBundle, HostPolicy, build_store
 from .login import DeviceAuthorization, device_login, login_providers, supports_login
 from .registry import PluginRegistry
-from .resources import ANSWERS, MODEL, PLAN, WORKSPACE, ResourceRequirement
+from .resources import ANSWERS, CLIENT, MODEL, PLAN, WORKSPACE, ResourceRequirement
 from .workspaces import require_pwsh
 
 _LOCAL_INSTRUCTIONS = """\
@@ -429,6 +429,11 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             binding_id="coder",
         ),
         DefinitionBinding(
+            plugin_id="hrns.client_terminal",
+            binding_id="client.terminal",
+            enabled=False,
+        ),
+        DefinitionBinding(
             plugin_id="hrns.todo",
             binding_id="todo",
         ),
@@ -455,6 +460,13 @@ def local_definition(settings: LocalSettings) -> AgentDefinition:
             MODEL, description="Agent model (provider string or native Model instance)."
         ),
         ResourceRequirement.of(WORKSPACE, description="Directory the bundled tools act on."),
+        ResourceRequirement.of(
+            CLIENT,
+            required=False,
+            description=(
+                "The connected ACP client, for bindings whose tools run there instead of here."
+            ),
+        ),
         ResourceRequirement.of(
             PLAN,
             description="Session-scoped plan channel that streams todos to the connected client.",

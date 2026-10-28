@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from acp import schema
 from pydantic import BaseModel, JsonValue
 from pydantic_ai import Agent
 from pydantic_ai.agent import AbstractAgent
@@ -402,6 +403,7 @@ async def compose_definition(
     effort_support: str | None = None,
     deps: object = None,
     presentation_sink: PresentationSink | None = None,
+    client_capabilities: schema.ClientCapabilities | None = None,
 ) -> Composition:
     """Compose a definition into a native agent and an ACP session configuration.
 
@@ -422,6 +424,7 @@ async def compose_definition(
         session_id=session_id,
         principal=principal,
         deployment_id=deployment_id,
+        client_capabilities=client_capabilities,
     )
     if initial_configuration:
         outcome = catalog.apply_changes(list(initial_configuration), initial_configuration=True)

@@ -208,6 +208,43 @@ class Provider:
   fallback text. Installed widgets run in-process; this is not a security sandbox, and
   plugin-owned event handlers remain the author's responsibility.
 
+## Client-origin plugins
+
+A plugin whose tools must run in the connected ACP client, not in this host's workspace, sets
+two descriptor fields:
+
+```python
+PluginDescriptor(
+    plugin_id="example.browser",
+    factory="example_browser:factory",
+    origin="client",
+    requires_client=("terminal",),        # dotted paths into ACP's clientCapabilities
+    needs=(CLIENT,),                      # the live connection handle
+    default_policy=CapabilityPolicy(enabled_by_default=False, client_can_toggle=True),
+)
+```
+
+- `requires_client` holds **paths**, not enum members: `terminal`, `fs.read_text_file`,
+  `fs.write_text_file`, `elicitation.form`, or anything else the ACP `ClientCapabilities`
+  schema defines. Each path is resolved against what the peer advertised on `initialize`.
+  A path the schema does not define is a **registration error**, so a typo fails at startup
+  instead of leaving the binding mysteriously unavailable.
+- The binding is then offered as *unavailable* whenever the connected client did not advertise
+  everything required; `availabilityReason` names the missing paths in ACP's spelling
+  (`fs.readTextFile`), and an `enable` change fails with `CAPABILITY_UNAVAILABLE`. The host
+  never substitutes host-local execution.
+- The factory reads `CLIENT` to build its toolset. `ClientSession` carries the live connection,
+  session id, `cwd`, and the advertised capabilities, so a factory can re-check a path with
+  `client_offers(session.capabilities, path)` before building anything.
+- Adding a new client-side capability needs no runtime change: the catalog, availability, and
+  policy code only resolve paths. If the family is new, the *client* also needs handlers for
+  it, and `hrns/client/io.py` is where this terminal keeps them.
+
+`hrns.client_terminal` is a working example; it also declares `shadows=("shell",)` so the host
+tool of that name is not composed while the binding is enabled. The shadow is applied when the
+binding is composed, never written into the other binding's configuration, so disabling the
+client binding restores the host tool as configured.
+
 ## Supported boundaries
 
 - Inline output only: no plugin screens, dialogs, marketplace or auto-installer.

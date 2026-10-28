@@ -36,11 +36,13 @@ from typing_extensions import TypeIs
 
 from hrns.protocol import HrnsError
 
+from .client_io import ClientSession
 from .todo import PlanChannel
 from .workspaces import local_workspace
 
 __all__ = [
     "ANSWERS",
+    "CLIENT",
     "MODEL",
     "PLAN",
     "SLOTS",
@@ -113,6 +115,10 @@ def _coerce_answerer(value: object) -> Answerer | None:
 
 def _coerce_plan_channel(value: object) -> PlanChannel | None:
     return value if isinstance(value, PlanChannel) else None
+
+
+def _coerce_client_session(value: object) -> ClientSession | None:
+    return value if isinstance(value, ClientSession) else None
 
 
 class ResourceBindings(Protocol):
@@ -208,6 +214,16 @@ PLAN: ResourceSlot[PlanChannel] = ResourceSlot(
     kind="service",
     description="Session-scoped plan channel that streams todos to the connected client.",
     coerce=_coerce_plan_channel,
+)
+CLIENT: ResourceSlot[ClientSession] = ResourceSlot(
+    name="client",
+    kind="service",
+    description=(
+        "The connected ACP client, for capabilities whose tools must run there instead of "
+        "in this host's workspace."
+    ),
+    missing_code="CAPABILITY_UNAVAILABLE",
+    coerce=_coerce_client_session,
 )
 
 _KIND_SLOTS: dict[str, ResourceSlot[object]] = {
@@ -333,7 +349,7 @@ class SlotRegistry:
         return slot
 
 
-SLOTS = SlotRegistry((WORKSPACE, MODEL, ANSWERS, PLAN))
+SLOTS = SlotRegistry((WORKSPACE, MODEL, ANSWERS, PLAN, CLIENT))
 
 
 # --- values --------------------------------------------------------------

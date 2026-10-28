@@ -13,8 +13,19 @@ Lay of the land:
 - `apply_changes` creates or edits one or many files in one call. Include all known file
   changes together, with one entry per file. Use `kind="write"` with complete `content`
   for new files; prefer `kind="edit"` with ordered `replacements` for existing files.
+"""
+
+SHELL_BULLET = """\
 - `shell` runs one foreground command in the working directory and returns its output and
   exit code. Use it for builds, tests, git, and package managers.
+"""
+
+CLIENT_COMMAND_BULLET = """\
+- `run_command` runs one foreground command in the connected client's terminal and returns
+  its output and exit code. Use it for builds, tests, git, and package managers.
+"""
+
+WORKING_RULES = """\
 
 Working rules:
 - Batch independent tool calls in one response: file reads and independent verification
@@ -30,3 +41,9 @@ Working rules:
   Repeat verification only after relevant changes, a failure, or a specific unresolved
   concern; avoid additional probes or repeated checks without a concrete reason.
 """
+
+
+def instructions(*, client_terminal: bool) -> str:
+    """Model-facing instructions with the command tool this composition actually exposes."""
+    bullet = CLIENT_COMMAND_BULLET if client_terminal else SHELL_BULLET
+    return f"{INSTRUCTIONS}{bullet}{WORKING_RULES}"

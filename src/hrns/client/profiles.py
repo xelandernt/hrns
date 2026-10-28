@@ -28,6 +28,7 @@ from .constants import (
     PROJECT_CONFIG_NAME,
 )
 from .errors import SecretMissing
+from .io import ClientIoMode, parse_client_io
 
 
 @dataclass(slots=True)
@@ -45,6 +46,7 @@ class Profile:
     token: str = ""  # secret reference for bearer token
     remote_cwd: str = ""  # bridge rewrite target
     auth_method: str = ""  # agent-advertised auth method id to try automatically
+    client_io: ClientIoMode = "off"  # what this terminal offers the agent: files and commands
     default_for_server: bool = False
     notes: str = ""
 
@@ -80,6 +82,8 @@ class Profile:
             data["remoteCwd"] = self.remote_cwd
         if self.auth_method:
             data["authMethod"] = self.auth_method
+        if self.client_io != "off":
+            data["clientIo"] = self.client_io
         if self.default_for_server:
             data["default"] = True
         if self.notes:
@@ -99,6 +103,7 @@ class Profile:
             "token",
             "remoteCwd",
             "authMethod",
+            "clientIo",
             "default",
             "notes",
         }
@@ -122,6 +127,7 @@ class Profile:
             token=str(data.get("token", "")),
             remote_cwd=str(data.get("remoteCwd", "")),
             auth_method=str(data.get("authMethod", "")),
+            client_io=parse_client_io(str(data.get("clientIo", "off"))),
             default_for_server=bool(data.get("default", False)),
             notes=str(data.get("notes", "")),
         )

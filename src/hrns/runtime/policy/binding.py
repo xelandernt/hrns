@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from acp import schema
 from pydantic_core import to_jsonable_python
 
 from hrns.protocol import (
@@ -18,6 +19,7 @@ from hrns.protocol import (
     canonical_hash,
 )
 
+from ..client_io import describe_missing, missing_client_capability
 from ..registry import PluginDescriptor
 
 
@@ -41,6 +43,8 @@ class BindingOffering:
     """Binding created at runtime through an ``add`` change (host-authorized)."""
     sequence: int = 0
     """Stable definition-then-creation ordering index for topological ties."""
+    client_capabilities: schema.ClientCapabilities | None = None
+    """What the connected ACP client advertised on ``initialize``, for ``requires_client``."""
 
     @property
     def change_mode(self) -> str:
@@ -60,7 +64,16 @@ class BindingOffering:
 
     @property
     def available(self) -> bool:
-        return self.policy.available and self.descriptor.compatibility.runtime_compatible
+        return (
+            self.policy.available
+            and self.descriptor.compatibility.runtime_compatible
+            and self.missing_client is None
+        )
+
+    @property
+    def missing_client(self) -> str | None:
+        """The path into ``clientCapabilities`` this binding needs and the client lacks."""
+        return missing_client_capability(self.client_capabilities, self.descriptor.requires_client)
 
     @property
     def availability_reason(self) -> str | None:
@@ -68,6 +81,10 @@ class BindingOffering:
             return "host policy marks this binding unavailable in this deployment"
         if not self.descriptor.compatibility.runtime_compatible:
             return "upstream compatibility constraints do not hold on this host"
+        missing = self.missing_client
+        if missing is not None:
+            advertised = describe_missing(self.descriptor.requires_client)
+            return f"the connected ACP client does not advertise {advertised}"
         return None
 
     def state(self) -> BindingState:
