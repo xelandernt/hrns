@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections import deque
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -13,8 +12,9 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import Static
 
 from ..constants import (
@@ -31,6 +31,7 @@ from .formatting import (
     bounded_user_text,
     truncate_text,
 )
+from .history import HistoryEntry, HistoryPane
 from .messages import OutputPending
 from .state import (
     is_shell_call,
@@ -140,22 +141,14 @@ class CommandResultBlock(Vertical):
         self._view = None
 
 
-class TranscriptPane(VerticalScroll):
-    """Streaming transcript with bounded retained widgets.
-
-    Assistant text is coalesced and flushed on a ticker. Tool cards are updated
-    in place by id. The pane keeps at most ``UI_MAX_TRANSCRIPT_BLOCKS`` blocks,
-    dropping oldest history first.
-    """
+class TranscriptPane(HistoryPane):
+    """Streaming transcript with a measured window over all retained block types."""
 
     can_focus = True
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # No deque maxlen: it silently drops items without running the prune
-        # loop, which is where the tool-card registry is kept consistent.
-        self._blocks: deque[Any] = deque()
-        self._tools: dict[str, "ToolCard"] = {}
+        self._tools: dict[str, HistoryEntry] = {}
         # Supplemental snapshots can arrive before the standard ACP tool-call start.
         self._pending_presentations: dict[str, Any] = {}
         self._stream: "MessageBlock | None" = None
@@ -169,7 +162,7 @@ class TranscriptPane(VerticalScroll):
         #: Expand reasoning text (the Thinking/Thought row appears either way).
         self.show_thoughts = False
         self._following = True
-        self._navigation_block: Any = None
+        self._navigation_block: HistoryEntry | None = None
         self.renderers = RendererRegistry()
         try:
             self.renderers.discover()
@@ -186,6 +179,12 @@ class TranscriptPane(VerticalScroll):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
+        self._schedule_visibility()
+        if self._compensating_scroll or (
+            self._following and self._anchored and not self._anchor_released
+        ):
+            return
+        self._scroll_anchor = None
         if new_value < old_value:
             self._following = False
         if self.is_vertical_scroll_end:
@@ -212,7 +211,7 @@ class TranscriptPane(VerticalScroll):
 
     def jump_to_latest(self) -> None:
         if self._navigation_block is not None:
-            self._navigation_block.remove_class("navigation-target")
+            self._navigation_block.block.remove_class("navigation-target")
         self._navigation_block = None
         self._following = True
         self.anchor()
@@ -220,27 +219,28 @@ class TranscriptPane(VerticalScroll):
 
     def jump_user(self, direction: int) -> None:
         messages = [
-            block
-            for block in self._blocks
-            if isinstance(block, MessageBlock) and block.role == "you"
+            entry
+            for entry in self._blocks
+            if isinstance(entry.block, MessageBlock) and entry.block.role == "you"
         ]
         if not messages:
             return
         if self._navigation_block in messages:
             index = messages.index(self._navigation_block) + direction
         else:
-            visible = [
-                i for i, block in enumerate(messages) if block.virtual_region.y <= self.scroll_y + 1
-            ]
+            visible = [i for i, block in enumerate(messages) if block.offset <= self.scroll_y + 1]
             index = (visible[-1] if visible else 0) + (1 if direction > 0 else -1)
             if self.is_vertical_scroll_end and direction < 0:
                 index = len(messages) - 1
         block = messages[max(0, min(index, len(messages) - 1))]
         self.reveal(block)
 
-    def reveal(self, block: Any) -> None:
+    def reveal(self, entry: HistoryEntry) -> None:
+        if entry not in self._blocks:
+            return
+        block = entry.block
         if self._navigation_block is not None:
-            self._navigation_block.remove_class("navigation-target")
+            self._navigation_block.block.remove_class("navigation-target")
         block.add_class("navigation-target")
         if isinstance(block, ToolCard):
             block._expanded = True
@@ -249,32 +249,33 @@ class TranscriptPane(VerticalScroll):
             block.collapsed = False
         self._following = False
         self.anchor(False)
-        self._navigation_block = block
-        self.scroll_to_widget(block, top=True, animate=False)
+        self._navigation_block = entry
+        self.reveal_entry(entry)
         self.focus()
 
-    def search_entries(self) -> list[tuple[Any, str, str]]:
-        entries: list[tuple[Any, str, str]] = []
-        for block in self._blocks:
+    def search_entries(self) -> list[tuple[HistoryEntry, str, str]]:
+        entries: list[tuple[HistoryEntry, str, str]] = []
+        for entry in self._blocks:
+            block = entry.block
             if isinstance(block, MessageBlock):
-                entries.append((block, block.role, block._text))
+                entries.append((entry, block.role, block._text))
             elif isinstance(block, ToolCard):
                 text = f"{block.data.get('title', 'Tool')}\n{block.data.get('detail') or block._body_text}"
-                entries.append((block, "tool", text))
+                entries.append((entry, "tool", text))
             elif isinstance(block, ReasoningBlock):
-                entries.append((block, "reasoning", block._text))
+                entries.append((entry, "reasoning", block._text))
             elif isinstance(block, CommandResultBlock):
-                entries.append((block, "command", block._text))
+                entries.append((entry, "command", block._text))
         return entries
 
     def latest_response(self) -> MessageBlock | None:
         return next(
             (
-                block
-                for block in reversed(self._blocks)
-                if isinstance(block, MessageBlock)
-                and block.role == "agent"
-                and block is not self._stream
+                entry.block
+                for entry in reversed(self._blocks)
+                if isinstance(entry.block, MessageBlock)
+                and entry.block.role == "agent"
+                and entry.block is not self._stream
             ),
             None,
         )
@@ -289,25 +290,55 @@ class TranscriptPane(VerticalScroll):
 
     def tool_data(self, tool_call_id: str) -> dict[str, Any] | None:
         """The current snapshot of one tool call, if its card is still in the transcript."""
-        card = self._tools.get(tool_call_id)
-        return dict(card.data) if card is not None else None
+        entry = self._tools.get(tool_call_id)
+        return (
+            dict(entry.block.data)
+            if entry is not None and isinstance(entry.block, ToolCard)
+            else None
+        )
+
+    def restore_block(self, block: Widget) -> Widget:
+        if isinstance(block, MessageBlock):
+            restored = MessageBlock(block.role, block._text)
+            restored._label.update(block._label.render())
+            restored._dropped = block._dropped
+            restored._marked = block._marked
+            if block._finished:
+                restored.finish()
+            if self._stream is block:
+                self._stream = restored
+        elif isinstance(block, ToolCard):
+            restored = self._tool_card(block.data)
+            restored._expanded = block._expanded
+            restored._started = block._started
+            restored._finished = block._finished
+        elif isinstance(block, ReasoningBlock):
+            restored = ReasoningBlock(expanded=not block.collapsed)
+            restored._text = block._text
+            restored._dropped = block._dropped
+            restored._marked = block._marked
+            restored._started = block._started
+            restored._finished = block._finished
+            restored._body.update(readable_text(block._text))
+            if self._thought is block:
+                self._thought = restored
+        elif isinstance(block, NoticeBlock):
+            restored = NoticeBlock(block.text, severity=block.severity)
+        elif isinstance(block, CommandResultBlock):
+            restored = self._command_block(block.data)
+            restored._header.update(block._header.render())
+        else:
+            raise TypeError(f"Unsupported history block: {type(block).__name__}")
+        if block.has_class("navigation-target"):
+            restored.add_class("navigation-target")
+        return restored
 
     # ------------------------------------------------------------- mounting
 
-    async def _mount_block(self, block: Any) -> None:
-        self._blocks.append(block)
-        await self.mount(block)
-        while len(self._blocks) > UI_MAX_TRANSCRIPT_BLOCKS:
-            oldest = self._blocks.popleft()
-            if isinstance(oldest, ToolCard):
-                # Evicted cards must not linger in the update registry.
-                self._tools.pop(oldest.tool_call_id, None)
-                self._pending_presentations.pop(oldest.tool_call_id, None)
-            if oldest is self._stream or oldest is self._thought:
-                self._blocks.append(oldest)
-                break
-            await oldest.remove()
+    async def _mount_block(self, block: Widget) -> HistoryEntry:
+        entry = await self._append_history(block)
         self._output_updated()
+        return entry
 
     async def add_user(self, text: str) -> None:
         text = bounded_user_text(text)
@@ -331,6 +362,9 @@ class TranscriptPane(VerticalScroll):
             return
         self._end_thought()
         self._end_agent_stream()
+        await self._mount_block(self._command_block(data, view=view))
+
+    def _command_block(self, data: dict[str, Any], *, view: Any = None) -> CommandResultBlock:
         if view is None and self.view_context is not None:
             from .extensions import CommandViewState, build_view
 
@@ -345,7 +379,7 @@ class TranscriptPane(VerticalScroll):
                     request_id=data.get("requestId"),
                 )
                 view = build_view(self.renderers, payload, "command", state, self.view_context)
-        await self._mount_block(CommandResultBlock(data, view=view))
+        return CommandResultBlock(data, view=view)
 
     async def append_agent_text(self, text: str, *, thought: bool = False) -> None:
         if not text:
@@ -386,6 +420,7 @@ class TranscriptPane(VerticalScroll):
             self._stream.finish()
         self._end_thought()
         self._stream = None
+        self._schedule_visibility()
 
     def flush(self) -> None:
         if not self._dirty or self._stream is None:
@@ -414,8 +449,7 @@ class TranscriptPane(VerticalScroll):
         if snapshot is not None:
             merged = merge_presentation(merged, snapshot)
         card = self._tool_card(merged)
-        self._tools[merged["toolCallId"]] = card
-        await self._mount_block(card)
+        self._tools[merged["toolCallId"]] = await self._mount_block(card)
 
     async def update_tool(self, event: Any) -> None:
         if self._replay:
@@ -429,8 +463,9 @@ class TranscriptPane(VerticalScroll):
             else:
                 self._replay_entries.append(("tool", merged))
             return
-        card = self._tools.get(event.tool_call_id)
-        if card is None:
+        entry = self._tools.get(event.tool_call_id)
+        card = entry.block if entry is not None else None
+        if not isinstance(card, ToolCard):
             await self.start_tool(event)
             return
         merged = merge_tool_event(card.data, event)
@@ -457,8 +492,7 @@ class TranscriptPane(VerticalScroll):
             self._replay_entries.append(("tool", data))
             return
         card = self._tool_card(data)
-        self._tools[data.get("toolCallId", "")] = card
-        await self._mount_block(card)
+        self._tools[data.get("toolCallId", "")] = await self._mount_block(card)
 
     async def apply_presentation(self, snapshot: Any) -> None:
         """Merge a supplemental snapshot into the matching live or replayed tool card."""
@@ -477,8 +511,9 @@ class TranscriptPane(VerticalScroll):
             self._pending_presentations[tool_id] = snapshot
             self._bound_pending()
             return
-        card = self._tools.get(tool_id)
-        if card is not None:
+        entry = self._tools.get(tool_id)
+        card = entry.block if entry is not None else None
+        if isinstance(card, ToolCard):
             card.update_from(merge_presentation(card.data, snapshot))
             self._output_updated()
             return
@@ -498,8 +533,7 @@ class TranscriptPane(VerticalScroll):
         self.post_message(OutputPending(False))
         self._tools.clear()
         self._pending_presentations.clear()
-        self._blocks.clear()
-        await self.remove_children()
+        await self.clear_history()
 
     # ---------------------------------------------------------------- replay
 
@@ -531,7 +565,8 @@ class TranscriptPane(VerticalScroll):
     def retained_tool_ids(self) -> list[str]:
         """Tool-call ids retained in the transcript, for passive presentation replay."""
         ids: list[str] = []
-        for block in self._blocks:
+        for entry in self._blocks:
+            block = entry.block
             if isinstance(block, ToolCard) and block.tool_call_id:
                 ids.append(block.tool_call_id)
         return ids
@@ -689,7 +724,10 @@ class ToolCard(Vertical):
         args_limit = max(32, width - 26) if width else 80
         args = tool_args_preview(self.data, limit=args_limit)
         text = Text()
-        text.append(f"{symbol} ", style="bold" if not pending else "dim")
+        text.append(
+            symbol, style="bold #ff8787" if status == "failed" else "bold" if not pending else "dim"
+        )
+        text.append(" ")
         if is_shell_call(self.data) and args:
             # Shell calls read like a prompt line: ``$ <command>``.
             text.append("$ ", style="bold")
@@ -783,7 +821,8 @@ class ToolCard(Vertical):
         preview_lines = preview_body.splitlines()
         full_lines = full_body.splitlines()
         self._preview.update(self._render_lines(preview_lines, limit=TOOL_PREVIEW_LINES))
-        self._full.update(self._render_lines(full_lines, limit=None))
+        if self._expanded:
+            self._full.update(self._render_lines(full_lines, limit=None))
 
         # A plugin view is the expanded body: collapsed cards keep the generic
         # preview (or nothing, while the call is still running) so a rich view can

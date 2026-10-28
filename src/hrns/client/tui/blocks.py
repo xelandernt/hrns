@@ -192,7 +192,9 @@ class MessageBlock(Vertical):
             self._copy_reset_timer = None
 
     def on_mount(self) -> None:
-        self.flush()
+        # Markdown mounts its initial document asynchronously; flush buffered text
+        # after that initialization so an empty initial document cannot replace it.
+        self.call_after_refresh(self.flush)
         self._copy_button.disabled = not self._finished
 
     def finish(self) -> None:
@@ -304,6 +306,7 @@ class ReasoningBlock(Collapsible):
 class NoticeBlock(Vertical):
     def __init__(self, text: str, *, severity: str = "info") -> None:
         self.severity = severity
+        self.text = text
         super().__init__()
         self._body = Static(self._render_notice(text, severity), markup=False)
         self.add_class("notice")

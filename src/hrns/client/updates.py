@@ -70,8 +70,7 @@ def tool_event(session_id: str, update: Any, *, is_new: bool) -> ToolEvent:
 def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
     raw_meta = dict(getattr(update, "field_meta", None) or {})
     if isinstance(update, UserMessageChunk):
-        # Live prompts are rendered by the composer action; user updates only
-        # arrive during session/load replay and belong in the transcript.
+        # User updates carry replayed prompts and steering delivered into live history.
         text = text_of(update.content) or ""
         if text:
             bus.publish(

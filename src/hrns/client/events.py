@@ -32,7 +32,7 @@ class ConnectionEvent:
 
 @dataclass(frozen=True, slots=True)
 class UserMessageReplayed:
-    """A prior user prompt replayed by ``session/load`` (not a new submission)."""
+    """A user prompt received through replay or delivered steering."""
 
     session_id: str
     text: str

@@ -11,8 +11,8 @@ from typing import Any
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
-from textual.widgets import Input, OptionList, Static
+from textual.containers import Vertical, VerticalScroll
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..interactions import (
@@ -119,6 +119,10 @@ class ApprovalBar(Vertical):
         self._detail = Static("", markup=False)
         self._detail.add_class("approval-detail")
         self._view_host = Vertical(classes="approval-view")
+        self._content = VerticalScroll(self._detail, self._view_host, classes="approval-content")
+        self._expand = Button("Show full call", classes="approval-expand", compact=True)
+        self._expanded = False
+        self._full_detail = ""
         self._view: Any = None
         self._options = OptionList(id="approval-options", markup=False)
         self._hint = Static("", markup=False)
@@ -127,8 +131,8 @@ class ApprovalBar(Vertical):
 
     def compose(self) -> ComposeResult:
         yield self._header
-        yield self._detail
-        yield self._view_host
+        yield self._content
+        yield self._expand
         yield self._options
         yield self._hint
 
@@ -152,6 +156,13 @@ class ApprovalBar(Vertical):
         """
         self._clear_view()
         self._request = request
+        self._expanded = False
+        self._expand.label = "Show full call"
+        self._full_detail = (
+            json.dumps(request.raw_input, indent=2, ensure_ascii=False, default=str)
+            if request.raw_input is not None
+            else request.detail or "No additional tool details were provided."
+        )
         header = Text()
         header.append("Approval needed", style="bold")
         header.append("  ")
@@ -186,6 +197,22 @@ class ApprovalBar(Vertical):
         if self._options.option_count:
             self._options.highlighted = 0
         self.call_after_refresh(self._options.focus)
+        self.call_after_refresh(self._content.scroll_home, animate=False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is not self._expand or self._request is None:
+            return
+        event.stop()
+        self._expanded = not self._expanded
+        self._detail.display = self._expanded or self._view is None
+        self._view_host.display = not self._expanded and self._view is not None
+        self._detail.update(
+            readable_text(self._full_detail, limit=len(self._full_detail))
+            if self._expanded
+            else _approval_detail(self._request)
+        )
+        self._expand.label = "Show preview" if self._expanded else "Show full call"
+        self._content.scroll_home(animate=False)
 
     def _build_view(
         self,
@@ -211,6 +238,7 @@ class ApprovalBar(Vertical):
         if view is None:
             return
         self._view = view
+        self._view_host.display = True
         self._detail.display = False
         if self.is_mounted and not view.widget.is_mounted:
             self._view_host.mount(view.widget)
@@ -218,6 +246,7 @@ class ApprovalBar(Vertical):
     def _clear_view(self) -> None:
         view, self._view = self._view, None
         self._detail.display = True
+        self._view_host.display = False
         if view is not None and view.widget.is_mounted:
             with contextlib.suppress(Exception):
                 view.widget.remove()

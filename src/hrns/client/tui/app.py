@@ -348,29 +348,42 @@ class HrnsApp(App[int]):
     }
     #approval {
         height: auto;
-        max-height: 16;
         margin: 0;
         padding: 0 1;
         background: $surface;
         border: round $warning 75%;
     }
     #approval .approval-header {
-        height: auto;
-        padding: 0 0 1 0;
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    #approval .approval-content {
+        height: 6;
+        max-height: 20vh;
+        scrollbar-size-vertical: 1;
+    }
+    #approval .approval-expand {
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0 1;
+        margin: 0;
+        width: auto;
     }
     #approval .approval-detail {
         height: auto;
-        max-height: 9;
         padding: 0 0 0 1;
         color: $foreground;
     }
     #approval .approval-view {
         height: auto;
-        max-height: 9;
         padding: 0 0 0 1;
     }
     #approval .approval-hint {
-        height: auto;
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
         color: $text-muted;
         padding: 0 0 0 1;
     }

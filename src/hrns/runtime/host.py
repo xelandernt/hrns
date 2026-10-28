@@ -12,13 +12,19 @@ import asyncio
 import contextlib
 import warnings
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from acp import schema
 from acp.exceptions import RequestError
 from acp.schema import DeleteSessionResponse
 from pydantic import ValidationError
 from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    EnqueuedMessagesEvent,
+    ModelRequest,
+    UserPromptPart,
+)
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
@@ -61,6 +67,9 @@ from .host_support import (
     _prompt_text,
 )
 from .session_service import SessionService
+
+if TYPE_CHECKING:
+    from pydantic_ai_harness.experimental.acp._adapter import _TurnState
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
@@ -275,6 +284,24 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
     async def delete_session(self, session_id: str, **kwargs: Any) -> DeleteSessionResponse | None:
         del kwargs
         return await self.sessions.delete_session(session_id)
+
+    async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
+        """Record and render steering at delivery time, in stream order."""
+        if isinstance(event, EnqueuedMessagesEvent):
+            for message in event.messages:
+                if not isinstance(message, ModelRequest):
+                    continue
+                for part in message.parts:
+                    if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                        await self._send_update(
+                            turn,
+                            schema.UserMessageChunk(
+                                session_update="user_message_chunk",
+                                content=schema.TextContentBlock(type="text", text=part.content),
+                            ),
+                        )
+            return
+        await super()._emit_event(turn, event)
 
     # --- prompts, effort, and metadata -----------------------------------
 
