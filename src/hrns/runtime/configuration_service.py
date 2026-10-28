@@ -18,7 +18,6 @@ from .host_support import HostPolicy, SessionDeps
 from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
 
 if TYPE_CHECKING:
-    from .acp_store import ScopedSessionStore
     from .definitions import AgentDefinition
     from .host import HrnsACPAgent
     from .registry import PluginRegistry
@@ -31,13 +30,11 @@ class ConfigurationService:
         self,
         *,
         agent: HrnsACPAgent,
-        store: ScopedSessionStore,
         policy: HostPolicy,
         definition: AgentDefinition,
         registry: PluginRegistry,
     ) -> None:
         self.agent = agent
-        self.store = store
         self.policy = policy
         self.definition = definition
         self.registry = registry
@@ -97,16 +94,14 @@ class ConfigurationService:
                 snapshot = composition.snapshot
                 cache[request.request_id] = (request_hash, snapshot)
                 return snapshot.to_wire()
-            record = await self.store.get(session_id)
-            if record is None:
+            cwd = await agent.sessions.cwd(session_id)
+            if cwd is None:
                 raise HrnsError("SESSION_CLOSED", "Load the session before updating configuration.")
             next_revision = composition.snapshot.selected_revision + 1
             refreshed = await compose_definition(
                 self.definition,
                 self.registry,
-                resources=agent.sessions.resources(
-                    self.policy.validate_cwd(record.cwd), session_id
-                ),
+                resources=agent.sessions.resources(self.policy.validate_cwd(cwd), session_id),
                 session_id=session_id,
                 principal=self.policy.principal,
                 deployment_id=self.policy.deployment_id,
@@ -134,10 +129,8 @@ class ConfigurationService:
                 toolsets=refreshed.config.toolsets,
                 workspace=refreshed.config.workspace,
             )
-            await self.store.update(
-                session_id,
-                bindings=refreshed.catalog.export_bindings(),
-                touch=True,
+            await agent.sessions.persist_metadata(
+                session_id, bindings=refreshed.catalog.export_bindings()
             )
             # Preserve the Composition/SessionDeps identity used by the adapter's live
             # sessions; only its contents are replaced.

@@ -48,10 +48,13 @@ override private execution methods and does not implement a second turn loop.
 
 - `session/new` validates `cwd` against host roots, rejects `additionalDirectories` and
   client MCP servers, parses `_meta.hrns.initialConfiguration`, and composes the initial agent.
+  The session is staged in memory with no row: it is written on its first prompt or an
+  explicit rename, so a session that is opened and never used is never listed.
 - `session/load` uses the stored cwd and selected bindings, validates scope, and lets the
   adapter replay the upstream transcript.
-- `session/prompt` delegates to the adapter. After a committed turn the host records a
-  fallback title (first prompt) and accumulated usage.
+- `session/prompt` delegates to the adapter. Before the turn runs, the host writes the staged
+  session (or keeps the existing row) and records a fallback title (first prompt); after a
+  committed turn it accumulates usage.
 - `session/cancel` and `session/close` delegate to the adapter; close cancels and discards
   live conversation state.
 - `session/list` and `session/delete` use the scoped host metadata table. Delete closes a live
@@ -87,6 +90,13 @@ One `acp_sessions` row stores:
 
 Reads and writes include the scope in every SQL predicate. A session id from another principal
 or deployment returns `None` and cannot be overwritten.
+
+The wrapper also stages a composed session (`stage`/`staged`/`discard`) and writes it on
+`materialize`. An empty `save` for a staged session is dropped: the adapter persists an empty
+session at `session/new` so a client could reopen it, which is exactly how unused sessions
+used to accumulate. A staged session is written by its first prompt, by a rename, or by its
+first non-empty save, whichever comes first; a draft that is never used is discarded with the
+connection.
 
 Save failures are logged and swallowed by the adapter; the next successful save catches up.
 There is no transactional turn commit, cross-connection ownership claim, revision table, turn

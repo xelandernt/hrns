@@ -180,7 +180,8 @@ actions: the runtime validates arguments and the active revision, then runs the 
 the session's existing turn lock without creating a model request or tool event.
 
 served through the `_hrns` extension; updates are applied in memory and persisted through
-the `bindings` column.
+the `bindings` column. A session that has not been prompted yet keeps them staged until its
+first prompt writes the row.
 
 Durability follows upstream semantics: save errors are logged, not fatal; there is no
 transactional turn commit or cross-connection lock. See [POSTGRES.md](POSTGRES.md),

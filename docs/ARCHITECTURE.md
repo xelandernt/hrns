@@ -83,6 +83,15 @@ selected model, and host metadata: cwd, title, effort, selected bindings, usage 
 timestamps. Reads and writes go through a `ScopedSessionStore` bound to one principal and one
 registered deployment, so another scope cannot load or overwrite a session.
 
+A session composed by `session/new` has no row yet. Its metadata is *staged* in the scoped
+store and written the first time the session is used: its first prompt (materialized before
+the run starts, and named after that prompt so a failed turn stays recognizable) or an
+explicit `_hrns/session/rename`. The adapter saves an empty session at creation so a client
+could reopen it before the first turn; the scoped store ignores that empty save, so opening
+`hrns` and quitting without typing leaves no history entry. Configuration, effort, and
+binding changes made before the first prompt live in memory with the staged session: they
+survive into the session if it is used, and are discarded with it if it never is.
+
 The store is deliberately not a second orchestration engine. `save` is called after each
 committed turn; a save failure is logged and the next successful save catches up. There is no
 transactional turn commit, cross-connection ownership claim, turn table, revision log, or

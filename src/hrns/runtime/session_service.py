@@ -70,6 +70,7 @@ class SessionService:
     # ------------------------------------------------------------- metadata
 
     def forget(self, session_id: str) -> None:
+        self.store.discard(session_id)
         self.compositions.pop(session_id, None)
         self.steering.pop(session_id, None)
         self.turn_usage.pop(session_id, None)
@@ -116,15 +117,70 @@ class SessionService:
     async def delete_session(self, session_id: str) -> DeleteSessionResponse:
         record = await self.store.get(session_id)
         if record is None:
-            raise RequestError.invalid_params(
-                {"sessionId": session_id, "reason": "no stored session with this id"}
+            reason = (
+                "the session has not been used yet, so nothing is stored to delete"
+                if self.store.staged(session_id) is not None
+                else "no stored session with this id"
             )
+            raise RequestError.invalid_params({"sessionId": session_id, "reason": reason})
         await self.agent.close_session(session_id)
         await self.store.delete(session_id)
         database = self.plan_database()
         if database is not None:
             await asyncio.to_thread(forget_plan, database, session_id)
         return DeleteSessionResponse()
+
+    async def ensure_persisted(self, session_id: str) -> bool:
+        """Write the row for a session that ``session/new`` only composed in memory.
+
+        Called at the moments a session becomes real: its first prompt, or an explicit rename.
+        The staged metadata is refreshed from the live composition first, so effort, model, and
+        binding changes made before the first prompt are kept with the session they belong to.
+        """
+        draft = self.store.staged(session_id)
+        if draft is None:
+            return await self.store.get(session_id) is not None
+        composition = self.compositions.get(session_id)
+        if composition is not None:
+            draft.effort = composition.effort.effort or EFFORT_DEFAULT
+            draft.bindings = composition.catalog.export_bindings()
+        await self.store.materialize(session_id)
+        return True
+
+    async def cwd(self, session_id: str) -> str | None:
+        """The workspace a session was opened in, staged or stored."""
+        draft = self.store.staged(session_id)
+        if draft is not None:
+            return draft.cwd
+        record = await self.store.get(session_id)
+        return record.cwd if record is not None else None
+
+    async def ensure_title(self, session_id: str, title: str) -> None:
+        """Name a session after its first prompt, so even a failed turn stays recognizable."""
+        if not title:
+            return
+        record = await self.store.get(session_id)
+        if record is None or record.title:
+            return
+        await self.store.update(session_id, title=title)
+        await self.send_session_title(session_id, title)
+
+    async def persist_metadata(
+        self,
+        session_id: str,
+        *,
+        effort: str | None = None,
+        bindings: Mapping[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """Record metadata for a staged session in memory, or write it once it has a row."""
+        draft = self.store.staged(session_id)
+        if draft is None:
+            await self.store.update(session_id, effort=effort, bindings=bindings, touch=True)
+            return
+        if effort is not None:
+            draft.effort = effort
+        if bindings is not None:
+            draft.bindings = dict(bindings)
 
     # -------------------------------------------------------- session state
 
@@ -398,21 +454,22 @@ class SessionService:
     async def compose_session(self, session: Any) -> Any:
         agent = self.agent
         record = await self.store.get(session.session_id)
+        draft = self.store.staged(session.session_id) if record is None else None
+        known = record or draft
         initial = None
-        saved = None
         effort = self.policy.default_effort
-        if record is None:
+        if known is None:
             initial = self.pending_initial
             if self.pending_effort is not None:
                 effort = self.pending_effort
         else:
-            saved = record.bindings
-            effort = record.effort or None
+            effort = known.effort or None
             if effort == EFFORT_DEFAULT:
                 effort = None
         cwd = self.policy.validate_cwd(session.cwd)
         handle = self.remember_client(session, cwd)
-        model = (record.model if record is not None else None) or agent._default_model
+        model = (known.model if known is not None else None) or agent._default_model
+        saved = known.bindings if known is not None else None
         support = self.policy.effort_support(model)
         composition = await compose_definition(
             self.definition,
@@ -434,7 +491,8 @@ class SessionService:
         composition.effort.model = model
         self.compositions[session.session_id] = composition
         if record is None:
-            await self.store.create(
+            # Composed, not yet used: the row is staged and written when the session is used.
+            self.store.stage(
                 SessionRecord(
                     session_id=session.session_id,
                     principal=self.policy.principal,
