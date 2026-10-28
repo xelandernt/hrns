@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import signal
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +28,10 @@ from acp.schema import (
 
 from hrns.protocol import FS_READ_TEXT_FILE, FS_WRITE_TEXT_FILE, TERMINAL
 from hrns.protocol.paths import read_only_path
+
+if os.name == "posix":
+    from os import getpgid, killpg
+    from signal import SIGKILL
 
 __all__ = [
     "ClientIo",
@@ -336,8 +339,8 @@ def _signal_tree(process: asyncio.subprocess.Process) -> None:
     Terminals are spawned as their own session (a process-group leader), so a bare
     ``process.kill()`` would orphan a build's own children and leave them running.
     """
-    if hasattr(os, "killpg"):
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    if os.name == "posix":
+        killpg(getpgid(process.pid), SIGKILL)
     else:  # pragma: no cover - Windows has no process groups here
         process.kill()
 
