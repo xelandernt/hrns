@@ -313,6 +313,7 @@ class ChatScreen(_HrnsScreen):
         ):
             return
         if isinstance(event, UserMessageReplayed):
+            self.prompts.steering_delivered(event.text)
             await pane.finish_message()
             await pane.add_user(event.text)
             return
@@ -341,6 +342,7 @@ class ChatScreen(_HrnsScreen):
             self._set_busy(True)
             return
         if isinstance(event, TurnCompleted):
+            self.prompts.recover_steering()
             if event.stop_reason not in {"end_turn", ""}:
                 self._queue_paused = True
             self.prompts.refresh_queue()
@@ -436,6 +438,7 @@ class ChatScreen(_HrnsScreen):
                 await self._notice(f"configuration update was malformed: {exc}", "error")
             return
         if isinstance(event, ConnectionEvent) and event.state == "lost":
+            self.prompts.recover_steering()
             self._queue_paused = True
             self.prompts.refresh_queue()
             self.connected = False

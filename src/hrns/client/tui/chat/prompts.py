@@ -25,6 +25,7 @@ class PromptWorkflow:
 
     def __init__(self, screen: ChatScreen) -> None:
         self.screen = screen
+        self._steering: dict[str, list[str]] = {}
 
     # ----------------------------------------------------------- suggestions
 
@@ -369,18 +370,22 @@ class PromptWorkflow:
             screen.query_one("#composer", Composer).focus()
             return False
         if screen.busy:
-            if not screen._attachments and await self.steer(text):
-                return True
-            if len(screen._queued_prompts) >= 20:
+            pending_count = len(self._steering.get(screen.session.session_id, []))
+            if len(screen._queued_prompts) + pending_count >= 20:
                 await screen._notice(
                     "The queue is full (20 follow-ups). Edit or remove an item.", "warning"
                 )
                 return False
-            screen._queued_prompts.append((text, list(screen._attachments)))
+            queued_attachments = list(screen._attachments)
             self.remember_prompt(text)
             screen._attachments.clear()
             screen.query_one("#composer", Composer).clear_composer()
             self.refresh_queue()
+            if not queued_attachments and await self.steer(text):
+                return True
+            screen._queued_prompts.append((text, queued_attachments))
+            self.refresh_queue()
+            await self.send_next_queued()
             return True
         attachments = list(screen._attachments) if attachments is None else attachments
         try:
@@ -426,17 +431,36 @@ class PromptWorkflow:
         screen = self.screen
         if not screen.client.extension.supports("_hrns/session/steer"):
             return False
+        pending = self._steering.setdefault(screen.session.session_id, [])
+        pending.append(text)
+        self.refresh_queue()
         try:
-            if not await screen.session.steer(text):
-                return False
+            accepted = await screen.session.steer(text)
         except HrnsClientError:
+            accepted = False
+        if not accepted:
+            # Delivery or turn completion can arrive before the RPC response.
+            if text not in pending:
+                return True
+            pending.remove(text)
+            self.refresh_queue()
             return False
-        pane = screen.query_one("#transcript", TranscriptPane)
-        await pane.finish_message()
-        await pane.add_user(text)
-        self.remember_prompt(text)
-        screen.query_one("#composer", Composer).clear_composer()
         return True
+
+    def steering_delivered(self, text: str) -> None:
+        pending = self._steering.get(self.screen.session.session_id, [])
+        if text in pending:
+            pending.remove(text)
+            self.refresh_queue()
+
+    def recover_steering(self) -> None:
+        """Keep undelivered messages available after cancellation or disconnect."""
+        pending = self._steering.pop(self.screen.session.session_id, [])
+        if pending:
+            self.screen._queued_prompts[:0] = [(text, []) for text in pending]
+            pending.clear()
+            self.screen._queue_paused = True
+            self.refresh_queue()
 
     # ---------------------------------------------------------------- drafts
 
@@ -470,7 +494,9 @@ class PromptWorkflow:
     def refresh_queue(self) -> None:
         screen = self.screen
         screen.query_one(PromptQueue).show_prompts(
-            screen._queued_prompts, paused=screen._queue_paused
+            screen._queued_prompts,
+            paused=screen._queue_paused,
+            steering=self._steering.get(screen.session.session_id, []),
         )
         screen.query_one(AttachmentBar).show_files(attachment_summary(screen._attachments))
 

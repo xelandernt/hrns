@@ -280,7 +280,7 @@ invents commands the agent did not advertise.
         entries = pane.search_entries()
 
         def reveal(index: int | None) -> None:
-            if index is not None and entries[index][0].is_mounted:
+            if index is not None:
                 pane.reveal(entries[index][0])
 
         screen.app.push_screen(

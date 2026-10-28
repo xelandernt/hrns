@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.strip import Strip
-from textual.widgets import Button, Label, OptionList, TextArea
+from textual.widgets import Button, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from .formatting import _restyle_spans
@@ -219,6 +219,7 @@ class PromptQueue(Vertical):
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
 
+        yield Static("", id="steering-pending", markup=False)
         yield Label("Queued follow-ups", id="queue-label")
         yield OptionList(id="queue-items", markup=False)
         with Horizontal():
@@ -226,8 +227,18 @@ class PromptQueue(Vertical):
             yield Button("Remove", id="queue-remove")
             yield Button("Resume queue", id="queue-resume")
 
-    def show_prompts(self, prompts: list[tuple[str, list[str]]], *, paused: bool) -> None:
-        self.display = bool(prompts)
+    def show_prompts(
+        self, prompts: list[tuple[str, list[str]]], *, paused: bool, steering: list[str]
+    ) -> None:
+        self.display = bool(prompts or steering)
+        pending = self.query_one("#steering-pending", Static)
+        pending.display = bool(steering)
+        pending.update(
+            "\n".join(f"Queued for agent: {' '.join(text.split())[:100]}" for text in steering)
+        )
+        self.query_one("#queue-label").display = bool(prompts)
+        self.query_one("#queue-items").display = bool(prompts)
+        self.query_one("Horizontal").display = bool(prompts)
         choices = self.query_one(OptionList)
         selected = choices.highlighted or 0
         choices.clear_options()
