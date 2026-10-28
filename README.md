@@ -128,7 +128,7 @@ ship by default; FastAPI hosting, Anthropic models and PostgreSQL are extras.
 | `hrns.protocol` | base | Versioned extension schemas and transport contracts |
 | `hrns.config` | base | Shared local settings using pydantic-settings |
 | `hrns.runtime` | base | Native agent definitions, plugin management, sessions, `hrns-host` and `hrns-local` |
-| `hrns.client` | base | Textual terminal, scripted ACP runner and stdio bridge |
+| `hrns.client` | base | Cyclopts CLI, Textual terminal, scripted ACP runner and stdio bridge |
 | `hrns.server` | `server` | FastAPI agent registration and in-process WebSocket ACP |
 
 Install only what you need, for example `pip install 'hrns[server]'`,
