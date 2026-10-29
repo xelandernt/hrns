@@ -67,6 +67,9 @@ class McpServerSettings(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     defer_loading: bool = False
+    description: str = Field(
+        default="", description="Describe when the model should load this MCP server."
+    )
     include_tools: list[str] = Field(default_factory=list)
     exclude_tools: list[str] = Field(default_factory=list)
     timeout: float = Field(default=10.0, gt=0)

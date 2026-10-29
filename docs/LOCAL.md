@@ -59,6 +59,9 @@ the prompt until the model asks for them. MCP tool calls follow the same approva
 the coder's write and shell tools, and an unreachable server is reported in `/mcp` instead
 of failing the whole turn.
 
+Use `--description "Search repositories, issues, and pull requests"` when adding a
+server, or set `description` in its TOML table, to tell the model when to load it.
+
 The first `npx` launch may spend time downloading the package, so give those servers a
 generous timeout (`--timeout 60`, or `timeout = 60.0` in the TOML). Later starts reuse the
 local npm cache and are near-instant.
@@ -75,6 +78,7 @@ timeout = 20.0
 [mcp.servers.github]
 url = "https://api.githubcopilot.com/mcp/"
 defer_loading = true
+description = "Search repositories, issues, and pull requests."
 
 [mcp.servers.github.headers]
 Authorization = "Bearer {env:GH_TOKEN}"
