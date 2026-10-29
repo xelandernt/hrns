@@ -351,6 +351,7 @@ def _mcp_add_command(
     oauth_callback_port: int | None = None,
     no_oauth: bool = False,
     defer: bool = False,
+    description: str = "",
     include_tools: ToolOption = None,
     exclude_tools: ExcludeToolOption = None,
     timeout: float = 10.0,
@@ -372,6 +373,7 @@ def _mcp_add_command(
             oauth_callback_port=oauth_callback_port,
             no_oauth=no_oauth,
             defer=defer,
+            description=description,
             include_tools=include_tools or [],
             exclude_tools=exclude_tools or [],
             timeout=timeout,
@@ -975,6 +977,7 @@ def _mcp_server(name: str, args: argparse.Namespace) -> McpServerSettings:
         headers=_mcp_pairs(args.header, "--header"),
         enabled=not args.disabled,
         defer_loading=args.defer,
+        description=args.description,
         include_tools=list(args.include_tools),
         exclude_tools=list(args.exclude_tools),
         timeout=args.timeout,
@@ -1037,6 +1040,8 @@ def _mcp_get(args: argparse.Namespace) -> int:
         return EXIT_OK
     print(f"{args.name} ({server.transport}, {'enabled' if server.enabled else 'disabled'})")
     print(f"target: {server_target(server)}")
+    if server.description:
+        print(f"description: {server.description}")
     if server.cwd:
         print(f"cwd: {server.cwd}")
     if server.env:

@@ -75,20 +75,6 @@ class GuardedMcpToolset(WrapperToolset[AgentDepsT]):
             raise ToolFailed(f"MCP server {self.server!r} failed: {exc}") from exc
 
 
-def _filter_tools(
-    toolset: AbstractToolset[AgentDepsT],
-    include: list[str],
-    exclude: list[str],
-) -> AbstractToolset[AgentDepsT]:
-    if include:
-        allowed = set(include)
-        return toolset.filtered(lambda _ctx, tool: tool.name in allowed)
-    if exclude:
-        blocked = set(exclude)
-        return toolset.filtered(lambda _ctx, tool: tool.name not in blocked)
-    return toolset
-
-
 def build_mcp_server(config: McpServerConfig, binding: BindingContext) -> AgentCapability:
     """Compose the transport, guard, and ``MCP`` capability for one server."""
     from pydantic_ai.capabilities import Capability
@@ -105,17 +91,21 @@ def build_mcp_server(config: McpServerConfig, binding: BindingContext) -> AgentC
             id=f"mcp.{name}",
             instructions=[f"MCP server {name} is unavailable: {exc}"],
         )
-    toolset = MCPToolset(
+    toolset: AbstractToolset[object] = MCPToolset(
         transport,
         id=f"mcp.{name}",
         include_instructions=True,
         init_timeout=config.timeout,
     )
-    toolset = _filter_tools(toolset, config.include_tools, config.exclude_tools)
+    if config.exclude_tools:
+        blocked = set(config.exclude_tools)
+        toolset = toolset.filtered(lambda _ctx, tool: tool.name not in blocked)
     guarded = GuardedMcpToolset(wrapped=toolset, server=name)
     return MCP(
         native=False,
         local=guarded,
         id=f"mcp.{name}",
+        description=config.description or None,
+        allowed_tools=config.include_tools or None,
         defer_loading=config.defer_loading,
     )

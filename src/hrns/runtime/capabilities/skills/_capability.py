@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import ClassVar
 
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai_skills import Skill, SkillPackage, SkillsCapability
 
 from ...registry import BindingContext
 from ...resources import ResourceSlot
@@ -31,8 +32,9 @@ class _ExplicitSkills(AbstractCapability[AgentDepsT]):
     a pasted one, a headless run, and an ACP client all behave like the picker.
     """
 
-    def __init__(self, directories: Sequence[str]) -> None:
+    def __init__(self, directories: Sequence[str], packages: Mapping[str, SkillPackage]) -> None:
         self._directories = tuple(directories)
+        self._packages = packages
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         text = latest_user_text(ctx.prompt, ctx.messages)
@@ -43,7 +45,38 @@ class _ExplicitSkills(AbstractCapability[AgentDepsT]):
         names = explicit_skill_names(text, by_name)
         if not names:
             return self
-        body = "\n\n".join(by_name[name].render() for name in names)
+        skills: list[Skill] = []
+        for name in names:
+            definition = by_name[name]
+            package = self._packages.get(name)
+            # Programmatic skills use the same bundled-file rendering as disk-backed
+            # skills, including user-only skills absent from the model's catalog.
+            body = definition.body.replace("${SKILL_DIR}", definition.directory).replace(
+                "${CLAUDE_SKILL_DIR}", definition.directory
+            )
+            skills.append(
+                Skill(
+                    name=name,
+                    description=definition.description,
+                    content=body,
+                    resources=list(package.resources) if package is not None else [],
+                    scripts=list(package.scripts) if package is not None else [],
+                )
+            )
+        rendered: dict[str, str] = {}
+
+        def collect(capability: AbstractCapability[AgentDepsT]) -> None:
+            if capability.id in names:
+                instructions = capability.get_instructions()
+                assert isinstance(instructions, list)
+                parts: list[str] = []
+                for part in instructions:
+                    assert isinstance(part, str)
+                    parts.append(part)
+                rendered[capability.id] = "\n\n".join(parts)
+
+        SkillsCapability[AgentDepsT](skills=skills).apply(collect)
+        body = "\n\n".join(rendered[name] for name in names)
         return Capability[AgentDepsT](
             id="hrns.skills.explicit",
             instructions=[f"{_HEADER}\n\n{body}"],
@@ -67,8 +100,10 @@ class AgentSkills(CombinedCapability[AgentDepsT]):
     def __init__(self, config: SkillsConfig | None = None, *, base: str | None = None) -> None:
         config = config if config is not None else SkillsConfig()
         directories = resolved_directories(config, base)
-        capabilities: list[AbstractCapability[AgentDepsT]] = [_ExplicitSkills(directories)]
         files = build_capability(directories)
+        capabilities: list[AbstractCapability[AgentDepsT]] = [
+            _ExplicitSkills(directories, files.packages if files is not None else {})
+        ]
         if files is not None:
             capabilities.append(files)
         super().__init__(
