@@ -39,6 +39,8 @@ class SessionLifecycleContext:
     cwd: str
     credential_id: str | None = None
     connection_id: str | None = None
+    #: Stable close/delete idempotency key; ``None`` for create/resume/suspend/queue.
+    operation_id: str | None = None
 
 
 class LifecycleEvent:
@@ -108,12 +110,15 @@ async def run_hook(
     except HrnsError:
         raise
     except Exception as exc:
+        details: dict[str, str] = {
+            "sessionId": context.session_id,
+            "hook": name,
+            "error": str(exc) or type(exc).__name__,
+        }
+        if context.operation_id is not None:
+            details["operationId"] = context.operation_id
         raise HrnsError(
             "LIFECYCLE_FAILED",
             f"The session {name} hook failed; the session cannot continue safely.",
-            {
-                "sessionId": context.session_id,
-                "hook": name,
-                "error": str(exc) or type(exc).__name__,
-            },
+            details,
         ) from exc

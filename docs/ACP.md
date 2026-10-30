@@ -23,8 +23,8 @@ ACP client ──stdio JSON-RPC──► hrns-host / hrns-local
 | `session/cancel` | Cancels the active turn through the adapter |
 | `session/load` | Restores native history/transcript from the scoped store and replays updates |
 | `session/list` | Lists this principal/deployment's sessions and titles |
-| `session/delete` | Closes live work and removes the stored session |
-| `session/close` | Cancels/drains work and discards live conversation state |
+| `session/delete` | Authoritatively cancels active/queued work, destroys resources, and removes reloadable state |
+| `session/close` | Authoritatively cancels active/queued work, destroys resources, and retains replayable state |
 | `session/set_config_option` | `model` and `effort` selections |
 | `session/set_mode`, `session/fork`, `session/resume` | Not advertised |
 | `authenticate` | No authentication method is advertised |

@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 __all__ = [
     "SESSION_COLUMNS",
     "DeploymentRecord",
+    "LIFECYCLE_OPERATION_KINDS",
+    "LIFECYCLE_PENDING_STATES",
     "OperationKind",
     "PromptState",
     "QueuedPrompt",
@@ -169,6 +171,21 @@ class OperationKind(StrEnum):
     PROMPT = "prompt"
     CONFIGURATION = "configuration"
     CONFIG_OPTION = "config_option"
+    CLOSE = "close"
+    DELETE = "delete"
+
+
+LIFECYCLE_OPERATION_KINDS: frozenset[OperationKind] = frozenset(
+    {OperationKind.CLOSE, OperationKind.DELETE}
+)
+LIFECYCLE_PENDING_STATES: frozenset[PromptState] = frozenset(
+    {
+        PromptState.QUEUED,
+        PromptState.CLAIMED,
+        PromptState.FAILED,
+        PromptState.UNCERTAIN,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +571,61 @@ class SessionStore(ABC):
     ) -> QueuedPrompt | None:
         """Re-queue an ``UNCERTAIN`` prompt from the same session as a fresh row."""
 
+    @abstractmethod
+    async def begin_lifecycle_operation(
+        self,
+        operation: QueuedPrompt,
+        *,
+        reuse_completed: bool,
+    ) -> QueuedPrompt:
+        """Create or reuse one durable close/delete intent for a session."""
+
+    @abstractmethod
+    async def get_lifecycle_operation(
+        self,
+        deployment_id: str,
+        session_id: str,
+        kind: OperationKind,
+        *,
+        principal: str | None = None,
+    ) -> QueuedPrompt | None:
+        """Return the latest lifecycle operation matching the requested intent."""
+
+    @abstractmethod
+    async def list_pending_lifecycle_operations(self) -> _PromptList:
+        """Return every retryable close/delete operation in durable order."""
+
+    @abstractmethod
+    async def claim_lifecycle_operation(
+        self,
+        prompt_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> QueuedPrompt | None:
+        """Claim or reclaim a retryable close/delete operation."""
+
+    @abstractmethod
+    async def cancel_queued_operations(
+        self,
+        deployment_id: str,
+        session_id: str,
+        *,
+        exclude_prompt_id: str,
+    ) -> _PromptList:
+        """Cancel queued non-lifecycle work after lifecycle admission has stopped."""
+
+    @abstractmethod
+    async def settle_lifecycle_operation(
+        self,
+        prompt_id: str,
+        state: PromptState,
+        *,
+        owner_id: str,
+        fence: int,
+        delete_session: bool,
+    ) -> bool:
+        """Atomically settle lifecycle state, release ownership, and optionally delete."""
+
     # -- Deployment revision metadata ----------------------------------------
 
     @abstractmethod
@@ -827,6 +899,75 @@ class ScopedSessionStore:
             new_prompt_id=new_prompt_id,
             owner_id=owner_id,
             fence=fence,
+        )
+
+    async def begin_lifecycle_operation(
+        self,
+        operation: QueuedPrompt,
+        *,
+        reuse_completed: bool,
+    ) -> QueuedPrompt:
+        return await self.backend.begin_lifecycle_operation(
+            operation,
+            reuse_completed=reuse_completed,
+        )
+
+    async def get_lifecycle_operation(
+        self,
+        session_id: str,
+        kind: OperationKind,
+        *,
+        principal: str | None = None,
+    ) -> QueuedPrompt | None:
+        return await self.backend.get_lifecycle_operation(
+            self.deployment_id,
+            session_id,
+            kind,
+            principal=principal,
+        )
+
+    async def list_pending_lifecycle_operations(self) -> _PromptList:
+        return [
+            operation
+            for operation in await self.backend.list_pending_lifecycle_operations()
+            if operation.deployment_id == self.deployment_id
+        ]
+
+    async def claim_lifecycle_operation(
+        self,
+        prompt_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> QueuedPrompt | None:
+        return await self.backend.claim_lifecycle_operation(prompt_id, owner_id, fence)
+
+    async def cancel_queued_operations(
+        self,
+        session_id: str,
+        *,
+        exclude_prompt_id: str,
+    ) -> _PromptList:
+        return await self.backend.cancel_queued_operations(
+            self.deployment_id,
+            session_id,
+            exclude_prompt_id=exclude_prompt_id,
+        )
+
+    async def settle_lifecycle_operation(
+        self,
+        prompt_id: str,
+        state: PromptState,
+        *,
+        owner_id: str,
+        fence: int,
+        delete_session: bool,
+    ) -> bool:
+        return await self.backend.settle_lifecycle_operation(
+            prompt_id,
+            state,
+            owner_id=owner_id,
+            fence=fence,
+            delete_session=delete_session,
         )
 
     async def update(

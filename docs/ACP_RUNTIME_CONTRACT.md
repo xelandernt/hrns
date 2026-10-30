@@ -55,10 +55,13 @@ override private execution methods and does not implement a second turn loop.
 - `session/prompt` delegates to the adapter. Before the turn runs, the host writes the staged
   session (or keeps the existing row) and records a fallback title (first prompt); after a
   committed turn it accumulates usage.
-- `session/cancel` and `session/close` delegate to the adapter; close cancels and discards
-  live conversation state.
-- `session/list` and `session/delete` use the scoped host metadata table. Delete closes a live
-  session before removing its row.
+- `session/cancel` delegates to the adapter. `session/close` and `session/delete` create a
+  durable lifecycle intent, stop new admission, cancel the active operation to `uncertain`,
+  cancel every unclaimed queued operation, close the adapter session, run `destroy`, release
+  the lease/fence, fan out one terminal notification, and forget the live composition.
+- `session/list` uses the scoped host metadata table. Close retains the replayable session row
+  and terminal queue ledger. Delete atomically removes the session row, non-lifecycle queue
+  rows, and lease while retaining only its completed idempotency receipt.
 - Model selection uses the adapter's standard `model` option. Reasoning effort is an
   additional standard `effort` option.
 - `_hrns/configuration/update` validates a complete change set, checks

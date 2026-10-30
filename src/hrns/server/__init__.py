@@ -30,7 +30,7 @@ from .deployments import (
     MissingDeployment,
 )
 from .errors import ACP_SUBPROTOCOL, MAX_MESSAGE_BYTES, ApiError
-from .models import AuthenticationDependency, Principal
+from .models import AuthenticationDependency, Principal, SessionLifecycleResult
 
 __all__ = [
     "__version__",
@@ -62,5 +62,6 @@ __all__ = [
     "SessionLease",
     "SessionLifecycleContext",
     "SessionLifecycleHooks",
+    "SessionLifecycleResult",
     "SessionPolicy",
 ]

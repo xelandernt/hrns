@@ -19,7 +19,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from hrns.protocol import HrnsError
+
 from .acp_store import (
+    LIFECYCLE_OPERATION_KINDS,
+    LIFECYCLE_PENDING_STATES,
     SESSION_COLUMNS,
     DeploymentRecord,
     OperationKind,
@@ -871,8 +875,9 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.cursor() as cursor:
                 await cursor.execute(
-                    "SELECT * FROM acp_session_leases WHERE session_id = %s AND deployment_id = %s",
-                    (session_id, deployment_id),
+                    "SELECT * FROM acp_session_leases WHERE session_id = %s "
+                    "AND deployment_id = %s AND expires_at > %s",
+                    (session_id, deployment_id, now_ms()),
                 )
                 row = await cursor.fetchone()
         return _lease_from_row(row) if row is not None else None
@@ -884,8 +889,24 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
-                    active = now_ms()
                     sequence = await self._next_sequence(cursor, prompt.session_id)
+                    await cursor.execute(
+                        "SELECT prompt_id FROM acp_prompt_queue WHERE deployment_id = %s "
+                        "AND session_id = %s AND kind = ANY(%s) AND state = ANY(%s) LIMIT 1",
+                        (
+                            prompt.deployment_id,
+                            prompt.session_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    if await cursor.fetchone() is not None:
+                        raise HrnsError(
+                            "SESSION_CLOSING",
+                            "The session is closing and no longer accepts new work.",
+                            {"sessionId": prompt.session_id},
+                        )
+                    active = now_ms()
                     stored = replace(
                         prompt,
                         sequence=sequence,
@@ -1126,6 +1147,266 @@ class PostgresSessionStore(SessionStore):
                     )
                     await _insert_prompt(cursor, stored)
                     return stored
+
+    async def begin_lifecycle_operation(
+        self,
+        operation: QueuedPrompt,
+        *,
+        reuse_completed: bool,
+    ) -> QueuedPrompt:
+        if operation.kind not in LIFECYCLE_OPERATION_KINDS:
+            raise ValueError("lifecycle operation must be close or delete")
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    sequence = await self._next_sequence(cursor, operation.session_id)
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
+                        "AND session_id = %s AND kind = ANY(%s) AND state = ANY(%s) "
+                        "ORDER BY sequence DESC LIMIT 1 FOR UPDATE",
+                        (
+                            operation.deployment_id,
+                            operation.session_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    row = await cursor.fetchone()
+                    if row is not None:
+                        current = _prompt_from_row(row)
+                        if current.kind is operation.kind:
+                            return current
+                        raise HrnsError(
+                            "SESSION_CONFLICT",
+                            "A different session lifecycle operation is already pending.",
+                            {
+                                "sessionId": operation.session_id,
+                                "operationId": current.prompt_id,
+                                "operation": current.kind.value,
+                            },
+                        )
+                    if reuse_completed:
+                        await cursor.execute(
+                            "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
+                            "AND session_id = %s AND principal = %s AND kind = %s "
+                            "AND state = %s ORDER BY sequence DESC LIMIT 1",
+                            (
+                                operation.deployment_id,
+                                operation.session_id,
+                                operation.principal,
+                                operation.kind.value,
+                                PromptState.COMPLETED.value,
+                            ),
+                        )
+                        completed = await cursor.fetchone()
+                        if completed is not None:
+                            return _prompt_from_row(completed)
+                    active = now_ms()
+                    stored = replace(
+                        operation,
+                        sequence=sequence,
+                        created_at=operation.created_at or active,
+                        updated_at=operation.updated_at or operation.created_at or active,
+                    )
+                    await _insert_prompt(cursor, stored)
+                    return stored
+
+    async def get_lifecycle_operation(
+        self,
+        deployment_id: str,
+        session_id: str,
+        kind: OperationKind,
+        *,
+        principal: str | None = None,
+    ) -> QueuedPrompt | None:
+        from psycopg import sql
+
+        clauses = [
+            sql.SQL("deployment_id = %s"),
+            sql.SQL("session_id = %s"),
+            sql.SQL("kind = %s"),
+        ]
+        values: list[object] = [deployment_id, session_id, kind.value]
+        if principal is not None:
+            clauses.append(sql.SQL("principal = %s"))
+            values.append(principal)
+        query = sql.SQL(
+            "SELECT * FROM acp_prompt_queue WHERE {} ORDER BY sequence DESC LIMIT 1"
+        ).format(sql.SQL(" AND ").join(clauses))
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.cursor() as cursor:
+                await cursor.execute(query, values)
+                row = await cursor.fetchone()
+        return _prompt_from_row(row) if row is not None else None
+
+    async def list_pending_lifecycle_operations(self) -> _PromptList:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE kind = ANY(%s) "
+                    "AND state = ANY(%s) ORDER BY created_at, prompt_id",
+                    (
+                        [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                        [state.value for state in LIFECYCLE_PENDING_STATES],
+                    ),
+                )
+                rows = await cursor.fetchall()
+        return [_prompt_from_row(row) for row in rows]
+
+    async def claim_lifecycle_operation(
+        self,
+        prompt_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> QueuedPrompt | None:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s "
+                        "AND kind = ANY(%s) AND state = ANY(%s) FOR UPDATE",
+                        (
+                            prompt_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    row = await cursor.fetchone()
+                    if row is None:
+                        return None
+                    current = _prompt_from_row(row)
+                    active = now_ms()
+                    attempt = current.attempt + 1
+                    await cursor.execute(
+                        "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
+                        "attempt = %s, updated_at = %s WHERE prompt_id = %s",
+                        (
+                            PromptState.CLAIMED.value,
+                            owner_id,
+                            fence,
+                            attempt,
+                            active,
+                            prompt_id,
+                        ),
+                    )
+                    return replace(
+                        current,
+                        state=PromptState.CLAIMED,
+                        owner_id=owner_id,
+                        fence=fence,
+                        attempt=attempt,
+                        updated_at=active,
+                    )
+
+    async def cancel_queued_operations(
+        self,
+        deployment_id: str,
+        session_id: str,
+        *,
+        exclude_prompt_id: str,
+    ) -> _PromptList:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "UPDATE acp_prompt_queue SET state = %s, updated_at = %s "
+                        "WHERE deployment_id = %s AND session_id = %s AND prompt_id != %s "
+                        "AND state = %s AND NOT (kind = ANY(%s)) RETURNING *",
+                        (
+                            PromptState.CANCELLED.value,
+                            now_ms(),
+                            deployment_id,
+                            session_id,
+                            exclude_prompt_id,
+                            PromptState.QUEUED.value,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                        ),
+                    )
+                    rows = await cursor.fetchall()
+        affected = [_prompt_from_row(row) for row in rows]
+        affected.sort(key=lambda prompt: prompt.sequence)
+        return affected
+
+    async def settle_lifecycle_operation(
+        self,
+        prompt_id: str,
+        state: PromptState,
+        *,
+        owner_id: str,
+        fence: int,
+        delete_session: bool,
+    ) -> bool:
+        if state not in (PromptState.COMPLETED, PromptState.FAILED):
+            raise ValueError("lifecycle operation must settle as completed or failed")
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s AND state = %s "
+                        "AND owner_id = %s AND fence = %s AND kind = ANY(%s) FOR UPDATE",
+                        (
+                            prompt_id,
+                            PromptState.CLAIMED.value,
+                            owner_id,
+                            fence,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                        ),
+                    )
+                    row = await cursor.fetchone()
+                    if row is None:
+                        return False
+                    operation = _prompt_from_row(row)
+                    if delete_session:
+                        await cursor.execute(
+                            "DELETE FROM acp_sessions WHERE session_id = %s AND deployment_id = %s",
+                            (operation.session_id, operation.deployment_id),
+                        )
+                        await cursor.execute(
+                            "DELETE FROM acp_prompt_queue WHERE session_id = %s "
+                            "AND deployment_id = %s AND prompt_id != %s",
+                            (operation.session_id, operation.deployment_id, prompt_id),
+                        )
+                        await cursor.execute(
+                            "DELETE FROM acp_session_leases WHERE session_id = %s "
+                            "AND deployment_id = %s AND owner_id = %s AND fence = %s",
+                            (
+                                operation.session_id,
+                                operation.deployment_id,
+                                owner_id,
+                                fence,
+                            ),
+                        )
+                    else:
+                        await cursor.execute(
+                            "UPDATE acp_session_leases SET expires_at = 0 WHERE session_id = %s "
+                            "AND deployment_id = %s AND owner_id = %s AND fence = %s",
+                            (
+                                operation.session_id,
+                                operation.deployment_id,
+                                owner_id,
+                                fence,
+                            ),
+                        )
+                    await cursor.execute(
+                        "UPDATE acp_prompt_queue SET state = %s, updated_at = %s "
+                        "WHERE prompt_id = %s AND state = %s AND owner_id = %s AND fence = %s",
+                        (
+                            state.value,
+                            now_ms(),
+                            prompt_id,
+                            PromptState.CLAIMED.value,
+                            owner_id,
+                            fence,
+                        ),
+                    )
+                    changed = cursor.rowcount
+        return bool(changed)
 
     # -- Deployment revision metadata ----------------------------------------
 

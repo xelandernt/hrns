@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
-from hrns.runtime import AgentDefinition
+from hrns.runtime import AgentDefinition, OperationKind
 
 
 @dataclass(frozen=True)
@@ -73,3 +73,13 @@ class RegisteredAgent:
         import json
 
         return json.dumps([self.id], separators=(",", ":"))
+
+
+@dataclass(frozen=True, slots=True)
+class SessionLifecycleResult:
+    """Completed authoritative embedding close/delete result."""
+
+    operation_id: str
+    session_id: str
+    agent_id: str
+    operation: OperationKind

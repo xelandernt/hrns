@@ -20,7 +20,9 @@ from hrns.runtime import (
     DeploymentRecord,
     HrnsError,
     NoopLifecycleHooks,
+    OperationKind,
     PluginRegistry,
+    PromptState,
     RequestContext,
     ResourceBindings,
     ResourceSet,
@@ -39,7 +41,12 @@ from .catalog import CursorCodec
 from .connections import ConnectionInfo, ConnectionRegistry
 from .deployments import DeploymentConflict, DeploymentRegistry, DeploymentRevision
 from .errors import ApiError
-from .models import AuthenticationDependency, Principal, RegisteredAgent
+from .models import (
+    AuthenticationDependency,
+    Principal,
+    RegisteredAgent,
+    SessionLifecycleResult,
+)
 
 
 async def _local_principal() -> Principal:
@@ -445,12 +452,172 @@ class AgentServer:
                     principal.id, agent.session_namespace, session_id, temporary
                 )
 
+    async def close_session(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+    ) -> SessionLifecycleResult:
+        """Authoritatively close a scoped session and retain its reloadable state."""
+        return await self._terminate_session(
+            principal,
+            agent_id,
+            session_id,
+            OperationKind.CLOSE,
+        )
+
+    async def delete_session(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+    ) -> SessionLifecycleResult:
+        """Authoritatively close a scoped session and delete all reloadable state."""
+        return await self._terminate_session(
+            principal,
+            agent_id,
+            session_id,
+            OperationKind.DELETE,
+        )
+
+    async def _terminate_session(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+        kind: OperationKind,
+    ) -> SessionLifecycleResult:
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        namespace = agent.session_namespace
+        actor_lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
+        request = RequestContext(
+            principal=principal.id,
+            credential_id=principal.credential_id,
+            agent_id=agent_id,
+        )
+        request_token = current_request.set(request)
+        try:
+            async with actor_lock:
+                host = self._actors.get(namespace)
+                temporary = host is None
+                if host is None:
+                    host = self._build_host(agent, principal)
+                    self._actors[namespace] = host
+                try:
+                    operation = await host.terminate_session(session_id, kind)
+                finally:
+                    if temporary and not host.has_pending_lifecycle_tasks():
+                        if self._actors.get(namespace) is host:
+                            self._actors.pop(namespace, None)
+                        await host.shutdown()
+        except HrnsError as exc:
+            raise self._embedding_lifecycle_error(exc) from exc
+        finally:
+            current_request.reset(request_token)
+        return SessionLifecycleResult(
+            operation_id=operation.prompt_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            operation=kind,
+        )
+
+    async def reconcile_session_lifecycle(self) -> tuple[SessionLifecycleResult, ...]:
+        """Finish durable close/delete intents left by cancellation or process loss."""
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        results: list[SessionLifecycleResult] = []
+        for operation in await self.store.list_pending_lifecycle_operations():
+            agent = next(
+                (
+                    revision.agent
+                    for agent_id in self.deployments.agent_ids()
+                    for revision in self.deployments.revisions(agent_id)
+                    if revision.agent.session_namespace == operation.deployment_id
+                    and (revision.agent_id, revision.version) in self._native_deployments
+                ),
+                None,
+            )
+            if agent is None:
+                raise ApiError(
+                    "CONFLICT",
+                    "A pending session lifecycle operation has no native deployment revision.",
+                    details={
+                        "sessionId": operation.session_id,
+                        "operationId": operation.prompt_id,
+                    },
+                )
+            principal = Principal(operation.principal, credential_id=operation.credential_id)
+            request = RequestContext(
+                principal=operation.principal,
+                credential_id=operation.credential_id,
+                connection_id=operation.connection_id,
+                request_id=operation.prompt_id,
+                agent_id=agent.id,
+            )
+            request_token = current_request.set(request)
+            actor_lock = self._actor_locks.setdefault(operation.deployment_id, asyncio.Lock())
+            try:
+                async with actor_lock:
+                    host = self._actors.get(operation.deployment_id)
+                    temporary = host is None
+                    if host is None:
+                        host = self._build_host(agent, principal)
+                        self._actors[operation.deployment_id] = host
+                    try:
+                        completed = await host.terminate_session(
+                            operation.session_id,
+                            operation.kind,
+                            operation=operation,
+                            authorize=False,
+                        )
+                    finally:
+                        if temporary and not host.has_pending_lifecycle_tasks():
+                            if self._actors.get(operation.deployment_id) is host:
+                                self._actors.pop(operation.deployment_id, None)
+                            await host.shutdown()
+            except HrnsError as exc:
+                raise self._embedding_lifecycle_error(exc) from exc
+            finally:
+                current_request.reset(request_token)
+            results.append(
+                SessionLifecycleResult(
+                    operation_id=completed.prompt_id,
+                    session_id=completed.session_id,
+                    agent_id=agent.id,
+                    operation=completed.kind,
+                )
+            )
+        return tuple(results)
+
+    @staticmethod
+    def _embedding_lifecycle_error(error: HrnsError) -> ApiError:
+        if error.code == "SESSION_NOT_FOUND":
+            return ApiError(
+                "NOT_FOUND",
+                "No session with this id is available to this principal.",
+            )
+        if error.code in {"SESSION_READ_ONLY", "POLICY_DENIED"}:
+            return ApiError("FORBIDDEN", error.message, details=error.details)
+        if error.code in {"SESSION_HELD", "SESSION_CONFLICT", "SESSION_CLOSING"}:
+            return ApiError("CONFLICT", error.message, details=error.details)
+        if error.code == "LIFECYCLE_FAILED":
+            return ApiError(
+                "LIFECYCLE_FAILED",
+                error.message,
+                details=error.details,
+                status_code=500,
+            )
+        return ApiError(
+            "INTERNAL_ERROR",
+            error.message,
+            details={"hrnsCode": error.code, **error.details},
+        )
+
     def _host_for_deployment(self, deployment_id: str) -> HrnsACPAgent | None:
         """A live actor for this logical agent, regardless of which revision opened it."""
-        return next(
-            (host for host in self._hosts.values() if host.policy.deployment_id == deployment_id),
-            None,
-        )
+        return self._actors.get(deployment_id)
 
     async def _admin_lease(
         self, principal: Principal, deployment_id: str, session_id: str
@@ -464,14 +631,22 @@ class AgentServer:
         if await self.store.get(principal.id, deployment_id, session_id) is None:
             # Do not create a coordination row for a session that does not exist.
             return None
-        host = next(
-            (
-                candidate
-                for candidate in self._hosts.values()
-                if candidate.policy.deployment_id == deployment_id
-            ),
-            None,
-        )
+        for kind in (OperationKind.DELETE, OperationKind.CLOSE):
+            operation = await self.store.get_lifecycle_operation(
+                deployment_id,
+                session_id,
+                kind,
+            )
+            if operation is not None and operation.state is not PromptState.COMPLETED:
+                raise ApiError(
+                    "CONFLICT",
+                    "The session is closing and no longer accepts administrative writes.",
+                    details={
+                        "sessionId": session_id,
+                        "operationId": operation.prompt_id,
+                    },
+                )
+        host = self._actors.get(deployment_id)
         if host is not None:
             try:
                 await host.acquire_session_lease(session_id)
