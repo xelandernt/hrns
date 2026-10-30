@@ -47,6 +47,15 @@ from .models import (
     WireModel,
     changes_adapter,
 )
+from .session_updates import (
+    SessionUpdateLedger,
+    SessionUpdatePosition,
+    SessionUpdateProtocolError,
+    maybe_session_update_position,
+    order_session_updates,
+    session_update_position,
+    with_session_update_position,
+)
 from .transport import (
     EXTENSION_METHODS,
     EXTENSION_VERSION,
@@ -101,6 +110,13 @@ __all__ = [
     "ResourceNeed",
     "WireModel",
     "changes_adapter",
+    "SessionUpdatePosition",
+    "SessionUpdateLedger",
+    "SessionUpdateProtocolError",
+    "maybe_session_update_position",
+    "order_session_updates",
+    "session_update_position",
+    "with_session_update_position",
     "HrnsError",
     "EXTENSION_METHODS",
     "EXTENSION_VERSION",

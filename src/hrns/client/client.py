@@ -37,7 +37,11 @@ from hrns.protocol import (
     TERMINAL,
     CommandInvokeResponse,
     ConfigurationSnapshot,
+    SessionUpdateLedger,
+    SessionUpdateProtocolError,
     ToolPresentationSnapshot,
+    maybe_session_update_position,
+    order_session_updates,
 )
 
 from .bus import EventBus
@@ -120,6 +124,8 @@ class HrnsAcpClient:
         self.auth_methods: list[Any] = []
 
         self._inflight_updates = 0
+        self._session_update_ledgers: dict[str, SessionUpdateLedger[Any]] = {}
+        self._session_load_buffers: dict[str, list[Any]] = {}
         self.sessions = SessionLifecycle(self)
         self.turns = TurnService(self)
         self.extensions = ExtensionsApi(
@@ -373,9 +379,50 @@ class HrnsAcpClient:
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self._inflight_updates += 1
         try:
+            if maybe_session_update_position(update) is not None:
+                ledger = self._session_update_ledgers.setdefault(
+                    session_id,
+                    SessionUpdateLedger(),
+                )
+                try:
+                    if not ledger.accept(update):
+                        return
+                except SessionUpdateProtocolError as exc:
+                    raise ProtocolError(str(exc)) from exc
+            buffer = self._session_load_buffers.get(session_id)
+            if buffer is not None:
+                buffer.append(update)
+                return
             dispatch_update(self.bus, session_id, update)
         finally:
             self._inflight_updates -= 1
+
+    def reset_session_updates(self, session_id: str) -> None:
+        """Start a fresh authoritative load for one session."""
+        self._session_update_ledgers.pop(session_id, None)
+
+    def begin_session_load(self, session_id: str) -> None:
+        """Buffer replay/live overlap until the load response establishes completion."""
+        self.reset_session_updates(session_id)
+        self._session_load_buffers[session_id] = []
+
+    def complete_session_load(self, session_id: str) -> None:
+        """Publish one authoritative, deduplicated replay in server revision order."""
+        buffered = self._session_load_buffers.pop(session_id, [])
+        positioned = [
+            update for update in buffered if maybe_session_update_position(update) is not None
+        ]
+        unpositioned = [
+            update for update in buffered if maybe_session_update_position(update) is None
+        ]
+        for update in order_session_updates(positioned):
+            dispatch_update(self.bus, session_id, update)
+        for update in unpositioned:
+            dispatch_update(self.bus, session_id, update)
+
+    def abort_session_load(self, session_id: str) -> None:
+        """Discard an incomplete replay; it is never authoritative client state."""
+        self._session_load_buffers.pop(session_id, None)
 
     async def request_permission(
         self,

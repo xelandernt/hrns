@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     owner TEXT,
     collaborators TEXT NOT NULL DEFAULT '[]',
     client_capabilities INTEGER,
+    next_update_revision INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     last_active_at INTEGER NOT NULL
 );
@@ -123,6 +124,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("owner", "TEXT"),
     ("collaborators", "TEXT NOT NULL DEFAULT '[]'"),
     ("client_capabilities", "INTEGER"),
+    ("next_update_revision", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 _ADDED_QUEUE_COLUMNS: tuple[tuple[str, str], ...] = (("kind", "TEXT NOT NULL DEFAULT 'prompt'"),)
@@ -717,6 +719,49 @@ class SQLiteSessionStore(SessionStore):
         if row is None:
             return None
         return decode_session(row["messages"], row["updates"], row["model"])
+
+    async def reserve_update_revisions(
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        count: int,
+        *,
+        fence: int | None = None,
+    ) -> int:
+        del principal
+        if count < 1:
+            raise ValueError("update revision reservation count must be positive")
+
+        def operation() -> int:
+            connection = self._connect()
+            with _immediate(connection):
+                row = connection.execute(
+                    "SELECT deployment_id, next_update_revision FROM acp_sessions "
+                    "WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise PermissionError("session was not created in this scope")
+                if row["deployment_id"] != deployment_id:
+                    raise PermissionError("session belongs to another deployment")
+                if fence is not None:
+                    lease = connection.execute(
+                        "SELECT fence FROM acp_session_leases "
+                        "WHERE session_id = ? AND deployment_id = ?",
+                        (session_id, deployment_id),
+                    ).fetchone()
+                    if lease is None or int(lease["fence"]) != fence:
+                        raise _session_conflict(deployment_id, session_id, fence)
+                first = int(row["next_update_revision"])
+                connection.execute(
+                    "UPDATE acp_sessions SET next_update_revision = ? WHERE session_id = ?",
+                    (first + count, session_id),
+                )
+                return first
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, operation)
 
     # -- Cross-worker session leases -----------------------------------------
 

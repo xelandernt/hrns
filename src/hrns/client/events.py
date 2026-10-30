@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from .constants import CLIENT_NAME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from hrns.protocol import ConfigurationSnapshot
+    from hrns.protocol import ConfigurationSnapshot, SessionUpdatePosition
 
 #: Rendered on the header, like ``{"kind": "local", "label": "/work/dir"}``.
 LocationInfo = dict[str, str]
@@ -37,6 +37,7 @@ class UserMessageReplayed:
     session_id: str
     text: str
     message_id: str | None = None
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,7 @@ class AgentTextChunk:
     message_id: str | None = None
     thought: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,7 @@ class ToolEvent:
     raw_input: Any = None
     raw_output: Any = None
     meta: dict[str, Any] = field(default_factory=dict)
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +77,7 @@ class PlanChanged:
     session_id: str
     entries: tuple[tuple[str, str, str], ...] = ()  # (content, priority, status)
     cleared: bool = False
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +86,7 @@ class CommandsUpdated:
 
     session_id: str
     commands: tuple[dict[str, Any], ...] = ()
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +113,7 @@ class ModesUpdated:
     session_id: str
     current_mode_id: str
     available_modes: tuple[dict[str, str], ...] = ()
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +122,7 @@ class ConfigOptionsUpdated:
 
     session_id: str
     options: tuple[dict[str, Any], ...] = ()
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +139,7 @@ class UsageUpdated:
 
     session_id: str
     summary: dict[str, Any]
+    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,3 +191,4 @@ class SessionsListed:
 class SessionInfoChanged:
     session_id: str
     title: str | None = None
+    position: SessionUpdatePosition | None = None

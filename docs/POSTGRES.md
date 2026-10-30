@@ -44,19 +44,22 @@ One `acp_sessions` table stores:
 - ACP `session/update` transcript entries;
 - selected model;
 - cwd, title, effort, selected bindings, usage totals, timestamps.
+- the next non-reusable session update revision.
 
-There are no turn, revision, transaction, workspace, or transcript-owner tables. SQLite and
+Every persisted ACP update carries its stable `_meta.hrns.update.updateId` and monotonic
+`revision`. Revision blocks are reserved under a row lock before live delivery, so a crash may
+leave a gap but cannot reuse a position. There are no turn, revision-log, workspace, or
+transcript-owner tables. SQLite and
 PostgreSQL use the same row shape and scope predicates. Existing databases are opened
-without conversion; only `acp_sessions` is created or used.
+with an additive `next_update_revision` column migration.
 
 The shared connection runs in autocommit mode. Reads therefore never leave an idle
 transaction open, and multi-statement mutations use an explicit transaction that rolls back
 on database errors or cancellation. A failed statement does not poison later sessions.
 
-`save` failures are logged and swallowed by the adapter; the next successful save catches up.
-There is no transactional turn commit or cross-connection ownership claim. Simultaneous
-writers are last-write-wins. These are the upstream ACP persistence semantics, not a hrns
-durability guarantee.
+HRNS fails committed transcript saves with `SESSION_DURABILITY_FAILED`; it does not report a
+durable update as successfully committed when the row cannot be written. Lease fencing still
+rejects stale writers with `SESSION_CONFLICT`.
 
 ## Configuration
 

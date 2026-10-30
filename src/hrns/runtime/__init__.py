@@ -23,6 +23,12 @@ from hrns.protocol import (
     EnableChange,
     HrnsError,
     PluginInfo,
+    SessionUpdateLedger,
+    SessionUpdatePosition,
+    SessionUpdateProtocolError,
+    maybe_session_update_position,
+    order_session_updates,
+    session_update_position,
 )
 
 from . import _warnings  # noqa: F401  (the pinned ACP adapter is experimental)
@@ -117,6 +123,12 @@ __all__ = [
     "EnableChange",
     "HrnsError",
     "PluginInfo",
+    "SessionUpdatePosition",
+    "SessionUpdateLedger",
+    "SessionUpdateProtocolError",
+    "maybe_session_update_position",
+    "order_session_updates",
+    "session_update_position",
     # command authoring
     "Command",
     "CommandBinding",

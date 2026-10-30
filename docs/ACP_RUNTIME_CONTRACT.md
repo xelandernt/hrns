@@ -50,8 +50,8 @@ override private execution methods and does not implement a second turn loop.
   client MCP servers, parses `_meta.hrns.initialConfiguration`, and composes the initial agent.
   The session is staged in memory with no row: it is written on its first prompt or an
   explicit rename, so a session that is opened and never used is never listed.
-- `session/load` uses the stored cwd and selected bindings, validates scope, and lets the
-  adapter replay the upstream transcript.
+- `session/load` subscribes before capturing a live replay cut, validates every public update
+  position, and replays the transcript with its original server identity and revision.
 - `session/prompt` delegates to the adapter. Before the turn runs, the host writes the staged
   session (or keeps the existing row) and records a fallback title (first prompt); after a
   committed turn it accumulates usage.
@@ -87,6 +87,7 @@ One `acp_sessions` row stores:
 - ACP `session/update` transcript entries;
 - selected model;
 - cwd, title, effort, selected binding state, usage totals, timestamps.
+- the next non-reusable session update revision.
 
 Reads and writes include the scope in every SQL predicate. A session id from another principal
 or deployment returns `None` and cannot be overwritten.
@@ -98,9 +99,11 @@ used to accumulate. A staged session is written by its first prompt, by a rename
 first non-empty save, whichever comes first; a draft that is never used is discarded with the
 connection.
 
-Save failures are logged and swallowed by the adapter; the next successful save catches up.
-There is no transactional turn commit, cross-connection ownership claim, revision table, turn
-table, or transcript journal. Simultaneous writers are last-write-wins.
+HRNS overrides the adapter's best-effort save behavior: a committed transcript save failure is
+a structured `SESSION_DURABILITY_FAILED` failure instead of success-shaped delivery. Each
+transcript update carries `_meta.hrns.update = {schemaVersion, updateId, revision}`. SQLite and
+PostgreSQL reserve revision blocks transactionally, so revisions may have gaps but are never
+reused. The transcript JSON remains the journal; there is no separate turn table.
 
 ## 5. Feature decisions
 
