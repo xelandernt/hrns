@@ -13,12 +13,23 @@ from hrns.protocol import (
     CommandInvokeResponse,
     ConfigurationSnapshot,
     PresentationUpdated,
+    QueueEditRequest,
+    QueueRemoveRequest,
+    QueueSnapshot,
+    QueueState,
+    QueueUpdate,
+    QueueUpdateProtocolError,
     ToolPresentationSnapshot,
 )
 
 from .bus import EventBus
 from .errors import HrnsClientError, ProtocolError
-from .events import ConfigurationChanged, PluginCommandsListed, ToolPresentationUpdated
+from .events import (
+    ConfigurationChanged,
+    PluginCommandsListed,
+    QueueChanged,
+    ToolPresentationUpdated,
+)
 from .extension import (
     CapabilityListResult,
     CommandListResult,
@@ -30,6 +41,8 @@ from .extension import (
     parse_configuration_snapshot,
     parse_plugin_list,
     parse_presentation_list,
+    parse_queue_snapshot,
+    parse_queue_update,
     validate_changes,
 )
 from .payloads import checked_limit
@@ -52,6 +65,25 @@ class ExtensionsApi:
         self._check_local_add = check_local_add
         self._bus = bus
         self._answer_questions = answer_questions
+        self._queues: dict[str, QueueState] = {}
+
+    def _queue(self, session_id: str) -> QueueState:
+        return self._queues.setdefault(session_id, QueueState(session_id))
+
+    def _publish_queue(self, session_id: str) -> None:
+        state = self._queue(session_id)
+        items = state.ordered()
+        revision = max(
+            state.snapshot_revision,
+            max((item.revision for item in items), default=0),
+        )
+        self._bus.publish(
+            QueueChanged(
+                session_id=session_id,
+                revision=revision,
+                items=items,
+            )
+        )
 
     async def capabilities(
         self, session_id: str, *, cursor: str | None = None, limit: int | None = None
@@ -89,6 +121,99 @@ class ExtensionsApi:
             return parse_configuration_snapshot(raw)
         except (ValueError, TypeError) as exc:
             raise ProtocolError(f"configuration/get returned malformed data: {exc}") from exc
+
+    async def queue(self, session_id: str) -> QueueSnapshot:
+        try:
+            raw = await self._request("_hrns/queue/list", {"sessionId": session_id})
+            snapshot = parse_queue_snapshot(raw)
+            self._queue(session_id).merge_snapshot(snapshot)
+        except QueueUpdateProtocolError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"queue/list returned malformed data: {exc}") from exc
+        self._publish_queue(session_id)
+        return snapshot
+
+    async def edit_queue_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        prompt: list[Any],
+        *,
+        expected_revision: int,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        content = [
+            dump(mode="json", by_alias=True, exclude_none=True)
+            if callable(dump := getattr(block, "model_dump", None))
+            else block
+            for block in prompt
+        ]
+        request = QueueEditRequest(
+            session_id=session_id,
+            prompt_id=prompt_id,
+            prompt=content,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id or f"queue-edit-{uuid.uuid4().hex}",
+        )
+        try:
+            raw = await self._request("_hrns/queue/edit", request.to_wire())
+            update = parse_queue_update(raw)
+            self._queue(session_id).accept(update)
+        except QueueUpdateProtocolError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"queue/edit returned malformed data: {exc}") from exc
+        self._publish_queue(session_id)
+        return update
+
+    async def remove_queue_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        request = QueueRemoveRequest(
+            session_id=session_id,
+            prompt_id=prompt_id,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id or f"queue-remove-{uuid.uuid4().hex}",
+        )
+        try:
+            raw = await self._request("_hrns/queue/remove", request.to_wire())
+            update = parse_queue_update(raw)
+            self._queue(session_id).accept(update)
+        except QueueUpdateProtocolError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"queue/remove returned malformed data: {exc}") from exc
+        self._publish_queue(session_id)
+        return update
+
+    async def retry_queue_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        *,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        payload = {
+            "sessionId": session_id,
+            "promptId": prompt_id,
+            "mutationId": mutation_id or f"queue-retry-{uuid.uuid4().hex}",
+        }
+        try:
+            raw = await self._request("_hrns/queue/retry", payload)
+            update = parse_queue_update(raw)
+            self._queue(session_id).accept(update)
+        except QueueUpdateProtocolError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise ProtocolError(f"queue/retry returned malformed data: {exc}") from exc
+        self._publish_queue(session_id)
+        return update
 
     async def update_configuration(
         self,
@@ -238,5 +363,16 @@ class ExtensionsApi:
             except Exception:
                 return
             self._bus.publish(ToolPresentationUpdated(snapshots=tuple(updated.snapshots)))
+            return
+        if name == "hrns/queue/changed":
+            try:
+                update = parse_queue_update(params)
+                accepted = self._queue(update.item.session_id).accept(update)
+            except QueueUpdateProtocolError:
+                raise
+            except (ValueError, TypeError) as exc:
+                raise QueueUpdateProtocolError(f"queue notification is malformed: {exc}") from exc
+            if accepted:
+                self._publish_queue(update.item.session_id)
             return
         return None

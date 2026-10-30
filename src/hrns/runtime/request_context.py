@@ -39,3 +39,4 @@ class RequestContext:
     connection_id: str | None = None
     request_id: str | None = None
     agent_id: str | None = None
+    scopes: frozenset[str] | None = None

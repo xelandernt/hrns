@@ -292,6 +292,8 @@ class QueuedPrompt:
     parent_id: str | None
     owner_id: str | None
     fence: int | None
+    update_id: str
+    revision: int
     created_at: int
     updated_at: int
 
@@ -312,9 +314,27 @@ class QueuedPrompt:
             "parent_id": self.parent_id,
             "owner_id": self.owner_id,
             "fence": self.fence,
+            "update_id": self.update_id,
+            "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class QueueMutationResult:
+    """The durable result of one idempotent client queue mutation."""
+
+    item: QueuedPrompt
+    replayed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PromptQueueSnapshot:
+    """A complete prompt queue read at one durable session revision."""
+
+    revision: int
+    items: list[QueuedPrompt]
 
 
 #: Return type of ``list_prompts``. Aliased because the store classes define a ``list``
@@ -503,6 +523,45 @@ class SessionStore(ABC):
         """Append a prompt, assigning the next per-session ``sequence``."""
 
     @abstractmethod
+    async def enqueue_prompt_mutation(
+        self,
+        prompt: QueuedPrompt,
+        *,
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult:
+        """Idempotently append a client-requested prompt."""
+
+    @abstractmethod
+    async def edit_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        payload: str,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        """Atomically replace one queued prompt's complete ACP payload."""
+
+    @abstractmethod
+    async def remove_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        """Atomically transition one queued prompt to a cancelled tombstone."""
+
+    @abstractmethod
     async def claim_next_prompt(
         self,
         deployment_id: str,
@@ -528,8 +587,8 @@ class SessionStore(ABC):
         *,
         owner_id: str,
         fence: int,
-    ) -> bool:
-        """Move a claimed prompt to a terminal state; ``False`` when it was not ours."""
+    ) -> QueuedPrompt | None:
+        """Move a claimed prompt to a terminal state; ``None`` when it was not ours."""
 
     @abstractmethod
     async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None: ...
@@ -544,6 +603,14 @@ class SessionStore(ABC):
         limit: int = 100,
     ) -> _PromptList:
         """List a session's prompts in queue order."""
+
+    @abstractmethod
+    async def queue_snapshot(
+        self,
+        deployment_id: str,
+        session_id: str,
+    ) -> PromptQueueSnapshot:
+        """Read every public prompt item and the exact queue revision atomically."""
 
     @abstractmethod
     async def mark_uncertain_prompts(
@@ -568,8 +635,10 @@ class SessionStore(ABC):
         new_prompt_id: str,
         owner_id: str,
         fence: int,
-    ) -> QueuedPrompt | None:
-        """Re-queue an ``UNCERTAIN`` prompt from the same session as a fresh row."""
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult | None:
+        """Idempotently re-queue an ``UNCERTAIN`` prompt as a fresh linked row."""
 
     @abstractmethod
     async def begin_lifecycle_operation(
@@ -846,6 +915,61 @@ class ScopedSessionStore:
     async def enqueue_prompt(self, prompt: QueuedPrompt) -> QueuedPrompt:
         return await self.backend.enqueue_prompt(prompt)
 
+    async def enqueue_prompt_mutation(
+        self,
+        prompt: QueuedPrompt,
+        *,
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult:
+        return await self.backend.enqueue_prompt_mutation(
+            prompt,
+            mutation_id=mutation_id,
+            request_hash=request_hash,
+        )
+
+    async def edit_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        payload: str,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        return await self.backend.edit_prompt(
+            self.deployment_id,
+            session_id,
+            prompt_id,
+            expected_revision=expected_revision,
+            payload=payload,
+            mutation_id=mutation_id,
+            request_hash=request_hash,
+            update_id=update_id,
+        )
+
+    async def remove_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        return await self.backend.remove_prompt(
+            self.deployment_id,
+            session_id,
+            prompt_id,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id,
+            request_hash=request_hash,
+            update_id=update_id,
+        )
+
     async def claim_prompt(self, prompt_id: str, owner_id: str, fence: int) -> QueuedPrompt | None:
         return await self.backend.claim_prompt(prompt_id, owner_id, fence)
 
@@ -858,7 +982,7 @@ class ScopedSessionStore:
 
     async def finish_prompt(
         self, prompt_id: str, state: PromptState, *, owner_id: str, fence: int
-    ) -> bool:
+    ) -> QueuedPrompt | None:
         return await self.backend.finish_prompt(prompt_id, state, owner_id=owner_id, fence=fence)
 
     async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None:
@@ -874,6 +998,9 @@ class ScopedSessionStore:
         return await self.backend.list_prompts(
             self.deployment_id, session_id, states=states, limit=limit
         )
+
+    async def queue_snapshot(self, session_id: str) -> PromptQueueSnapshot:
+        return await self.backend.queue_snapshot(self.deployment_id, session_id)
 
     async def mark_uncertain_prompts(
         self, owner_id: str, *, session_id: str | None = None
@@ -892,13 +1019,17 @@ class ScopedSessionStore:
         new_prompt_id: str,
         owner_id: str,
         fence: int,
-    ) -> QueuedPrompt | None:
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult | None:
         return await self.backend.retry_prompt(
             prompt_id,
             session_id=session_id,
             new_prompt_id=new_prompt_id,
             owner_id=owner_id,
             fence=fence,
+            mutation_id=mutation_id,
+            request_hash=request_hash,
         )
 
     async def begin_lifecycle_operation(

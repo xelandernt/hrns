@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from .constants import CLIENT_NAME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from hrns.protocol import ConfigurationSnapshot, SessionUpdatePosition
+    from hrns.protocol import ConfigurationSnapshot, QueueItem, SessionUpdatePosition
 
 #: Rendered on the header, like ``{"kind": "local", "label": "/work/dir"}``.
 LocationInfo = dict[str, str]
@@ -131,6 +131,15 @@ class ConfigurationChanged:
 
     session_id: str
     snapshot: ConfigurationSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class QueueChanged:
+    """The converged complete authoritative prompt queue changed."""
+
+    session_id: str
+    revision: int
+    items: tuple[QueueItem, ...]
 
 
 @dataclass(frozen=True, slots=True)

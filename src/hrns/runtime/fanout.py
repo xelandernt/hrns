@@ -167,6 +167,25 @@ class FanoutClient:
 
         await self._deliver(self._session_targets(session_id), "session_notification", deliver)
 
+    async def session_notification_connections(
+        self,
+        connection_ids: tuple[str, ...],
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        """Send a notification to an already-authorized connection snapshot."""
+
+        targets = tuple(
+            client
+            for connection_id, client in self._clients.items()
+            if connection_id in connection_ids
+        )
+
+        async def deliver(client: Client) -> None:
+            await client.ext_notification(method, params)
+
+        await self._deliver(targets, "session_notification", deliver)
+
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         """Send a host notification to the initiating connection only."""
         client = self.current()

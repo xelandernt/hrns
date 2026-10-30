@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -27,8 +28,10 @@ from .acp_store import (
     SESSION_COLUMNS,
     DeploymentRecord,
     OperationKind,
+    PromptQueueSnapshot,
     PromptState,
     QueuedPrompt,
+    QueueMutationResult,
     SessionLease,
     SessionPage,
     SessionRecord,
@@ -76,6 +79,7 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     collaborators TEXT NOT NULL DEFAULT '[]',
     client_capabilities BOOLEAN,
     next_update_revision BIGINT NOT NULL DEFAULT 1,
+    next_queue_revision BIGINT NOT NULL DEFAULT 1,
     created_at BIGINT NOT NULL,
     last_active_at BIGINT NOT NULL
 )
@@ -118,6 +122,8 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
     parent_id TEXT,
     owner_id TEXT,
     fence BIGINT,
+    update_id TEXT NOT NULL,
+    revision BIGINT NOT NULL,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
     UNIQUE(session_id, sequence)
@@ -127,6 +133,19 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
 _SCHEMA_PROMPT_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_acp_prompt_queue_order
     ON acp_prompt_queue(deployment_id, session_id, state, sequence)
+"""
+
+_SCHEMA_QUEUE_MUTATIONS = """
+CREATE TABLE IF NOT EXISTS acp_queue_mutations (
+    session_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL,
+    mutation_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    result_payload TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (session_id, mutation_id)
+)
 """
 
 _SCHEMA_DEPLOYMENTS = """
@@ -162,9 +181,14 @@ _ADDED_COLUMNS = (
     ("collaborators", "TEXT NOT NULL DEFAULT '[]'"),
     ("client_capabilities", "BOOLEAN"),
     ("next_update_revision", "BIGINT NOT NULL DEFAULT 1"),
+    ("next_queue_revision", "BIGINT NOT NULL DEFAULT 1"),
 )
 
-_ADDED_QUEUE_COLUMNS = (("kind", "TEXT NOT NULL DEFAULT 'prompt'"),)
+_ADDED_QUEUE_COLUMNS = (
+    ("kind", "TEXT NOT NULL DEFAULT 'prompt'"),
+    ("update_id", "TEXT NOT NULL DEFAULT ''"),
+    ("revision", "BIGINT NOT NULL DEFAULT 0"),
+)
 
 
 def _columns(sql: Any) -> Any:
@@ -218,8 +242,9 @@ def _record_from_row(row: PgRow) -> SessionRecord:
 _PROMPT_INSERT = """
 INSERT INTO acp_prompt_queue (
     prompt_id, session_id, principal, deployment_id, credential_id, connection_id,
-    sequence, kind, payload, state, attempt, parent_id, owner_id, fence, created_at, updated_at
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    sequence, kind, payload, state, attempt, parent_id, owner_id, fence, update_id, revision,
+    created_at, updated_at
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 #: States that may only be reached through ``finish_prompt``.
@@ -266,6 +291,8 @@ def _prompt_from_row(row: PgRow) -> QueuedPrompt:
         parent_id=values["parent_id"],
         owner_id=values["owner_id"],
         fence=None if values["fence"] is None else int(values["fence"]),
+        update_id=str(values["update_id"]),
+        revision=int(values["revision"]),
         created_at=int(values["created_at"]),
         updated_at=int(values["updated_at"]),
     )
@@ -304,10 +331,147 @@ async def _insert_prompt(cursor: AsyncCursor[PgRow], prompt: QueuedPrompt) -> No
             prompt.parent_id,
             prompt.owner_id,
             prompt.fence,
+            prompt.update_id,
+            prompt.revision,
             prompt.created_at,
             prompt.updated_at,
         ),
     )
+
+
+async def _reserve_queue_revision(cursor: AsyncCursor[PgRow], session_id: str) -> int:
+    await cursor.execute(
+        "UPDATE acp_sessions SET next_queue_revision = next_queue_revision + 1 "
+        "WHERE session_id = %s RETURNING next_queue_revision - 1 AS revision",
+        (session_id,),
+    )
+    row = _row_dict(await cursor.fetchone())
+    if row is None:
+        raise HrnsError(
+            "SESSION_DURABILITY_FAILED",
+            "The queue revision could not be durably reserved.",
+            {"sessionId": session_id},
+        )
+    return int(row["revision"])
+
+
+def _prompt_snapshot(prompt: QueuedPrompt) -> str:
+    return json.dumps(prompt.to_public(), ensure_ascii=False, separators=(",", ":"))
+
+
+def _prompt_from_snapshot(payload: str) -> QueuedPrompt:
+    values = json.loads(payload)
+    if not isinstance(values, Mapping):
+        raise ValueError("queue mutation result is not an object")
+    return QueuedPrompt(
+        prompt_id=str(values["prompt_id"]),
+        session_id=str(values["session_id"]),
+        principal=str(values["principal"]),
+        deployment_id=str(values["deployment_id"]),
+        credential_id=values.get("credential_id"),
+        connection_id=values.get("connection_id"),
+        sequence=int(values["sequence"]),
+        kind=OperationKind(values["kind"]),
+        payload=str(values["payload"]),
+        state=PromptState(values["state"]),
+        attempt=int(values["attempt"]),
+        parent_id=values.get("parent_id"),
+        owner_id=values.get("owner_id"),
+        fence=None if values.get("fence") is None else int(values["fence"]),
+        update_id=str(values["update_id"]),
+        revision=int(values["revision"]),
+        created_at=int(values["created_at"]),
+        updated_at=int(values["updated_at"]),
+    )
+
+
+async def _mutation_replay(
+    cursor: AsyncCursor[PgRow],
+    session_id: str,
+    mutation_id: str,
+    operation: str,
+    request_hash: str,
+) -> QueueMutationResult | None:
+    await cursor.execute(
+        "INSERT INTO acp_queue_mutations "
+        "(session_id, deployment_id, mutation_id, operation, request_hash, result_payload, created_at) "
+        "VALUES (%s, '', %s, %s, %s, '', %s) "
+        "ON CONFLICT (session_id, mutation_id) DO NOTHING",
+        (session_id, mutation_id, operation, request_hash, now_ms()),
+    )
+    if cursor.rowcount:
+        return None
+    await cursor.execute(
+        "SELECT request_hash, result_payload FROM acp_queue_mutations "
+        "WHERE session_id = %s AND mutation_id = %s FOR UPDATE",
+        (session_id, mutation_id),
+    )
+    row = _row_dict(await cursor.fetchone())
+    if row is None:
+        return None
+    if row["request_hash"] != request_hash:
+        raise HrnsError(
+            "MUTATION_ID_REUSED",
+            "mutationId was already bound to a different queue request.",
+            {"sessionId": session_id, "mutationId": mutation_id},
+        )
+    result_payload = str(row["result_payload"])
+    if not result_payload:
+        raise HrnsError(
+            "SESSION_DURABILITY_FAILED",
+            "The prior queue mutation did not persist a result.",
+            {"sessionId": session_id, "mutationId": mutation_id},
+        )
+    return QueueMutationResult(_prompt_from_snapshot(result_payload), replayed=True)
+
+
+async def _record_mutation(
+    cursor: AsyncCursor[PgRow],
+    prompt: QueuedPrompt,
+    *,
+    mutation_id: str,
+    operation: str,
+    request_hash: str,
+) -> None:
+    await cursor.execute(
+        "UPDATE acp_queue_mutations SET deployment_id = %s, result_payload = %s "
+        "WHERE session_id = %s AND mutation_id = %s AND operation = %s AND request_hash = %s",
+        (
+            prompt.deployment_id,
+            _prompt_snapshot(prompt),
+            prompt.session_id,
+            mutation_id,
+            operation,
+            request_hash,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise HrnsError(
+            "SESSION_DURABILITY_FAILED",
+            "The queue mutation result could not be durably recorded.",
+            {"sessionId": prompt.session_id, "mutationId": mutation_id},
+        )
+
+
+def _queue_item_error(current: QueuedPrompt, expected_revision: int) -> HrnsError | None:
+    details = {
+        "promptId": current.prompt_id,
+        "state": current.state.value,
+        "revision": current.revision,
+    }
+    if current.revision != expected_revision:
+        return HrnsError(
+            "QUEUE_CONFLICT",
+            "The queued prompt changed before this mutation committed.",
+            details,
+        )
+    if current.state is not PromptState.QUEUED:
+        return HrnsError(
+            "QUEUE_NOT_EDITABLE",
+            "Only prompts that are still queued may be edited or removed.",
+            details,
+        )
+    return None
 
 
 class PostgresSessionStore(SessionStore):
@@ -341,6 +505,7 @@ class PostgresSessionStore(SessionStore):
                     await cursor.execute(_SCHEMA_LEASES)
                     await cursor.execute(_SCHEMA_PROMPT_QUEUE)
                     await cursor.execute(_SCHEMA_PROMPT_INDEX)
+                    await cursor.execute(_SCHEMA_QUEUE_MUTATIONS)
                     await cursor.execute(_SCHEMA_DEPLOYMENTS)
                     for name, declaration in _ADDED_COLUMNS:
                         await cursor.execute(
@@ -354,6 +519,38 @@ class PostgresSessionStore(SessionStore):
                                 "ALTER TABLE acp_prompt_queue ADD COLUMN IF NOT EXISTS {} {}"
                             ).format(sql.Identifier(name), sql.SQL(declaration))
                         )
+                    await cursor.execute(
+                        """
+                        WITH positioned AS (
+                            SELECT prompt_id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY session_id ORDER BY sequence
+                                   ) AS revision
+                            FROM acp_prompt_queue
+                        )
+                        UPDATE acp_prompt_queue AS queue
+                        SET revision = positioned.revision,
+                            update_id = md5(
+                                random()::text || clock_timestamp()::text || queue.prompt_id
+                            )
+                        FROM positioned
+                        WHERE queue.prompt_id = positioned.prompt_id
+                          AND (queue.revision < 1 OR queue.update_id = '')
+                        """
+                    )
+                    await cursor.execute(
+                        """
+                        UPDATE acp_sessions AS session
+                        SET next_queue_revision = GREATEST(
+                            session.next_queue_revision,
+                            COALESCE((
+                                SELECT MAX(queue.revision) + 1
+                                FROM acp_prompt_queue AS queue
+                                WHERE queue.session_id = session.session_id
+                            ), 1)
+                        )
+                        """
+                    )
             except BaseException:
                 await connection.close()
                 raise
@@ -910,11 +1107,192 @@ class PostgresSessionStore(SessionStore):
                     stored = replace(
                         prompt,
                         sequence=sequence,
+                        update_id=prompt.update_id or uuid.uuid4().hex,
+                        revision=await _reserve_queue_revision(cursor, prompt.session_id),
                         created_at=prompt.created_at or active,
                         updated_at=prompt.updated_at or prompt.created_at or active,
                     )
                     await _insert_prompt(cursor, stored)
                     return stored
+
+    async def enqueue_prompt_mutation(
+        self,
+        prompt: QueuedPrompt,
+        *,
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    replay = await _mutation_replay(
+                        cursor, prompt.session_id, mutation_id, "enqueue", request_hash
+                    )
+                    if replay is not None:
+                        return replay
+                    sequence = await self._next_sequence(cursor, prompt.session_id)
+                    await cursor.execute(
+                        "SELECT prompt_id FROM acp_prompt_queue WHERE deployment_id = %s "
+                        "AND session_id = %s AND kind = ANY(%s) AND state = ANY(%s) LIMIT 1",
+                        (
+                            prompt.deployment_id,
+                            prompt.session_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    if await cursor.fetchone() is not None:
+                        raise HrnsError(
+                            "SESSION_CLOSING",
+                            "The session is closing and no longer accepts new work.",
+                            {"sessionId": prompt.session_id},
+                        )
+                    active = now_ms()
+                    stored = replace(
+                        prompt,
+                        sequence=sequence,
+                        update_id=prompt.update_id or uuid.uuid4().hex,
+                        revision=await _reserve_queue_revision(cursor, prompt.session_id),
+                        created_at=prompt.created_at or active,
+                        updated_at=prompt.updated_at or prompt.created_at or active,
+                    )
+                    await _insert_prompt(cursor, stored)
+                    await _record_mutation(
+                        cursor,
+                        stored,
+                        mutation_id=mutation_id,
+                        operation="enqueue",
+                        request_hash=request_hash,
+                    )
+                    return QueueMutationResult(stored)
+
+    async def edit_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        payload: str,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    replay = await _mutation_replay(
+                        cursor, session_id, mutation_id, "edit", request_hash
+                    )
+                    if replay is not None:
+                        return replay
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
+                        "AND session_id = %s AND prompt_id = %s AND kind = %s FOR UPDATE",
+                        (deployment_id, session_id, prompt_id, OperationKind.PROMPT.value),
+                    )
+                    row = await cursor.fetchone()
+                    if row is None:
+                        raise HrnsError(
+                            "QUEUE_ITEM_NOT_FOUND",
+                            "No queued prompt with this id is available in the session.",
+                            {"sessionId": session_id, "promptId": prompt_id},
+                        )
+                    current = _prompt_from_row(row)
+                    error = _queue_item_error(current, expected_revision)
+                    if error is not None:
+                        raise error
+                    updated = replace(
+                        current,
+                        payload=payload,
+                        update_id=update_id,
+                        revision=await _reserve_queue_revision(cursor, session_id),
+                        updated_at=now_ms(),
+                    )
+                    await cursor.execute(
+                        "UPDATE acp_prompt_queue SET payload = %s, update_id = %s, "
+                        "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                        (
+                            updated.payload,
+                            updated.update_id,
+                            updated.revision,
+                            updated.updated_at,
+                            prompt_id,
+                        ),
+                    )
+                    await _record_mutation(
+                        cursor,
+                        updated,
+                        mutation_id=mutation_id,
+                        operation="edit",
+                        request_hash=request_hash,
+                    )
+                    return QueueMutationResult(updated)
+
+    async def remove_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    replay = await _mutation_replay(
+                        cursor, session_id, mutation_id, "remove", request_hash
+                    )
+                    if replay is not None:
+                        return replay
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
+                        "AND session_id = %s AND prompt_id = %s AND kind = %s FOR UPDATE",
+                        (deployment_id, session_id, prompt_id, OperationKind.PROMPT.value),
+                    )
+                    row = await cursor.fetchone()
+                    if row is None:
+                        raise HrnsError(
+                            "QUEUE_ITEM_NOT_FOUND",
+                            "No queued prompt with this id is available in the session.",
+                            {"sessionId": session_id, "promptId": prompt_id},
+                        )
+                    current = _prompt_from_row(row)
+                    error = _queue_item_error(current, expected_revision)
+                    if error is not None:
+                        raise error
+                    updated = replace(
+                        current,
+                        state=PromptState.CANCELLED,
+                        update_id=update_id,
+                        revision=await _reserve_queue_revision(cursor, session_id),
+                        updated_at=now_ms(),
+                    )
+                    await cursor.execute(
+                        "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
+                        "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                        (
+                            updated.state.value,
+                            updated.update_id,
+                            updated.revision,
+                            updated.updated_at,
+                            prompt_id,
+                        ),
+                    )
+                    await _record_mutation(
+                        cursor,
+                        updated,
+                        mutation_id=mutation_id,
+                        operation="remove",
+                        request_hash=request_hash,
+                    )
+                    return QueueMutationResult(updated)
 
     async def claim_prompt(self, prompt_id: str, owner_id: str, fence: int) -> QueuedPrompt | None:
         async with self._lock:
@@ -932,14 +1310,19 @@ class PostgresSessionStore(SessionStore):
                     queued = _prompt_from_row(row)
                     active = now_ms()
                     attempt = queued.attempt + 1
+                    update_id = uuid.uuid4().hex
+                    revision = await _reserve_queue_revision(cursor, queued.session_id)
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
-                        "attempt = %s, updated_at = %s WHERE prompt_id = %s",
+                        "attempt = %s, update_id = %s, revision = %s, updated_at = %s "
+                        "WHERE prompt_id = %s",
                         (
                             PromptState.CLAIMED.value,
                             owner_id,
                             fence,
                             attempt,
+                            update_id,
+                            revision,
                             active,
                             prompt_id,
                         ),
@@ -950,6 +1333,8 @@ class PostgresSessionStore(SessionStore):
                         owner_id=owner_id,
                         fence=fence,
                         attempt=attempt,
+                        update_id=update_id,
+                        revision=revision,
                         updated_at=active,
                     )
 
@@ -986,14 +1371,19 @@ class PostgresSessionStore(SessionStore):
                         return None
                     active = now_ms()
                     attempt = queued.attempt + 1
+                    update_id = uuid.uuid4().hex
+                    revision = await _reserve_queue_revision(cursor, queued.session_id)
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
-                        "attempt = %s, updated_at = %s WHERE prompt_id = %s",
+                        "attempt = %s, update_id = %s, revision = %s, updated_at = %s "
+                        "WHERE prompt_id = %s",
                         (
                             PromptState.CLAIMED.value,
                             owner_id,
                             fence,
                             attempt,
+                            update_id,
+                            revision,
                             active,
                             queued.prompt_id,
                         ),
@@ -1004,6 +1394,8 @@ class PostgresSessionStore(SessionStore):
                         owner_id=owner_id,
                         fence=fence,
                         attempt=attempt,
+                        update_id=update_id,
+                        revision=revision,
                         updated_at=active,
                     )
 
@@ -1014,26 +1406,41 @@ class PostgresSessionStore(SessionStore):
         *,
         owner_id: str,
         fence: int,
-    ) -> bool:
+    ) -> QueuedPrompt | None:
         if state not in _TERMINAL_PROMPT_STATES:
             raise ValueError(f"{state.value!r} is not a terminal prompt state")
         async with self._lock:
             connection = self._require_connection()
-            async with connection.cursor() as cursor:
-                await cursor.execute(
-                    "UPDATE acp_prompt_queue SET state = %s, updated_at = %s "
-                    "WHERE prompt_id = %s AND state = %s AND owner_id = %s AND fence = %s",
-                    (
-                        state.value,
-                        now_ms(),
-                        prompt_id,
-                        PromptState.CLAIMED.value,
-                        owner_id,
-                        fence,
-                    ),
-                )
-                changed = cursor.rowcount
-        return bool(changed)
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s AND state = %s "
+                        "AND owner_id = %s AND fence = %s FOR UPDATE",
+                        (prompt_id, PromptState.CLAIMED.value, owner_id, fence),
+                    )
+                    row = await cursor.fetchone()
+                    if row is None:
+                        return None
+                    current = _prompt_from_row(row)
+                    updated = replace(
+                        current,
+                        state=state,
+                        update_id=uuid.uuid4().hex,
+                        revision=await _reserve_queue_revision(cursor, current.session_id),
+                        updated_at=now_ms(),
+                    )
+                    await cursor.execute(
+                        "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
+                        "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                        (
+                            updated.state.value,
+                            updated.update_id,
+                            updated.revision,
+                            updated.updated_at,
+                            prompt_id,
+                        ),
+                    )
+                    return updated
 
     async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None:
         async with self._lock:
@@ -1073,6 +1480,38 @@ class PostgresSessionStore(SessionStore):
                 rows = await cursor.fetchall()
         return [_prompt_from_row(row) for row in rows]
 
+    async def queue_snapshot(
+        self,
+        deployment_id: str,
+        session_id: str,
+    ) -> PromptQueueSnapshot:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT next_queue_revision FROM acp_sessions "
+                        "WHERE deployment_id = %s AND session_id = %s FOR SHARE",
+                        (deployment_id, session_id),
+                    )
+                    session = _row_dict(await cursor.fetchone())
+                    if session is None:
+                        raise HrnsError(
+                            "QUEUE_ITEM_NOT_FOUND",
+                            "No queue is available for this session.",
+                            {"sessionId": session_id},
+                        )
+                    await cursor.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
+                        "AND session_id = %s AND kind = %s ORDER BY sequence",
+                        (deployment_id, session_id, OperationKind.PROMPT.value),
+                    )
+                    rows = await cursor.fetchall()
+                    return PromptQueueSnapshot(
+                        revision=max(0, int(session["next_queue_revision"]) - 1),
+                        items=[_prompt_from_row(row) for row in rows],
+                    )
+
     async def mark_uncertain_prompts(
         self,
         owner_id: str,
@@ -1091,20 +1530,38 @@ class PostgresSessionStore(SessionStore):
             clauses.append(sql.SQL("session_id = %s"))
             values.append(session_id)
         query = sql.SQL(
-            "UPDATE acp_prompt_queue SET state = %s, updated_at = %s WHERE {} RETURNING *"
+            "SELECT * FROM acp_prompt_queue WHERE {} ORDER BY sequence FOR UPDATE"
         ).format(sql.SQL(" AND ").join(clauses))
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
-                    await cursor.execute(
-                        query,
-                        [PromptState.UNCERTAIN.value, now_ms(), *values],
-                    )
+                    await cursor.execute(query, values)
                     rows = await cursor.fetchall()
-        affected = [_prompt_from_row(row) for row in rows]
-        affected.sort(key=lambda prompt: prompt.sequence)
-        return affected
+                    active = now_ms()
+                    affected: list[QueuedPrompt] = []
+                    for row in rows:
+                        current = _prompt_from_row(row)
+                        updated = replace(
+                            current,
+                            state=PromptState.UNCERTAIN,
+                            update_id=uuid.uuid4().hex,
+                            revision=await _reserve_queue_revision(cursor, current.session_id),
+                            updated_at=active,
+                        )
+                        await cursor.execute(
+                            "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
+                            "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                            (
+                                updated.state.value,
+                                updated.update_id,
+                                updated.revision,
+                                updated.updated_at,
+                                updated.prompt_id,
+                            ),
+                        )
+                        affected.append(updated)
+                    return affected
 
     async def retry_prompt(
         self,
@@ -1114,12 +1571,19 @@ class PostgresSessionStore(SessionStore):
         new_prompt_id: str,
         owner_id: str,
         fence: int,
-    ) -> QueuedPrompt | None:
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult | None:
         del owner_id, fence  # the caller re-queues; the old claim stays as history
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    replay = await _mutation_replay(
+                        cursor, session_id, mutation_id, "retry", request_hash
+                    )
+                    if replay is not None:
+                        return replay
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s "
                         "AND session_id = %s FOR UPDATE",
@@ -1127,10 +1591,22 @@ class PostgresSessionStore(SessionStore):
                     )
                     row = await cursor.fetchone()
                     if row is None:
-                        return None
+                        raise HrnsError(
+                            "QUEUE_ITEM_NOT_FOUND",
+                            "No queued prompt with this id is available in the session.",
+                            {"sessionId": session_id, "promptId": prompt_id},
+                        )
                     original = _prompt_from_row(row)
                     if original.state is not PromptState.UNCERTAIN:
-                        return None
+                        raise HrnsError(
+                            "QUEUE_NOT_EDITABLE",
+                            "Only an uncertain prompt can be retried.",
+                            {
+                                "promptId": prompt_id,
+                                "state": original.state.value,
+                                "revision": original.revision,
+                            },
+                        )
                     active = now_ms()
                     sequence = await self._next_sequence(cursor, original.session_id)
                     stored = replace(
@@ -1142,11 +1618,20 @@ class PostgresSessionStore(SessionStore):
                         parent_id=prompt_id,
                         owner_id=None,
                         fence=None,
+                        update_id=uuid.uuid4().hex,
+                        revision=await _reserve_queue_revision(cursor, original.session_id),
                         created_at=active,
                         updated_at=active,
                     )
                     await _insert_prompt(cursor, stored)
-                    return stored
+                    await _record_mutation(
+                        cursor,
+                        stored,
+                        mutation_id=mutation_id,
+                        operation="retry",
+                        request_hash=request_hash,
+                    )
+                    return QueueMutationResult(stored)
 
     async def begin_lifecycle_operation(
         self,
@@ -1206,6 +1691,8 @@ class PostgresSessionStore(SessionStore):
                     stored = replace(
                         operation,
                         sequence=sequence,
+                        update_id=operation.update_id or uuid.uuid4().hex,
+                        revision=await _reserve_queue_revision(cursor, operation.session_id),
                         created_at=operation.created_at or active,
                         updated_at=operation.updated_at or operation.created_at or active,
                     )
@@ -1281,14 +1768,19 @@ class PostgresSessionStore(SessionStore):
                     current = _prompt_from_row(row)
                     active = now_ms()
                     attempt = current.attempt + 1
+                    update_id = uuid.uuid4().hex
+                    revision = await _reserve_queue_revision(cursor, current.session_id)
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
-                        "attempt = %s, updated_at = %s WHERE prompt_id = %s",
+                        "attempt = %s, update_id = %s, revision = %s, updated_at = %s "
+                        "WHERE prompt_id = %s",
                         (
                             PromptState.CLAIMED.value,
                             owner_id,
                             fence,
                             attempt,
+                            update_id,
+                            revision,
                             active,
                             prompt_id,
                         ),
@@ -1299,6 +1791,8 @@ class PostgresSessionStore(SessionStore):
                         owner_id=owner_id,
                         fence=fence,
                         attempt=attempt,
+                        update_id=update_id,
+                        revision=revision,
                         updated_at=active,
                     )
 
@@ -1314,12 +1808,10 @@ class PostgresSessionStore(SessionStore):
             async with connection.transaction():
                 async with connection.cursor() as cursor:
                     await cursor.execute(
-                        "UPDATE acp_prompt_queue SET state = %s, updated_at = %s "
+                        "SELECT * FROM acp_prompt_queue "
                         "WHERE deployment_id = %s AND session_id = %s AND prompt_id != %s "
-                        "AND state = %s AND NOT (kind = ANY(%s)) RETURNING *",
+                        "AND state = %s AND NOT (kind = ANY(%s)) ORDER BY sequence FOR UPDATE",
                         (
-                            PromptState.CANCELLED.value,
-                            now_ms(),
                             deployment_id,
                             session_id,
                             exclude_prompt_id,
@@ -1328,9 +1820,30 @@ class PostgresSessionStore(SessionStore):
                         ),
                     )
                     rows = await cursor.fetchall()
-        affected = [_prompt_from_row(row) for row in rows]
-        affected.sort(key=lambda prompt: prompt.sequence)
-        return affected
+                    active = now_ms()
+                    affected: list[QueuedPrompt] = []
+                    for row in rows:
+                        current = _prompt_from_row(row)
+                        updated = replace(
+                            current,
+                            state=PromptState.CANCELLED,
+                            update_id=uuid.uuid4().hex,
+                            revision=await _reserve_queue_revision(cursor, current.session_id),
+                            updated_at=active,
+                        )
+                        await cursor.execute(
+                            "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
+                            "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                            (
+                                updated.state.value,
+                                updated.update_id,
+                                updated.revision,
+                                updated.updated_at,
+                                updated.prompt_id,
+                            ),
+                        )
+                        affected.append(updated)
+                    return affected
 
     async def settle_lifecycle_operation(
         self,

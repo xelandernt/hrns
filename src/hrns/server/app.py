@@ -798,6 +798,7 @@ class AgentServer:
             credential_id=principal.credential_id,
             connection_id=info.connection_id,
             agent_id=agent.id,
+            scopes=principal.scopes,
         )
         request_token = current_request.set(request)
         connection_token = current_connection_id.set(info.connection_id)

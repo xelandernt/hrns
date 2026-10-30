@@ -47,6 +47,16 @@ from .models import (
     WireModel,
     changes_adapter,
 )
+from .queue import (
+    QueueEditRequest,
+    QueueItem,
+    QueueMutationRequest,
+    QueueRemoveRequest,
+    QueueSnapshot,
+    QueueState,
+    QueueUpdate,
+    QueueUpdateProtocolError,
+)
 from .session_updates import (
     SessionUpdateLedger,
     SessionUpdatePosition,
@@ -117,6 +127,14 @@ __all__ = [
     "order_session_updates",
     "session_update_position",
     "with_session_update_position",
+    "QueueEditRequest",
+    "QueueItem",
+    "QueueMutationRequest",
+    "QueueRemoveRequest",
+    "QueueSnapshot",
+    "QueueState",
+    "QueueUpdate",
+    "QueueUpdateProtocolError",
     "HrnsError",
     "EXTENSION_METHODS",
     "EXTENSION_VERSION",
