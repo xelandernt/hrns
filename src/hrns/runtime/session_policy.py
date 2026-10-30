@@ -171,9 +171,7 @@ class DefaultSessionPolicy:
             admitted = context.principal == context.owner
 
         if context.access is SessionAccess.ARCHIVED:
-            if action in READ_ACTIONS or action is PolicyAction.CLOSE:
-                # Closing a live host is lifecycle, not a content mutation; an admitted
-                # reader may still detach it.
+            if action in READ_ACTIONS:
                 return PolicyDecision.allow() if admitted else _not_found()
             if action is PolicyAction.ARCHIVE and context.principal == context.owner:
                 # The owner may restore an archived session; every other mutation stays

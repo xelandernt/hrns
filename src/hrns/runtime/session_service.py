@@ -7,8 +7,6 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 from acp import schema
-from acp.exceptions import RequestError
-from acp.schema import DeleteSessionResponse
 from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai_harness.planning import PlanItem, PlanStore, SqlitePlanStore
 
@@ -38,7 +36,7 @@ from .resources import (
 )
 from .session_policy import PolicyAction, SessionAccess, decide_policy
 from .steering import SteeringCapability, SteeringChannel
-from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
+from .todo import PLAN_TABLE, PlanChannel, plan_update
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -160,23 +158,6 @@ class SessionService:
                 )
             )
         return schema.ListSessionsResponse(sessions=entries, next_cursor=page.next_cursor)
-
-    async def delete_session(self, session_id: str) -> DeleteSessionResponse:
-        record = await self.store.get_visible(session_id, self.principal)
-        if record is None:
-            reason = (
-                "the session has not been used yet, so nothing is stored to delete"
-                if self.store.staged(session_id) is not None
-                else "no stored session with this id"
-            )
-            raise RequestError.invalid_params({"sessionId": session_id, "reason": reason})
-        # Delete while the caller still holds the lease; closing releases it.
-        await self.store.delete(session_id)
-        await self.agent._close_session_unchecked(session_id)
-        database = self.plan_database()
-        if database is not None:
-            await asyncio.to_thread(forget_plan, database, session_id)
-        return DeleteSessionResponse()
 
     async def ensure_persisted(self, session_id: str) -> bool:
         """Write the row for a session that ``session/new`` only composed in memory.

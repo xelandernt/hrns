@@ -160,7 +160,7 @@ await agents.set_session_access(
 ```
 
 `ARCHIVED` sessions still load and replay, but every mutation — prompt, steering,
-configuration, commands, rename, approvals, delete — is rejected with
+configuration, commands, rename, approvals, close, delete — is rejected with
 `SESSION_READ_ONLY`. The `_hrns/session/access` extension exposes the same operation to an
 authorized client.
 
@@ -174,6 +174,54 @@ rebuilt.
 Pass `session_policy=...` to `AgentServer` for custom rules. A policy implements
 `decide(context, action)` and returns `PolicyDecision.allow()`, `.deny(...)`, or
 `.read_only_denial()`; it may be async. Private/shared/archived semantics are the default.
+
+## Authoritative embedding close and delete
+
+Embedding applications close or delete a session through the same authoritative actor and
+durable lifecycle used by hosted ACP:
+
+```python
+closed = await agents.close_session(principal, "coding", session_id)
+deleted = await agents.delete_session(principal, "coding", session_id)
+```
+
+Both calls authorize the supplied `Principal` against the agent scope and session policy
+before writing lifecycle state. A foreign and a nonexistent session both raise
+`ApiError(code="NOT_FOUND")`; archived/read-only policy raises `FORBIDDEN`; another live
+worker raises `CONFLICT` without creating a lifecycle operation. Lifecycle hook failures
+raise `ApiError(code="LIFECYCLE_FAILED")`.
+
+Once a close/delete intent is durable, the session admits no new prompt, configuration,
+command, approval, load, or administrative mutation. The active ordered operation is
+cancelled and finishes as `uncertain`, because a model or tool boundary may already have
+been crossed. Operations that were queued but never claimed become `cancelled` and never
+run. Every subscribed viewer receives the same `hrns/session/terminated` notification
+before the actor forgets the session and removes all subscriptions.
+
+`close_session()` retains the session row, native message history, ACP transcript, metadata,
+usage, and terminal queue ledger so a later `session/load` creates a fresh live session.
+It releases the active lease/fence and forgets every in-memory composition and turn handle.
+`delete_session()` performs the same shutdown, then atomically removes the session row,
+all non-lifecycle queue rows, and the lease/fence. It retains only the completed delete
+receipt needed to make a retry after a lost response return the same
+`SessionLifecycleResult`; that receipt is not runnable or reloadable session state.
+
+Close/delete retries reuse the same durable `operation_id`. `destroy` receives that id as
+`SessionLifecycleContext.operation_id`; resource managers must use it as their idempotency
+key when an external side effect crosses a process-failure boundary. A failed `destroy`
+leaves the operation retryable and keeps admission closed. Cancellation or process loss
+leaves a claimed durable operation rather than implying success.
+
+After startup, reconcile interrupted lifecycle operations with the public store still open:
+
+```python
+async with agents.lifespan(app):
+    reconciled = await agents.reconcile_session_lifecycle()
+```
+
+Reconciliation reclaims only an expired lease. If another worker still owns a live lease,
+it raises `CONFLICT` and performs no partial close/delete; retry after that owner releases
+or loses the lease.
 
 ## Deployment revisions
 
@@ -249,8 +297,9 @@ Pass `lifecycle=...` for external resources. Implement any of `create`, `resume`
 `suspend`, `destroy`, and `queue_changed` (sync or async). `create` and `resume` run on
 `session/new` and `session/load`; a queue drain requires the session to be live, so load
 first. Queue idle invokes suspend; close/delete invokes destroy
-once per host. A hook failure surfaces as `LIFECYCLE_FAILED` and no prompt runs without its
-resource.
+once per durable lifecycle operation. A hook failure surfaces as `LIFECYCLE_FAILED` and no
+prompt runs without its resource. Use `SessionLifecycleContext.operation_id` to deduplicate
+an external destroy across an unknown process-loss boundary.
 
 ## Routes and client connection
 

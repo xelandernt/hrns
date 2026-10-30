@@ -20,7 +20,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hrns.protocol import HrnsError
+
 from .acp_store import (
+    LIFECYCLE_OPERATION_KINDS,
+    LIFECYCLE_PENDING_STATES,
     SESSION_COLUMNS,
     DeploymentRecord,
     OperationKind,
@@ -904,8 +908,8 @@ class SQLiteSessionStore(SessionStore):
                     self._connect()
                     .execute(
                         "SELECT * FROM acp_session_leases "
-                        "WHERE session_id = ? AND deployment_id = ?",
-                        (session_id, deployment_id),
+                        "WHERE session_id = ? AND deployment_id = ? AND expires_at > ?",
+                        (session_id, deployment_id, now_ms()),
                     )
                     .fetchone()
                 ),
@@ -918,6 +922,23 @@ class SQLiteSessionStore(SessionStore):
         def operation() -> QueuedPrompt:
             connection = self._connect()
             with _immediate(connection):
+                pending = connection.execute(
+                    "SELECT prompt_id FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND kind IN (?, ?) AND state IN (?, ?, ?, ?) LIMIT 1",
+                    (
+                        prompt.deployment_id,
+                        prompt.session_id,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if pending is not None:
+                    raise HrnsError(
+                        "SESSION_CLOSING",
+                        "The session is closing and no longer accepts new work.",
+                        {"sessionId": prompt.session_id},
+                    )
                 active = now_ms()
                 stored = replace(
                     prompt,
@@ -1175,6 +1196,295 @@ class SQLiteSessionStore(SessionStore):
 
         async with self._lock:
             return await asyncio.to_thread(self._run, operation)
+
+    async def begin_lifecycle_operation(
+        self,
+        operation: QueuedPrompt,
+        *,
+        reuse_completed: bool,
+    ) -> QueuedPrompt:
+        if operation.kind not in LIFECYCLE_OPERATION_KINDS:
+            raise ValueError("lifecycle operation must be close or delete")
+
+        def begin() -> QueuedPrompt:
+            connection = self._connect()
+            with _immediate(connection):
+                placeholders = ", ".join("?" for _ in LIFECYCLE_PENDING_STATES)
+                pending = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND kind IN (?, ?) "
+                    f"AND state IN ({placeholders}) ORDER BY sequence DESC LIMIT 1",
+                    (
+                        operation.deployment_id,
+                        operation.session_id,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if pending is not None:
+                    current = _row_to_prompt(pending)
+                    if current.kind is operation.kind:
+                        return current
+                    raise HrnsError(
+                        "SESSION_CONFLICT",
+                        "A different session lifecycle operation is already pending.",
+                        {
+                            "sessionId": operation.session_id,
+                            "operationId": current.prompt_id,
+                            "operation": current.kind.value,
+                        },
+                    )
+                if reuse_completed:
+                    completed = connection.execute(
+                        "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
+                        "AND session_id = ? AND principal = ? AND kind = ? AND state = ? "
+                        "ORDER BY sequence DESC LIMIT 1",
+                        (
+                            operation.deployment_id,
+                            operation.session_id,
+                            operation.principal,
+                            operation.kind.value,
+                            PromptState.COMPLETED.value,
+                        ),
+                    ).fetchone()
+                    if completed is not None:
+                        return _row_to_prompt(completed)
+                active = now_ms()
+                stored = replace(
+                    operation,
+                    sequence=_next_sequence(connection, operation.session_id),
+                    created_at=operation.created_at or active,
+                    updated_at=operation.updated_at or operation.created_at or active,
+                )
+                _insert_prompt(connection, stored)
+                return stored
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, begin)
+
+    async def get_lifecycle_operation(
+        self,
+        deployment_id: str,
+        session_id: str,
+        kind: OperationKind,
+        *,
+        principal: str | None = None,
+    ) -> QueuedPrompt | None:
+        clauses = ["deployment_id = ?", "session_id = ?", "kind = ?"]
+        values: list[object] = [deployment_id, session_id, kind.value]
+        if principal is not None:
+            clauses.append("principal = ?")
+            values.append(principal)
+        query = (
+            f"SELECT * FROM acp_prompt_queue WHERE {' AND '.join(clauses)} "
+            "ORDER BY sequence DESC LIMIT 1"
+        )
+        async with self._lock:
+            row = await asyncio.to_thread(
+                self._run,
+                lambda: self._connect().execute(query, values).fetchone(),
+            )
+        return _row_to_prompt(row) if row is not None else None
+
+    async def list_pending_lifecycle_operations(self) -> _PromptList:
+        placeholders = ", ".join("?" for _ in LIFECYCLE_PENDING_STATES)
+        query = (
+            "SELECT * FROM acp_prompt_queue WHERE kind IN (?, ?) "
+            f"AND state IN ({placeholders}) ORDER BY created_at, prompt_id"
+        )
+        values = [
+            OperationKind.CLOSE.value,
+            OperationKind.DELETE.value,
+            *(state.value for state in LIFECYCLE_PENDING_STATES),
+        ]
+        async with self._lock:
+            rows = await asyncio.to_thread(
+                self._run,
+                lambda: self._connect().execute(query, values).fetchall(),
+            )
+        return [_row_to_prompt(row) for row in rows]
+
+    async def claim_lifecycle_operation(
+        self,
+        prompt_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> QueuedPrompt | None:
+        def claim() -> QueuedPrompt | None:
+            connection = self._connect()
+            with _immediate(connection):
+                placeholders = ", ".join("?" for _ in LIFECYCLE_PENDING_STATES)
+                row = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE prompt_id = ? "
+                    "AND kind IN (?, ?) "
+                    f"AND state IN ({placeholders})",
+                    (
+                        prompt_id,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if row is None:
+                    return None
+                current = _row_to_prompt(row)
+                active = now_ms()
+                attempt = current.attempt + 1
+                connection.execute(
+                    "UPDATE acp_prompt_queue SET state = ?, owner_id = ?, fence = ?, "
+                    "attempt = ?, updated_at = ? WHERE prompt_id = ?",
+                    (
+                        PromptState.CLAIMED.value,
+                        owner_id,
+                        fence,
+                        attempt,
+                        active,
+                        prompt_id,
+                    ),
+                )
+                return replace(
+                    current,
+                    state=PromptState.CLAIMED,
+                    owner_id=owner_id,
+                    fence=fence,
+                    attempt=attempt,
+                    updated_at=active,
+                )
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, claim)
+
+    async def cancel_queued_operations(
+        self,
+        deployment_id: str,
+        session_id: str,
+        *,
+        exclude_prompt_id: str,
+    ) -> _PromptList:
+        def cancel() -> list[QueuedPrompt]:
+            connection = self._connect()
+            with _immediate(connection):
+                rows = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND prompt_id != ? AND state = ? "
+                    "AND kind NOT IN (?, ?) ORDER BY sequence",
+                    (
+                        deployment_id,
+                        session_id,
+                        exclude_prompt_id,
+                        PromptState.QUEUED.value,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                    ),
+                ).fetchall()
+                if not rows:
+                    return []
+                active = now_ms()
+                connection.execute(
+                    "UPDATE acp_prompt_queue SET state = ?, updated_at = ? "
+                    "WHERE deployment_id = ? AND session_id = ? AND prompt_id != ? "
+                    "AND state = ? AND kind NOT IN (?, ?)",
+                    (
+                        PromptState.CANCELLED.value,
+                        active,
+                        deployment_id,
+                        session_id,
+                        exclude_prompt_id,
+                        PromptState.QUEUED.value,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                    ),
+                )
+                return [
+                    replace(
+                        _row_to_prompt(row),
+                        state=PromptState.CANCELLED,
+                        updated_at=active,
+                    )
+                    for row in rows
+                ]
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, cancel)
+
+    async def settle_lifecycle_operation(
+        self,
+        prompt_id: str,
+        state: PromptState,
+        *,
+        owner_id: str,
+        fence: int,
+        delete_session: bool,
+    ) -> bool:
+        if state not in (PromptState.COMPLETED, PromptState.FAILED):
+            raise ValueError("lifecycle operation must settle as completed or failed")
+
+        def settle() -> bool:
+            connection = self._connect()
+            with _immediate(connection):
+                row = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE prompt_id = ? AND state = ? "
+                    "AND owner_id = ? AND fence = ? AND kind IN (?, ?)",
+                    (
+                        prompt_id,
+                        PromptState.CLAIMED.value,
+                        owner_id,
+                        fence,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                    ),
+                ).fetchone()
+                if row is None:
+                    return False
+                operation = _row_to_prompt(row)
+                if delete_session:
+                    connection.execute(
+                        "DELETE FROM acp_sessions WHERE session_id = ? AND deployment_id = ?",
+                        (operation.session_id, operation.deployment_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM acp_prompt_queue WHERE session_id = ? "
+                        "AND deployment_id = ? AND prompt_id != ?",
+                        (operation.session_id, operation.deployment_id, prompt_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM acp_session_leases WHERE session_id = ? "
+                        "AND deployment_id = ? AND owner_id = ? AND fence = ?",
+                        (
+                            operation.session_id,
+                            operation.deployment_id,
+                            owner_id,
+                            fence,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE acp_session_leases SET expires_at = 0 WHERE session_id = ? "
+                        "AND deployment_id = ? AND owner_id = ? AND fence = ?",
+                        (
+                            operation.session_id,
+                            operation.deployment_id,
+                            owner_id,
+                            fence,
+                        ),
+                    )
+                changed = connection.execute(
+                    "UPDATE acp_prompt_queue SET state = ?, updated_at = ? "
+                    "WHERE prompt_id = ? AND state = ? AND owner_id = ? AND fence = ?",
+                    (
+                        state.value,
+                        now_ms(),
+                        prompt_id,
+                        PromptState.CLAIMED.value,
+                        owner_id,
+                        fence,
+                    ),
+                ).rowcount
+                return bool(changed)
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, settle)
 
     # -- Deployment revision metadata ----------------------------------------
 
