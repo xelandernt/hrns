@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from .acp_store import (
     SESSION_COLUMNS,
     DeploymentRecord,
+    OperationKind,
     PromptState,
     QueuedPrompt,
     SessionLease,
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
   credential_id TEXT,
   connection_id TEXT,
   sequence INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'prompt',
   payload TEXT NOT NULL,
   state TEXT NOT NULL,
   attempt INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +125,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("client_capabilities", "INTEGER"),
 )
 
+_ADDED_QUEUE_COLUMNS: tuple[tuple[str, str], ...] = (("kind", "TEXT NOT NULL DEFAULT 'prompt'"),)
+
 
 def default_store_path() -> Path:
     """Host default store location: ``HRNS_STORE`` when set, else the user data dir."""
@@ -149,8 +153,8 @@ _TERMINAL_PROMPT_STATES = frozenset(
 _PROMPT_INSERT = """
 INSERT INTO acp_prompt_queue (
     prompt_id, session_id, principal, deployment_id, credential_id, connection_id,
-    sequence, payload, state, attempt, parent_id, owner_id, fence, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    sequence, kind, payload, state, attempt, parent_id, owner_id, fence, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _DEPLOYMENT_UPSERT = """
@@ -228,6 +232,7 @@ def _row_to_prompt(row: sqlite3.Row) -> QueuedPrompt:
         credential_id=values["credential_id"],
         connection_id=values["connection_id"],
         sequence=int(values["sequence"]),
+        kind=OperationKind(values["kind"]),
         payload=str(values["payload"]),
         state=PromptState(values["state"]),
         attempt=int(values["attempt"]),
@@ -271,6 +276,7 @@ def _insert_prompt(connection: sqlite3.Connection, prompt: QueuedPrompt) -> None
             prompt.credential_id,
             prompt.connection_id,
             prompt.sequence,
+            prompt.kind.value,
             prompt.payload,
             prompt.state.value,
             prompt.attempt,
@@ -329,6 +335,12 @@ class SQLiteSessionStore(SessionStore):
         for name, declaration in _ADDED_COLUMNS:
             if name not in existing:
                 connection.execute(f"ALTER TABLE acp_sessions ADD COLUMN {name} {declaration}")
+        existing_queue = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(acp_prompt_queue)")
+        }
+        for name, declaration in _ADDED_QUEUE_COLUMNS:
+            if name not in existing_queue:
+                connection.execute(f"ALTER TABLE acp_prompt_queue ADD COLUMN {name} {declaration}")
 
     async def close(self) -> None:
         async with self._lock:
@@ -923,14 +935,20 @@ class SQLiteSessionStore(SessionStore):
         def operation() -> QueuedPrompt | None:
             connection = self._connect()
             with _immediate(connection):
-                # Only hand out a *new* claim. A row already claimed by this owner is
-                # an interrupted attempt and must never be executed twice.
+                # The earliest non-terminal operation is authoritative. A stale claim
+                # blocks later work until recovery marks it uncertain; skipping it
+                # would silently overtake an interrupted turn.
                 row = connection.execute(
                     "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
-                    "AND session_id = ? AND state = ? ORDER BY sequence LIMIT 1",
-                    (deployment_id, session_id, PromptState.QUEUED.value),
+                    "AND session_id = ? AND state IN (?, ?) ORDER BY sequence LIMIT 1",
+                    (
+                        deployment_id,
+                        session_id,
+                        PromptState.QUEUED.value,
+                        PromptState.CLAIMED.value,
+                    ),
                 ).fetchone()
-                if row is None:
+                if row is None or row["state"] != PromptState.QUEUED.value:
                     return None
                 active = now_ms()
                 attempt = int(row["attempt"]) + 1

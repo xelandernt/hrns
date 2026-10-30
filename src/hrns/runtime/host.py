@@ -56,6 +56,7 @@ from hrns.protocol import (
 
 from . import acp as acp_map
 from .acp_store import (
+    OperationKind,
     PromptState,
     QueuedPrompt,
     SessionLease,
@@ -147,7 +148,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self._lease_task: asyncio.Task[None] | None = None
         self._session_cwd: dict[str, str] = {}
         self._destroyed: set[str] = set()
-        self._inflight_prompts: set[str] = set()
+        self._operation_results: dict[str, asyncio.Future[Any]] = {}
+        self._operation_kwargs: dict[str, dict[str, Any]] = {}
         models = tuple(self.policy.models)
         default = self.policy.default_model or (models[0] if models else None)
         self._default_model = default
@@ -774,77 +776,78 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         prompt: list[Any],
         **kwargs: Any,
     ) -> schema.PromptResponse:
-        async with self._turn_lock(session_id):
-            # A composed session is only in memory; its first turn is what makes it durable, and
-            # the prompt names it so even a turn that fails outright stays recognizable later.
-            await self.authorize(session_id, PolicyAction.PROMPT)
-            await self.sessions.ensure_persisted(session_id)
-            await self.acquire_session_lease(session_id)
-            connection_id = self.connection_key()
-            if connection_id is not None:
-                self.fanout.subscribe(connection_id, session_id)
-            queued = await self.begin_queued_prompt(session_id, prompt)
-            if queued is not None:
-                self._inflight_prompts.add(queued.prompt_id)
-            await self.sessions.ensure_title(session_id, _prompt_text(prompt))
-            self.sessions.turn_usage[session_id] = {}
-            response = None
-            outcome = PromptState.FAILED
-            try:
-                response = await super().prompt(session_id, prompt, **kwargs)
-                outcome = (
-                    PromptState.UNCERTAIN
-                    if getattr(response, "stop_reason", None) == "cancelled"
-                    else PromptState.COMPLETED
+        # A composed session is only in memory; its first ordered operation makes it
+        # durable. Hosted prompts are appended before waiting for the turn boundary, so
+        # an older queued prompt or configuration mutation cannot be overtaken.
+        await self.authorize(session_id, PolicyAction.PROMPT)
+        await self.sessions.ensure_persisted(session_id)
+        await self.acquire_session_lease(session_id)
+        connection_id = self.connection_key()
+        if connection_id is not None:
+            self.fanout.subscribe(connection_id, session_id)
+        if self._lease_owner() is None:
+            async with self._turn_lock(session_id):
+                return await self._run_prompt_turn(session_id, prompt, kwargs)
+        payload = self._queue_payload(prompt)
+        self._decode_prompt(payload)
+        row = self._queue_row(session_id, payload)
+        result = await self._submit_ordered_operation(row, kwargs=kwargs)
+        if not isinstance(result, schema.PromptResponse):
+            raise HrnsError(
+                "SESSION_CONFLICT",
+                "The ordered prompt completed without a prompt response.",
+                {"sessionId": session_id, "promptId": row.prompt_id},
+            )
+        return result
+
+    async def _run_prompt_turn(
+        self,
+        session_id: str,
+        prompt: list[Any],
+        kwargs: Mapping[str, Any],
+    ) -> schema.PromptResponse:
+        await self.sessions.ensure_title(session_id, _prompt_text(prompt))
+        self.sessions.turn_usage[session_id] = {}
+        response = None
+        try:
+            response = await super().prompt(session_id, prompt, **dict(kwargs))
+            return response
+        finally:
+            channel = self.sessions.steering.get(session_id)
+            if channel is not None:
+                channel.detach()
+            increment = self.sessions.turn_usage.pop(session_id, {})
+            if response is not None and response.usage is not None:
+                for name, value in usage_payload(response.usage).items():
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        increment[name] = max(increment.get(name, 0), value)
+            record = await self.store.get_visible(session_id, self.acting_principal())
+            if record is not None and (self._lease_owner() is None or session_id in self._leases):
+                title = record.title
+                if not title and response is not None:
+                    title = _prompt_text(prompt) or None
+                totals = merge_usage(record.usage, increment)
+                request = self.attribution()
+                totals["last_request"] = {
+                    "principal": request.principal,
+                    "credential_id": request.credential_id,
+                    "connection_id": request.connection_id,
+                    "request_id": request.request_id,
+                }
+                await self.store.update(
+                    session_id,
+                    title=title,
+                    usage=totals,
+                    touch=True,
                 )
-                return response
-            except asyncio.CancelledError:
-                # The caller lost the connection or the lease mid-turn. The committed
-                # transcript is unknown, so the prompt must become uncertain, never replayed
-                # automatically.
-                outcome = PromptState.UNCERTAIN
-                raise
-            finally:
-                if queued is not None:
-                    self._inflight_prompts.discard(queued.prompt_id)
-                await self.finish_queued_prompt(queued, outcome)
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await self.notify_queue(session_id)
-                channel = self.sessions.steering.get(session_id)
-                if channel is not None:
-                    channel.detach()
-                increment = self.sessions.turn_usage.pop(session_id, {})
-                if response is not None and response.usage is not None:
-                    # The adapter's final totals include approval continuations and limits.
-                    # Reconcile without double counting or losing measured usage on cancel.
-                    # Only counters reconcile by max; the price is summed per response.
-                    for name, value in usage_payload(response.usage).items():
-                        if isinstance(value, int) and not isinstance(value, bool):
-                            increment[name] = max(increment.get(name, 0), value)
-                record = await self.store.get_visible(session_id, self.acting_principal())
-                if record is not None and (
-                    self._lease_owner() is None or session_id in self._leases
-                ):
-                    title = record.title
-                    if not title and response is not None:
-                        title = _prompt_text(prompt) or None
-                    totals = merge_usage(record.usage, increment)
-                    request = self.attribution()
-                    totals["last_request"] = {
-                        "principal": request.principal,
-                        "credential_id": request.credential_id,
-                        "connection_id": request.connection_id,
-                        "request_id": request.request_id,
-                    }
-                    await self.store.update(
-                        session_id,
-                        title=title,
-                        usage=totals,
-                        touch=True,
-                    )
-                    await self.sessions.send_session_usage(session_id, finalize_usage(totals))
-                    if title and title != record.title:
-                        await self.sessions.send_session_title(session_id, title)
+                await self.sessions.send_session_usage(session_id, finalize_usage(totals))
+                if title and title != record.title:
+                    await self.sessions.send_session_title(session_id, title)
+
+    def _new_operation_waiter(self, operation_id: str) -> asyncio.Future[Any]:
+        waiter: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._operation_results[operation_id] = waiter
+        return waiter
 
     # --- durable prompt queue --------------------------------------------
 
@@ -873,6 +876,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         session_id: str,
         payload: str,
         *,
+        kind: OperationKind = OperationKind.PROMPT,
         parent_id: str | None = None,
     ) -> QueuedPrompt:
         request = self.attribution()
@@ -885,6 +889,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             credential_id=request.credential_id,
             connection_id=request.connection_id,
             sequence=0,
+            kind=kind,
             payload=payload,
             state=PromptState.QUEUED,
             attempt=0,
@@ -898,6 +903,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
     async def enqueue_prompt(self, session_id: str, prompt: Sequence[Any]) -> QueuedPrompt:
         """Persist a prompt without executing it; a later run drains it in order."""
         await self.authorize(session_id, PolicyAction.PROMPT)
+        await self.sessions.ensure_persisted(session_id)
         await self.acquire_session_lease(session_id)
         payload = self._queue_payload(prompt)
         # Reject blocks the drain could never reconstruct now, not at execution time.
@@ -927,111 +933,153 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         return blocks
 
     async def run_queued_prompts(self, session_id: str, *, limit: int = 100) -> list[QueuedPrompt]:
-        """Execute durable prompts in sequence order, once each.
-
-        An inline prompt that is already running is skipped, not run twice. A cancelled
-        turn leaves its row uncertain; it is never picked up again without an explicit
-        retry.
-        """
+        """Execute durable session operations in their authoritative order."""
         await self.authorize(session_id, PolicyAction.PROMPT)
-        # A drain needs the live composition; without it every row would be marked
-        # failed by the adapter's unknown-session error.
         self.sessions.require_composition(session_id)
-        lease = await self.acquire_session_lease(session_id)
+        await self.acquire_session_lease(session_id)
+        return await self._drain_ordered_operations(session_id, limit=limit)
+
+    async def _drain_ordered_operations(
+        self,
+        session_id: str,
+        *,
+        stop_id: str | None = None,
+        limit: int = 100,
+    ) -> list[QueuedPrompt]:
         owner = self._lease_owner()
-        if lease is None or owner is None:
-            raise HrnsError("SESSION_HELD", "Draining a queue requires an owned session lease.")
+        if owner is None:
+            raise HrnsError("SESSION_HELD", "Draining ordered work requires a hosted session.")
         done: list[QueuedPrompt] = []
-        for _ in range(limit):
-            async with self._turn_lock(session_id):
+        async with self._turn_lock(session_id):
+            processed = 0
+            while stop_id is not None or processed < limit:
+                lease = self._leases.get(session_id)
+                if lease is None:
+                    raise HrnsError(
+                        "SESSION_HELD",
+                        "Draining ordered work requires an owned session lease.",
+                    )
                 row = await self.store.claim_next_prompt(
                     session_id, owner, lease.fence, self._lease_ttl_ms
                 )
                 if row is None:
+                    if stop_id is not None:
+                        raise HrnsError(
+                            "SESSION_CONFLICT",
+                            "Earlier ordered work is unresolved; refusing to overtake it.",
+                            {"sessionId": session_id, "operationId": stop_id},
+                        )
                     break
-                if row.prompt_id in self._inflight_prompts:
-                    break
-                self._inflight_prompts.add(row.prompt_id)
-                self.sessions.turn_usage[session_id] = {}
-                await self.sessions.ensure_title(session_id, "Queued prompt")
+                processed += 1
                 outcome = PromptState.FAILED
-                token = (
-                    self.fanout.select(row.connection_id) if row.connection_id is not None else None
-                )
+                result: Any = None
+                failure: BaseException | None = None
                 try:
-                    response = await super().prompt(session_id, self._decode_prompt(row.payload))
-                    outcome = (
-                        PromptState.UNCERTAIN
-                        if getattr(response, "stop_reason", None) == "cancelled"
-                        else PromptState.COMPLETED
-                    )
-                except asyncio.CancelledError:
+                    result = await self._execute_ordered_operation(row)
+                    if (
+                        row.kind is OperationKind.PROMPT
+                        and getattr(result, "stop_reason", None) == "cancelled"
+                    ):
+                        outcome = PromptState.UNCERTAIN
+                    else:
+                        outcome = PromptState.COMPLETED
+                except asyncio.CancelledError as exc:
                     outcome = PromptState.UNCERTAIN
-                    raise
-                except Exception:
-                    outcome = PromptState.FAILED
+                    failure = exc
+                except Exception as exc:
+                    failure = exc
                 finally:
-                    if token is not None:
-                        self.fanout.reset(token)
-                    self._inflight_prompts.discard(row.prompt_id)
-                    await self.finish_queued_prompt(row, outcome)
-                    increment = self.sessions.turn_usage.pop(session_id, {})
-                    if increment and (self._lease_owner() is None or session_id in self._leases):
-                        stored = await self.store.get_visible(session_id, self.acting_principal())
-                        if stored is not None:
-                            await self.store.update(
-                                session_id,
-                                usage=merge_usage(stored.usage, increment),
-                                touch=True,
-                            )
-                    await self.notify_queue(session_id)
+                    finished = await self.finish_queued_prompt(row, outcome)
+                    if not finished and failure is None:
+                        failure = HrnsError(
+                            "SESSION_CONFLICT",
+                            "The ordered operation executed but its completion could not be fenced.",
+                            {
+                                "sessionId": session_id,
+                                "operationId": row.prompt_id,
+                            },
+                        )
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await self.notify_queue(session_id)
+                waiter = self._operation_results.get(row.prompt_id)
+                if waiter is not None and not waiter.done():
+                    if isinstance(failure, asyncio.CancelledError):
+                        waiter.cancel()
+                    elif failure is not None:
+                        waiter.set_exception(failure)
+                    else:
+                        waiter.set_result(result)
                 done.append(await self.store.get_prompt(row.prompt_id) or row)
+                if isinstance(failure, asyncio.CancelledError):
+                    raise failure
+                if row.prompt_id == stop_id:
+                    break
         return done
 
-    async def begin_queued_prompt(
-        self, session_id: str, prompt: Sequence[Any]
-    ) -> QueuedPrompt | None:
-        """Persist this prompt before execution and claim it under the session fence.
-
-        Queue rows exist only for hosted servers (``worker_id`` set); a local stdio host
-        keeps its existing in-memory behavior.
-        """
-        owner = self._lease_owner()
-        if owner is None:
-            return None
-        lease = self._leases.get(session_id)
-        if lease is None:
-            lease = await self.acquire_session_lease(session_id)
-        if lease is None:
-            return None
-        stored = await self.store.enqueue_prompt(
-            self._queue_row(session_id, self._queue_payload(prompt))
+    async def _execute_ordered_operation(self, row: QueuedPrompt) -> Any:
+        request = RequestContext(
+            principal=row.principal,
+            credential_id=row.credential_id,
+            connection_id=row.connection_id,
+            agent_id=self.definition.agent_id,
         )
-        # Claim this specific row. Earlier queued rows stay queued for an explicit
-        # drain instead of being turned into uncertain work by an unrelated prompt.
-        claimed = await self.store.claim_prompt(stored.prompt_id, owner, lease.fence)
-        if claimed is None:
+        request_token = current_request.set(request)
+        connection_token = current_connection_id.set(row.connection_id)
+        fanout_token = (
+            self.fanout.select(row.connection_id) if row.connection_id is not None else None
+        )
+        try:
+            if row.kind is OperationKind.PROMPT:
+                kwargs = self._operation_kwargs.pop(row.prompt_id, {})
+                return await self._run_prompt_turn(
+                    row.session_id,
+                    self._decode_prompt(row.payload),
+                    kwargs,
+                )
+            if row.kind is OperationKind.CONFIGURATION:
+                payload = json.loads(row.payload)
+                request = ConfigurationUpdate.model_validate(payload)
+                return await self.config.apply(request)
+            if row.kind is OperationKind.CONFIG_OPTION:
+                payload = json.loads(row.payload)
+                if not isinstance(payload, dict):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION", "The queued config option is malformed."
+                    )
+                config_id = payload.get("configId")
+                value = payload.get("value")
+                if not isinstance(config_id, str) or not isinstance(value, (str, bool)):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION", "The queued config option is malformed."
+                    )
+                kwargs = self._operation_kwargs.pop(row.prompt_id, {})
+                return await self._apply_config_option(config_id, row.session_id, value, **kwargs)
             raise HrnsError(
-                "SESSION_CONFLICT",
-                "The prompt could not be claimed under the current session fence.",
-                {"sessionId": session_id, "promptId": stored.prompt_id},
+                "INVALID_CONFIGURATION",
+                "The queued operation kind is not supported.",
+                {"kind": row.kind.value},
             )
-        await self.notify_queue(session_id)
-        return claimed
+        finally:
+            if fanout_token is not None:
+                self.fanout.reset(fanout_token)
+            current_connection_id.reset(connection_token)
+            current_request.reset(request_token)
 
-    async def finish_queued_prompt(self, queued: QueuedPrompt | None, state: PromptState) -> None:
+    async def finish_queued_prompt(self, queued: QueuedPrompt | None, state: PromptState) -> bool:
         if queued is None:
-            return
+            return False
         # The row's own owner/fence is authoritative even when the in-memory lease was
         # already lost; otherwise an interrupted finish leaves the row claimed forever.
         owner = queued.owner_id or self._lease_owner()
         fence = queued.fence
         if owner is None or fence is None:
-            return
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            await asyncio.shield(
+            return False
+        try:
+            return await asyncio.shield(
                 self.store.finish_prompt(queued.prompt_id, state, owner_id=owner, fence=fence)
             )
+        except (Exception, asyncio.CancelledError):
+            return False
 
     async def list_queued_prompts(
         self,
@@ -1047,6 +1095,13 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
     async def retry_queued_prompt(self, session_id: str, prompt_id: str) -> QueuedPrompt:
         """Link a new attempt to an uncertain prompt; execution stays explicit."""
         await self.authorize(session_id, PolicyAction.RETRY)
+        original = await self.store.get_prompt(prompt_id)
+        if original is None or original.kind is not OperationKind.PROMPT:
+            raise HrnsError(
+                "INVALID_REQUEST",
+                "Only an uncertain prompt can be retried.",
+                {"promptId": prompt_id},
+            )
         lease = await self.acquire_session_lease(session_id)
         owner = self._lease_owner()
         if lease is None or owner is None:
@@ -1070,6 +1125,58 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         refreshed = await self.store.get_prompt(row.prompt_id)
         return refreshed or row
 
+    async def _submit_ordered_operation(
+        self,
+        row: QueuedPrompt,
+        *,
+        kwargs: Mapping[str, Any] | None = None,
+    ) -> Any:
+        waiter = self._new_operation_waiter(row.prompt_id)
+        if kwargs:
+            self._operation_kwargs[row.prompt_id] = dict(kwargs)
+        try:
+            stored = await self.store.enqueue_prompt(row)
+        except BaseException:
+            self._operation_results.pop(row.prompt_id, None)
+            self._operation_kwargs.pop(row.prompt_id, None)
+            raise
+        await self.notify_queue(row.session_id)
+        try:
+            await self._drain_ordered_operations(row.session_id, stop_id=stored.prompt_id)
+            return await asyncio.shield(waiter)
+        finally:
+            self._operation_results.pop(stored.prompt_id, None)
+            self._operation_kwargs.pop(stored.prompt_id, None)
+
+    async def order_configuration_update(self, request: ConfigurationUpdate) -> dict[str, Any]:
+        """Order a binding transaction with prompts at the next turn boundary."""
+        await self.authorize(request.session_id, PolicyAction.CONFIGURE)
+        self.config.validate(request)
+        await self.sessions.ensure_persisted(request.session_id)
+        await self.acquire_session_lease(request.session_id)
+        if self._lease_owner() is None:
+            async with self._turn_lock(request.session_id):
+                return await self.config.apply(request)
+        payload = json.dumps(
+            request.to_wire(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        result = await self._submit_ordered_operation(
+            self._queue_row(
+                request.session_id,
+                payload,
+                kind=OperationKind.CONFIGURATION,
+            )
+        )
+        if not isinstance(result, dict):
+            raise HrnsError(
+                "SESSION_CONFLICT",
+                "The ordered configuration update completed without a snapshot.",
+                {"sessionId": request.session_id, "requestId": request.request_id},
+            )
+        return result
+
     async def set_config_option(
         self,
         config_id: str,
@@ -1078,18 +1185,42 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.SetSessionConfigOptionResponse | None:
         try:
-            return await self._set_config_option(config_id, session_id, value, **kwargs)
+            await self.authorize(session_id, PolicyAction.CONFIGURE)
+            await self.sessions.ensure_persisted(session_id)
+            await self.acquire_session_lease(session_id)
+            if self._lease_owner() is None:
+                async with self._turn_lock(session_id):
+                    return await self._apply_config_option(config_id, session_id, value, **kwargs)
+            payload = json.dumps(
+                {"configId": config_id, "value": value},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            result = await self._submit_ordered_operation(
+                self._queue_row(
+                    session_id,
+                    payload,
+                    kind=OperationKind.CONFIG_OPTION,
+                ),
+                kwargs=kwargs,
+            )
+            if result is not None and not isinstance(result, schema.SetSessionConfigOptionResponse):
+                raise HrnsError(
+                    "SESSION_CONFLICT",
+                    "The ordered config option completed without a valid response.",
+                    {"sessionId": session_id, "configId": config_id},
+                )
+            return result
         except HrnsError as exc:
             raise acp_map.hrns_rpc_error(exc) from exc
 
-    async def _set_config_option(
+    async def _apply_config_option(
         self,
         config_id: str,
         session_id: str,
         value: str | bool,
         **kwargs: Any,
     ) -> schema.SetSessionConfigOptionResponse | None:
-        await self.authorize(session_id, PolicyAction.CONFIGURE)
         if config_id == acp_map.EFFORT_OPTION_ID:
             composition = self.sessions.require_composition(session_id)
             if not isinstance(value, str):

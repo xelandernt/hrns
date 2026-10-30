@@ -29,6 +29,7 @@ from . import _warnings  # noqa: F401  (the pinned ACP adapter is experimental)
 from ._version import __version__
 from .acp_store import (
     DeploymentRecord,
+    OperationKind,
     PromptState,
     QueuedPrompt,
     ScopedSessionStore,
@@ -191,6 +192,7 @@ __all__ = [
     "SQLiteSessionStore",
     "ScopedSessionStore",
     "DeploymentRecord",
+    "OperationKind",
     "PromptState",
     "QueuedPrompt",
     "SessionLease",
