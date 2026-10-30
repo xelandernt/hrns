@@ -79,6 +79,7 @@ class AgentServer:
         self._instance_id = uuid.uuid4().hex
         self._hosts: dict[str, HrnsACPAgent] = {}
         self._actors: dict[str, HrnsACPAgent] = {}
+        self._actor_locks: dict[str, asyncio.Lock] = {}
         self._native_deployments: set[tuple[str, str]] = set()
         self._pending_deployments: dict[tuple[str, str], DeploymentRecord] = {}
         self._persist_tasks: set[asyncio.Task[None]] = set()
@@ -604,11 +605,15 @@ class AgentServer:
             )
         except PermissionError as exc:
             raise ApiError("UNAUTHORIZED", str(exc)) from exc
+        namespace = agent.session_namespace
+        actor_lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
         try:
-            host = self._actors.get(agent.session_namespace)
-            if host is None:
-                host = self._build_host(agent, principal)
-                self._actors[agent.session_namespace] = host
+            async with actor_lock:
+                host = self._actors.get(namespace)
+                if host is None:
+                    host = self._build_host(agent, principal)
+                    self._actors[namespace] = host
+                self._hosts[info.connection_id] = host
         except BaseException:
             # A constructor failure must not keep counting against the connection limit.
             self.connections.unregister(info.connection_id)
@@ -622,19 +627,19 @@ class AgentServer:
         request_token = current_request.set(request)
         connection_token = current_connection_id.set(info.connection_id)
         host.request_context = request
-        self._hosts[info.connection_id] = host
         try:
             yield host
         finally:
             current_request.reset(request_token)
             current_connection_id.reset(connection_token)
-            host.detach(info.connection_id)
-            self._hosts.pop(info.connection_id, None)
-            self.connections.unregister(info.connection_id)
-            # Another connection may have registered this actor but not yet attached
-            # its socket. Keep the actor alive until every handler leaves `_hosts`.
-            still_attached = any(candidate is host for candidate in self._hosts.values())
-            if not host.fanout.connections() and not still_attached:
-                if self._actors.get(agent.session_namespace) is host:
-                    self._actors.pop(agent.session_namespace, None)
-                await host.shutdown()
+            async with actor_lock:
+                host.detach(info.connection_id)
+                self._hosts.pop(info.connection_id, None)
+                self.connections.unregister(info.connection_id)
+                # A reconnect either registers against this actor before retirement
+                # starts or waits until shutdown has released all of its leases.
+                still_attached = any(candidate is host for candidate in self._hosts.values())
+                if not host.fanout.connections() and not still_attached:
+                    await host.shutdown()
+                    if self._actors.get(namespace) is host:
+                        self._actors.pop(namespace, None)
