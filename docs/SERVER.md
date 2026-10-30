@@ -228,12 +228,13 @@ Prompts are persisted in `acp_prompt_queue` before they run. The extension surfa
 | Method | Purpose |
 | --- | --- |
 | `_hrns/queue/enqueue` | Persist a text prompt without executing it |
-| `_hrns/queue/run` | Execute queued prompts in sequence order, once each |
-| `_hrns/queue/list` | Inspect states, attempts, origins, and parent links |
+| `_hrns/queue/run` | Execute ordered prompts and configuration mutations once each |
+| `_hrns/queue/list` | Inspect operation kinds, states, attempts, origins, and parent links |
 | `_hrns/queue/retry` | Create and execute a new attempt linked to an `uncertain` one |
 
-A cancelled or abandoned turn becomes `uncertain`, is never replayed automatically, and
-blocks accidental duplicate execution until an explicit retry.
+Inline prompts and configuration mutations join the same durable per-session sequence.
+Configuration waits for the active turn boundary, and a cancelled or abandoned active
+prompt becomes `uncertain` instead of being replayed automatically.
 
 ## Revocation and lifecycle
 

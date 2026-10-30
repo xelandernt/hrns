@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from .acp_store import (
     SESSION_COLUMNS,
     DeploymentRecord,
+    OperationKind,
     PromptState,
     QueuedPrompt,
     SessionLease,
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
     credential_id TEXT,
     connection_id TEXT,
     sequence BIGINT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'prompt',
     payload TEXT NOT NULL,
     state TEXT NOT NULL,
     attempt BIGINT NOT NULL DEFAULT 0,
@@ -155,6 +157,8 @@ _ADDED_COLUMNS = (
     ("collaborators", "TEXT NOT NULL DEFAULT '[]'"),
     ("client_capabilities", "BOOLEAN"),
 )
+
+_ADDED_QUEUE_COLUMNS = (("kind", "TEXT NOT NULL DEFAULT 'prompt'"),)
 
 
 def _columns(sql: Any) -> Any:
@@ -208,8 +212,8 @@ def _record_from_row(row: PgRow) -> SessionRecord:
 _PROMPT_INSERT = """
 INSERT INTO acp_prompt_queue (
     prompt_id, session_id, principal, deployment_id, credential_id, connection_id,
-    sequence, payload, state, attempt, parent_id, owner_id, fence, created_at, updated_at
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    sequence, kind, payload, state, attempt, parent_id, owner_id, fence, created_at, updated_at
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 #: States that may only be reached through ``finish_prompt``.
@@ -249,6 +253,7 @@ def _prompt_from_row(row: PgRow) -> QueuedPrompt:
         credential_id=values["credential_id"],
         connection_id=values["connection_id"],
         sequence=int(values["sequence"]),
+        kind=OperationKind(values["kind"]),
         payload=str(values["payload"]),
         state=PromptState(values["state"]),
         attempt=int(values["attempt"]),
@@ -286,6 +291,7 @@ async def _insert_prompt(cursor: AsyncCursor[PgRow], prompt: QueuedPrompt) -> No
             prompt.credential_id,
             prompt.connection_id,
             prompt.sequence,
+            prompt.kind.value,
             prompt.payload,
             prompt.state.value,
             prompt.attempt,
@@ -334,6 +340,12 @@ class PostgresSessionStore(SessionStore):
                         await cursor.execute(
                             sql.SQL(
                                 "ALTER TABLE acp_sessions ADD COLUMN IF NOT EXISTS {} {}"
+                            ).format(sql.Identifier(name), sql.SQL(declaration))
+                        )
+                    for name, declaration in _ADDED_QUEUE_COLUMNS:
+                        await cursor.execute(
+                            sql.SQL(
+                                "ALTER TABLE acp_prompt_queue ADD COLUMN IF NOT EXISTS {} {}"
                             ).format(sql.Identifier(name), sql.SQL(declaration))
                         )
             except BaseException:
@@ -889,17 +901,24 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
-                    # Never return an already-claimed row: an interrupted attempt must
-                    # not be executed a second time.
+                    # A stale claim blocks later work until recovery marks it
+                    # uncertain. Selecting a later queued row would overtake it.
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
-                        "AND session_id = %s AND state = %s ORDER BY sequence LIMIT 1 FOR UPDATE",
-                        (deployment_id, session_id, PromptState.QUEUED.value),
+                        "AND session_id = %s AND state = ANY(%s) "
+                        "ORDER BY sequence LIMIT 1 FOR UPDATE",
+                        (
+                            deployment_id,
+                            session_id,
+                            [PromptState.QUEUED.value, PromptState.CLAIMED.value],
+                        ),
                     )
                     row = await cursor.fetchone()
                     if row is None:
                         return None
                     queued = _prompt_from_row(row)
+                    if queued.state is not PromptState.QUEUED:
+                        return None
                     active = now_ms()
                     attempt = queued.attempt + 1
                     await cursor.execute(

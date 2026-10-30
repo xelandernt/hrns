@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SESSION_COLUMNS",
     "DeploymentRecord",
+    "OperationKind",
     "PromptState",
     "QueuedPrompt",
     "SessionLease",
@@ -147,7 +148,7 @@ def decode_session_cursor(cursor: str) -> tuple[int, str]:
 
 
 class PromptState(StrEnum):
-    """Lifecycle of one durable prompt in the per-session queue."""
+    """Lifecycle of one durable operation in the per-session queue."""
 
     QUEUED = "queued"
     CLAIMED = "claimed"
@@ -155,6 +156,14 @@ class PromptState(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     UNCERTAIN = "uncertain"
+
+
+class OperationKind(StrEnum):
+    """Kinds of work sharing the authoritative per-session order."""
+
+    PROMPT = "prompt"
+    CONFIGURATION = "configuration"
+    CONFIG_OPTION = "config_option"
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +250,11 @@ _DeploymentList = list[DeploymentRecord]
 
 @dataclass(frozen=True, slots=True)
 class QueuedPrompt:
-    """One durably queued ACP prompt, ordered by ``sequence`` within its session."""
+    """One durably ordered session operation.
+
+    The historic name is retained because prompt queue records are part of the public
+    runtime API. ``kind`` distinguishes prompts from configuration mutations.
+    """
 
     prompt_id: str
     session_id: str
@@ -250,6 +263,7 @@ class QueuedPrompt:
     credential_id: str | None
     connection_id: str | None
     sequence: int
+    kind: OperationKind
     payload: str
     state: PromptState
     attempt: int
@@ -269,6 +283,7 @@ class QueuedPrompt:
             "credential_id": self.credential_id,
             "connection_id": self.connection_id,
             "sequence": self.sequence,
+            "kind": self.kind.value,
             "payload": self.payload,
             "state": self.state.value,
             "attempt": self.attempt,
@@ -462,11 +477,14 @@ class SessionStore(ABC):
         fence: int,
         ttl_ms: int,
     ) -> QueuedPrompt | None:
-        """Claim the earliest queued prompt, or return this owner's current claim."""
+        """Claim the earliest queued operation.
+
+        An earlier unresolved claim blocks later work until recovery marks it uncertain.
+        """
 
     @abstractmethod
     async def claim_prompt(self, prompt_id: str, owner_id: str, fence: int) -> QueuedPrompt | None:
-        """Claim one specific queued prompt (used by an inline turn)."""
+        """Claim one specific queued operation."""
 
     @abstractmethod
     async def finish_prompt(
