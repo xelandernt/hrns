@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import uuid
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
@@ -28,8 +29,10 @@ from .acp_store import (
     SESSION_COLUMNS,
     DeploymentRecord,
     OperationKind,
+    PromptQueueSnapshot,
     PromptState,
     QueuedPrompt,
+    QueueMutationResult,
     SessionLease,
     SessionPage,
     SessionRecord,
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     collaborators TEXT NOT NULL DEFAULT '[]',
     client_capabilities INTEGER,
     next_update_revision INTEGER NOT NULL DEFAULT 1,
+    next_queue_revision INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     last_active_at INTEGER NOT NULL
 );
@@ -104,12 +108,24 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
   parent_id TEXT,
   owner_id TEXT,
   fence INTEGER,
+  update_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(session_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS idx_acp_prompt_queue_order
     ON acp_prompt_queue(deployment_id, session_id, state, sequence);
+CREATE TABLE IF NOT EXISTS acp_queue_mutations (
+  session_id TEXT NOT NULL,
+  deployment_id TEXT NOT NULL,
+  mutation_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  result_payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, mutation_id)
+);
 CREATE TABLE IF NOT EXISTS acp_deployments (
     agent_id TEXT NOT NULL,
     version TEXT NOT NULL,
@@ -129,9 +145,14 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("collaborators", "TEXT NOT NULL DEFAULT '[]'"),
     ("client_capabilities", "INTEGER"),
     ("next_update_revision", "INTEGER NOT NULL DEFAULT 1"),
+    ("next_queue_revision", "INTEGER NOT NULL DEFAULT 1"),
 )
 
-_ADDED_QUEUE_COLUMNS: tuple[tuple[str, str], ...] = (("kind", "TEXT NOT NULL DEFAULT 'prompt'"),)
+_ADDED_QUEUE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("kind", "TEXT NOT NULL DEFAULT 'prompt'"),
+    ("update_id", "TEXT NOT NULL DEFAULT ''"),
+    ("revision", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 def default_store_path() -> Path:
@@ -159,8 +180,9 @@ _TERMINAL_PROMPT_STATES = frozenset(
 _PROMPT_INSERT = """
 INSERT INTO acp_prompt_queue (
     prompt_id, session_id, principal, deployment_id, credential_id, connection_id,
-    sequence, kind, payload, state, attempt, parent_id, owner_id, fence, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    sequence, kind, payload, state, attempt, parent_id, owner_id, fence, update_id, revision,
+    created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _DEPLOYMENT_UPSERT = """
@@ -245,6 +267,8 @@ def _row_to_prompt(row: sqlite3.Row) -> QueuedPrompt:
         parent_id=values["parent_id"],
         owner_id=values["owner_id"],
         fence=None if values["fence"] is None else int(values["fence"]),
+        update_id=str(values["update_id"]),
+        revision=int(values["revision"]),
         created_at=int(values["created_at"]),
         updated_at=int(values["updated_at"]),
     )
@@ -289,10 +313,144 @@ def _insert_prompt(connection: sqlite3.Connection, prompt: QueuedPrompt) -> None
             prompt.parent_id,
             prompt.owner_id,
             prompt.fence,
+            prompt.update_id,
+            prompt.revision,
             prompt.created_at,
             prompt.updated_at,
         ),
     )
+
+
+def _reserve_queue_revision(connection: sqlite3.Connection, session_id: str) -> int:
+    row = connection.execute(
+        "UPDATE acp_sessions SET next_queue_revision = next_queue_revision + 1 "
+        "WHERE session_id = ? RETURNING next_queue_revision - 1 AS revision",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        raise HrnsError(
+            "SESSION_DURABILITY_FAILED",
+            "The queue revision could not be durably reserved.",
+            {"sessionId": session_id},
+        )
+    return int(row["revision"])
+
+
+def _prompt_snapshot(prompt: QueuedPrompt) -> str:
+    return json.dumps(prompt.to_public(), ensure_ascii=False, separators=(",", ":"))
+
+
+def _prompt_from_snapshot(payload: str) -> QueuedPrompt:
+    values = json.loads(payload)
+    if not isinstance(values, dict):
+        raise ValueError("queue mutation result is not an object")
+    return QueuedPrompt(
+        prompt_id=str(values["prompt_id"]),
+        session_id=str(values["session_id"]),
+        principal=str(values["principal"]),
+        deployment_id=str(values["deployment_id"]),
+        credential_id=values.get("credential_id"),
+        connection_id=values.get("connection_id"),
+        sequence=int(values["sequence"]),
+        kind=OperationKind(values["kind"]),
+        payload=str(values["payload"]),
+        state=PromptState(values["state"]),
+        attempt=int(values["attempt"]),
+        parent_id=values.get("parent_id"),
+        owner_id=values.get("owner_id"),
+        fence=None if values.get("fence") is None else int(values["fence"]),
+        update_id=str(values["update_id"]),
+        revision=int(values["revision"]),
+        created_at=int(values["created_at"]),
+        updated_at=int(values["updated_at"]),
+    )
+
+
+def _mutation_replay(
+    connection: sqlite3.Connection,
+    session_id: str,
+    mutation_id: str,
+    operation: str,
+    request_hash: str,
+) -> QueueMutationResult | None:
+    inserted = connection.execute(
+        "INSERT OR IGNORE INTO acp_queue_mutations "
+        "(session_id, deployment_id, mutation_id, operation, request_hash, result_payload, created_at) "
+        "VALUES (?, '', ?, ?, ?, '', ?)",
+        (session_id, mutation_id, operation, request_hash, now_ms()),
+    ).rowcount
+    if inserted:
+        return None
+    row = connection.execute(
+        "SELECT request_hash, result_payload FROM acp_queue_mutations "
+        "WHERE session_id = ? AND mutation_id = ?",
+        (session_id, mutation_id),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["request_hash"] != request_hash:
+        raise HrnsError(
+            "MUTATION_ID_REUSED",
+            "mutationId was already bound to a different queue request.",
+            {"sessionId": session_id, "mutationId": mutation_id},
+        )
+    result_payload = str(row["result_payload"])
+    if not result_payload:
+        raise HrnsError(
+            "SESSION_DURABILITY_FAILED",
+            "The prior queue mutation did not persist a result.",
+            {"sessionId": session_id, "mutationId": mutation_id},
+        )
+    return QueueMutationResult(_prompt_from_snapshot(result_payload), replayed=True)
+
+
+def _record_mutation(
+    connection: sqlite3.Connection,
+    prompt: QueuedPrompt,
+    *,
+    mutation_id: str,
+    operation: str,
+    request_hash: str,
+) -> None:
+    changed = connection.execute(
+        "UPDATE acp_queue_mutations SET deployment_id = ?, result_payload = ? "
+        "WHERE session_id = ? AND mutation_id = ? AND operation = ? AND request_hash = ?",
+        (
+            prompt.deployment_id,
+            _prompt_snapshot(prompt),
+            prompt.session_id,
+            mutation_id,
+            operation,
+            request_hash,
+        ),
+    ).rowcount
+    if changed != 1:
+        raise HrnsError(
+            "SESSION_DURABILITY_FAILED",
+            "The queue mutation result could not be durably recorded.",
+            {"sessionId": prompt.session_id, "mutationId": mutation_id},
+        )
+
+
+def _queue_item_error(current: QueuedPrompt, expected_revision: int) -> HrnsError | None:
+    details = {
+        "promptId": current.prompt_id,
+        "state": current.state.value,
+        "revision": current.revision,
+    }
+    if current.revision != expected_revision:
+        return HrnsError(
+            "QUEUE_CONFLICT",
+            "The queued prompt changed before this mutation committed.",
+            details,
+        )
+    if current.state is not PromptState.QUEUED:
+        return HrnsError(
+            "QUEUE_NOT_EDITABLE",
+            "Only prompts that are still queued may be edited or removed.",
+            details,
+        )
+    return None
 
 
 class SQLiteSessionStore(SessionStore):
@@ -347,6 +505,33 @@ class SQLiteSessionStore(SessionStore):
         for name, declaration in _ADDED_QUEUE_COLUMNS:
             if name not in existing_queue:
                 connection.execute(f"ALTER TABLE acp_prompt_queue ADD COLUMN {name} {declaration}")
+        with _immediate(connection):
+            rows = connection.execute(
+                "SELECT prompt_id, session_id FROM acp_prompt_queue "
+                "WHERE revision < 1 OR update_id = '' ORDER BY session_id, sequence"
+            ).fetchall()
+            revisions: dict[str, int] = {}
+            for row in rows:
+                session_id = str(row["session_id"])
+                if session_id not in revisions:
+                    current = connection.execute(
+                        "SELECT COALESCE(MAX(revision), 0) AS revision "
+                        "FROM acp_prompt_queue WHERE session_id = ? AND revision > 0",
+                        (session_id,),
+                    ).fetchone()
+                    revisions[session_id] = int(current["revision"])
+                revisions[session_id] += 1
+                connection.execute(
+                    "UPDATE acp_prompt_queue SET revision = ?, update_id = ? WHERE prompt_id = ?",
+                    (revisions[session_id], uuid.uuid4().hex, row["prompt_id"]),
+                )
+            connection.execute(
+                "UPDATE acp_sessions SET next_queue_revision = MAX("
+                "next_queue_revision, COALESCE(("
+                "SELECT MAX(revision) + 1 FROM acp_prompt_queue "
+                "WHERE acp_prompt_queue.session_id = acp_sessions.session_id"
+                "), 1))"
+            )
 
     async def close(self) -> None:
         async with self._lock:
@@ -943,11 +1128,196 @@ class SQLiteSessionStore(SessionStore):
                 stored = replace(
                     prompt,
                     sequence=_next_sequence(connection, prompt.session_id),
+                    update_id=prompt.update_id or uuid.uuid4().hex,
+                    revision=_reserve_queue_revision(connection, prompt.session_id),
                     created_at=prompt.created_at or active,
                     updated_at=prompt.updated_at or prompt.created_at or active,
                 )
                 _insert_prompt(connection, stored)
                 return stored
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, operation)
+
+    async def enqueue_prompt_mutation(
+        self,
+        prompt: QueuedPrompt,
+        *,
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult:
+        def operation() -> QueueMutationResult:
+            connection = self._connect()
+            with _immediate(connection):
+                replay = _mutation_replay(
+                    connection, prompt.session_id, mutation_id, "enqueue", request_hash
+                )
+                if replay is not None:
+                    return replay
+                pending = connection.execute(
+                    "SELECT prompt_id FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND kind IN (?, ?) AND state IN (?, ?, ?, ?) LIMIT 1",
+                    (
+                        prompt.deployment_id,
+                        prompt.session_id,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if pending is not None:
+                    raise HrnsError(
+                        "SESSION_CLOSING",
+                        "The session is closing and no longer accepts new work.",
+                        {"sessionId": prompt.session_id},
+                    )
+                active = now_ms()
+                stored = replace(
+                    prompt,
+                    sequence=_next_sequence(connection, prompt.session_id),
+                    update_id=prompt.update_id or uuid.uuid4().hex,
+                    revision=_reserve_queue_revision(connection, prompt.session_id),
+                    created_at=prompt.created_at or active,
+                    updated_at=prompt.updated_at or prompt.created_at or active,
+                )
+                _insert_prompt(connection, stored)
+                _record_mutation(
+                    connection,
+                    stored,
+                    mutation_id=mutation_id,
+                    operation="enqueue",
+                    request_hash=request_hash,
+                )
+                return QueueMutationResult(stored)
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, operation)
+
+    async def edit_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        payload: str,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        def operation() -> QueueMutationResult:
+            connection = self._connect()
+            with _immediate(connection):
+                replay = _mutation_replay(connection, session_id, mutation_id, "edit", request_hash)
+                if replay is not None:
+                    return replay
+                row = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND prompt_id = ? AND kind = ?",
+                    (deployment_id, session_id, prompt_id, OperationKind.PROMPT.value),
+                ).fetchone()
+                if row is None:
+                    raise HrnsError(
+                        "QUEUE_ITEM_NOT_FOUND",
+                        "No queued prompt with this id is available in the session.",
+                        {"sessionId": session_id, "promptId": prompt_id},
+                    )
+                current = _row_to_prompt(row)
+                error = _queue_item_error(current, expected_revision)
+                if error is not None:
+                    raise error
+                active = now_ms()
+                updated = replace(
+                    current,
+                    payload=payload,
+                    update_id=update_id,
+                    revision=_reserve_queue_revision(connection, session_id),
+                    updated_at=active,
+                )
+                connection.execute(
+                    "UPDATE acp_prompt_queue SET payload = ?, update_id = ?, revision = ?, "
+                    "updated_at = ? WHERE prompt_id = ?",
+                    (
+                        updated.payload,
+                        updated.update_id,
+                        updated.revision,
+                        updated.updated_at,
+                        prompt_id,
+                    ),
+                )
+                _record_mutation(
+                    connection,
+                    updated,
+                    mutation_id=mutation_id,
+                    operation="edit",
+                    request_hash=request_hash,
+                )
+                return QueueMutationResult(updated)
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, operation)
+
+    async def remove_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str,
+        request_hash: str,
+        update_id: str,
+    ) -> QueueMutationResult:
+        def operation() -> QueueMutationResult:
+            connection = self._connect()
+            with _immediate(connection):
+                replay = _mutation_replay(
+                    connection, session_id, mutation_id, "remove", request_hash
+                )
+                if replay is not None:
+                    return replay
+                row = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND prompt_id = ? AND kind = ?",
+                    (deployment_id, session_id, prompt_id, OperationKind.PROMPT.value),
+                ).fetchone()
+                if row is None:
+                    raise HrnsError(
+                        "QUEUE_ITEM_NOT_FOUND",
+                        "No queued prompt with this id is available in the session.",
+                        {"sessionId": session_id, "promptId": prompt_id},
+                    )
+                current = _row_to_prompt(row)
+                error = _queue_item_error(current, expected_revision)
+                if error is not None:
+                    raise error
+                active = now_ms()
+                updated = replace(
+                    current,
+                    state=PromptState.CANCELLED,
+                    update_id=update_id,
+                    revision=_reserve_queue_revision(connection, session_id),
+                    updated_at=active,
+                )
+                connection.execute(
+                    "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
+                    "updated_at = ? WHERE prompt_id = ?",
+                    (
+                        updated.state.value,
+                        updated.update_id,
+                        updated.revision,
+                        updated.updated_at,
+                        prompt_id,
+                    ),
+                )
+                _record_mutation(
+                    connection,
+                    updated,
+                    mutation_id=mutation_id,
+                    operation="remove",
+                    request_hash=request_hash,
+                )
+                return QueueMutationResult(updated)
 
         async with self._lock:
             return await asyncio.to_thread(self._run, operation)
@@ -964,14 +1334,18 @@ class SQLiteSessionStore(SessionStore):
                     return None
                 active = now_ms()
                 attempt = int(row["attempt"]) + 1
+                update_id = uuid.uuid4().hex
+                revision = _reserve_queue_revision(connection, str(row["session_id"]))
                 connection.execute(
                     "UPDATE acp_prompt_queue SET state = ?, owner_id = ?, fence = ?, "
-                    "attempt = ?, updated_at = ? WHERE prompt_id = ?",
+                    "attempt = ?, update_id = ?, revision = ?, updated_at = ? WHERE prompt_id = ?",
                     (
                         PromptState.CLAIMED.value,
                         owner_id,
                         fence,
                         attempt,
+                        update_id,
+                        revision,
                         active,
                         prompt_id,
                     ),
@@ -982,6 +1356,8 @@ class SQLiteSessionStore(SessionStore):
                     owner_id=owner_id,
                     fence=fence,
                     attempt=attempt,
+                    update_id=update_id,
+                    revision=revision,
                     updated_at=active,
                 )
 
@@ -1018,14 +1394,18 @@ class SQLiteSessionStore(SessionStore):
                     return None
                 active = now_ms()
                 attempt = int(row["attempt"]) + 1
+                update_id = uuid.uuid4().hex
+                revision = _reserve_queue_revision(connection, session_id)
                 connection.execute(
                     "UPDATE acp_prompt_queue SET state = ?, owner_id = ?, fence = ?, "
-                    "attempt = ?, updated_at = ? WHERE prompt_id = ?",
+                    "attempt = ?, update_id = ?, revision = ?, updated_at = ? WHERE prompt_id = ?",
                     (
                         PromptState.CLAIMED.value,
                         owner_id,
                         fence,
                         attempt,
+                        update_id,
+                        revision,
                         active,
                         row["prompt_id"],
                     ),
@@ -1036,6 +1416,8 @@ class SQLiteSessionStore(SessionStore):
                     owner_id=owner_id,
                     fence=fence,
                     attempt=attempt,
+                    update_id=update_id,
+                    revision=revision,
                     updated_at=active,
                 )
 
@@ -1049,27 +1431,41 @@ class SQLiteSessionStore(SessionStore):
         *,
         owner_id: str,
         fence: int,
-    ) -> bool:
+    ) -> QueuedPrompt | None:
         if state not in _TERMINAL_PROMPT_STATES:
             raise ValueError(f"{state.value!r} is not a terminal prompt state")
 
-        def operation() -> bool:
+        def operation() -> QueuedPrompt | None:
             connection = self._connect()
             with _immediate(connection):
-                return bool(
-                    connection.execute(
-                        "UPDATE acp_prompt_queue SET state = ?, updated_at = ? "
-                        "WHERE prompt_id = ? AND state = ? AND owner_id = ? AND fence = ?",
-                        (
-                            state.value,
-                            now_ms(),
-                            prompt_id,
-                            PromptState.CLAIMED.value,
-                            owner_id,
-                            fence,
-                        ),
-                    ).rowcount
+                row = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE prompt_id = ? AND state = ? "
+                    "AND owner_id = ? AND fence = ?",
+                    (prompt_id, PromptState.CLAIMED.value, owner_id, fence),
+                ).fetchone()
+                if row is None:
+                    return None
+                current = _row_to_prompt(row)
+                active = now_ms()
+                updated = replace(
+                    current,
+                    state=state,
+                    update_id=uuid.uuid4().hex,
+                    revision=_reserve_queue_revision(connection, current.session_id),
+                    updated_at=active,
                 )
+                connection.execute(
+                    "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
+                    "updated_at = ? WHERE prompt_id = ?",
+                    (
+                        state.value,
+                        updated.update_id,
+                        updated.revision,
+                        updated.updated_at,
+                        prompt_id,
+                    ),
+                )
+                return updated
 
         async with self._lock:
             return await asyncio.to_thread(self._run, operation)
@@ -1113,6 +1509,38 @@ class SQLiteSessionStore(SessionStore):
             )
         return [_row_to_prompt(row) for row in rows]
 
+    async def queue_snapshot(
+        self,
+        deployment_id: str,
+        session_id: str,
+    ) -> PromptQueueSnapshot:
+        def operation() -> PromptQueueSnapshot:
+            connection = self._connect()
+            with _immediate(connection):
+                session = connection.execute(
+                    "SELECT next_queue_revision FROM acp_sessions "
+                    "WHERE deployment_id = ? AND session_id = ?",
+                    (deployment_id, session_id),
+                ).fetchone()
+                if session is None:
+                    raise HrnsError(
+                        "QUEUE_ITEM_NOT_FOUND",
+                        "No queue is available for this session.",
+                        {"sessionId": session_id},
+                    )
+                rows = connection.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
+                    "AND session_id = ? AND kind = ? ORDER BY sequence",
+                    (deployment_id, session_id, OperationKind.PROMPT.value),
+                ).fetchall()
+                return PromptQueueSnapshot(
+                    revision=max(0, int(session["next_queue_revision"]) - 1),
+                    items=[_row_to_prompt(row) for row in rows],
+                )
+
+        async with self._lock:
+            return await asyncio.to_thread(self._run, operation)
+
     async def mark_uncertain_prompts(
         self,
         owner_id: str,
@@ -1139,18 +1567,29 @@ class SQLiteSessionStore(SessionStore):
                 if not rows:
                     return []
                 active = now_ms()
-                connection.execute(
-                    f"UPDATE acp_prompt_queue SET state = ?, updated_at = ? WHERE {where}",
-                    [PromptState.UNCERTAIN.value, active, *values],
-                )
-                return [
-                    replace(
-                        _row_to_prompt(row),
+                affected: list[QueuedPrompt] = []
+                for row in rows:
+                    current = _row_to_prompt(row)
+                    updated = replace(
+                        current,
                         state=PromptState.UNCERTAIN,
+                        update_id=uuid.uuid4().hex,
+                        revision=_reserve_queue_revision(connection, current.session_id),
                         updated_at=active,
                     )
-                    for row in rows
-                ]
+                    connection.execute(
+                        "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
+                        "updated_at = ? WHERE prompt_id = ?",
+                        (
+                            updated.state.value,
+                            updated.update_id,
+                            updated.revision,
+                            updated.updated_at,
+                            updated.prompt_id,
+                        ),
+                    )
+                    affected.append(updated)
+                return affected
 
         async with self._lock:
             return await asyncio.to_thread(self._run, operation)
@@ -1163,21 +1602,40 @@ class SQLiteSessionStore(SessionStore):
         new_prompt_id: str,
         owner_id: str,
         fence: int,
-    ) -> QueuedPrompt | None:
+        mutation_id: str,
+        request_hash: str,
+    ) -> QueueMutationResult | None:
         del owner_id, fence  # the caller re-queues; the old claim stays as history
 
-        def operation() -> QueuedPrompt | None:
+        def operation() -> QueueMutationResult:
             connection = self._connect()
             with _immediate(connection):
+                replay = _mutation_replay(
+                    connection, session_id, mutation_id, "retry", request_hash
+                )
+                if replay is not None:
+                    return replay
                 row = connection.execute(
                     "SELECT * FROM acp_prompt_queue WHERE prompt_id = ? AND session_id = ?",
                     (prompt_id, session_id),
                 ).fetchone()
                 if row is None:
-                    return None
+                    raise HrnsError(
+                        "QUEUE_ITEM_NOT_FOUND",
+                        "No queued prompt with this id is available in the session.",
+                        {"sessionId": session_id, "promptId": prompt_id},
+                    )
                 original = _row_to_prompt(row)
                 if original.state is not PromptState.UNCERTAIN:
-                    return None
+                    raise HrnsError(
+                        "QUEUE_NOT_EDITABLE",
+                        "Only an uncertain prompt can be retried.",
+                        {
+                            "promptId": prompt_id,
+                            "state": original.state.value,
+                            "revision": original.revision,
+                        },
+                    )
                 active = now_ms()
                 stored = replace(
                     original,
@@ -1188,11 +1646,20 @@ class SQLiteSessionStore(SessionStore):
                     parent_id=prompt_id,
                     owner_id=None,
                     fence=None,
+                    update_id=uuid.uuid4().hex,
+                    revision=_reserve_queue_revision(connection, original.session_id),
                     created_at=active,
                     updated_at=active,
                 )
                 _insert_prompt(connection, stored)
-                return stored
+                _record_mutation(
+                    connection,
+                    stored,
+                    mutation_id=mutation_id,
+                    operation="retry",
+                    request_hash=request_hash,
+                )
+                return QueueMutationResult(stored)
 
         async with self._lock:
             return await asyncio.to_thread(self._run, operation)
@@ -1254,6 +1721,8 @@ class SQLiteSessionStore(SessionStore):
                 stored = replace(
                     operation,
                     sequence=_next_sequence(connection, operation.session_id),
+                    update_id=operation.update_id or uuid.uuid4().hex,
+                    revision=_reserve_queue_revision(connection, operation.session_id),
                     created_at=operation.created_at or active,
                     updated_at=operation.updated_at or operation.created_at or active,
                 )
@@ -1331,14 +1800,18 @@ class SQLiteSessionStore(SessionStore):
                 current = _row_to_prompt(row)
                 active = now_ms()
                 attempt = current.attempt + 1
+                update_id = uuid.uuid4().hex
+                revision = _reserve_queue_revision(connection, current.session_id)
                 connection.execute(
                     "UPDATE acp_prompt_queue SET state = ?, owner_id = ?, fence = ?, "
-                    "attempt = ?, updated_at = ? WHERE prompt_id = ?",
+                    "attempt = ?, update_id = ?, revision = ?, updated_at = ? WHERE prompt_id = ?",
                     (
                         PromptState.CLAIMED.value,
                         owner_id,
                         fence,
                         attempt,
+                        update_id,
+                        revision,
                         active,
                         prompt_id,
                     ),
@@ -1349,6 +1822,8 @@ class SQLiteSessionStore(SessionStore):
                     owner_id=owner_id,
                     fence=fence,
                     attempt=attempt,
+                    update_id=update_id,
+                    revision=revision,
                     updated_at=active,
                 )
 
@@ -1381,29 +1856,29 @@ class SQLiteSessionStore(SessionStore):
                 if not rows:
                     return []
                 active = now_ms()
-                connection.execute(
-                    "UPDATE acp_prompt_queue SET state = ?, updated_at = ? "
-                    "WHERE deployment_id = ? AND session_id = ? AND prompt_id != ? "
-                    "AND state = ? AND kind NOT IN (?, ?)",
-                    (
-                        PromptState.CANCELLED.value,
-                        active,
-                        deployment_id,
-                        session_id,
-                        exclude_prompt_id,
-                        PromptState.QUEUED.value,
-                        OperationKind.CLOSE.value,
-                        OperationKind.DELETE.value,
-                    ),
-                )
-                return [
-                    replace(
-                        _row_to_prompt(row),
+                affected: list[QueuedPrompt] = []
+                for row in rows:
+                    current = _row_to_prompt(row)
+                    updated = replace(
+                        current,
                         state=PromptState.CANCELLED,
+                        update_id=uuid.uuid4().hex,
+                        revision=_reserve_queue_revision(connection, current.session_id),
                         updated_at=active,
                     )
-                    for row in rows
-                ]
+                    connection.execute(
+                        "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
+                        "updated_at = ? WHERE prompt_id = ?",
+                        (
+                            updated.state.value,
+                            updated.update_id,
+                            updated.revision,
+                            updated.updated_at,
+                            updated.prompt_id,
+                        ),
+                    )
+                    affected.append(updated)
+                return affected
 
         async with self._lock:
             return await asyncio.to_thread(self._run, cancel)
@@ -1469,11 +1944,20 @@ class SQLiteSessionStore(SessionStore):
                             fence,
                         ),
                     )
+                update_id = uuid.uuid4().hex
+                revision = (
+                    operation.revision
+                    if delete_session
+                    else _reserve_queue_revision(connection, operation.session_id)
+                )
                 changed = connection.execute(
-                    "UPDATE acp_prompt_queue SET state = ?, updated_at = ? "
+                    "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
+                    "updated_at = ? "
                     "WHERE prompt_id = ? AND state = ? AND owner_id = ? AND fence = ?",
                     (
                         state.value,
+                        update_id,
+                        revision,
                         now_ms(),
                         prompt_id,
                         PromptState.CLAIMED.value,

@@ -10,6 +10,8 @@ from acp import RequestError
 from hrns.protocol import (
     CommandInvokeResponse,
     ConfigurationSnapshot,
+    QueueSnapshot,
+    QueueUpdate,
     ToolPresentationSnapshot,
 )
 
@@ -149,6 +151,51 @@ class SessionProxy:
             )
         )
         return result
+
+    async def queue(self) -> QueueSnapshot:
+        return await self.client.hrns_queue(self.session_id)
+
+    async def edit_queued_prompt(
+        self,
+        prompt_id: str,
+        prompt: list[Any],
+        *,
+        expected_revision: int,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        return await self.client.hrns_edit_queue_prompt(
+            self.session_id,
+            prompt_id,
+            prompt,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id,
+        )
+
+    async def remove_queued_prompt(
+        self,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        return await self.client.hrns_remove_queue_prompt(
+            self.session_id,
+            prompt_id,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id,
+        )
+
+    async def retry_queued_prompt(
+        self,
+        prompt_id: str,
+        *,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        return await self.client.hrns_retry_queue_prompt(
+            self.session_id,
+            prompt_id,
+            mutation_id=mutation_id,
+        )
 
     async def invoke_command(
         self,

@@ -37,6 +37,8 @@ from hrns.protocol import (
     TERMINAL,
     CommandInvokeResponse,
     ConfigurationSnapshot,
+    QueueSnapshot,
+    QueueUpdate,
     SessionUpdateLedger,
     SessionUpdateProtocolError,
     ToolPresentationSnapshot,
@@ -316,6 +318,54 @@ class HrnsAcpClient:
         self, session_id: str, *, cursor: str | None = None, limit: int | None = None
     ) -> CommandListResult:
         return await self.extensions.commands(session_id, cursor=cursor, limit=limit)
+
+    async def hrns_queue(self, session_id: str) -> QueueSnapshot:
+        return await self.extensions.queue(session_id)
+
+    async def hrns_edit_queue_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        prompt: list[Any],
+        *,
+        expected_revision: int,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        return await self.extensions.edit_queue_prompt(
+            session_id,
+            prompt_id,
+            prompt,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id,
+        )
+
+    async def hrns_remove_queue_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        *,
+        expected_revision: int,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        return await self.extensions.remove_queue_prompt(
+            session_id,
+            prompt_id,
+            expected_revision=expected_revision,
+            mutation_id=mutation_id,
+        )
+
+    async def hrns_retry_queue_prompt(
+        self,
+        session_id: str,
+        prompt_id: str,
+        *,
+        mutation_id: str | None = None,
+    ) -> QueueUpdate:
+        return await self.extensions.retry_queue_prompt(
+            session_id,
+            prompt_id,
+            mutation_id=mutation_id,
+        )
 
     async def hrns_steer(self, session_id: str, text: str) -> bool:
         """Inject a follow-up into the turn that is currently running."""

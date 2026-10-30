@@ -22,6 +22,8 @@ class Principal:
             request (an API key or token record), not for the human. Two keys for one
             user share ``id`` and differ here, so usage attribution and revocation can
             target one key without changing session ownership.
+        scopes: Credential permissions. ``None`` grants the historical unrestricted
+            behavior; an explicit set must contain ``queue:mutate`` for queue writes.
 
     Authentication dependencies return this object after validating credentials;
     it is not itself a token. Without an authentication dependency, every caller
@@ -31,6 +33,7 @@ class Principal:
     id: str
     agent_ids: frozenset[str] | None = None
     credential_id: str | None = None
+    scopes: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip():

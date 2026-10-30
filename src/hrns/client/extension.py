@@ -22,6 +22,8 @@ from hrns.protocol import (
     ExtensionAdvertisement,
     PluginInfo,
     PresentationListResponse,
+    QueueSnapshot,
+    QueueUpdate,
     changes_adapter,
 )
 
@@ -37,6 +39,8 @@ __all__ = [
     "parse_capability_list",
     "parse_configuration_snapshot",
     "parse_plugin_list",
+    "parse_queue_snapshot",
+    "parse_queue_update",
     "strip_prefix",
     "validate_changes",
 ]
@@ -131,6 +135,18 @@ def parse_advertisement(meta: dict[str, Any] | None) -> HrnsExtension:
         local_binding_creation=advertisement.local_binding_creation,
         accepts_client_capabilities=advertisement.accepts_client_capabilities,
     )
+
+
+def parse_queue_snapshot(payload: dict[str, Any]) -> QueueSnapshot:
+    """Validate a complete authoritative queue snapshot."""
+
+    return QueueSnapshot.model_validate(payload)
+
+
+def parse_queue_update(payload: dict[str, Any]) -> QueueUpdate:
+    """Validate one positioned authoritative queue transition."""
+
+    return QueueUpdate.model_validate(payload)
 
 
 def _lenient_validate(model: Any, payload: Any) -> Any:

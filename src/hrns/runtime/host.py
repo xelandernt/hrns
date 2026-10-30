@@ -22,7 +22,7 @@ import acp as acp_sdk
 from acp import schema
 from acp.exceptions import RequestError
 from acp.schema import DeleteSessionResponse
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -53,9 +53,15 @@ from hrns.protocol import (
     PluginListResponse,
     PresentationListRequest,
     PresentationListResponse,
+    QueueEditRequest,
+    QueueItem,
+    QueueRemoveRequest,
+    QueueSnapshot,
+    QueueUpdate,
     SessionUpdatePosition,
     SessionUpdateProtocolError,
     SteerRequest,
+    canonical_hash,
     maybe_session_update_position,
     order_session_updates,
     paginate,
@@ -107,6 +113,16 @@ if TYPE_CHECKING:
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
 __all__ = ["HrnsACPAgent"]
+
+_PROMPT_BLOCKS = TypeAdapter(
+    list[
+        schema.TextContentBlock
+        | schema.ImageContentBlock
+        | schema.AudioContentBlock
+        | schema.ResourceContentBlock
+        | schema.EmbeddedResourceContentBlock
+    ]
+)
 
 #: What the client on the current connection advertised during ``initialize``.
 _current_capabilities: contextvars.ContextVar[schema.ClientCapabilities | None] = (
@@ -697,6 +713,33 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 self.lifecycle_context(session_id),
             )
 
+    async def notify_queue_update(self, row: QueuedPrompt) -> None:
+        """Fan out one durable queue transition to currently authorized viewers."""
+
+        authorized: list[str] = []
+        for connection_id in self.fanout.subscribed_connections(row.session_id):
+            principal = self.connection_principal(connection_id)
+            visible = await self.store.get_visible(row.session_id, principal)
+            if visible is None:
+                continue
+            decision = await decide_policy(
+                self.policy.session_policy,
+                self.session_context(
+                    visible,
+                    row.session_id,
+                    principal=principal,
+                    connection_id=connection_id,
+                ),
+                PolicyAction.LOAD,
+            )
+            if decision.allowed:
+                authorized.append(connection_id)
+        await self.fanout.session_notification_connections(
+            tuple(authorized),
+            "hrns/queue/changed",
+            self._public_queue_update(row).to_wire(),
+        )
+
     # --- per-session authorization ---------------------------------------
 
     def attribution(self) -> RequestContext:
@@ -809,6 +852,28 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             # metadata, delete, or re-share a session even though policy still allows it.
             await self.acquire_session_lease(session_id)
         return known
+
+    def require_queue_mutation_scope(self) -> None:
+        request = self.attribution()
+        if request.scopes is not None and "queue:mutate" not in request.scopes:
+            raise HrnsError(
+                "FORBIDDEN",
+                "The authenticated credential does not grant queue mutation scope.",
+                {"requiredScope": "queue:mutate"},
+            )
+
+    async def authorize_queue_mutation(self, session_id: str) -> SessionRecord:
+        self.require_queue_mutation_scope()
+        try:
+            return await self.authorize(session_id, PolicyAction.PROMPT)
+        except HrnsError as exc:
+            if exc.code == "SESSION_NOT_FOUND":
+                raise HrnsError(
+                    "QUEUE_ITEM_NOT_FOUND",
+                    "No queued prompt with this id is available in the session.",
+                    {"sessionId": session_id},
+                ) from exc
+            raise
 
     # --- initialization --------------------------------------------------
 
@@ -1268,11 +1333,26 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             elif isinstance(block, Mapping):
                 entries.append(dict(block))
             else:
-                entries.append({"type": "text", "text": str(block)})
-        payload = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+                entries.append(block)
+        try:
+            validated = _PROMPT_BLOCKS.validate_python(entries)
+        except ValidationError as exc:
+            raise HrnsError(
+                "INVALID_CONFIGURATION",
+                "prompt must be a valid ACP ContentBlock array.",
+                {"errors": exc.errors()[:10]},
+            ) from exc
+        payload = json.dumps(
+            [
+                block.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for block in validated
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         if len(payload.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise HrnsError(
-                "INVALID_REQUEST",
+                "INVALID_CONFIGURATION",
                 "The queued prompt payload exceeds the transport bound.",
                 {"maxBytes": MAX_MESSAGE_BYTES},
             )
@@ -1303,41 +1383,154 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             parent_id=parent_id,
             owner_id=None,
             fence=None,
+            update_id=uuid.uuid4().hex,
+            revision=0,
             created_at=now,
             updated_at=now,
         )
 
-    async def enqueue_prompt(self, session_id: str, prompt: Sequence[Any]) -> QueuedPrompt:
+    async def enqueue_prompt(
+        self,
+        session_id: str,
+        prompt: Sequence[Any],
+        *,
+        mutation_id: str,
+    ) -> QueuedPrompt:
         """Persist a prompt without executing it; a later run drains it in order."""
-        await self.authorize(session_id, PolicyAction.PROMPT)
+        await self.authorize_queue_mutation(session_id)
         await self.sessions.ensure_persisted(session_id)
         await self.acquire_session_lease(session_id)
         payload = self._queue_payload(prompt)
-        # Reject blocks the drain could never reconstruct now, not at execution time.
-        self._decode_prompt(payload)
-        stored = await self.store.enqueue_prompt(self._queue_row(session_id, payload))
-        await self.notify_queue(session_id)
-        return stored
+        request_hash = canonical_hash(
+            {
+                "operation": "enqueue",
+                "sessionId": session_id,
+                "prompt": json.loads(payload),
+                "mutationId": mutation_id,
+            }
+        )
+        try:
+            result = await self.store.enqueue_prompt_mutation(
+                self._queue_row(session_id, payload),
+                mutation_id=mutation_id,
+                request_hash=request_hash,
+            )
+        except HrnsError:
+            raise
+        except Exception as exc:
+            raise HrnsError(
+                "SESSION_DURABILITY_FAILED",
+                "The queued prompt could not be durably written.",
+                {"sessionId": session_id},
+            ) from exc
+        if not result.replayed:
+            await self.notify_queue_update(result.item)
+            await self.notify_queue(session_id)
+        return result.item
+
+    async def edit_queued_prompt(self, request: QueueEditRequest) -> QueueUpdate:
+        """Replace one still-queued prompt without changing its identity or order."""
+
+        await self.authorize_queue_mutation(request.session_id)
+        payload = self._queue_payload(request.prompt)
+        request_hash = canonical_hash(
+            {
+                "operation": "edit",
+                **request.to_wire(),
+                "prompt": json.loads(payload),
+            }
+        )
+        try:
+            result = await self.store.edit_prompt(
+                request.session_id,
+                request.prompt_id,
+                expected_revision=request.expected_revision,
+                payload=payload,
+                mutation_id=request.mutation_id,
+                request_hash=request_hash,
+                update_id=uuid.uuid4().hex,
+            )
+        except HrnsError:
+            raise
+        except Exception as exc:
+            raise HrnsError(
+                "SESSION_DURABILITY_FAILED",
+                "The queued prompt edit could not be durably written.",
+                {"sessionId": request.session_id, "promptId": request.prompt_id},
+            ) from exc
+        if not result.replayed:
+            await self.notify_queue_update(result.item)
+        return self._public_queue_update(result.item)
+
+    async def remove_queued_prompt(self, request: QueueRemoveRequest) -> QueueUpdate:
+        """Cancel one still-queued prompt as a durable tombstone."""
+
+        await self.authorize_queue_mutation(request.session_id)
+        request_hash = canonical_hash({"operation": "remove", **request.to_wire()})
+        try:
+            result = await self.store.remove_prompt(
+                request.session_id,
+                request.prompt_id,
+                expected_revision=request.expected_revision,
+                mutation_id=request.mutation_id,
+                request_hash=request_hash,
+                update_id=uuid.uuid4().hex,
+            )
+        except HrnsError:
+            raise
+        except Exception as exc:
+            raise HrnsError(
+                "SESSION_DURABILITY_FAILED",
+                "The queued prompt removal could not be durably written.",
+                {"sessionId": request.session_id, "promptId": request.prompt_id},
+            ) from exc
+        if not result.replayed:
+            await self.notify_queue_update(result.item)
+            await self.notify_queue(request.session_id)
+        return self._public_queue_update(result.item)
 
     @staticmethod
     def _decode_prompt(payload: str) -> list[Any]:
-        """Rebuild the ACP text blocks stored by :meth:`_queue_payload`."""
-        raw = json.loads(payload)
-        if not isinstance(raw, list):
-            raise HrnsError("INVALID_CONFIGURATION", "The queued prompt payload is not a list.")
-        blocks: list[Any] = []
-        for entry in raw:
-            if not isinstance(entry, dict):
-                raise HrnsError("INVALID_CONFIGURATION", "The queued prompt payload is malformed.")
-            text = entry.get("text")
-            if entry.get("type") != "text" or not isinstance(text, str):
-                raise HrnsError(
-                    "INVALID_CONFIGURATION",
-                    "Only text prompt blocks can be replayed from the durable queue.",
-                    {"type": entry.get("type")},
-                )
-            blocks.append(schema.TextContentBlock(type="text", text=text))
-        return blocks
+        """Rebuild the complete ACP content array stored by :meth:`_queue_payload`."""
+        try:
+            return list(_PROMPT_BLOCKS.validate_json(payload))
+        except ValidationError as exc:
+            raise HrnsError(
+                "INVALID_CONFIGURATION",
+                "The queued prompt payload is malformed.",
+                {"errors": exc.errors()[:10]},
+            ) from exc
+
+    @classmethod
+    def _public_queue_item(cls, row: QueuedPrompt) -> QueueItem:
+        prompt = [
+            block.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for block in cls._decode_prompt(row.payload)
+        ]
+        return QueueItem(
+            update_id=row.update_id,
+            revision=row.revision,
+            prompt_id=row.prompt_id,
+            session_id=row.session_id,
+            principal=row.principal,
+            deployment_id=row.deployment_id,
+            credential_id=row.credential_id,
+            connection_id=row.connection_id,
+            sequence=row.sequence,
+            prompt=prompt,
+            state=row.state.value,
+            attempt=row.attempt,
+            parent_id=row.parent_id,
+            owner_id=row.owner_id,
+            fence=row.fence,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @classmethod
+    def _public_queue_update(cls, row: QueuedPrompt) -> QueueUpdate:
+        item = cls._public_queue_item(row)
+        return QueueUpdate(update_id=item.update_id, revision=item.revision, item=item)
 
     async def run_queued_prompts(self, session_id: str, *, limit: int = 100) -> list[QueuedPrompt]:
         """Execute durable session operations in their authoritative order."""
@@ -1391,6 +1584,9 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                         )
                     break
                 processed += 1
+                if row.kind is OperationKind.PROMPT:
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await self.notify_queue_update(row)
                 outcome = PromptState.FAILED
                 result: Any = None
                 failure: BaseException | None = None
@@ -1485,35 +1681,50 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             current_connection_id.reset(connection_token)
             current_request.reset(request_token)
 
-    async def finish_queued_prompt(self, queued: QueuedPrompt | None, state: PromptState) -> bool:
+    async def finish_queued_prompt(
+        self, queued: QueuedPrompt | None, state: PromptState
+    ) -> QueuedPrompt | None:
         if queued is None:
-            return False
+            return None
         # The row's own owner/fence is authoritative even when the in-memory lease was
         # already lost; otherwise an interrupted finish leaves the row claimed forever.
         owner = queued.owner_id or self._lease_owner()
         fence = queued.fence
         if owner is None or fence is None:
-            return False
+            return None
         try:
-            return await asyncio.shield(
+            finished = await asyncio.shield(
                 self.store.finish_prompt(queued.prompt_id, state, owner_id=owner, fence=fence)
             )
         except (Exception, asyncio.CancelledError):
-            return False
+            return None
+        if finished is not None and finished.kind is OperationKind.PROMPT:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self.notify_queue_update(finished)
+        return finished
 
-    async def list_queued_prompts(
+    async def list_queued_prompts(self, session_id: str) -> QueueSnapshot:
+        """Read the complete authoritative prompt queue at one durable revision."""
+        await self.authorize(session_id, PolicyAction.LOAD)
+        connection_id = self.connection_key()
+        if connection_id is not None:
+            self.fanout.subscribe(connection_id, session_id)
+        snapshot = await self.store.queue_snapshot(session_id)
+        return QueueSnapshot(
+            session_id=session_id,
+            snapshot_revision=snapshot.revision,
+            items=[self._public_queue_item(item) for item in snapshot.items],
+        )
+
+    async def retry_queued_prompt(
         self,
         session_id: str,
+        prompt_id: str,
         *,
-        states: Sequence[PromptState] | None = None,
-        limit: int = 100,
-    ) -> list[QueuedPrompt]:
-        """Inspect durable prompts for an authorized session."""
-        await self.authorize(session_id, PolicyAction.LOAD)
-        return await self.store.list_prompts(session_id, states=states, limit=limit)
-
-    async def retry_queued_prompt(self, session_id: str, prompt_id: str) -> QueuedPrompt:
+        mutation_id: str,
+    ) -> QueueUpdate:
         """Link a new attempt to an uncertain prompt; execution stays explicit."""
+        self.require_queue_mutation_scope()
         await self.authorize(session_id, PolicyAction.RETRY)
         original = await self.store.get_prompt(prompt_id)
         if original is None or original.kind is not OperationKind.PROMPT:
@@ -1526,24 +1737,33 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         owner = self._lease_owner()
         if lease is None or owner is None:
             raise HrnsError("SESSION_HELD", "Retrying a prompt requires an owned session lease.")
-        row = await self.store.retry_prompt(
+        request_hash = canonical_hash(
+            {
+                "operation": "retry",
+                "sessionId": session_id,
+                "promptId": prompt_id,
+                "mutationId": mutation_id,
+            }
+        )
+        result = await self.store.retry_prompt(
             prompt_id,
             session_id=session_id,
             new_prompt_id=uuid.uuid4().hex,
             owner_id=owner,
             fence=lease.fence,
+            mutation_id=mutation_id,
+            request_hash=request_hash,
         )
-        if row is None:
+        if result is None:
             raise HrnsError(
                 "INVALID_REQUEST",
                 "Only an uncertain prompt can be retried.",
                 {"promptId": prompt_id},
             )
-        # A retry is explicit, so executing it immediately is allowed; the new row is
-        # linked to the original and the drain keeps global sequence order.
-        await self.run_queued_prompts(session_id)
-        refreshed = await self.store.get_prompt(row.prompt_id)
-        return refreshed or row
+        if not result.replayed:
+            await self.notify_queue_update(result.item)
+            await self.notify_queue(session_id)
+        return self._public_queue_update(result.item)
 
     async def _submit_ordered_operation(
         self,
@@ -1890,24 +2110,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 session_id = params.get("sessionId", params.get("session_id"))
                 if not isinstance(session_id, str) or not session_id:
                     raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
-                raw_states = params.get("states")
-                states: list[PromptState] | None = None
-                if raw_states is not None:
-                    if not isinstance(raw_states, list) or not all(
-                        isinstance(item, str) for item in raw_states
-                    ):
-                        raise HrnsError(
-                            "INVALID_CONFIGURATION", "states must be a list of prompt states."
-                        )
-                    try:
-                        states = [PromptState(item) for item in raw_states]
-                    except ValueError as exc:
-                        raise HrnsError("INVALID_CONFIGURATION", "Unknown prompt state.") from exc
-                items = await self.list_queued_prompts(session_id, states=states)
-                return {
-                    "sessionId": session_id,
-                    "items": [item.to_public() for item in items],
-                }
+                return (await self.list_queued_prompts(session_id)).to_wire()
             if method == "hrns/queue/enqueue":
                 session_id = params.get("sessionId", params.get("session_id"))
                 if not isinstance(session_id, str) or not session_id:
@@ -1917,8 +2120,28 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     raise HrnsError(
                         "INVALID_CONFIGURATION", "prompt must be a list of content blocks."
                     )
-                row = await self.enqueue_prompt(session_id, raw_prompt)
-                return row.to_public()
+                mutation_id = params.get("mutationId", params.get("mutation_id"))
+                if (
+                    not isinstance(mutation_id, str)
+                    or not mutation_id.strip()
+                    or len(mutation_id) > 200
+                ):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION",
+                        "mutationId must be a non-empty string of at most 200 characters.",
+                    )
+                row = await self.enqueue_prompt(
+                    session_id,
+                    raw_prompt,
+                    mutation_id=mutation_id,
+                )
+                return self._public_queue_update(row).to_wire()
+            if method == "hrns/queue/edit":
+                request = QueueEditRequest.model_validate(dict(params))
+                return (await self.edit_queued_prompt(request)).to_wire()
+            if method == "hrns/queue/remove":
+                request = QueueRemoveRequest.model_validate(dict(params))
+                return (await self.remove_queued_prompt(request)).to_wire()
             if method == "hrns/queue/run":
                 session_id = params.get("sessionId", params.get("session_id"))
                 if not isinstance(session_id, str) or not session_id:
@@ -1928,12 +2151,27 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             if method == "hrns/queue/retry":
                 session_id = params.get("sessionId", params.get("session_id"))
                 prompt_id = params.get("promptId", params.get("prompt_id"))
+                mutation_id = params.get("mutationId", params.get("mutation_id"))
                 if not isinstance(session_id, str) or not session_id:
                     raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
                 if not isinstance(prompt_id, str) or not prompt_id:
                     raise HrnsError("INVALID_CONFIGURATION", "promptId is required.")
-                row = await self.retry_queued_prompt(session_id, prompt_id)
-                return row.to_public()
+                if (
+                    not isinstance(mutation_id, str)
+                    or not mutation_id.strip()
+                    or len(mutation_id) > 200
+                ):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION",
+                        "mutationId must be a non-empty string of at most 200 characters.",
+                    )
+                return (
+                    await self.retry_queued_prompt(
+                        session_id,
+                        prompt_id,
+                        mutation_id=mutation_id,
+                    )
+                ).to_wire()
             if method == "hrns/presentation/get":
                 request = PresentationListRequest.model_validate(dict(params))
                 await self.authorize(request.session_id, PolicyAction.LOAD)
