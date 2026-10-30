@@ -32,13 +32,27 @@ Identity and workspace bounds come from the application, never from ACP metadata
 ## Storage scope
 
 Session rows are keyed by session id and every query includes `(principal, deployment_id)`.
-The deployment id is a namespace derived from the registered agent id and definition version.
+The deployment id is the logical agent namespace; each row's `definition_version` pins the
+immutable revision used to compose it.
 SQLite and PostgreSQL use the same `acp_sessions` schema. A scoped store implements the
 upstream `SessionStore` protocol; the adapter owns conversation state, while the host owns
 cwd/title/effort/bindings/usage metadata.
 
-Durability follows upstream: `save` failures are logged, not fatal; no transactional turn
-commit or cross-connection ownership claim is provided. Last writer wins.
+Durability follows upstream: `save` failures are logged, not fatal. Hosted sessions add
+`acp_session_leases` (owner, fence, expiry): a second live worker gets `SESSION_HELD`, an
+expired lease is taken over with the next fence, and a save carrying a stale fence fails
+with `SESSION_CONFLICT`. `acp_prompt_queue` records prompts before execution, marks a
+cancelled/abandoned attempt `uncertain`, and links an explicit retry to the original.
+Connections to one deployment share one host instance: `FanoutClient` broadcasts
+`session/update` only to connections subscribed to that session and routes
+response-bearing client calls to the connection that started the turn. Session updates
+have no fallback after an unsubscribe; only local stdio may use its sole client, and an
+in-flight client-origin call is not re-authorized mid-turn. A
+second worker is refused with `SESSION_HELD` rather than attached; cross-worker routing is
+the remaining distributed step. Queued prompts can be enqueued, drained in sequence
+order, inspected, and explicitly retried after a restart. Session scope is the logical
+agent, so a version bump does not orphan old sessions; the stored definition version pins
+composition.
 
 ## ACP and transport
 

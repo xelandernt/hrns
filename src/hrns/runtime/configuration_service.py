@@ -18,7 +18,6 @@ from .host_support import HostPolicy, SessionDeps
 from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
 
 if TYPE_CHECKING:
-    from .definitions import AgentDefinition
     from .host import HrnsACPAgent
     from .registry import PluginRegistry
 
@@ -31,12 +30,10 @@ class ConfigurationService:
         *,
         agent: HrnsACPAgent,
         policy: HostPolicy,
-        definition: AgentDefinition,
         registry: PluginRegistry,
     ) -> None:
         self.agent = agent
         self.policy = policy
-        self.definition = definition
         self.registry = registry
         self.requests: dict[str, OrderedDict[str, tuple[str, ConfigurationSnapshot]]] = {}
 
@@ -97,26 +94,47 @@ class ConfigurationService:
             cwd = await agent.sessions.cwd(session_id)
             if cwd is None:
                 raise HrnsError("SESSION_CLOSED", "Load the session before updating configuration.")
+            record = await agent.session_record(session_id)
+            revision = agent.sessions.revision_for(record)
+            effective_accepts = (
+                record.accepts_client_capabilities
+                if record is not None and record.accepts_client_capabilities is not None
+                else revision.accepts_client_capabilities
+            )
             next_revision = composition.snapshot.selected_revision + 1
+            next_model = composition.effort.model or revision.default_model
+            effective_model = next_model or agent._default_model
+            support = (
+                revision.effort_support(effective_model)
+                if revision.models
+                else self.policy.effort_support(effective_model)
+            )
             refreshed = await compose_definition(
-                self.definition,
+                revision.definition,
                 self.registry,
-                resources=agent.sessions.resources(self.policy.validate_cwd(cwd), session_id),
+                resources=agent.sessions.resources(
+                    self.policy.validate_cwd(cwd, allowed=revision.allowed_cwds),
+                    session_id,
+                    revision.definition,
+                    revision.resources,
+                    next_model,
+                ),
                 session_id=session_id,
-                principal=self.policy.principal,
+                principal=(
+                    record.effective_owner if record is not None else agent.acting_principal()
+                ),
                 deployment_id=self.policy.deployment_id,
                 saved_bindings=self.bindings_payload(outcome),
                 model_settings=self.policy.model_settings,
                 effort=composition.effort.effort,
-                effort_support=self.policy.effort_support(
-                    composition.effort.model or agent._default_model
-                ),
+                effort_support=support,
                 deps=composition.deps,
                 presentation_sink=agent.sessions.presentation_sink(session_id),
                 client_capabilities=agent.sessions.client_capabilities(session_id),
-                accepts_client_capabilities=self.policy.accepts_client_capabilities,
+                accepts_client_capabilities=effective_accepts,
             )
-            refreshed.effort.model = composition.effort.model or agent._default_model
+            refreshed.effort.model = effective_model
+            refreshed.models = revision.models
             snapshot = refreshed.catalog.snapshot(
                 selected_revision=next_revision,
                 active_revision=next_revision,
@@ -152,8 +170,9 @@ class ConfigurationService:
             return snapshot.to_wire()
 
     async def send_changed(self, snapshot: ConfigurationSnapshot) -> None:
-        conn = self.agent._client_conn
-        if conn is None:
-            return
         with contextlib.suppress(Exception):
-            await conn.ext_notification("hrns/configuration/changed", snapshot.to_wire())
+            await self.agent.fanout.session_notification(
+                snapshot.session_id,
+                "hrns/configuration/changed",
+                snapshot.to_wire(),
+            )

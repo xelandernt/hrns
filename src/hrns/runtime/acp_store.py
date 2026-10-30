@@ -13,9 +13,10 @@ import asyncio
 import base64
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from acp import schema
@@ -24,26 +25,35 @@ from pydantic_ai.messages import ModelMessage
 
 from hrns.protocol import HrnsError
 
+from .session_policy import SessionAccess
+
 if TYPE_CHECKING:
     from pydantic_ai_harness.experimental.acp import StoredSession
 
 __all__ = [
     "SESSION_COLUMNS",
+    "DeploymentRecord",
+    "PromptState",
+    "QueuedPrompt",
+    "SessionLease",
     "SessionPage",
     "SessionRecord",
     "SessionStore",
     "ScopedSessionStore",
     "decode_session",
     "decode_session_cursor",
+    "deserialize_collaborators",
     "encode_session",
     "encode_session_cursor",
     "now_ms",
+    "serialize_collaborators",
 ]
 
 #: Metadata projection shared by both stores. Session bodies are only read by ``load_scoped``.
 SESSION_COLUMNS = (
     "session_id, principal, deployment_id, agent_id, definition_version, cwd, title, effort, "
-    "bindings, usage, model, created_at, last_active_at"
+    "bindings, usage, model, access, owner, collaborators, client_capabilities, created_at, "
+    "last_active_at"
 )
 
 _MESSAGES = TypeAdapter(list[ModelMessage])
@@ -136,6 +146,29 @@ def decode_session_cursor(cursor: str) -> tuple[int, str]:
     return last, session_id
 
 
+class PromptState(StrEnum):
+    """Lifecycle of one durable prompt in the per-session queue."""
+
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionLease:
+    """A fenced, expiring grant to be the only writer for one session."""
+
+    session_id: str
+    principal: str
+    deployment_id: str
+    owner_id: str
+    fence: int
+    expires_at: int
+
+
 @dataclass(frozen=True, slots=True)
 class SessionPage:
     """One page of session metadata plus the cursor for the next page."""
@@ -159,8 +192,120 @@ class SessionRecord:
     model: str | None = None
     bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
+    access: SessionAccess = SessionAccess.PRIVATE
+    owner: str | None = None
+    collaborators: frozenset[str] = frozenset()
+    accepts_client_capabilities: bool | None = None
     created_at: int = 0
     last_active_at: int = 0
+
+    @property
+    def effective_owner(self) -> str:
+        """The principal that owns the session; older rows fall back to their creator."""
+        return self.owner or self.principal
+
+    @property
+    def read_only(self) -> bool:
+        return self.access is SessionAccess.ARCHIVED
+
+    def admits(self, principal: str) -> bool:
+        """Whether ``principal`` may load or replay this session."""
+        if principal == self.effective_owner:
+            return True
+        if self.access is SessionAccess.PRIVATE:
+            return False
+        return principal in self.collaborators
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentRecord:
+    """Durable metadata for one registered ``(agent_id, definition_version)`` revision.
+
+    Only the descriptor is persisted: the agent definition itself can hold native
+    objects, so the application re-registers it and this row just records that the
+    revision existed, whether it is visible, and whether it is retained.
+    """
+
+    agent_id: str
+    version: str
+    name: str
+    description: str
+    visible: bool
+    retained: bool
+    registered_at: int
+
+
+#: Return type of ``list_deployments``; aliased because the store classes define ``list``.
+_DeploymentList = list[DeploymentRecord]
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedPrompt:
+    """One durably queued ACP prompt, ordered by ``sequence`` within its session."""
+
+    prompt_id: str
+    session_id: str
+    principal: str
+    deployment_id: str
+    credential_id: str | None
+    connection_id: str | None
+    sequence: int
+    payload: str
+    state: PromptState
+    attempt: int
+    parent_id: str | None
+    owner_id: str | None
+    fence: int | None
+    created_at: int
+    updated_at: int
+
+    def to_public(self) -> dict[str, object]:
+        """Render the prompt as a transport-friendly dict."""
+        return {
+            "prompt_id": self.prompt_id,
+            "session_id": self.session_id,
+            "principal": self.principal,
+            "deployment_id": self.deployment_id,
+            "credential_id": self.credential_id,
+            "connection_id": self.connection_id,
+            "sequence": self.sequence,
+            "payload": self.payload,
+            "state": self.state.value,
+            "attempt": self.attempt,
+            "parent_id": self.parent_id,
+            "owner_id": self.owner_id,
+            "fence": self.fence,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+#: Return type of ``list_prompts``. Aliased because the store classes define a ``list``
+#: method, which shadows the builtin inside their bodies.
+_PromptList = list[QueuedPrompt]
+
+
+def serialize_collaborators(collaborators: frozenset[str] | set[str]) -> str:
+    """Encode the collaborator set for a text column, deterministically."""
+    return json.dumps(sorted(collaborators), ensure_ascii=False, separators=(",", ":"))
+
+
+def deserialize_collaborators(value: str | None) -> frozenset[str]:
+    if not value:
+        return frozenset()
+    parsed = json.loads(value)
+    if not isinstance(parsed, list):
+        raise ValueError("stored collaborators must be a list")
+    return frozenset(str(item) for item in parsed)
+
+
+def _session_conflict(deployment_id: str, session_id: str, fence: int) -> HrnsError:
+    """The error raised when a fenced write finds the lease moved on."""
+    return HrnsError(
+        "SESSION_CONFLICT",
+        "The session lease was lost; refusing to overwrite a newer actor's state.",
+        {"deployment_id": deployment_id, "session_id": session_id, "fence": fence},
+    )
 
 
 class SessionStore(ABC):
@@ -213,14 +358,188 @@ class SessionStore(ABC):
     ) -> None: ...
 
     @abstractmethod
+    async def set_access(
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        *,
+        access: SessionAccess,
+        owner: str | None = None,
+        collaborators: frozenset[str] | None = None,
+    ) -> bool:
+        """Change a session's access mode; the caller must already own it."""
+
+    @abstractmethod
+    async def set_client_capabilities(
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        accepts: bool | None,
+    ) -> bool:
+        """Override (or clear, with ``None``) the deployment's capability gate."""
+
+    @abstractmethod
+    async def get_visible(
+        self, deployment_id: str, session_id: str, principal: str
+    ) -> SessionRecord | None:
+        """Read a session visible to ``principal`` under its own access mode."""
+
+    @abstractmethod
+    async def list_visible(
+        self,
+        deployment_id: str,
+        principal: str,
+        *,
+        cwd: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> SessionPage:
+        """List sessions visible to ``principal`` under each session's access mode."""
+
+    @abstractmethod
     async def save_scoped(
-        self, principal: str, deployment_id: str, session_id: str, session: StoredSession
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        session: StoredSession,
+        *,
+        fence: int | None = None,
     ) -> None: ...
 
     @abstractmethod
     async def load_scoped(
         self, principal: str, deployment_id: str, session_id: str
     ) -> StoredSession | None: ...
+
+    # -- Cross-worker session leases -----------------------------------------
+
+    @abstractmethod
+    async def acquire_lease(
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        owner_id: str,
+        ttl_ms: int,
+    ) -> SessionLease | None:
+        """Take or renew the writer lease; ``None`` when a live other owner holds it."""
+
+    @abstractmethod
+    async def renew_lease(
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        owner_id: str,
+        ttl_ms: int,
+    ) -> SessionLease | None:
+        """Extend a lease that this owner still holds and that has not expired."""
+
+    @abstractmethod
+    async def release_lease(
+        self, principal: str, deployment_id: str, session_id: str, owner_id: str
+    ) -> bool:
+        """Drop the lease, but only when ``owner_id`` still holds it."""
+
+    @abstractmethod
+    async def get_lease(self, deployment_id: str, session_id: str) -> SessionLease | None: ...
+
+    # -- Durable per-session prompt queue ------------------------------------
+
+    @abstractmethod
+    async def enqueue_prompt(self, prompt: QueuedPrompt) -> QueuedPrompt:
+        """Append a prompt, assigning the next per-session ``sequence``."""
+
+    @abstractmethod
+    async def claim_next_prompt(
+        self,
+        deployment_id: str,
+        session_id: str,
+        owner_id: str,
+        fence: int,
+        ttl_ms: int,
+    ) -> QueuedPrompt | None:
+        """Claim the earliest queued prompt, or return this owner's current claim."""
+
+    @abstractmethod
+    async def claim_prompt(self, prompt_id: str, owner_id: str, fence: int) -> QueuedPrompt | None:
+        """Claim one specific queued prompt (used by an inline turn)."""
+
+    @abstractmethod
+    async def finish_prompt(
+        self,
+        prompt_id: str,
+        state: PromptState,
+        *,
+        owner_id: str,
+        fence: int,
+    ) -> bool:
+        """Move a claimed prompt to a terminal state; ``False`` when it was not ours."""
+
+    @abstractmethod
+    async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None: ...
+
+    @abstractmethod
+    async def list_prompts(
+        self,
+        deployment_id: str,
+        session_id: str,
+        *,
+        states: Sequence[PromptState] | None = None,
+        limit: int = 100,
+    ) -> _PromptList:
+        """List a session's prompts in queue order."""
+
+    @abstractmethod
+    async def mark_uncertain_prompts(
+        self,
+        owner_id: str,
+        *,
+        deployment_id: str | None = None,
+        session_id: str | None = None,
+    ) -> _PromptList:
+        """Park claims held by a worker that lost a lease as ``UNCERTAIN``.
+
+        ``session_id`` narrows the operation to one session; without it every claim of
+        that owner in the deployment is affected.
+        """
+
+    @abstractmethod
+    async def retry_prompt(
+        self,
+        prompt_id: str,
+        *,
+        session_id: str,
+        new_prompt_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> QueuedPrompt | None:
+        """Re-queue an ``UNCERTAIN`` prompt from the same session as a fresh row."""
+
+    # -- Deployment revision metadata ----------------------------------------
+
+    @abstractmethod
+    async def upsert_deployment(self, record: DeploymentRecord) -> None:
+        """Insert or replace the metadata of one revision."""
+
+    @abstractmethod
+    async def list_deployments(self) -> _DeploymentList:
+        """List every persisted revision ordered by agent, registration, and version."""
+
+    @abstractmethod
+    async def set_deployment_visible(self, agent_id: str, version: str, visible: bool) -> bool:
+        """Hide or show one revision; ``False`` when the row does not exist."""
+
+    @abstractmethod
+    async def set_deployment_retained(self, agent_id: str, version: str, retained: bool) -> bool:
+        """Change whether a revision is protected from deletion."""
+
+    @abstractmethod
+    async def delete_deployment(self, agent_id: str, version: str) -> bool:
+        """Delete an unretained revision; ``False`` when absent or retained."""
 
     def scoped(self, principal: str, deployment_id: str) -> ScopedSessionStore:
         return ScopedSessionStore(self, principal, deployment_id)
@@ -241,13 +560,14 @@ class ScopedSessionStore:
         self.deployment_id = deployment_id
         self._staged: dict[str, SessionRecord] = {}
         self._materialize_lock = asyncio.Lock()
+        self._fences: dict[str, int] = {}
 
     def stage(self, record: SessionRecord) -> None:
         """Hold a composed session's metadata in memory until the session is first used."""
-        if record.principal != self.principal or record.deployment_id != self.deployment_id:
+        if record.deployment_id != self.deployment_id:
             raise HrnsError(
                 "POLICY_DENIED",
-                "A scoped store can only stage sessions in its own scope.",
+                "A scoped store can only stage sessions in its own deployment.",
                 details={"session_id": record.session_id},
             )
         self._staged[record.session_id] = record
@@ -269,6 +589,16 @@ class ScopedSessionStore:
             self._staged.pop(session_id, None)
             return True
 
+    def set_fence(self, session_id: str, fence: int | None) -> None:
+        """Bind this session's writes to the lease fence the actor holds."""
+        if fence is None:
+            self._fences.pop(session_id, None)
+        else:
+            self._fences[session_id] = fence
+
+    def fence(self, session_id: str) -> int | None:
+        return self._fences.get(session_id)
+
     async def save(self, session_id: str, session: StoredSession) -> None:
         if not (session.messages or session.updates) and self.staged(session_id) is not None:
             # ``session/new`` persists an empty session so a client could reopen it before the
@@ -277,7 +607,13 @@ class ScopedSessionStore:
             return
         # The first content save is also the moment a staged session becomes durable.
         await self.materialize(session_id)
-        await self.backend.save_scoped(self.principal, self.deployment_id, session_id, session)
+        await self.backend.save_scoped(
+            self.principal,
+            self.deployment_id,
+            session_id,
+            session,
+            fence=self.fence(session_id),
+        )
 
     async def load(self, session_id: str) -> StoredSession | None:
         return await self.backend.load_scoped(self.principal, self.deployment_id, session_id)
@@ -298,6 +634,128 @@ class ScopedSessionStore:
 
     async def delete(self, session_id: str) -> bool:
         return await self.backend.delete(self.principal, self.deployment_id, session_id)
+
+    async def get_visible(self, session_id: str, principal: str) -> SessionRecord | None:
+        return await self.backend.get_visible(self.deployment_id, session_id, principal)
+
+    async def list_visible(
+        self,
+        principal: str,
+        *,
+        cwd: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> SessionPage:
+        return await self.backend.list_visible(
+            self.deployment_id,
+            principal,
+            cwd=cwd,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def set_access(
+        self,
+        session_id: str,
+        *,
+        access: SessionAccess,
+        owner: str | None = None,
+        collaborators: frozenset[str] | None = None,
+        principal: str | None = None,
+    ) -> bool:
+        return await self.backend.set_access(
+            principal or self.principal,
+            self.deployment_id,
+            session_id,
+            access=access,
+            owner=owner,
+            collaborators=collaborators,
+        )
+
+    async def set_client_capabilities(
+        self, session_id: str, accepts: bool | None, *, principal: str | None = None
+    ) -> bool:
+        return await self.backend.set_client_capabilities(
+            principal or self.principal, self.deployment_id, session_id, accepts
+        )
+
+    async def acquire_lease(
+        self, session_id: str, owner_id: str, ttl_ms: int
+    ) -> SessionLease | None:
+        return await self.backend.acquire_lease(
+            self.principal, self.deployment_id, session_id, owner_id, ttl_ms
+        )
+
+    async def renew_lease(self, session_id: str, owner_id: str, ttl_ms: int) -> SessionLease | None:
+        return await self.backend.renew_lease(
+            self.principal, self.deployment_id, session_id, owner_id, ttl_ms
+        )
+
+    async def release_lease(self, session_id: str, owner_id: str) -> bool:
+        return await self.backend.release_lease(
+            self.principal, self.deployment_id, session_id, owner_id
+        )
+
+    async def get_lease(self, session_id: str) -> SessionLease | None:
+        return await self.backend.get_lease(self.deployment_id, session_id)
+
+    async def enqueue_prompt(self, prompt: QueuedPrompt) -> QueuedPrompt:
+        return await self.backend.enqueue_prompt(prompt)
+
+    async def claim_prompt(self, prompt_id: str, owner_id: str, fence: int) -> QueuedPrompt | None:
+        return await self.backend.claim_prompt(prompt_id, owner_id, fence)
+
+    async def claim_next_prompt(
+        self, session_id: str, owner_id: str, fence: int, ttl_ms: int
+    ) -> QueuedPrompt | None:
+        return await self.backend.claim_next_prompt(
+            self.deployment_id, session_id, owner_id, fence, ttl_ms
+        )
+
+    async def finish_prompt(
+        self, prompt_id: str, state: PromptState, *, owner_id: str, fence: int
+    ) -> bool:
+        return await self.backend.finish_prompt(prompt_id, state, owner_id=owner_id, fence=fence)
+
+    async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None:
+        return await self.backend.get_prompt(prompt_id)
+
+    async def list_prompts(
+        self,
+        session_id: str,
+        *,
+        states: Sequence[PromptState] | None = None,
+        limit: int = 100,
+    ) -> _PromptList:
+        return await self.backend.list_prompts(
+            self.deployment_id, session_id, states=states, limit=limit
+        )
+
+    async def mark_uncertain_prompts(
+        self, owner_id: str, *, session_id: str | None = None
+    ) -> _PromptList:
+        return await self.backend.mark_uncertain_prompts(
+            owner_id,
+            deployment_id=self.deployment_id,
+            session_id=session_id,
+        )
+
+    async def retry_prompt(
+        self,
+        prompt_id: str,
+        *,
+        session_id: str,
+        new_prompt_id: str,
+        owner_id: str,
+        fence: int,
+    ) -> QueuedPrompt | None:
+        return await self.backend.retry_prompt(
+            prompt_id,
+            session_id=session_id,
+            new_prompt_id=new_prompt_id,
+            owner_id=owner_id,
+            fence=fence,
+        )
 
     async def update(
         self,

@@ -24,14 +24,24 @@ from ._unavailable_tools import UnavailableTools
 from .acp_store import SessionRecord, finalize_usage, merge_usage, usage_payload
 from .client_io import ClientSession
 from .composition import Composition, compose_definition
-from .host_support import HostPolicy, SessionDeps, _iso_millis
+from .host_support import HostPolicy, RevisionSpec, SessionDeps, _iso_millis
 from .presentation import snapshot_from_metadata
-from .resources import ANSWERS, CLIENT, MODEL, PLAN, WORKSPACE, ResourceSet
+from .request_context import current_connection_id
+from .resources import (
+    ANSWERS,
+    CLIENT,
+    MODEL,
+    PLAN,
+    WORKSPACE,
+    ResourceBindings,
+    ResourceSet,
+)
+from .session_policy import PolicyAction, SessionAccess, decide_policy
 from .steering import SteeringCapability, SteeringChannel
 from .todo import PLAN_TABLE, PlanChannel, forget_plan, plan_update
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from pydantic_ai_harness.experimental.acp import AcpSession
 
@@ -52,12 +62,14 @@ class SessionService:
         policy: HostPolicy,
         definition: AgentDefinition,
         registry: PluginRegistry,
+        revision_resolver: Callable[[str], RevisionSpec | None] | None = None,
     ) -> None:
         self.agent = agent
         self.store = store
         self.policy = policy
         self.definition = definition
         self.registry = registry
+        self.revision_resolver = revision_resolver
         self.compositions: dict[str, Composition] = {}
         self.steering: dict[str, SteeringChannel] = {}
         self.turn_usage: dict[str, dict[str, Any]] = {}
@@ -66,6 +78,11 @@ class SessionService:
         self.new_lock = asyncio.Lock()
         self.pending_initial: list[Any] | None = None
         self.pending_effort: str | None = None
+
+    @property
+    def principal(self) -> str:
+        """The principal acting on this request, not the actor's first connection."""
+        return self.agent.acting_principal()
 
     # ------------------------------------------------------------- metadata
 
@@ -77,18 +94,38 @@ class SessionService:
         self.plan_channels.pop(session_id, None)
         self.client_sessions.pop(session_id, None)
 
-    def remember_client(self, session: AcpSession, cwd: str) -> ClientSession:
-        """Record the connection handle this session's client-origin tools act through."""
+    def remember_client(
+        self, session: AcpSession, cwd: str, *, accepts: bool | None = None
+    ) -> ClientSession:
+        """Record the connection handle this session's client-origin tools act through.
+
+        ``accepts`` is the session's server gate. ``None`` falls back to the deployment
+        default so an older record without an override keeps its old behavior.
+        """
+        if accepts is None:
+            accepts = self.policy.accepts_client_capabilities
+        # Client-origin tools go through the fan-out so the call is routed to the
+        # connection that initiated the current turn, not whichever client composed
+        # the session first.
+        client = self.agent.fanout
+        advertised = self.agent.current_capabilities()
+        if advertised is None and current_connection_id.get() is None:
+            # Local stdio has no connection registry; use the adapter's negotiated value.
+            advertised = session.client_capabilities
+        capabilities = advertised if accepts else None
         known = self.client_sessions.get(session.session_id)
-        if known is not None and known.client is session.client:
+        if (
+            known is not None
+            and known.client is client
+            and known.capabilities == capabilities
+            and known.cwd == cwd
+        ):
             return known
         handle = ClientSession(
-            client=session.client,
+            client=client,
             session_id=session.session_id,
             cwd=cwd,
-            capabilities=(
-                session.client_capabilities if self.policy.accepts_client_capabilities else None
-            ),
+            capabilities=capabilities,
         )
         self.client_sessions[session.session_id] = handle
         return handle
@@ -102,20 +139,30 @@ class SessionService:
         self, cwd: str | None = None, cursor: str | None = None
     ) -> schema.ListSessionsResponse:
         cwd_filter = self.policy.validate_cwd(cwd) if cwd is not None else None
-        page = await self.store.list(cwd=cwd_filter, cursor=cursor, limit=50)
-        entries = [
-            schema.SessionInfo(
-                session_id=record.session_id,
-                cwd=record.cwd,
-                title=record.title,
-                updated_at=_iso_millis(record.last_active_at),
+        page = await self.store.list_visible(
+            self.principal, cwd=cwd_filter, cursor=cursor, limit=50
+        )
+        entries: list[schema.SessionInfo] = []
+        for record in page.records:
+            decision = await decide_policy(
+                self.policy.session_policy,
+                self.agent.session_context(record, record.session_id),
+                PolicyAction.LIST,
             )
-            for record in page.records
-        ]
+            if not decision.allowed:
+                continue
+            entries.append(
+                schema.SessionInfo(
+                    session_id=record.session_id,
+                    cwd=record.cwd,
+                    title=record.title,
+                    updated_at=_iso_millis(record.last_active_at),
+                )
+            )
         return schema.ListSessionsResponse(sessions=entries, next_cursor=page.next_cursor)
 
     async def delete_session(self, session_id: str) -> DeleteSessionResponse:
-        record = await self.store.get(session_id)
+        record = await self.store.get_visible(session_id, self.principal)
         if record is None:
             reason = (
                 "the session has not been used yet, so nothing is stored to delete"
@@ -123,8 +170,9 @@ class SessionService:
                 else "no stored session with this id"
             )
             raise RequestError.invalid_params({"sessionId": session_id, "reason": reason})
-        await self.agent.close_session(session_id)
+        # Delete while the caller still holds the lease; closing releases it.
         await self.store.delete(session_id)
+        await self.agent._close_session_unchecked(session_id)
         database = self.plan_database()
         if database is not None:
             await asyncio.to_thread(forget_plan, database, session_id)
@@ -139,7 +187,7 @@ class SessionService:
         """
         draft = self.store.staged(session_id)
         if draft is None:
-            return await self.store.get(session_id) is not None
+            return await self.store.get_visible(session_id, self.principal) is not None
         composition = self.compositions.get(session_id)
         if composition is not None:
             draft.effort = composition.effort.effort or EFFORT_DEFAULT
@@ -152,14 +200,14 @@ class SessionService:
         draft = self.store.staged(session_id)
         if draft is not None:
             return draft.cwd
-        record = await self.store.get(session_id)
+        record = await self.store.get_visible(session_id, self.principal)
         return record.cwd if record is not None else None
 
     async def ensure_title(self, session_id: str, title: str) -> None:
         """Name a session after its first prompt, so even a failed turn stays recognizable."""
         if not title:
             return
-        record = await self.store.get(session_id)
+        record = await self.store.get_visible(session_id, self.principal)
         if record is None or record.title:
             return
         await self.store.update(session_id, title=title)
@@ -181,6 +229,96 @@ class SessionService:
             draft.effort = effort
         if bindings is not None:
             draft.bindings = dict(bindings)
+
+    async def set_access(
+        self,
+        session_id: str,
+        *,
+        access: SessionAccess,
+        collaborators: frozenset[str] | None = None,
+        principal: str | None = None,
+    ) -> bool:
+        """Change a session's access mode, staged or stored.
+
+        The caller is responsible for authorizing the change; this method only writes it.
+        """
+        acting = principal or self.principal
+        draft = self.store.staged(session_id)
+        if draft is not None:
+            if draft.effective_owner != acting:
+                raise HrnsError(
+                    "POLICY_DENIED",
+                    "Only the session owner may change its access mode.",
+                    {"sessionId": session_id},
+                )
+            if draft.access == access and (
+                collaborators is None or draft.collaborators == collaborators
+            ):
+                return False
+            draft.access = access
+            if collaborators is not None:
+                draft.collaborators = collaborators
+            # Sharing an unused session is itself a reason to persist it: another
+            # principal must be able to find the row that grants it access.
+            changed = await self.store.materialize(session_id)
+        else:
+            before = await self.store.get_visible(session_id, acting)
+            if (
+                before is not None
+                and before.access == access
+                and (collaborators is None or before.collaborators == collaborators)
+            ):
+                return False
+            changed = await self.store.set_access(
+                session_id, access=access, collaborators=collaborators, principal=acting
+            )
+        if changed:
+            await self._retain_admitted_viewers(session_id, acting)
+        return changed
+
+    async def _retain_admitted_viewers(self, session_id: str, acting: str) -> None:
+        """Drop viewers the new access decision no longer admits.
+
+        The owner and still-admitted collaborators keep their existing subscriptions,
+        including when the change came from the embedding API and has no request
+        connection to re-subscribe. A missing record fails closed: without a decision
+        there is no safe audience to retain.
+        """
+        record = await self.store.get_visible(session_id, acting)
+        if record is None:
+            self.agent.fanout.unsubscribe_session(session_id)
+            return
+        for connection_id in self.agent.fanout.subscribed_connections(session_id):
+            principal = self.agent.connection_principal(connection_id)
+            decision = await decide_policy(
+                self.policy.session_policy,
+                self.agent.session_context(
+                    record,
+                    session_id,
+                    principal=principal,
+                    connection_id=connection_id,
+                ),
+                PolicyAction.REPLAY,
+            )
+            if not decision.allowed:
+                self.agent.fanout.unsubscribe(connection_id, session_id)
+
+    async def set_client_capabilities(
+        self, session_id: str, accepts: bool | None, *, principal: str | None = None
+    ) -> bool:
+        """Override the deployment's client-origin capability gate for one session."""
+        acting = principal or self.principal
+        draft = self.store.staged(session_id)
+        if draft is not None:
+            if draft.effective_owner != acting:
+                raise HrnsError(
+                    "POLICY_DENIED",
+                    "Only the session owner may change its capability gate.",
+                    {"sessionId": session_id},
+                )
+            draft.accepts_client_capabilities = accepts
+            return await self.store.materialize(session_id)
+        return await self.store.set_client_capabilities(session_id, accepts, principal=acting)
 
     # -------------------------------------------------------- session state
 
@@ -205,7 +343,30 @@ class SessionService:
         )
         options: list[Any] = []
         model = self.agent.session_model_option(session_id)
+        if model is None and composition is not None and composition.models:
+            current_model = composition.effort.model
+            if current_model is not None:
+                model = schema.SessionConfigOptionSelect(
+                    id=acp_map.MODEL_OPTION_ID,
+                    name="Model",
+                    type="select",
+                    current_value=current_model,
+                    options=[
+                        schema.SessionConfigSelectOption(value=value, name=value)
+                        for value in composition.models
+                    ],
+                )
         if model is not None:
+            if composition is not None and composition.models:
+                model = model.model_copy(
+                    update={
+                        "current_value": composition.effort.model or model.current_value,
+                        "options": [
+                            schema.SessionConfigSelectOption(value=value, name=value)
+                            for value in composition.models
+                        ],
+                    }
+                )
             options.append(model)
         effort = acp_map.effort_option(current_effort, support=support)
         if effort is not None:
@@ -232,7 +393,7 @@ class SessionService:
         increment["requests"] = 1
         current = merge_usage(current, increment)
         self.turn_usage[session_id] = current
-        record = await self.store.get(session_id)
+        record = await self.store.get_visible(session_id, self.principal)
         await self.send_session_usage(
             session_id,
             finalize_usage(merge_usage(record.usage if record is not None else {}, current)),
@@ -327,16 +488,13 @@ class SessionService:
 
     def presentation_sink(self, session_id: str) -> Any:
         async def publish(snapshot: ToolPresentationSnapshot) -> None:
-            conn = self.agent._client_conn
-            if conn is None:
-                return
             with contextlib.suppress(Exception):
-                await conn.ext_notification(
+                await self.agent.fanout.session_notification(
+                    session_id,
                     "hrns/presentation/updated",
                     PresentationUpdated(snapshots=[snapshot]).to_wire(),
                 )
 
-        del session_id
         return publish
 
     async def remembered_tool_names(self, session_id: str) -> frozenset[str]:
@@ -428,14 +586,70 @@ class SessionService:
 
     # ----------------------------------------------------------- composition
 
-    def resources(self, cwd: str, session_id: str | None = None) -> ResourceSet:
+    def current_revision(self) -> RevisionSpec:
+        """The latest native revision this actor serves for new sessions."""
+        return RevisionSpec(
+            definition=self.definition,
+            allowed_cwds=self.policy.allowed_cwds,
+            default_cwd=self.policy.default_cwd,
+            models=self.policy.models,
+            thinking_models=self.policy.thinking_models,
+            resources=self.policy.resources,
+            accepts_client_capabilities=self.policy.accepts_client_capabilities,
+        )
+
+    def revision_for(self, record: SessionRecord | None) -> RevisionSpec:
+        """Resolve the complete revision pinned by a stored session.
+
+        A hosted server's resolver fails closed when the pinned revision is not native;
+        silently falling back to the latest revision would execute different tools and
+        resources under the old row's version.
+        """
+        if record is not None and record.definition_version and self.revision_resolver:
+            revision = self.revision_resolver(record.definition_version)
+            if revision is None:
+                raise HrnsError(
+                    "DEPLOYMENT_UNAVAILABLE",
+                    "The revision pinned by this session is not registered in this process.",
+                    {
+                        "sessionId": record.session_id,
+                        "definitionVersion": record.definition_version,
+                    },
+                )
+            return revision
+        if (
+            record is not None
+            and record.definition_version
+            and self.policy.hosted
+            and record.definition_version != (self.definition.version or "")
+        ):
+            raise HrnsError(
+                "DEPLOYMENT_UNAVAILABLE",
+                "The revision pinned by this session is not registered in this process.",
+                {
+                    "sessionId": record.session_id,
+                    "definitionVersion": record.definition_version,
+                },
+            )
+        return self.current_revision()
+
+    def resources(
+        self,
+        cwd: str,
+        session_id: str | None = None,
+        definition: AgentDefinition | None = None,
+        resource_bindings: ResourceSet | ResourceBindings | None = None,
+        model: str | None = None,
+    ) -> ResourceSet:
         """The deployment's bindings plus the services this session owns.
 
         A deployment binding always wins: the ACP client's cwd only fills a workspace slot the
         deployment left empty. That is what lets a host bind a remote or sandboxed workspace
         backend while the client still sends an ordinary path as its ``cwd``.
         """
-        resources = ResourceSet(self.policy.resources)
+        resources = ResourceSet(
+            self.policy.resources if resource_bindings is None else resource_bindings
+        )
         resources.bind_if_absent(ANSWERS, self.agent.question_channel)
         if session_id is not None:
             resources.bind_if_absent(PLAN, self.plan_channel(session_id))
@@ -444,16 +658,21 @@ class SessionService:
                 # Definitions may require the handle even while every client plugin is disabled.
                 # Capability acceptance is enforced by the catalog and the handle's capabilities.
                 resources.bind_if_absent(CLIENT, handle)
-        model = self.agent._default_model
-        if model is not None:
-            resources.bind_if_absent(MODEL, model)
-        if self.definition.declares(WORKSPACE):
+        bound_model = model or self.agent._default_model
+        if bound_model is not None:
+            resources.bind_if_absent(MODEL, bound_model)
+        if (definition or self.definition).declares(WORKSPACE):
             resources.bind_if_absent(WORKSPACE, cwd)
         return resources
 
     async def compose_session(self, session: Any) -> Any:
         agent = self.agent
-        record = await self.store.get(session.session_id)
+        # Subscribe the initiator before composition can publish presentation, plan, or
+        # configuration notifications. Hosted actors have no no-subscriber fallback.
+        connection_id = current_connection_id.get()
+        if connection_id is not None:
+            self.agent.fanout.subscribe(connection_id, session.session_id)
+        record = await self.store.get_visible(session.session_id, self.principal)
         draft = self.store.staged(session.session_id) if record is None else None
         known = record or draft
         initial = None
@@ -466,17 +685,36 @@ class SessionService:
             effort = known.effort or None
             if effort == EFFORT_DEFAULT:
                 effort = None
-        cwd = self.policy.validate_cwd(session.cwd)
-        handle = self.remember_client(session, cwd)
-        model = (known.model if known is not None else None) or agent._default_model
+        revision = self.revision_for(known)
+        cwd = self.policy.validate_cwd(session.cwd, allowed=revision.allowed_cwds)
+        accepts = (
+            known.accepts_client_capabilities
+            if known is not None and known.accepts_client_capabilities is not None
+            else revision.accepts_client_capabilities
+        )
+        handle = self.remember_client(session, cwd, accepts=accepts)
+        model = (
+            (known.model if known is not None else None)
+            or revision.default_model
+            or agent._default_model
+        )
         saved = known.bindings if known is not None else None
-        support = self.policy.effort_support(model)
+        support = (
+            revision.effort_support(model) if revision.models else self.policy.effort_support(model)
+        )
+        definition = revision.definition
         composition = await compose_definition(
-            self.definition,
+            definition,
             self.registry,
-            resources=self.resources(cwd, session.session_id),
+            resources=self.resources(
+                cwd,
+                session.session_id,
+                definition,
+                revision.resources,
+                model,
+            ),
             session_id=session.session_id,
-            principal=self.policy.principal,
+            principal=(known.effective_owner if known is not None else self.principal),
             deployment_id=self.policy.deployment_id,
             initial_configuration=initial,
             saved_bindings=saved,
@@ -486,25 +724,26 @@ class SessionService:
             provider_types=self.policy.provider_types,
             presentation_sink=self.presentation_sink(session.session_id),
             client_capabilities=handle.capabilities,
-            accepts_client_capabilities=self.policy.accepts_client_capabilities,
+            accepts_client_capabilities=accepts,
         )
         composition.effort.model = model
+        composition.models = revision.models
         self.compositions[session.session_id] = composition
         if record is None:
             # Composed, not yet used: the row is staged and written when the session is used.
             self.store.stage(
                 SessionRecord(
                     session_id=session.session_id,
-                    principal=self.policy.principal,
+                    principal=self.principal,
                     deployment_id=self.policy.deployment_id,
-                    agent_id=self.definition.agent_id,
-                    definition_version=self.definition.version or "",
+                    agent_id=definition.agent_id,
+                    definition_version=definition.version or "",
                     cwd=cwd,
                     effort=effort or EFFORT_DEFAULT,
                     bindings=composition.catalog.export_bindings(),
                 )
             )
-        else:
+        elif not record.read_only:
             await self.store.update(
                 session.session_id,
                 bindings=composition.catalog.export_bindings(),

@@ -70,10 +70,11 @@ Mounting composes a router lifespan with the application's existing lifespan. It
 the database, closes active connections at shutdown, then closes the store. Give the server a
 store instance dedicated to its lifetime.
 
-Sessions are scoped by principal and by a namespace derived from the registered agent id and
-definition version. cwd, title, effort, selected bindings, usage, native history, and the ACP
-transcript persist in the shared store. Keep principal and definition version stable to reopen
-conversations. Live adapters and in-flight turns are not restored after a restart; uncertain
+Sessions are scoped by principal and by the logical agent id. Each row records the
+`definition_version` that created it, so a version bump does not orphan the conversation;
+loading resolves that pinned revision's definition, workspace roots, resources, and model
+default. cwd, title, effort, selected bindings, usage, native history, and the ACP
+transcript persist in the shared store. Keep the principal stable to reopen conversations. Live adapters and in-flight turns are not restored after a restart; uncertain
 prompts are never resent automatically. Durability follows the upstream save/load contract:
 save failures are logged and the next successful save catches up.
 
@@ -139,6 +140,116 @@ Pass `registry=your_registry` for custom plugins. The default registry contains 
 definition still has to bind and enable a plugin before a session can use it. Embedded
 connections can edit existing next-turn bindings; remote clients cannot add local plugins or
 supply MCP commands.
+
+## Per-session access, capability gate, and policy
+
+Sessions are owner-private by default. The embedding application can change that without
+an ACP round trip:
+
+```python
+from hrns.runtime import SessionAccess
+
+await agents.set_session_access(
+    principal, "coding", session_id,
+    access=SessionAccess.SHARED,
+    collaborators=frozenset({"bob"}),
+)
+await agents.set_session_access(
+    principal, "coding", session_id, access=SessionAccess.ARCHIVED
+)
+```
+
+`ARCHIVED` sessions still load and replay, but every mutation — prompt, steering,
+configuration, commands, rename, approvals, delete — is rejected with
+`SESSION_READ_ONLY`. The `_hrns/session/access` extension exposes the same operation to an
+authorized client.
+
+`set_session_capabilities(principal, agent_id, session_id, True | False | None)` overrides
+the deployment's `accepts_client_capabilities` default for one session. `None` restores the
+deployment default. Composition binds client-origin tools only when the resulting gate is
+open; advertising a wider mode from the client cannot widen it. A change to a live
+session takes effect on its next `session/load` (or new session), when composition is
+rebuilt.
+
+Pass `session_policy=...` to `AgentServer` for custom rules. A policy implements
+`decide(context, action)` and returns `PolicyDecision.allow()`, `.deny(...)`, or
+`.read_only_denial()`; it may be async. Private/shared/archived semantics are the default.
+
+## Deployment revisions
+
+`add_agent()` may be called before or after `mount()`. Each call registers an immutable
+revision keyed by `(agent_id, definition_version)`. New sessions resolve the latest visible
+revision; older revisions stay retained and can be resolved by version with
+`server.get_revision(agent_id, principal, version=...)`. `await server.unregister_agent(id)` hides every revision without deleting it and
+persists the decision; `await server.set_agent_visible(id, version, visible)` changes one
+revision. Registering a duplicate version raises `DeploymentConflict`; an unknown pinned
+version raises `MissingDeployment`.
+
+Session scope is the logical agent, not the revision. A session records the
+`definition_version` that created it, and loading resolves that retained definition, so
+a version bump does not orphan existing sessions. A fully hidden agent disappears from
+the catalog and refuses `session/new` with `DEPLOYMENT_UNAVAILABLE`, but its existing
+sessions can still be loaded through the WebSocket route.
+
+Revision metadata is stored in `acp_deployments`. After a restart the catalog restores
+the metadata (visibility and retention) but not native Python objects: the application
+re-registers each revision it wants served or kept loadable. A metadata-only revision
+is retained but is not served, and it never shadows an older native revision: catalog
+and connection resolution pick the newest native revision. Use
+`server.retained_revisions(agent_id)` to see what the durable catalog expects. A session
+pinned to a revision that has no native object fails with `DEPLOYMENT_UNAVAILABLE`
+instead of silently running a different revision.
+
+Stores written by pre-namespace builds are unsupported: the session namespace changed
+without a compatibility path, so open a fresh database instead of pointing this build at
+an old store.
+
+## Multiple viewers and the durable queue
+
+Connections to the same agent deployment in one worker share one authoritative
+`HrnsACPAgent`. Session updates are broadcast only to connections subscribed to that
+session; a connection subscribes on `session/new`, `session/load`, or before its first
+prompt. Session updates have no fallback after an unsubscribe; only local stdio may use
+its sole client before a subscription exists. Configuration and command catalog change
+notifications are delivered to the same session subscribers, not only to the initiating
+connection. Changing a session's access drops viewers the new decision no longer admits,
+so a collaborator removed by a private/shared transition stops receiving the stream
+immediately. The owner and still-admitted collaborators keep their existing
+subscriptions, including when the change comes from the embedding API with no request
+connection; reapplying an identical access and collaborator set is a no-op. Client-origin
+calls during an in-flight turn still route to the connection that started the turn and
+are not re-authorized until the turn ends or the viewer reloads. Permission requests are
+policy-guarded before each ask. A second worker is
+refused with `SESSION_HELD` until the first worker's lease expires, then takes ownership
+with a new fence and marks that owner's in-flight prompts `uncertain`.
+
+Prompts are persisted in `acp_prompt_queue` before they run. The extension surface is:
+
+| Method | Purpose |
+| --- | --- |
+| `_hrns/queue/enqueue` | Persist a text prompt without executing it |
+| `_hrns/queue/run` | Execute queued prompts in sequence order, once each |
+| `_hrns/queue/list` | Inspect states, attempts, origins, and parent links |
+| `_hrns/queue/retry` | Create and execute a new attempt linked to an `uncertain` one |
+
+A cancelled or abandoned turn becomes `uncertain`, is never replayed automatically, and
+blocks accidental duplicate execution until an explicit retry.
+
+## Revocation and lifecycle
+
+Each `Principal` may carry a `credential_id`; `BearerAuth` derives a stable one per token.
+`await agents.revoke_credential(credential_id)` marks the credential revoked, closes every
+matching socket, and waits for those handler tasks before returning. The credential cannot
+open a new connection: the handshake is denied with `401 UNAUTHORIZED`.
+`revoke_principal(id)` closes all of a user's connections without invalidating future
+authentication.
+
+Pass `lifecycle=...` for external resources. Implement any of `create`, `resume`,
+`suspend`, `destroy`, and `queue_changed` (sync or async). `create` and `resume` run on
+`session/new` and `session/load`; a queue drain requires the session to be live, so load
+first. Queue idle invokes suspend; close/delete invokes destroy
+once per host. A hook failure surfaces as `LIFECYCLE_FAILED` and no prompt runs without its
+resource.
 
 ## Routes and client connection
 

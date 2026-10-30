@@ -27,7 +27,15 @@ from hrns.protocol import (
 
 from . import _warnings  # noqa: F401  (the pinned ACP adapter is experimental)
 from ._version import __version__
-from .acp_store import ScopedSessionStore, SessionRecord, SessionStore
+from .acp_store import (
+    DeploymentRecord,
+    PromptState,
+    QueuedPrompt,
+    ScopedSessionStore,
+    SessionLease,
+    SessionRecord,
+    SessionStore,
+)
 from .composition import Composition, EffortState, compose_definition
 from .definitions import (
     AGENT_FACTORY_PARAM,
@@ -50,6 +58,14 @@ from .definitions import (
 )
 from .deps import HrnsDeps
 from .extensions import Command, CommandBinding, CommandContext, TextArguments
+from .fanout import FanoutClient
+from .lifecycle import (
+    LifecycleEvent,
+    NoopLifecycleHooks,
+    SessionLifecycleContext,
+    SessionLifecycleHooks,
+    run_hook,
+)
 from .policy import PolicyCatalog, changes_payload_hash, order_enabled_offerings
 from .registry import (
     ENTRY_POINT_GROUP,
@@ -60,6 +76,7 @@ from .registry import (
     PluginDescriptor,
     PluginRegistry,
 )
+from .request_context import RequestContext
 from .resources import (
     ANSWERS,
     MODEL,
@@ -74,6 +91,15 @@ from .resources import (
     ResourceSet,
     ResourceSlot,
     WorkspaceInput,
+)
+from .session_policy import (
+    DefaultSessionPolicy,
+    PolicyAction,
+    PolicyDecision,
+    SessionAccess,
+    SessionContext,
+    SessionPolicy,
+    decide_policy,
 )
 from .store import SQLiteSessionStore, default_store_path
 
@@ -144,9 +170,30 @@ __all__ = [
     "EffortState",
     "HrnsDeps",
     "compose_definition",
-    # persistence
+    # policy
+    "DefaultSessionPolicy",
+    "PolicyAction",
+    "PolicyDecision",
+    "SessionAccess",
+    "SessionContext",
+    "SessionPolicy",
+    "decide_policy",
+    # attribution and transport
+    "RequestContext",
+    "FanoutClient",
+    # lifecycle
+    "LifecycleEvent",
+    "NoopLifecycleHooks",
+    "SessionLifecycleContext",
+    "SessionLifecycleHooks",
+    "run_hook",
+    # persistence and coordination
     "SQLiteSessionStore",
     "ScopedSessionStore",
+    "DeploymentRecord",
+    "PromptState",
+    "QueuedPrompt",
+    "SessionLease",
     "SessionRecord",
     "SessionStore",
     "default_store_path",

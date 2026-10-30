@@ -29,8 +29,28 @@ claims refer only to checks actually run in this revision; there is no test suit
   are passed through `AcpSessionConfig.workspace`.
 - Direct Python `SessionManager`/`Session` APIs and runtime event journals were removed in
   favor of `compose_definition` and native agent runs.
-- Persistence uses upstream save/load semantics: save errors are logged, and simultaneous
-  writers are last-write-wins.
+- Persistence uses upstream save/load semantics: save errors are logged. Hosted sessions
+  additionally use a store-backed lease with a fencing token, so an actor that lost its
+  lease is refused with `SESSION_CONFLICT` instead of overwriting the new owner.
+
+## Release-gate contracts
+
+The 0.0.7 public-contract audit classified ten contracts as missing (1-9 and 11). Current state:
+
+| Contract | State |
+| --- | --- |
+| 1. Authoritative actor | **Met within one worker; lease-guarded across workers.** Connections to one deployment share one `HrnsACPAgent`; a store lease + fence makes ownership exclusive across workers and refuses stale saves. Cross-worker *attaching* still requires a future broker/routing layer. |
+| 2. Fan-out + one global queue | **Met within one actor.** `FanoutClient` broadcasts updates, presentation, configuration, and command-catalog changes only to subscribers of the session, routes permissions to the turn's originator (never an arbitrary viewer), and one turn lock serializes prompts/configuration. A hosted actor has no update fallback after an unsubscribe; the sole-client fallback is local-stdio only. An in-flight client-origin call still routes to the connection that started it and is not re-authorized mid-turn. A second worker is refused with `SESSION_HELD`. |
+| 3. Durable queue / uncertain turns | **Met.** `acp_prompt_queue` persists before execution; `enqueue`, `run`, `list`, and `retry` are public; cancellation/abandonment becomes `uncertain`; retries link to the original and execute once. |
+| 4. Per-session policy | **Met.** `SessionPolicy` with private/shared/archived decisions, enforced on load, prompt, steering, configuration, commands, rename, access changes, and delete. An access change drops only viewers the new decision no longer admits, so a removed collaborator stops receiving the live stream while the owner and still-admitted collaborators keep their subscriptions. Reapplying an identical access and collaborator set is a no-op. |
+| 5. Per-session capability gate | **Met.** `set_session_capabilities` overrides the deployment default per session; composition binds client-origin tools only when the session gate is open. |
+| 6. Attribution metadata | **Met.** `RequestContext` carries principal, credential, connection, and agent IDs into policy decisions, queue rows, lifecycle hooks, and the persisted usage record. `request_id` exists but is not populated for ACP requests yet. |
+| 7. Connection revocation | **Met.** `ConnectionRegistry` / `AgentServer.revoke_credential()` close exactly the matching sockets and await their tasks. |
+| 8. Lifecycle hooks | **Met.** `SessionLifecycleHooks` covers create/resume/suspend/destroy and queue changes; destroy is once per host and failures surface as `LIFECYCLE_FAILED`. |
+| 9. Dynamic deployments | **Met with app re-registration.** Revisions register while mounted, hide, retain, resolve by version, and persist in `acp_deployments`. Session scope is the logical agent, so a version bump does not orphan old sessions; the stored `definition_version` resolves the complete pinned revision and fails closed if it is not native. Stores from pre-namespace builds are unsupported and must be recreated. After restart the application re-registers native definitions; metadata-only placeholders are not served and never shadow an older native revision. |
+| 10. Interactive load | **Met (unchanged).** |
+| 11. Read-only replay | **Met.** Archived sessions load and replay; every mutating ACP path returns `SESSION_READ_ONLY`, and archived loads do not touch session metadata. |
+| 12. Browser WebSocket auth | **Met (unchanged).** |
 
 ## Boundaries
 
@@ -40,5 +60,7 @@ claims refer only to checks actually run in this revision; there is no test suit
 - A local workspace is not a sandbox.
 - The terminal does not offer client-side ACP filesystem/terminal services by default.
 - Client-supplied MCP servers are rejected; MCP remains a deployment capability.
-- Authentication is checked when the HTTP/WebSocket connection is established. Continuous
-  token revocation is application-owned.
+- Authentication is checked when the HTTP/WebSocket connection is established.
+  `AgentServer.revoke_credential()` and `revoke_principal()` close the matching live
+  sockets and await their handler tasks before returning; a revoked credential cannot
+  open a new connection through `BearerAuth`.

@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import json
+import uuid
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from acp import schema
@@ -34,6 +37,7 @@ from pydantic_ai_harness.experimental.acp import (
 
 from hrns.config import EFFORT_DEFAULT
 from hrns.protocol import (
+    MAX_MESSAGE_BYTES,
     BindingListResponse,
     CommandCancelRequest,
     CommandInvokeRequest,
@@ -52,19 +56,38 @@ from hrns.protocol import (
 
 from . import acp as acp_map
 from .acp_store import (
+    PromptState,
+    QueuedPrompt,
+    SessionLease,
+    SessionRecord,
     finalize_usage,
     merge_usage,
+    now_ms,
     usage_payload,
 )
 from .ask_user import QuestionChannel
 from .capabilities.coder._acp import coder_tool_presenter
 from .command_service import CommandService
 from .configuration_service import ConfigurationService
+from .fanout import FanoutClient
 from .host_support import (
     HostBundle,
     HostPolicy,
     _ComposedAgent,
     _prompt_text,
+)
+from .lifecycle import LifecycleEvent, SessionLifecycleContext, run_hook
+from .request_context import (
+    RequestContext,
+    current_connection_id,
+    current_request,
+)
+from .session_policy import (
+    READ_ONLY_ACTIONS,
+    PolicyAction,
+    SessionAccess,
+    SessionContext,
+    decide_policy,
 )
 from .session_service import SessionService
 
@@ -74,6 +97,17 @@ if TYPE_CHECKING:
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
 __all__ = ["HrnsACPAgent"]
+
+#: What the client on the current connection advertised during ``initialize``.
+_current_capabilities: contextvars.ContextVar[schema.ClientCapabilities | None] = (
+    contextvars.ContextVar("hrns_client_capabilities", default=None)
+)
+
+#: A per-task replay target for ``load_session``. Turn starts in other tasks keep the
+#: actor-wide fan-out connection.
+_conn_override: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "hrns_conn_override", default=None
+)
 
 
 class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
@@ -87,6 +121,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         refresh_models: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
         """``refresh_models`` re-advertises ids that appear after the runtime started."""
+        self._base_conn: Any | None = None
         self.bundle = bundle
         self._refresh_models = refresh_models
         self.policy = policy or HostPolicy()
@@ -97,21 +132,33 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self.config = ConfigurationService(
             agent=self,
             policy=self.policy,
-            definition=self.definition,
             registry=bundle.registry,
         )
         self.commands = CommandService(agent=self)
         self._client_conn: Any | None = None
+        self.request_context: RequestContext | None = None
+        self.fanout = FanoutClient(local=not self.policy.hosted)
+        self.fanout.set_approval_guard(self._guard_approval)
+        self._connection_capabilities: dict[str, schema.ClientCapabilities | None] = {}
+        self._connection_principals: dict[str, str] = {}
         self.question_channel = QuestionChannel()
+        self._leases: dict[str, SessionLease] = {}
+        self._lease_ttl_ms = self.policy.lease_ttl_ms
+        self._lease_task: asyncio.Task[None] | None = None
+        self._session_cwd: dict[str, str] = {}
+        self._destroyed: set[str] = set()
+        self._inflight_prompts: set[str] = set()
         models = tuple(self.policy.models)
         default = self.policy.default_model or (models[0] if models else None)
         self._default_model = default
+        self.allow_new_sessions = self.policy.allow_new_sessions
         self.sessions = SessionService(
             agent=self,
             store=self.store,
             policy=self.policy,
             definition=self.definition,
             registry=bundle.registry,
+            revision_resolver=bundle.revision_resolver,
         )
         super().__init__(
             cast(
@@ -134,34 +181,370 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
     # --- connection and lifecycle ---------------------------------------
 
+    @property
+    def _conn(self) -> Any | None:
+        override = _conn_override.get()
+        return override if override is not None else self._base_conn
+
+    @_conn.setter
+    def _conn(self, value: Any | None) -> None:
+        self._base_conn = value
+
     def on_connect(self, conn: Any) -> None:
-        self._client_conn = conn
-        self.question_channel.bind(conn)
-        super().on_connect(conn)
+        connection_id = current_connection_id.get() or uuid.uuid4().hex
+        request = current_request.get()
+        if request is not None:
+            self._connection_principals[connection_id] = request.principal
+        self.fanout.attach(connection_id, conn)
+        self._client_conn = self.fanout
+        self.question_channel.bind(self.fanout)
+        super().on_connect(self.fanout)
+
+    def detach(self, connection_id: str) -> None:
+        """Remove one viewer without disturbing the shared session state."""
+        self.fanout.detach(connection_id)
+        self._connection_capabilities.pop(connection_id, None)
+        self._connection_principals.pop(connection_id, None)
+
+    def connection_principal(self, connection_id: str) -> str:
+        """The authenticated identity of a connection, for subscriber rechecks.
+
+        Local stdio has no request context; its sole client acts as the host policy's
+        principal.
+        """
+        return self._connection_principals.get(connection_id, self.policy.principal)
+
+    def connection_key(self) -> str | None:
+        """The current connection, or the sole local stdio connection."""
+        connection_id = current_connection_id.get()
+        if connection_id is not None:
+            return connection_id
+        if self.policy.hosted:
+            return None
+        attached = self.fanout.connections()
+        return attached[0] if len(attached) == 1 else None
+
+    def current_client(self) -> Any | None:
+        """The ACP client for the connection that initiated the current request."""
+        return self.fanout.current()
+
+    def current_capabilities(self) -> schema.ClientCapabilities | None:
+        """What the current connection advertised during ``initialize``."""
+        connection_id = current_connection_id.get()
+        if connection_id is None:
+            return _current_capabilities.get()
+        return self._connection_capabilities.get(connection_id)
+
+    def acting_principal(self) -> str:
+        """The authenticated principal for this request, not the actor's first one."""
+        request = current_request.get()
+        if request is not None:
+            return request.principal
+        return self.policy.principal
 
     async def shutdown(self) -> None:
         """Close every live session through the public adapter method, then the store."""
         for session_id in list(self.sessions.compositions):
             with contextlib.suppress(Exception):
-                await self.close_session(session_id)
+                await self._close_session_unchecked(session_id)
+        owner = self._lease_owner()
+        if owner is not None:
+            with contextlib.suppress(Exception):
+                await self.store.backend.mark_uncertain_prompts(
+                    owner, deployment_id=self.policy.deployment_id
+                )
+        for session_id in list(self._leases):
+            with contextlib.suppress(Exception):
+                await self.release_session_lease(session_id)
+        if self._lease_task is not None:
+            self._lease_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._lease_task
+            self._lease_task = None
         self.sessions.compositions.clear()
         if self.bundle.close_store:
             with contextlib.suppress(Exception):
                 await self.store.backend.close()
 
+    async def cancel(self, session_id: str, **kwargs: Any) -> None:
+        """Cancel a turn only when the caller may mutate this session."""
+        try:
+            await self.authorize(session_id, PolicyAction.CANCEL)
+            await super().cancel(session_id, **kwargs)
+        except HrnsError as exc:
+            if exc.code == "SESSION_NOT_FOUND":
+                return
+            raise acp_map.hrns_rpc_error(exc) from exc
+
     async def close_session(
         self, session_id: str, **kwargs: Any
     ) -> schema.CloseSessionResponse | None:
-        response = await super().close_session(session_id, **kwargs)
-        await self.commands.cancel_session(session_id)
-        self.sessions.forget(session_id)
-        self._turn_locks.pop(session_id, None)
-        self.config.forget(session_id)
-        self.commands.forget(session_id)
+        try:
+            await self.authorize(session_id, PolicyAction.CLOSE)
+        except HrnsError as exc:
+            if exc.code == "SESSION_NOT_FOUND":
+                return None
+            raise acp_map.hrns_rpc_error(exc) from exc
+        return await self._close_session_unchecked(session_id, **kwargs)
+
+    async def _close_session_unchecked(
+        self, session_id: str, **kwargs: Any
+    ) -> schema.CloseSessionResponse | None:
+        try:
+            response = await super().close_session(session_id, **kwargs)
+            await self.commands.cancel_session(session_id)
+            await self.run_lifecycle(LifecycleEvent.DESTROY, session_id)
+        finally:
+            self.sessions.forget(session_id)
+            self._turn_locks.pop(session_id, None)
+            self.config.forget(session_id)
+            self.commands.forget(session_id)
+            self._session_cwd.pop(session_id, None)
+            self.fanout.unsubscribe_session(session_id)
+            await self.release_session_lease(session_id)
         return response
 
     def _turn_lock(self, session_id: str) -> asyncio.Lock:
         return self._turn_locks.setdefault(session_id, asyncio.Lock())
+
+    # --- session leases ---------------------------------------------------
+
+    def _lease_owner(self) -> str | None:
+        return self.policy.worker_id
+
+    async def acquire_session_lease(self, session_id: str) -> SessionLease | None:
+        """Take (or renew) exclusive ownership of a session across workers.
+
+        A live other owner is a hard ``SESSION_HELD`` failure: the caller must not run a
+        second actor from an independently loaded snapshot. Taking over an expired lease
+        fences out the old owner and marks its in-flight prompts uncertain.
+        """
+        owner = self._lease_owner()
+        if owner is None:
+            return None
+        previous = await self.store.get_lease(session_id)
+        lease = await self.store.acquire_lease(session_id, owner, self._lease_ttl_ms)
+        if lease is None:
+            raise HrnsError(
+                "SESSION_HELD",
+                "Another live worker owns this session; retry after its lease expires.",
+                {
+                    "sessionId": session_id,
+                    "owner": previous.owner_id if previous is not None else None,
+                    "expiresAt": previous.expires_at if previous is not None else None,
+                },
+            )
+        if previous is not None and previous.owner_id != owner:
+            with contextlib.suppress(Exception):
+                await self.store.backend.mark_uncertain_prompts(
+                    previous.owner_id,
+                    deployment_id=self.policy.deployment_id,
+                    session_id=session_id,
+                )
+        self._leases[session_id] = lease
+        self.store.set_fence(session_id, lease.fence)
+        self._start_lease_keeper()
+        return lease
+
+    async def release_session_lease(self, session_id: str) -> None:
+        # Only the actor that actually holds this lease may release it. A failed
+        # ``session/load`` from a second principal must not expire the live owner's
+        # lease or clear its fence.
+        if self._leases.pop(session_id, None) is None:
+            return
+        owner = self._lease_owner()
+        self.store.set_fence(session_id, None)
+        if owner is not None:
+            with contextlib.suppress(Exception):
+                await self.store.release_lease(session_id, owner)
+
+    def _start_lease_keeper(self) -> None:
+        if self._lease_task is None or self._lease_task.done():
+            self._lease_task = asyncio.create_task(self._renew_leases())
+
+    async def _renew_leases(self) -> None:
+        owner = self._lease_owner()
+        if owner is None:
+            return
+        interval = max(self._lease_ttl_ms / 3000, 0.05)
+        try:
+            while self._leases:
+                await asyncio.sleep(interval)
+                for session_id in list(self._leases):
+                    try:
+                        renewed = await self.store.renew_lease(
+                            session_id, owner, self._lease_ttl_ms
+                        )
+                    except Exception:
+                        # A transient store failure must not kill the keeper; retry on
+                        # the next tick before the lease can expire.
+                        continue
+                    if renewed is None:
+                        # The lease was lost. Fence every subsequent save with an
+                        # impossible token and stop the turn rather than overwrite the
+                        # new owner's state. The in-flight row becomes uncertain so it
+                        # can never be silently replayed.
+                        with contextlib.suppress(Exception):
+                            await self.store.backend.mark_uncertain_prompts(
+                                owner,
+                                deployment_id=self.policy.deployment_id,
+                                session_id=session_id,
+                            )
+                        self._leases.pop(session_id, None)
+                        self.store.set_fence(session_id, -1)
+                        with contextlib.suppress(Exception):
+                            await super().cancel(session_id)
+                    else:
+                        self._leases[session_id] = renewed
+                        self.store.set_fence(session_id, renewed.fence)
+        except asyncio.CancelledError:
+            return
+
+    # --- lifecycle hooks --------------------------------------------------
+
+    def lifecycle_context(self, session_id: str) -> SessionLifecycleContext:
+        request = self.attribution()
+        return SessionLifecycleContext(
+            session_id=session_id,
+            principal=self.acting_principal(),
+            deployment_id=self.policy.deployment_id,
+            agent_id=self.definition.agent_id,
+            cwd=self._session_cwd.get(session_id, ""),
+            credential_id=request.credential_id,
+            connection_id=request.connection_id,
+        )
+
+    async def run_lifecycle(self, event: str, session_id: str) -> None:
+        if event == LifecycleEvent.DESTROY:
+            if session_id in self._destroyed:
+                return
+            await run_hook(self.policy.lifecycle, event, self.lifecycle_context(session_id))
+            # Only a successful destroy is final; a failed hook must remain retryable.
+            self._destroyed.add(session_id)
+            return
+        if event in (LifecycleEvent.CREATE, LifecycleEvent.RESUME):
+            self._destroyed.discard(session_id)
+        await run_hook(self.policy.lifecycle, event, self.lifecycle_context(session_id))
+
+    async def pending_prompts(self, session_id: str) -> int:
+        if self._lease_owner() is None:
+            return 0
+        states = (PromptState.QUEUED, PromptState.CLAIMED)
+        rows = await self.store.list_prompts(session_id, states=states)
+        return len(rows)
+
+    async def notify_queue(self, session_id: str) -> None:
+        pending = await self.pending_prompts(session_id)
+        await run_hook(
+            self.policy.lifecycle,
+            LifecycleEvent.QUEUE,
+            self.lifecycle_context(session_id),
+            pending,
+        )
+        if pending == 0:
+            await run_hook(
+                self.policy.lifecycle,
+                LifecycleEvent.SUSPEND,
+                self.lifecycle_context(session_id),
+            )
+
+    # --- per-session authorization ---------------------------------------
+
+    def attribution(self) -> RequestContext:
+        """Attribution for the current request, or the host's default identity."""
+        request = current_request.get()
+        if request is not None:
+            return request
+        if self.request_context is not None:
+            return self.request_context
+        return RequestContext(
+            principal=self.acting_principal(),
+            agent_id=self.definition.agent_id,
+        )
+
+    async def session_record(self, session_id: str) -> SessionRecord | None:
+        """The visible stored record, or the staged record of a session not yet used."""
+        record = await self.store.get_visible(session_id, self.acting_principal())
+        if record is not None:
+            return record
+        return self.store.staged(session_id)
+
+    def session_context(
+        self,
+        record: SessionRecord,
+        session_id: str,
+        *,
+        principal: str | None = None,
+        connection_id: str | None = None,
+    ) -> SessionContext:
+        request = self.attribution()
+        acting = principal if principal is not None else self.acting_principal()
+        return SessionContext(
+            session_id=session_id,
+            principal=acting,
+            deployment_id=self.policy.deployment_id,
+            agent_id=self.definition.agent_id,
+            owner=record.effective_owner,
+            access=record.access,
+            collaborators=record.collaborators,
+            credential_id=request.credential_id if principal is None else None,
+            connection_id=connection_id
+            if connection_id is not None
+            else (request.connection_id if principal is None else None),
+            request_id=request.request_id if principal is None else None,
+            metadata={
+                "clientCapabilities": (
+                    "deployment"
+                    if record.accepts_client_capabilities is None
+                    else ("enabled" if record.accepts_client_capabilities else "disabled")
+                )
+            },
+        )
+
+    async def _guard_approval(self, session_id: str) -> None:
+        await self.authorize(session_id, PolicyAction.APPROVE)
+
+    async def authorize(
+        self,
+        session_id: str,
+        action: PolicyAction,
+        *,
+        record: SessionRecord | None = None,
+    ) -> SessionRecord:
+        """Apply the session policy or raise a stable ACP error.
+
+        A denial for a session the caller cannot see uses the same message as a missing
+        session so existence is not leaked. A read-only denial uses
+        ``SESSION_READ_ONLY`` and is reported separately because the caller can replay
+        the session.
+        """
+        known = record if record is not None else await self.session_record(session_id)
+        if known is None:
+            raise HrnsError(
+                "SESSION_NOT_FOUND",
+                "no stored session with this id",
+                {"sessionId": session_id},
+            )
+        decision = await decide_policy(
+            self.policy.session_policy,
+            self.session_context(known, session_id),
+            action,
+        )
+        if not decision.allowed:
+            raise HrnsError(
+                decision.code,
+                decision.message,
+                {
+                    "sessionId": session_id,
+                    "action": action.value,
+                    "readOnly": decision.read_only,
+                },
+            )
+        if action in READ_ONLY_ACTIONS and self._lease_owner() is not None:
+            # Every mutation is fenced. A stale actor that lost its lease cannot write
+            # metadata, delete, or re-share a session even though policy still allows it.
+            await self.acquire_session_lease(session_id)
+        return known
 
     # --- initialization --------------------------------------------------
 
@@ -172,11 +555,17 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         client_info: schema.Implementation | None = None,
         **kwargs: Any,
     ) -> schema.InitializeResponse:
+        # Retain what the client advertised even when this deployment's default gate is
+        # closed: a session may carry a per-session override that opens it later. The
+        # composition gate, not this negotiation, decides whether client-origin tools
+        # are actually bound.
+        _current_capabilities.set(client_capabilities)
+        connection_id = current_connection_id.get()
+        if connection_id is not None:
+            self._connection_capabilities[connection_id] = client_capabilities
         response = await super().initialize(
             protocol_version,
-            client_capabilities=(
-                client_capabilities if self.policy.accepts_client_capabilities else None
-            ),
+            client_capabilities=client_capabilities,
             client_info=client_info,
             **kwargs,
         )
@@ -210,6 +599,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.NewSessionResponse:
         try:
+            if not self.allow_new_sessions:
+                raise HrnsError(
+                    "DEPLOYMENT_UNAVAILABLE",
+                    "This deployment revision is hidden; existing sessions can still load.",
+                    {"agentId": self.definition.agent_id},
+                )
             self.sessions.reject_additional_directories(additional_directories)
             self.sessions.reject_client_mcp(mcp_servers)
             self.policy.validate_cwd(cwd)
@@ -241,6 +636,16 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 finally:
                     self.sessions.pending_initial = None
                     self.sessions.pending_effort = None
+            self._session_cwd[response.session_id] = cwd
+            await self.acquire_session_lease(response.session_id)
+            try:
+                await self.run_lifecycle(LifecycleEvent.CREATE, response.session_id)
+            except Exception:
+                await self._close_session_unchecked(response.session_id)
+                raise
+            connection_id = self.connection_key()
+            if connection_id is not None:
+                self.fanout.subscribe(connection_id, response.session_id)
             return response.model_copy(
                 update={"config_options": self.sessions.options_for(response.session_id)}
             )
@@ -257,25 +662,62 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         additional_directories: list[str] | None = None,
         **kwargs: Any,
     ) -> schema.LoadSessionResponse | None:
+        owned_before = session_id in self._leases
         try:
             self.sessions.reject_additional_directories(additional_directories)
             self.sessions.reject_client_mcp(mcp_servers)
-            record = await self.store.get(session_id)
+            record = await self.store.get_visible(session_id, self.acting_principal())
             if record is None:
                 raise RequestError.invalid_params(
                     {"sessionId": session_id, "reason": "no stored session with this id"}
                 )
-            stored_cwd = self.policy.validate_cwd(record.cwd)
-            response = await super().load_session(
-                stored_cwd,
-                session_id,
-                mcp_servers=None,
-                additional_directories=None,
-                **kwargs,
-            )
+            await self.authorize(session_id, PolicyAction.LOAD, record=record)
+            await self.authorize(session_id, PolicyAction.REPLAY, record=record)
+            revision = self.sessions.revision_for(record)
+            await self.acquire_session_lease(session_id)
+            connection_id = self.connection_key()
+            if connection_id is not None:
+                self.fanout.subscribe(connection_id, session_id)
+            live = self._sessions.get(session_id)
+            if live is not None:
+                # Another connection already owns the live actor. Attach this viewer and
+                # replay its transcript to it only; do not tear down or rebuild the
+                # session that the first connection is using.
+                client = self.current_client()
+                if client is not None:
+                    for update in live.transcript:
+                        with contextlib.suppress(Exception):
+                            await client.session_update(session_id=session_id, update=update)
+                return schema.LoadSessionResponse(
+                    config_options=self.sessions.options_for(session_id)
+                )
+            stored_cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
+            # Replay only to the connection that asked to load. The shared host keeps
+            # fan-out for live turns, but a fresh viewer must not duplicate another
+            # viewer's transcript.
+            requesting = self.current_client()
+            token = _conn_override.set(requesting) if requesting is not None else None
+            try:
+                response = await super().load_session(
+                    stored_cwd,
+                    session_id,
+                    mcp_servers=None,
+                    additional_directories=None,
+                    **kwargs,
+                )
+            finally:
+                if token is not None:
+                    _conn_override.reset(token)
+            self._session_cwd[session_id] = stored_cwd
+            if not record.read_only:
+                await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
         except HrnsError as exc:
+            if not owned_before:
+                await self.release_session_lease(session_id)
             raise acp_map.hrns_rpc_error(exc) from exc
         except RequestError:
+            if not owned_before:
+                await self.release_session_lease(session_id)
             raise
         if response is None:
             return response
@@ -289,7 +731,11 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
     async def delete_session(self, session_id: str, **kwargs: Any) -> DeleteSessionResponse | None:
         del kwargs
-        return await self.sessions.delete_session(session_id)
+        try:
+            await self.authorize(session_id, PolicyAction.DELETE)
+            return await self.sessions.delete_session(session_id)
+        except HrnsError as exc:
+            raise acp_map.hrns_rpc_error(exc) from exc
 
     async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
         """Record and render steering at delivery time, in stream order."""
@@ -317,17 +763,53 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         prompt: list[Any],
         **kwargs: Any,
     ) -> schema.PromptResponse:
+        try:
+            return await self._prompt_impl(session_id, prompt, **kwargs)
+        except HrnsError as exc:
+            raise acp_map.hrns_rpc_error(exc) from exc
+
+    async def _prompt_impl(
+        self,
+        session_id: str,
+        prompt: list[Any],
+        **kwargs: Any,
+    ) -> schema.PromptResponse:
         async with self._turn_lock(session_id):
             # A composed session is only in memory; its first turn is what makes it durable, and
             # the prompt names it so even a turn that fails outright stays recognizable later.
+            await self.authorize(session_id, PolicyAction.PROMPT)
             await self.sessions.ensure_persisted(session_id)
+            await self.acquire_session_lease(session_id)
+            connection_id = self.connection_key()
+            if connection_id is not None:
+                self.fanout.subscribe(connection_id, session_id)
+            queued = await self.begin_queued_prompt(session_id, prompt)
+            if queued is not None:
+                self._inflight_prompts.add(queued.prompt_id)
             await self.sessions.ensure_title(session_id, _prompt_text(prompt))
             self.sessions.turn_usage[session_id] = {}
             response = None
+            outcome = PromptState.FAILED
             try:
                 response = await super().prompt(session_id, prompt, **kwargs)
+                outcome = (
+                    PromptState.UNCERTAIN
+                    if getattr(response, "stop_reason", None) == "cancelled"
+                    else PromptState.COMPLETED
+                )
                 return response
+            except asyncio.CancelledError:
+                # The caller lost the connection or the lease mid-turn. The committed
+                # transcript is unknown, so the prompt must become uncertain, never replayed
+                # automatically.
+                outcome = PromptState.UNCERTAIN
+                raise
             finally:
+                if queued is not None:
+                    self._inflight_prompts.discard(queued.prompt_id)
+                await self.finish_queued_prompt(queued, outcome)
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await self.notify_queue(session_id)
                 channel = self.sessions.steering.get(session_id)
                 if channel is not None:
                     channel.detach()
@@ -339,12 +821,21 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     for name, value in usage_payload(response.usage).items():
                         if isinstance(value, int) and not isinstance(value, bool):
                             increment[name] = max(increment.get(name, 0), value)
-                record = await self.store.get(session_id)
-                if record is not None:
+                record = await self.store.get_visible(session_id, self.acting_principal())
+                if record is not None and (
+                    self._lease_owner() is None or session_id in self._leases
+                ):
                     title = record.title
                     if not title and response is not None:
                         title = _prompt_text(prompt) or None
                     totals = merge_usage(record.usage, increment)
+                    request = self.attribution()
+                    totals["last_request"] = {
+                        "principal": request.principal,
+                        "credential_id": request.credential_id,
+                        "connection_id": request.connection_id,
+                        "request_id": request.request_id,
+                    }
                     await self.store.update(
                         session_id,
                         title=title,
@@ -355,6 +846,230 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     if title and title != record.title:
                         await self.sessions.send_session_title(session_id, title)
 
+    # --- durable prompt queue --------------------------------------------
+
+    @staticmethod
+    def _queue_payload(prompt: Sequence[Any]) -> str:
+        entries: list[object] = []
+        for block in prompt:
+            dump = getattr(block, "model_dump", None)
+            if callable(dump):
+                entries.append(dump(mode="json", by_alias=True, exclude_none=True))
+            elif isinstance(block, Mapping):
+                entries.append(dict(block))
+            else:
+                entries.append({"type": "text", "text": str(block)})
+        payload = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+        if len(payload.encode("utf-8")) > MAX_MESSAGE_BYTES:
+            raise HrnsError(
+                "INVALID_REQUEST",
+                "The queued prompt payload exceeds the transport bound.",
+                {"maxBytes": MAX_MESSAGE_BYTES},
+            )
+        return payload
+
+    def _queue_row(
+        self,
+        session_id: str,
+        payload: str,
+        *,
+        parent_id: str | None = None,
+    ) -> QueuedPrompt:
+        request = self.attribution()
+        now = now_ms()
+        return QueuedPrompt(
+            prompt_id=uuid.uuid4().hex,
+            session_id=session_id,
+            principal=self.acting_principal(),
+            deployment_id=self.policy.deployment_id,
+            credential_id=request.credential_id,
+            connection_id=request.connection_id,
+            sequence=0,
+            payload=payload,
+            state=PromptState.QUEUED,
+            attempt=0,
+            parent_id=parent_id,
+            owner_id=None,
+            fence=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def enqueue_prompt(self, session_id: str, prompt: Sequence[Any]) -> QueuedPrompt:
+        """Persist a prompt without executing it; a later run drains it in order."""
+        await self.authorize(session_id, PolicyAction.PROMPT)
+        await self.acquire_session_lease(session_id)
+        payload = self._queue_payload(prompt)
+        # Reject blocks the drain could never reconstruct now, not at execution time.
+        self._decode_prompt(payload)
+        stored = await self.store.enqueue_prompt(self._queue_row(session_id, payload))
+        await self.notify_queue(session_id)
+        return stored
+
+    @staticmethod
+    def _decode_prompt(payload: str) -> list[Any]:
+        """Rebuild the ACP text blocks stored by :meth:`_queue_payload`."""
+        raw = json.loads(payload)
+        if not isinstance(raw, list):
+            raise HrnsError("INVALID_CONFIGURATION", "The queued prompt payload is not a list.")
+        blocks: list[Any] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise HrnsError("INVALID_CONFIGURATION", "The queued prompt payload is malformed.")
+            text = entry.get("text")
+            if entry.get("type") != "text" or not isinstance(text, str):
+                raise HrnsError(
+                    "INVALID_CONFIGURATION",
+                    "Only text prompt blocks can be replayed from the durable queue.",
+                    {"type": entry.get("type")},
+                )
+            blocks.append(schema.TextContentBlock(type="text", text=text))
+        return blocks
+
+    async def run_queued_prompts(self, session_id: str, *, limit: int = 100) -> list[QueuedPrompt]:
+        """Execute durable prompts in sequence order, once each.
+
+        An inline prompt that is already running is skipped, not run twice. A cancelled
+        turn leaves its row uncertain; it is never picked up again without an explicit
+        retry.
+        """
+        await self.authorize(session_id, PolicyAction.PROMPT)
+        # A drain needs the live composition; without it every row would be marked
+        # failed by the adapter's unknown-session error.
+        self.sessions.require_composition(session_id)
+        lease = await self.acquire_session_lease(session_id)
+        owner = self._lease_owner()
+        if lease is None or owner is None:
+            raise HrnsError("SESSION_HELD", "Draining a queue requires an owned session lease.")
+        done: list[QueuedPrompt] = []
+        for _ in range(limit):
+            async with self._turn_lock(session_id):
+                row = await self.store.claim_next_prompt(
+                    session_id, owner, lease.fence, self._lease_ttl_ms
+                )
+                if row is None:
+                    break
+                if row.prompt_id in self._inflight_prompts:
+                    break
+                self._inflight_prompts.add(row.prompt_id)
+                self.sessions.turn_usage[session_id] = {}
+                await self.sessions.ensure_title(session_id, "Queued prompt")
+                outcome = PromptState.FAILED
+                token = (
+                    self.fanout.select(row.connection_id) if row.connection_id is not None else None
+                )
+                try:
+                    response = await super().prompt(session_id, self._decode_prompt(row.payload))
+                    outcome = (
+                        PromptState.UNCERTAIN
+                        if getattr(response, "stop_reason", None) == "cancelled"
+                        else PromptState.COMPLETED
+                    )
+                except asyncio.CancelledError:
+                    outcome = PromptState.UNCERTAIN
+                    raise
+                except Exception:
+                    outcome = PromptState.FAILED
+                finally:
+                    if token is not None:
+                        self.fanout.reset(token)
+                    self._inflight_prompts.discard(row.prompt_id)
+                    await self.finish_queued_prompt(row, outcome)
+                    increment = self.sessions.turn_usage.pop(session_id, {})
+                    if increment and (self._lease_owner() is None or session_id in self._leases):
+                        stored = await self.store.get_visible(session_id, self.acting_principal())
+                        if stored is not None:
+                            await self.store.update(
+                                session_id,
+                                usage=merge_usage(stored.usage, increment),
+                                touch=True,
+                            )
+                    await self.notify_queue(session_id)
+                done.append(await self.store.get_prompt(row.prompt_id) or row)
+        return done
+
+    async def begin_queued_prompt(
+        self, session_id: str, prompt: Sequence[Any]
+    ) -> QueuedPrompt | None:
+        """Persist this prompt before execution and claim it under the session fence.
+
+        Queue rows exist only for hosted servers (``worker_id`` set); a local stdio host
+        keeps its existing in-memory behavior.
+        """
+        owner = self._lease_owner()
+        if owner is None:
+            return None
+        lease = self._leases.get(session_id)
+        if lease is None:
+            lease = await self.acquire_session_lease(session_id)
+        if lease is None:
+            return None
+        stored = await self.store.enqueue_prompt(
+            self._queue_row(session_id, self._queue_payload(prompt))
+        )
+        # Claim this specific row. Earlier queued rows stay queued for an explicit
+        # drain instead of being turned into uncertain work by an unrelated prompt.
+        claimed = await self.store.claim_prompt(stored.prompt_id, owner, lease.fence)
+        if claimed is None:
+            raise HrnsError(
+                "SESSION_CONFLICT",
+                "The prompt could not be claimed under the current session fence.",
+                {"sessionId": session_id, "promptId": stored.prompt_id},
+            )
+        await self.notify_queue(session_id)
+        return claimed
+
+    async def finish_queued_prompt(self, queued: QueuedPrompt | None, state: PromptState) -> None:
+        if queued is None:
+            return
+        # The row's own owner/fence is authoritative even when the in-memory lease was
+        # already lost; otherwise an interrupted finish leaves the row claimed forever.
+        owner = queued.owner_id or self._lease_owner()
+        fence = queued.fence
+        if owner is None or fence is None:
+            return
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.shield(
+                self.store.finish_prompt(queued.prompt_id, state, owner_id=owner, fence=fence)
+            )
+
+    async def list_queued_prompts(
+        self,
+        session_id: str,
+        *,
+        states: Sequence[PromptState] | None = None,
+        limit: int = 100,
+    ) -> list[QueuedPrompt]:
+        """Inspect durable prompts for an authorized session."""
+        await self.authorize(session_id, PolicyAction.LOAD)
+        return await self.store.list_prompts(session_id, states=states, limit=limit)
+
+    async def retry_queued_prompt(self, session_id: str, prompt_id: str) -> QueuedPrompt:
+        """Link a new attempt to an uncertain prompt; execution stays explicit."""
+        await self.authorize(session_id, PolicyAction.RETRY)
+        lease = await self.acquire_session_lease(session_id)
+        owner = self._lease_owner()
+        if lease is None or owner is None:
+            raise HrnsError("SESSION_HELD", "Retrying a prompt requires an owned session lease.")
+        row = await self.store.retry_prompt(
+            prompt_id,
+            session_id=session_id,
+            new_prompt_id=uuid.uuid4().hex,
+            owner_id=owner,
+            fence=lease.fence,
+        )
+        if row is None:
+            raise HrnsError(
+                "INVALID_REQUEST",
+                "Only an uncertain prompt can be retried.",
+                {"promptId": prompt_id},
+            )
+        # A retry is explicit, so executing it immediately is allowed; the new row is
+        # linked to the original and the drain keeps global sequence order.
+        await self.run_queued_prompts(session_id)
+        refreshed = await self.store.get_prompt(row.prompt_id)
+        return refreshed or row
+
     async def set_config_option(
         self,
         config_id: str,
@@ -362,6 +1077,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         value: str | bool,
         **kwargs: Any,
     ) -> schema.SetSessionConfigOptionResponse | None:
+        try:
+            return await self._set_config_option(config_id, session_id, value, **kwargs)
+        except HrnsError as exc:
+            raise acp_map.hrns_rpc_error(exc) from exc
+
+    async def _set_config_option(
+        self,
+        config_id: str,
+        session_id: str,
+        value: str | bool,
+        **kwargs: Any,
+    ) -> schema.SetSessionConfigOptionResponse | None:
+        await self.authorize(session_id, PolicyAction.CONFIGURE)
         if config_id == acp_map.EFFORT_OPTION_ID:
             composition = self.sessions.require_composition(session_id)
             if not isinstance(value, str):
@@ -392,12 +1120,37 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 config_options=self.sessions.options_for(session_id)
             )
         if config_id == acp_map.MODEL_OPTION_ID and isinstance(value, str):
-            self._adopt_added_models(value)
+            record = await self.session_record(session_id)
+            revision = self.sessions.revision_for(record)
+            pinned = record is not None and record.definition_version not in (
+                "",
+                self.definition.version or "",
+            )
+            if pinned and revision.models:
+                # The revision advertises its own model set.
+                allowed = revision.models
+                model_support = revision.effort_support(value)
+            else:
+                # An empty pinned revision carries no model set of its own, so the live
+                # actor's advertised set applies, exactly as composition falls back.
+                self._adopt_added_models(value)
+                allowed = self._models
+                model_support = self.policy.effort_support(value)
+            if value not in allowed:
+                raise RequestError.invalid_params(
+                    {"model_id": value, "reason": "not an advertised model"}
+                )
+            if value not in self._models:
+                # The upstream adapter validates against its process-wide advertised set;
+                # retain a pinned model there so switching back to it remains possible.
+                self._models = (*self._models, value)
+        else:
+            model_support = None
         response = await super().set_config_option(config_id, session_id, value, **kwargs)
         if config_id == acp_map.MODEL_OPTION_ID and self._default_model is not None:
             composition = self.sessions.composition(session_id)
             if composition is not None and isinstance(value, str):
-                support = self.policy.effort_support(value)
+                support = model_support
                 composition.effort.set_model(value, support)
                 support_after = composition.effort.support
                 keep = composition.effort.effort
@@ -432,6 +1185,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 from hrns.protocol.models import SessionTitleUpdate
 
                 request = SessionTitleUpdate.model_validate(params)
+                await self.authorize(request.session_id, PolicyAction.RENAME)
                 if not await self.sessions.ensure_persisted(request.session_id):
                     raise HrnsError("SESSION_CLOSED", "Load the session before renaming it.")
                 await self.store.update(request.session_id, title=request.title, touch=True)
@@ -439,7 +1193,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 return {"sessionId": request.session_id, "title": request.title}
             if method == "hrns/session/steer":
                 request = SteerRequest.model_validate(dict(params))
-                if await self.store.get(request.session_id) is None:
+                await self.authorize(request.session_id, PolicyAction.STEER)
+                if await self.session_record(request.session_id) is None:
                     raise HrnsError("SESSION_CLOSED", "Load the session before steering it.")
                 channel = self.sessions.steering.get(request.session_id)
                 if channel is None or not channel.enqueue(request.text):
@@ -454,6 +1209,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     raise HrnsError(
                         "INVALID_CONFIGURATION", "sessionId is required for a capability listing."
                     )
+                await self.authorize(request.session_id, PolicyAction.LOAD)
                 composition = self.sessions.require_composition(request.session_id)
                 descriptors = composition.descriptors()
                 page, next_cursor = paginate(
@@ -481,13 +1237,16 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 session_id = params.get("sessionId", params.get("session_id"))
                 if not isinstance(session_id, str) or not session_id:
                     raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                await self.authorize(session_id, PolicyAction.LOAD)
                 composition = self.sessions.require_composition(session_id)
                 return composition.snapshot.to_wire()
             if method == "hrns/configuration/update":
                 request = ConfigurationUpdate.model_validate(dict(params))
+                await self.authorize(request.session_id, PolicyAction.CONFIGURE)
                 return await self.config.update(request)
             if method == "hrns/commands/list":
                 request = CommandListRequest.model_validate(dict(params))
+                await self.authorize(request.session_id, PolicyAction.LOAD)
                 composition = self.sessions.require_composition(request.session_id)
                 page, next_cursor = paginate(
                     composition.commands.descriptors(),
@@ -503,16 +1262,130 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 ).to_wire()
             if method == "hrns/commands/invoke":
                 request = CommandInvokeRequest.model_validate(dict(params))
+                await self.authorize(request.session_id, PolicyAction.COMMAND)
                 return await self.commands.invoke(request)
             if method == "hrns/commands/cancel":
                 request = CommandCancelRequest.model_validate(dict(params))
-                if await self.store.get(request.session_id) is None:
+                await self.authorize(request.session_id, PolicyAction.COMMAND)
+                if await self.session_record(request.session_id) is None:
                     raise HrnsError(
                         "SESSION_CLOSED", "Load the session before cancelling a command."
                     )
                 return self.commands.cancel(request)
+            if method == "hrns/session/access":
+                session_id = params.get("sessionId", params.get("session_id"))
+                if not isinstance(session_id, str) or not session_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                record = await self.authorize(session_id, PolicyAction.ARCHIVE)
+                if record.effective_owner != self.acting_principal():
+                    raise HrnsError(
+                        "POLICY_DENIED",
+                        "Only the session owner may change its access mode.",
+                        {"sessionId": session_id},
+                    )
+                raw_access = params.get("access", record.access.value)
+                try:
+                    access = SessionAccess(raw_access)
+                except ValueError as exc:
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION",
+                        "access must be one of private, shared, or archived.",
+                        {"value": raw_access},
+                    ) from exc
+                raw_collaborators = params.get("collaborators", sorted(record.collaborators))
+                if not isinstance(raw_collaborators, list) or not all(
+                    isinstance(item, str) and item.strip() for item in raw_collaborators
+                ):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION",
+                        "collaborators must be a list of non-empty principal IDs.",
+                    )
+                collaborators = frozenset(raw_collaborators)
+                if not await self.sessions.set_access(
+                    session_id,
+                    access=access,
+                    collaborators=collaborators,
+                    principal=self.acting_principal(),
+                ):
+                    raise HrnsError("SESSION_CLOSED", "Load the session before changing access.")
+                return {
+                    "sessionId": session_id,
+                    "access": access.value,
+                    "collaborators": sorted(collaborators),
+                }
+            if method == "hrns/session/capabilities":
+                session_id = params.get("sessionId", params.get("session_id"))
+                if not isinstance(session_id, str) or not session_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                record = await self.authorize(session_id, PolicyAction.CONFIGURE)
+                if record.effective_owner != self.acting_principal():
+                    raise HrnsError(
+                        "POLICY_DENIED",
+                        "Only the session owner may change its capability gate.",
+                        {"sessionId": session_id},
+                    )
+                accepts = params.get("acceptsClientCapabilities")
+                if accepts is not None and not isinstance(accepts, bool):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION",
+                        "acceptsClientCapabilities must be a boolean or null.",
+                    )
+                if not await self.sessions.set_client_capabilities(
+                    session_id, accepts, principal=self.acting_principal()
+                ):
+                    raise HrnsError("SESSION_CLOSED", "Load the session before changing its gate.")
+                return {"sessionId": session_id, "acceptsClientCapabilities": accepts}
+            if method == "hrns/queue/list":
+                session_id = params.get("sessionId", params.get("session_id"))
+                if not isinstance(session_id, str) or not session_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                raw_states = params.get("states")
+                states: list[PromptState] | None = None
+                if raw_states is not None:
+                    if not isinstance(raw_states, list) or not all(
+                        isinstance(item, str) for item in raw_states
+                    ):
+                        raise HrnsError(
+                            "INVALID_CONFIGURATION", "states must be a list of prompt states."
+                        )
+                    try:
+                        states = [PromptState(item) for item in raw_states]
+                    except ValueError as exc:
+                        raise HrnsError("INVALID_CONFIGURATION", "Unknown prompt state.") from exc
+                items = await self.list_queued_prompts(session_id, states=states)
+                return {
+                    "sessionId": session_id,
+                    "items": [item.to_public() for item in items],
+                }
+            if method == "hrns/queue/enqueue":
+                session_id = params.get("sessionId", params.get("session_id"))
+                if not isinstance(session_id, str) or not session_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                raw_prompt = params.get("prompt")
+                if not isinstance(raw_prompt, list):
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION", "prompt must be a list of content blocks."
+                    )
+                row = await self.enqueue_prompt(session_id, raw_prompt)
+                return row.to_public()
+            if method == "hrns/queue/run":
+                session_id = params.get("sessionId", params.get("session_id"))
+                if not isinstance(session_id, str) or not session_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                rows = await self.run_queued_prompts(session_id)
+                return {"sessionId": session_id, "items": [row.to_public() for row in rows]}
+            if method == "hrns/queue/retry":
+                session_id = params.get("sessionId", params.get("session_id"))
+                prompt_id = params.get("promptId", params.get("prompt_id"))
+                if not isinstance(session_id, str) or not session_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                if not isinstance(prompt_id, str) or not prompt_id:
+                    raise HrnsError("INVALID_CONFIGURATION", "promptId is required.")
+                row = await self.retry_queued_prompt(session_id, prompt_id)
+                return row.to_public()
             if method == "hrns/presentation/get":
                 request = PresentationListRequest.model_validate(dict(params))
+                await self.authorize(request.session_id, PolicyAction.LOAD)
                 self.sessions.require_composition(request.session_id)
                 snapshots = await self.sessions.presentation_snapshots(
                     request.session_id, request.tool_call_ids
