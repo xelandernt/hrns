@@ -38,7 +38,29 @@ SQLite and PostgreSQL use the same `acp_sessions` schema. A scoped store impleme
 upstream `SessionStore` protocol; the adapter owns conversation state, while the host owns
 cwd/title/effort/bindings/usage metadata.
 
-Durability follows upstream: `save` failures are logged, not fatal. Hosted sessions add
+Every HRNS-produced ACP `session/update` carries a public `_meta.hrns.update` object:
+
+```json
+{"schemaVersion": 1, "updateId": "server-id", "revision": 42}
+```
+
+`updateId` is stable and session-scoped. `revision` is a monotonically increasing durable
+session position. The store reserves revision blocks transactionally before live delivery;
+unused positions may create gaps, but positions are never reused after cancellation, failure,
+disconnect, or restart. Replay preserves the same identity and revision. Public
+`SessionUpdateLedger` and `order_session_updates` helpers reject identity/revision conflicts,
+drop identical duplicates, and reconstruct committed order without arrival counters or payload
+hashes.
+
+For an already-live session, `session/load` subscribes the requesting connection before taking
+the session turn lock and capturing the replay snapshot. Updates before the cut are therefore
+in the transcript, updates after it arrive live, and overlap is safely identifiable. A replay
+send, transcript validation, position reservation, or durable save failure aborts the load or
+operation with a structured HRNS error; partial replay is not reported as complete. The HRNS
+client buffers replay/live overlap until `session/load` returns, then publishes it in revision
+order and discards an incomplete buffer on failure.
+
+Hosted sessions add
 `acp_session_leases` (owner, fence, expiry): a second live worker gets `SESSION_HELD`, an
 expired lease is taken over with the next fence, and a save carrying a stale fence fails
 with `SESSION_CONFLICT`. `acp_prompt_queue` records prompts before execution, marks a
@@ -53,6 +75,11 @@ the remaining distributed step. Queued prompts can be enqueued, drained in seque
 order, inspected, and explicitly retried after a restart. Session scope is the logical
 agent, so a version bump does not orphan old sessions; the stored definition version pins
 composition.
+
+Session-scoped HRNS extension notifications are non-durable invalidation/presentation hints.
+Authoritative extension state is loaded through its typed snapshot request
+(`configuration/get`, `commands/list`, or `presentation/get`), so those notifications are not
+part of the replay journal.
 
 ## ACP and transport
 

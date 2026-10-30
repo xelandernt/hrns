@@ -397,6 +397,7 @@ class SessionService:
         await self.send_session_usage(
             session_id,
             finalize_usage(merge_usage(record.usage if record is not None else {}, current)),
+            durable=False,
         )
         await self.send_context_usage(session_id, payload)
 
@@ -407,9 +408,6 @@ class SessionService:
         cumulative session counters, so clients can show a context readout that does not
         grow by the whole history on every turn.
         """
-        conn = self.agent._client_conn
-        if conn is None:
-            return
         input_tokens = payload.get("input_tokens")
         output_tokens = payload.get("output_tokens")
         used = payload.get("total_tokens")
@@ -429,39 +427,39 @@ class SessionService:
             and isinstance(value, int)
             and not isinstance(value, bool)
         }
-        with contextlib.suppress(Exception):
-            await conn.session_update(
-                session_id=session_id,
-                update=schema.UsageUpdate(
-                    session_update="usage_update",
-                    used=max(0, used),
-                    size=self.context_window(session_id),
-                    field_meta={"hrns": {"contextUsage": detail}},
-                ),
-            )
+        await self.agent.publish_session_update(
+            session_id,
+            schema.UsageUpdate(
+                session_update="usage_update",
+                used=max(0, used),
+                size=self.context_window(session_id),
+                field_meta={"hrns": {"contextUsage": detail}},
+            ),
+            durable=False,
+        )
 
-    async def send_session_usage(self, session_id: str, totals: Mapping[str, Any]) -> None:
-        conn = self.agent._client_conn
-        if conn is None:
-            return
-        with contextlib.suppress(Exception):
-            await conn.session_update(
-                session_id=session_id,
-                update=schema.SessionInfoUpdate(
-                    session_update="session_info_update",
-                    field_meta={"hrns": {"sessionUsage": {"scope": "session", **totals}}},
-                ),
-            )
+    async def send_session_usage(
+        self,
+        session_id: str,
+        totals: Mapping[str, Any],
+        *,
+        durable: bool = True,
+    ) -> None:
+        await self.agent.publish_session_update(
+            session_id,
+            schema.SessionInfoUpdate(
+                session_update="session_info_update",
+                field_meta={"hrns": {"sessionUsage": {"scope": "session", **totals}}},
+            ),
+            durable=durable,
+        )
 
     async def send_session_title(self, session_id: str, title: str) -> None:
-        conn = self.agent._client_conn
-        if conn is None:
-            return
-        with contextlib.suppress(Exception):
-            await conn.session_update(
-                session_id=session_id,
-                update=schema.SessionInfoUpdate(session_update="session_info_update", title=title),
-            )
+        await self.agent.publish_session_update(
+            session_id,
+            schema.SessionInfoUpdate(session_update="session_info_update", title=title),
+            durable=True,
+        )
 
     # ------------------------------------------------------ presentation
 
@@ -575,14 +573,11 @@ class SessionService:
         return SqlitePlanStore(database, session=session_id, table=PLAN_TABLE)
 
     async def publish_plan(self, session_id: str, items: list[PlanItem]) -> None:
-        conn = self.agent._client_conn
-        if conn is None:
-            return
-        with contextlib.suppress(Exception):
-            await conn.session_update(
-                session_id=session_id,
-                update=plan_update(items),
-            )
+        await self.agent.publish_session_update(
+            session_id,
+            plan_update(items),
+            durable=True,
+        )
 
     # ----------------------------------------------------------- composition
 

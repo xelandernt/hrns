@@ -295,6 +295,7 @@ class SessionLifecycle:
             )
         if not replay:
             raise ProtocolError("session/load always replays history in ACP v1.")
+        client.begin_session_load(session_id)
         try:
             response = await client.connection.load_session(
                 cwd=cwd,
@@ -303,7 +304,12 @@ class SessionLifecycle:
                 additional_directories=additional_directories,
             )
         except RequestError as exc:
+            client.abort_session_load(session_id)
             raise HrnsClientError(describe_rpc_error("session/load", exc)) from exc
+        except BaseException:
+            client.abort_session_load(session_id)
+            raise
+        client.complete_session_load(session_id)
         session = SessionProxy(client, session_id, cwd)
         if response is not None:
             session.apply_state(response.modes, response.config_options)

@@ -23,7 +23,7 @@ from acp import schema
 from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelMessage
 
-from hrns.protocol import HrnsError
+from hrns.protocol import HrnsError, order_session_updates
 
 from .session_policy import SessionAccess
 
@@ -92,13 +92,14 @@ def now_ms() -> int:
 def encode_session(session: "StoredSession") -> tuple[str, str, str | None]:
     """Serialize an upstream stored session into JSON columns."""
     messages = _MESSAGES.dump_json(list(session.messages)).decode("utf-8")
+    ordered_updates = order_session_updates(session.updates)
     updates = json.dumps(
         [
             {
                 "type": update.session_update,
                 "data": update.model_dump(mode="json", by_alias=True, exclude_none=True),
             }
-            for update in session.updates
+            for update in ordered_updates
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -124,7 +125,11 @@ def decode_session(messages: str, updates: str, model: str | None) -> "StoredSes
         if cls is None or not isinstance(data, dict):
             raise ValueError(f"unsupported stored update type {update_type!r}")
         parsed_updates.append(cls.model_validate(data))
-    return StoredSession(messages=parsed_messages, updates=parsed_updates, model=model)
+    return StoredSession(
+        messages=parsed_messages,
+        updates=order_session_updates(parsed_updates),
+        model=model,
+    )
 
 
 def encode_session_cursor(record: SessionRecord) -> str:
@@ -429,6 +434,18 @@ class SessionStore(ABC):
         self, principal: str, deployment_id: str, session_id: str
     ) -> StoredSession | None: ...
 
+    @abstractmethod
+    async def reserve_update_revisions(
+        self,
+        principal: str,
+        deployment_id: str,
+        session_id: str,
+        count: int,
+        *,
+        fence: int | None = None,
+    ) -> int:
+        """Durably reserve ``count`` revisions and return the first one."""
+
     # -- Cross-worker session leases -----------------------------------------
 
     @abstractmethod
@@ -579,6 +596,8 @@ class ScopedSessionStore:
         self._staged: dict[str, SessionRecord] = {}
         self._materialize_lock = asyncio.Lock()
         self._fences: dict[str, int] = {}
+        self._revision_lock = asyncio.Lock()
+        self._revision_blocks: dict[str, tuple[int, int, int | None]] = {}
 
     def stage(self, record: SessionRecord) -> None:
         """Hold a composed session's metadata in memory until the session is first used."""
@@ -609,10 +628,13 @@ class ScopedSessionStore:
 
     def set_fence(self, session_id: str, fence: int | None) -> None:
         """Bind this session's writes to the lease fence the actor holds."""
+        previous = self._fences.get(session_id)
         if fence is None:
             self._fences.pop(session_id, None)
         else:
             self._fences[session_id] = fence
+        if previous != fence:
+            self._revision_blocks.pop(session_id, None)
 
     def fence(self, session_id: str) -> int | None:
         return self._fences.get(session_id)
@@ -635,6 +657,38 @@ class ScopedSessionStore:
 
     async def load(self, session_id: str) -> StoredSession | None:
         return await self.backend.load_scoped(self.principal, self.deployment_id, session_id)
+
+    async def reserve_update_revisions(self, session_id: str, count: int = 1) -> range:
+        """Reserve non-reusable revisions, amortizing durable reservations in blocks."""
+        if count < 1:
+            raise ValueError("update revision reservation count must be positive")
+        async with self._revision_lock:
+            fence = self.fence(session_id)
+            block = self._revision_blocks.get(session_id)
+            if block is not None:
+                next_revision, end_revision, block_fence = block
+                if block_fence == fence and end_revision - next_revision >= count:
+                    self._revision_blocks[session_id] = (
+                        next_revision + count,
+                        end_revision,
+                        fence,
+                    )
+                    return range(next_revision, next_revision + count)
+
+            reservation_size = max(128, count)
+            first = await self.backend.reserve_update_revisions(
+                self.principal,
+                self.deployment_id,
+                session_id,
+                reservation_size,
+                fence=fence,
+            )
+            self._revision_blocks[session_id] = (
+                first + count,
+                first + reservation_size,
+                fence,
+            )
+            return range(first, first + count)
 
     async def get(self, session_id: str) -> SessionRecord | None:
         return await self.backend.get(self.principal, self.deployment_id, session_id)

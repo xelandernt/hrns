@@ -17,6 +17,7 @@ import warnings
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+import acp as acp_sdk
 from acp import schema
 from acp.exceptions import RequestError
 from acp.schema import DeleteSessionResponse
@@ -31,6 +32,7 @@ from pydantic_ai.messages import (
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
     PydanticAIACPAgent,
+    StoredSession,
     chain_presenters,
     default_coding_presenter,
 )
@@ -50,8 +52,13 @@ from hrns.protocol import (
     PluginListResponse,
     PresentationListRequest,
     PresentationListResponse,
+    SessionUpdatePosition,
+    SessionUpdateProtocolError,
     SteerRequest,
+    maybe_session_update_position,
+    order_session_updates,
     paginate,
+    with_session_update_position,
 )
 
 from . import acp as acp_map
@@ -686,19 +693,52 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 # replay its transcript to it only; do not tear down or rebuild the
                 # session that the first connection is using.
                 client = self.current_client()
-                if client is not None:
-                    for update in live.transcript:
-                        with contextlib.suppress(Exception):
-                            await client.session_update(session_id=session_id, update=update)
+                if client is None:
+                    raise HrnsError(
+                        "SESSION_REPLAY_UNAVAILABLE",
+                        "The replay target connection is unavailable.",
+                        {"sessionId": session_id, "restartFullLoad": True},
+                    )
+                async with live.lock:
+                    try:
+                        replay = order_session_updates(live.transcript)
+                    except SessionUpdateProtocolError as exc:
+                        raise HrnsError(
+                            "SESSION_UPDATE_PROTOCOL_ERROR",
+                            "The live session transcript has conflicting update positions.",
+                            {"sessionId": session_id, "restartFullLoad": True},
+                        ) from exc
+                    for update in replay:
+                        await client.session_update(session_id=session_id, update=update)
                 return schema.LoadSessionResponse(
                     config_options=self.sessions.options_for(session_id)
+                )
+            try:
+                stored = await self.store.load(session_id)
+            except Exception as exc:
+                raise HrnsError(
+                    "SESSION_REPLAY_UNAVAILABLE",
+                    "The durable session transcript could not be validated.",
+                    {"sessionId": session_id, "restartFullLoad": True},
+                ) from exc
+            if stored is None:
+                raise HrnsError(
+                    "SESSION_REPLAY_UNAVAILABLE",
+                    "The durable session transcript is unavailable.",
+                    {"sessionId": session_id, "restartFullLoad": True},
                 )
             stored_cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
             # Replay only to the connection that asked to load. The shared host keeps
             # fan-out for live turns, but a fresh viewer must not duplicate another
             # viewer's transcript.
             requesting = self.current_client()
-            token = _conn_override.set(requesting) if requesting is not None else None
+            if requesting is None:
+                raise HrnsError(
+                    "SESSION_REPLAY_UNAVAILABLE",
+                    "The replay target connection is unavailable.",
+                    {"sessionId": session_id, "restartFullLoad": True},
+                )
+            token = _conn_override.set(requesting)
             try:
                 response = await super().load_session(
                     stored_cwd,
@@ -708,8 +748,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     **kwargs,
                 )
             finally:
-                if token is not None:
-                    _conn_override.reset(token)
+                _conn_override.reset(token)
             self._session_cwd[session_id] = stored_cwd
             if not record.read_only:
                 await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
@@ -756,6 +795,119 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                         )
             return
         await super()._emit_event(turn, event)
+
+    async def _position_updates(
+        self,
+        session_id: str,
+        updates: Sequence[acp_map.SessionUpdate],
+    ) -> list[acp_map.SessionUpdate]:
+        """Assign durable, non-reusable positions to updates that do not have one."""
+        try:
+            missing = [
+                index
+                for index, update in enumerate(updates)
+                if maybe_session_update_position(update) is None
+            ]
+        except SessionUpdateProtocolError as exc:
+            raise HrnsError(
+                "SESSION_UPDATE_PROTOCOL_ERROR",
+                "A session update has invalid or conflicting position metadata.",
+                {"sessionId": session_id},
+            ) from exc
+        if not missing:
+            return list(updates)
+        try:
+            revisions = iter(await self.store.reserve_update_revisions(session_id, len(missing)))
+        except HrnsError:
+            raise
+        except Exception as exc:
+            raise HrnsError(
+                "SESSION_DURABILITY_FAILED",
+                "Could not reserve durable session update revisions.",
+                {"sessionId": session_id},
+            ) from exc
+        positioned = list(updates)
+        for index in missing:
+            positioned[index] = with_session_update_position(
+                positioned[index],
+                SessionUpdatePosition(update_id=uuid.uuid4().hex, revision=next(revisions)),
+            )
+        return positioned
+
+    async def _send_update(
+        self,
+        turn: _TurnState,
+        update: acp_map.SessionUpdate,
+    ) -> None:
+        """Position live updates before delivery, including the replay-only user prompt."""
+        turn.updates[:] = await self._position_updates(turn.session_id, turn.updates)
+        positioned = (await self._position_updates(turn.session_id, [update]))[0]
+        await super()._send_update(turn, positioned)
+
+    async def _fail_outstanding_tool_calls(
+        self,
+        turn: _TurnState,
+        *,
+        record: bool = False,
+    ) -> None:
+        """Finish announced tools with positioned updates even on cancellation."""
+        for tool_call_id in turn.started - turn.resulted:
+            update = acp_sdk.update_tool_call(tool_call_id=tool_call_id, status="failed")
+            positioned = (await self._position_updates(turn.session_id, [update]))[0]
+            if record:
+                turn.updates.append(positioned)
+            with contextlib.suppress(Exception):
+                await turn.conn.session_update(session_id=turn.session_id, update=positioned)
+
+    async def _persist(self, state: Any) -> None:
+        """Persist canonical positioned updates and fail closed on durability loss."""
+        try:
+            state.transcript[:] = order_session_updates(
+                await self._position_updates(state.session_id, state.transcript)
+            )
+            await self.store.save(
+                state.session_id,
+                StoredSession(
+                    messages=list(state.history),
+                    updates=list(state.transcript),
+                    model=state.model,
+                ),
+            )
+        except SessionUpdateProtocolError as exc:
+            raise HrnsError(
+                "SESSION_UPDATE_PROTOCOL_ERROR",
+                "The session transcript has conflicting update positions.",
+                {"sessionId": state.session_id},
+            ) from exc
+        except HrnsError:
+            raise
+        except Exception as exc:
+            raise HrnsError(
+                "SESSION_DURABILITY_FAILED",
+                "The committed session state could not be persisted.",
+                {"sessionId": state.session_id},
+            ) from exc
+
+    async def publish_session_update(
+        self,
+        session_id: str,
+        update: acp_map.SessionUpdate,
+        *,
+        durable: bool,
+    ) -> None:
+        """Position and publish a host-owned update, persisting it first when durable."""
+        positioned = (await self._position_updates(session_id, [update]))[0]
+        if durable:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise HrnsError(
+                    "SESSION_REPLAY_UNAVAILABLE",
+                    "The session is not open, so its durable update cannot be journaled.",
+                    {"sessionId": session_id, "restartFullLoad": True},
+                )
+            state.transcript.append(positioned)
+            await self._persist(state)
+        await self.fanout.session_update(session_id=session_id, update=positioned)
 
     # --- prompts, effort, and metadata -----------------------------------
 
