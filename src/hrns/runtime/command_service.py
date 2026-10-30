@@ -196,11 +196,9 @@ class CommandService:
         return response
 
     async def send_changed(self, session_id: str, composition: Composition) -> None:
-        conn = self.agent._client_conn
-        if conn is None:
-            return
         with contextlib.suppress(Exception):
-            await conn.ext_notification(
+            await self.agent.fanout.session_notification(
+                session_id,
                 "hrns/commands/changed",
                 CommandCatalogChanged(
                     session_id=session_id,

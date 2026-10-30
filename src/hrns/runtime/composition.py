@@ -163,6 +163,7 @@ class Composition:
     presentation: PresentationObserver | None = None
     workspace: ResolvedWorkspace | None = None
     deps: object = None
+    models: tuple[str, ...] = ()
 
     def descriptors(self) -> list[BindingDescriptor]:
         return list(self.catalog.descriptors())

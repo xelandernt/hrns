@@ -1,5 +1,6 @@
 """Ready-to-use bearer authentication for HTTP and WebSocket routes."""
 
+import dataclasses
 import hashlib
 import secrets
 from collections.abc import Mapping
@@ -36,7 +37,14 @@ class BearerAuth:
                 raise ValueError("Bearer tokens must be non-empty strings without whitespace")
             if not isinstance(principal, Principal):
                 raise TypeError("Each bearer token must map to a Principal")
-            credentials.append((hashlib.sha256(token.encode("utf-8")).digest(), principal))
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            # A token is a credential, not a user: keep the caller's explicit credential
+            # id when supplied, otherwise derive a stable one from the token digest so
+            # revocation can target exactly one key.
+            credential_id = principal.credential_id or digest.hex()[:24]
+            credentials.append(
+                (digest, dataclasses.replace(principal, credential_id=credential_id))
+            )
         self._credentials = tuple(credentials)
 
     async def __call__(self, connection: HTTPConnection) -> Principal:

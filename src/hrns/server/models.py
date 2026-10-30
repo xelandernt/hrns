@@ -18,6 +18,10 @@ class Principal:
             Returning the same ID after rotating a token preserves session access.
         agent_ids: Agent IDs this identity may discover and connect to. ``None``
             permits all registered agents; an empty frozenset permits none.
+        credential_id: Stable identifier for the credential that authenticated this
+            request (an API key or token record), not for the human. Two keys for one
+            user share ``id`` and differ here, so usage attribution and revocation can
+            target one key without changing session ownership.
 
     Authentication dependencies return this object after validating credentials;
     it is not itself a token. Without an authentication dependency, every caller
@@ -26,6 +30,7 @@ class Principal:
 
     id: str
     agent_ids: frozenset[str] | None = None
+    credential_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -62,7 +67,9 @@ class RegisteredAgent:
 
     @property
     def session_namespace(self) -> str:
-        # JSON avoids ambiguous delimiters in definition IDs and versions.
+        # The namespace is the logical agent, not the revision. A version bump must not
+        # orphan existing rows: the row itself records the definition version that
+        # created it, and the host resolves that revision for composition.
         import json
 
-        return json.dumps([self.id, self.definition.definition_version], separators=(",", ":"))
+        return json.dumps([self.id], separators=(",", ":"))

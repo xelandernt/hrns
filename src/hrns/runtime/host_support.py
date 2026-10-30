@@ -20,8 +20,10 @@ from . import acp as acp_map
 from .acp_store import SessionStore
 from .composition import Composition
 from .definitions import AgentDefinition
+from .lifecycle import NoopLifecycleHooks, SessionLifecycleHooks
 from .registry import PluginRegistry
 from .resources import MODEL, ResourceBindings, ResourceSet
+from .session_policy import DefaultSessionPolicy, SessionPolicy
 
 if TYPE_CHECKING:
     from .host import HrnsACPAgent
@@ -61,6 +63,31 @@ class HostSetup:
         return self.model or (values[0] if values else None)
 
 
+@dataclass(frozen=True, slots=True)
+class RevisionSpec:
+    """The complete immutable inputs of one deployment revision.
+
+    A pinned session resolves this object, not just its ``AgentDefinition``, so its
+    workspace roots, resources, models, thinking support, and capability default stay
+    consistent with the revision that created it.
+    """
+
+    definition: AgentDefinition
+    allowed_cwds: tuple[str, ...] | None
+    default_cwd: str | None
+    models: tuple[str, ...]
+    thinking_models: Mapping[str, str]
+    resources: ResourceSet | ResourceBindings
+    accepts_client_capabilities: bool
+
+    @property
+    def default_model(self) -> str | None:
+        return self.models[0] if self.models else None
+
+    def effort_support(self, model: str | None) -> str | None:
+        return self.thinking_models.get(model) if model else None
+
+
 @dataclass
 class HostBundle:
     """The pieces a host process serves: one definition and one durable store."""
@@ -70,6 +97,8 @@ class HostBundle:
     store: SessionStore
     close_store: bool = False
     model_resolver: Callable[[str], Any] | None = None
+    revision_resolver: Callable[[str], RevisionSpec | None] | None = None
+    """Resolve a retained revision for loading or reconfiguring a pinned session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +121,14 @@ class HostPolicy:
     model_settings: ModelSettings = field(default_factory=ModelSettings)
     resources: ResourceSet | ResourceBindings = field(default_factory=dict)
     default_cwd: str | None = None
+    session_policy: SessionPolicy = field(default_factory=DefaultSessionPolicy)
+    worker_id: str | None = None
+    """Stable identity of this live host for session leases; ``None`` disables leasing."""
+    lease_ttl_ms: int = 120_000
+    """How long a session lease survives without renewal before another worker may take it."""
+    allow_new_sessions: bool = True
+    """Whether this actor may create sessions; hidden deployments keep loading old ones."""
+    lifecycle: SessionLifecycleHooks = field(default_factory=NoopLifecycleHooks)
 
     def __post_init__(self) -> None:
         roots = self.allowed_cwds
@@ -117,8 +154,12 @@ class HostPolicy:
     def effort_support(self, model: str | None) -> str | None:
         return self.thinking_models.get(model) if model else None
 
-    def validate_cwd(self, cwd: Any) -> str:
-        return acp_map.validate_requested_cwd(cwd, allowed=self.allowed_cwds, hosted=self.hosted)
+    def validate_cwd(self, cwd: Any, *, allowed: tuple[str, ...] | None = None) -> str:
+        return acp_map.validate_requested_cwd(
+            cwd,
+            allowed=self.allowed_cwds if allowed is None else allowed,
+            hosted=self.hosted,
+        )
 
 
 @dataclass(frozen=True)

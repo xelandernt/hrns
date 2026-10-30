@@ -39,7 +39,8 @@ async def _deny(socket: WebSocket, error: ApiError) -> None:
         await socket.send_denial_response(response)
     except RuntimeError:
         await socket.close(
-            code={404: 4404, 503: 4503}.get(error.status_code, 4455), reason=error.code
+            code={401: 4401, 404: 4404, 503: 4503}.get(error.status_code, 4455),
+            reason=error.code,
         )
 
 
@@ -131,7 +132,9 @@ async def acp_websocket(
     server: AgentServer, socket: WebSocket, agent_id: str, principal: Principal
 ) -> None:
     try:
-        agent = server.get_agent(agent_id, principal)
+        # A connection may still load an existing session from a hidden revision; the
+        # actor refuses new sessions when that revision is hidden.
+        agent = server.get_agent(agent_id, principal, allow_hidden=True)
         if ACP_SUBPROTOCOL not in socket.scope.get("subprotocols", []):
             raise ApiError("INVALID_REQUEST", f"The {ACP_SUBPROTOCOL} subprotocol is required")
         async with server.connection(socket, agent, principal) as host:
