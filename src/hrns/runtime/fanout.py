@@ -183,16 +183,19 @@ class FanoutClient:
         options: list[schema.PermissionOption],
         **kwargs: Any,
     ) -> schema.RequestPermissionResponse:
-        """Ask the selected client to approve a tool call, after the host policy check."""
+        """Ask the selected client to approve a tool call, with policy checks at both boundaries."""
         if self._approval_guard is not None:
             await self._approval_guard(session_id)
         client = self._require_client()
-        return await client.request_permission(
+        response = await client.request_permission(
             session_id=session_id,
             tool_call=tool_call,
             options=options,
             **kwargs,
         )
+        if response.outcome.outcome == "selected" and self._approval_guard is not None:
+            await self._approval_guard(session_id)
+        return response
 
     async def write_text_file(
         self, session_id: str, path: str, content: str, **kwargs: Any
