@@ -325,6 +325,14 @@ Inline prompts and configuration mutations join the same durable per-session seq
 Configuration waits for the active turn boundary, and a cancelled or abandoned active
 prompt becomes `uncertain` instead of being replayed automatically.
 
+For embedded startup recovery, call
+`await agents.load_session(principal, agent_id, session_id)`. The application must
+authenticate the supplied `Principal`. The method returns `None`, authorizes `LOAD`
+with the current caller, and loads the session's retained pinned revision under its
+lease. It resolves `LOAD` resources and resumes active sessions without creating a
+session, running or draining turns, replaying uncertain turns, or attaching a client.
+Archived sessions remain subject to the application's load policy and resolver.
+
 ## Revocation and lifecycle
 
 Each `Principal` may carry a `credential_id`; `BearerAuth` derives a stable one per token.
