@@ -242,7 +242,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self.fanout = FanoutClient(local=not self.policy.hosted)
         self.fanout.set_approval_guard(self._guard_approval)
         self._connection_capabilities: dict[str, schema.ClientCapabilities | None] = {}
-        self._connection_principals: dict[str, str] = {}
+        self._connection_requests: dict[str, RequestContext] = {}
         self.question_channel = QuestionChannel()
         self._leases: dict[str, SessionLease] = {}
         self._retiring = False
@@ -301,8 +301,14 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
     def on_connect(self, conn: Any) -> None:
         connection_id = current_connection_id.get() or uuid.uuid4().hex
         request = current_request.get()
+        if connection_id in self.fanout.connections():
+            self.detach(connection_id)
         if request is not None:
-            self._connection_principals[connection_id] = request.principal
+            self._connection_requests[connection_id] = replace(request, connection_id=connection_id)
+        elif not self.policy.hosted:
+            self._connection_requests[connection_id] = RequestContext(
+                principal=self.policy.principal, connection_id=connection_id
+            )
         self.fanout.attach(connection_id, conn)
         self._client_conn = self.fanout
         self.question_channel.bind(self.fanout)
@@ -312,7 +318,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         """Remove one viewer without disturbing the shared session state."""
         self.fanout.detach(connection_id)
         self._connection_capabilities.pop(connection_id, None)
-        self._connection_principals.pop(connection_id, None)
+        self._connection_requests.pop(connection_id, None)
 
     def connection_principal(self, connection_id: str) -> str:
         """The authenticated identity of a connection, for subscriber rechecks.
@@ -320,7 +326,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         Local stdio has no request context; its sole client acts as the host policy's
         principal.
         """
-        return self._connection_principals.get(connection_id, self.policy.principal)
+        request = self._connection_requests.get(connection_id)
+        return request.principal if request is not None else self.policy.principal
 
     def connection_key(self) -> str | None:
         """The current connection, or the sole local stdio connection."""
@@ -1062,30 +1069,36 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
     async def notify_queue_update(self, row: QueuedPrompt) -> None:
         """Fan out one durable queue transition to currently authorized viewers."""
-
-        authorized: list[str] = []
+        if row.deployment_id != self.policy.deployment_id:
+            return
+        record = await self.store.get_policy_candidate(row.session_id)
+        if record is None:
+            return
         for connection_id in self.fanout.subscribed_connections(row.session_id):
-            principal = self.connection_principal(connection_id)
-            visible = await self.store.get_visible(row.session_id, principal)
-            if visible is None:
+            request = self._connection_requests.get(connection_id)
+            if request is None:
                 continue
-            decision = await decide_policy(
-                self.policy.session_policy,
-                self.session_context(
-                    visible,
-                    row.session_id,
-                    principal=principal,
-                    connection_id=connection_id,
-                ),
-                PolicyAction.LOAD,
-            )
-            if decision.allowed:
-                authorized.append(connection_id)
-        await self.fanout.session_notification_connections(
-            tuple(authorized),
-            "hrns/queue/changed",
-            self._public_queue_update(row).to_wire(),
-        )
+            request_token = current_request.set(request)
+            connection_token = current_connection_id.set(connection_id)
+            try:
+                decision = await decide_policy(
+                    self.policy.session_policy,
+                    self.session_context(record, row.session_id),
+                    PolicyAction.LOAD,
+                )
+            finally:
+                current_connection_id.reset(connection_token)
+                current_request.reset(request_token)
+            if (
+                decision.allowed
+                and self._connection_requests.get(connection_id) is request
+                and connection_id in self.fanout.subscribed_connections(row.session_id)
+            ):
+                await self.fanout.session_notification_connections(
+                    (connection_id,),
+                    "hrns/queue/changed",
+                    self._public_queue_update(row).to_wire(),
+                )
 
     # --- per-session authorization ---------------------------------------
 
@@ -1117,6 +1130,11 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         connection_id: str | None = None,
     ) -> SessionContext:
         request = self.attribution()
+        viewer = None
+        if principal is not None and connection_id is not None:
+            candidate = self._connection_requests.get(connection_id)
+            if candidate is not None and candidate.principal == principal:
+                viewer = candidate
         acting = principal if principal is not None else self.acting_principal()
         return SessionContext(
             session_id=session_id,
@@ -1126,11 +1144,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             owner=record.effective_owner,
             access=record.access,
             collaborators=record.collaborators,
-            credential_id=request.credential_id if principal is None else None,
+            credential_id=(
+                request.credential_id
+                if principal is None
+                else viewer.credential_id
+                if viewer is not None
+                else None
+            ),
             connection_id=connection_id
             if connection_id is not None
             else (request.connection_id if principal is None else None),
-            request_id=request.request_id if principal is None else None,
+            request_id=(
+                request.request_id if principal is None else viewer.request_id if viewer else None
+            ),
             metadata={
                 "clientCapabilities": (
                     "deployment"
