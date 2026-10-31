@@ -36,6 +36,7 @@ from .acp_store import (
     SessionPage,
     SessionRecord,
     SessionStore,
+    TurnResult,
     _DeploymentList,
     _PromptList,
     _session_conflict,
@@ -45,6 +46,7 @@ from .acp_store import (
     deserialize_collaborators,
     encode_session,
     encode_session_cursor,
+    lifecycle_policy_payload,
     now_ms,
     serialize_bindings,
     serialize_collaborators,
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     owner TEXT,
     collaborators TEXT NOT NULL DEFAULT '[]',
     client_capabilities BOOLEAN,
+    capability_revision BIGINT NOT NULL DEFAULT 0,
     next_update_revision BIGINT NOT NULL DEFAULT 1,
     next_queue_revision BIGINT NOT NULL DEFAULT 1,
     created_at BIGINT NOT NULL,
@@ -133,6 +136,9 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
     revision BIGINT NOT NULL,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
+    origin TEXT,
+    mutation_id TEXT,
+    result TEXT,
     UNIQUE(session_id, sequence)
 )
 """
@@ -187,6 +193,7 @@ _ADDED_COLUMNS = (
     ("owner", "TEXT"),
     ("collaborators", "TEXT NOT NULL DEFAULT '[]'"),
     ("client_capabilities", "BOOLEAN"),
+    ("capability_revision", "BIGINT NOT NULL DEFAULT 0"),
     ("next_update_revision", "BIGINT NOT NULL DEFAULT 1"),
     ("next_queue_revision", "BIGINT NOT NULL DEFAULT 1"),
 )
@@ -195,6 +202,9 @@ _ADDED_QUEUE_COLUMNS = (
     ("kind", "TEXT NOT NULL DEFAULT 'prompt'"),
     ("update_id", "TEXT NOT NULL DEFAULT ''"),
     ("revision", "BIGINT NOT NULL DEFAULT 0"),
+    ("origin", "TEXT"),
+    ("mutation_id", "TEXT"),
+    ("result", "TEXT"),
 )
 
 
@@ -241,6 +251,7 @@ def _record_from_row(row: PgRow) -> SessionRecord:
         accepts_client_capabilities=(
             None if values["client_capabilities"] is None else bool(values["client_capabilities"])
         ),
+        capability_revision=int(values["capability_revision"]),
         created_at=int(values["created_at"]),
         last_active_at=int(values["last_active_at"]),
     )
@@ -250,8 +261,8 @@ _PROMPT_INSERT = """
 INSERT INTO acp_prompt_queue (
     prompt_id, session_id, principal, deployment_id, credential_id, connection_id,
     sequence, kind, payload, state, attempt, parent_id, owner_id, fence, update_id, revision,
-    created_at, updated_at
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    created_at, updated_at, origin, mutation_id, result
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 #: States that may only be reached through ``finish_prompt``.
@@ -302,6 +313,9 @@ def _prompt_from_row(row: PgRow) -> QueuedPrompt:
         revision=int(values["revision"]),
         created_at=int(values["created_at"]),
         updated_at=int(values["updated_at"]),
+        origin=values["origin"],
+        mutation_id=values["mutation_id"],
+        result=TurnResult.model_validate_json(values["result"]) if values["result"] else None,
     )
 
 
@@ -342,6 +356,9 @@ async def _insert_prompt(cursor: AsyncCursor[PgRow], prompt: QueuedPrompt) -> No
             prompt.revision,
             prompt.created_at,
             prompt.updated_at,
+            prompt.origin,
+            prompt.mutation_id,
+            prompt.result.model_dump_json() if prompt.result is not None else None,
         ),
     )
 
@@ -360,6 +377,65 @@ async def _reserve_queue_revision(cursor: AsyncCursor[PgRow], session_id: str) -
             {"sessionId": session_id},
         )
     return int(row["revision"])
+
+
+async def _recover_abandoned_claims(
+    cursor: AsyncCursor[PgRow], deployment_id: str, session_id: str, active: int
+) -> None:
+    await cursor.execute(
+        "SELECT prompt_id FROM acp_prompt_queue WHERE deployment_id = %s "
+        "AND session_id = %s AND state = %s ORDER BY sequence FOR UPDATE",
+        (deployment_id, session_id, PromptState.CLAIMED.value),
+    )
+    rows = await cursor.fetchall()
+    for row in rows:
+        values = _row_dict(row)
+        if values is None:
+            continue
+        await cursor.execute(
+            "UPDATE acp_prompt_queue SET state = %s, update_id = %s, revision = %s, "
+            "updated_at = %s WHERE prompt_id = %s",
+            (
+                PromptState.UNCERTAIN.value,
+                uuid.uuid4().hex,
+                await _reserve_queue_revision(cursor, session_id),
+                active,
+                values["prompt_id"],
+            ),
+        )
+
+
+async def _require_lease(
+    cursor: AsyncCursor[PgRow], deployment_id: str, session_id: str, owner_id: str, fence: int
+) -> None:
+    await cursor.execute(
+        "SELECT owner_id, fence, expires_at FROM acp_session_leases "
+        "WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
+        (session_id, deployment_id),
+    )
+    lease = _row_dict(await cursor.fetchone())
+    if (
+        lease is None
+        or lease["owner_id"] != owner_id
+        or int(lease["fence"]) != fence
+        or int(lease["expires_at"]) <= now_ms()
+    ):
+        raise _session_conflict(deployment_id, session_id, fence)
+
+
+async def _require_prompt_lease(
+    cursor: AsyncCursor[PgRow], prompt_id: str, owner_id: str, fence: int
+) -> bool:
+    # Discover immutable identity without a row lock: lease locks precede queue locks.
+    await cursor.execute(
+        "SELECT session_id, deployment_id FROM acp_prompt_queue WHERE prompt_id = %s",
+        (prompt_id,),
+    )
+    row = _row_dict(await cursor.fetchone())
+    if row is None:
+        return False
+    await _require_lease(cursor, str(row["deployment_id"]), str(row["session_id"]), owner_id, fence)
+    return True
 
 
 def _prompt_snapshot(prompt: QueuedPrompt) -> str:
@@ -389,6 +465,9 @@ def _prompt_from_snapshot(payload: str) -> QueuedPrompt:
         revision=int(values["revision"]),
         created_at=int(values["created_at"]),
         updated_at=int(values["updated_at"]),
+        origin=values.get("origin"),
+        mutation_id=values.get("mutation_id"),
+        result=TurnResult.model_validate(values["result"]) if values.get("result") else None,
     )
 
 
@@ -750,18 +829,21 @@ class PostgresSessionStore(SessionStore):
                 )
                 if lease is not None:
                     await cursor.execute(
-                        "INSERT INTO acp_session_leases "
-                        "(session_id, principal, deployment_id, owner_id, fence, expires_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        "UPDATE acp_session_leases SET expires_at = GREATEST(expires_at, %s) "
+                        "WHERE session_id = %s AND principal = %s AND deployment_id = %s "
+                        "AND owner_id = %s AND fence = %s AND expires_at > %s",
                         (
+                            lease.expires_at,
                             lease.session_id,
                             lease.principal,
                             lease.deployment_id,
                             lease.owner_id,
                             lease.fence,
-                            lease.expires_at,
+                            now_ms(),
                         ),
                     )
+                    if cursor.rowcount != 1:
+                        raise creation_conflict()
                 await self._creation_write(
                     cursor,
                     operation.model_copy(
@@ -974,18 +1056,60 @@ class PostgresSessionStore(SessionStore):
         deployment_id: str,
         session_id: str,
         accepts: bool | None,
-    ) -> bool:
+        *,
+        expected_revision: int,
+        owner_id: str,
+        fence: int,
+    ) -> SessionRecord:
+        from psycopg import sql
+
         async with self._lock:
             connection = self._require_connection()
-            async with connection.cursor() as cursor:
-                await cursor.execute(
-                    "UPDATE acp_sessions SET client_capabilities = %s "
-                    "WHERE session_id = %s AND deployment_id = %s "
-                    "AND COALESCE(owner, principal) = %s",
-                    (accepts, session_id, deployment_id, principal),
-                )
-                changed = cursor.rowcount
-        return bool(changed)
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await _require_lease(cursor, deployment_id, session_id, owner_id, fence)
+                    await cursor.execute(
+                        "SELECT 1 FROM acp_sessions WHERE session_id = %s AND deployment_id = %s "
+                        "AND COALESCE(owner, principal) = %s FOR UPDATE",
+                        (session_id, deployment_id, principal),
+                    )
+                    if await cursor.fetchone() is None:
+                        raise HrnsError(
+                            "SESSION_NOT_FOUND", "No session with this id is available."
+                        )
+                    # The lease may have expired while waiting for the session row lock.
+                    await _require_lease(cursor, deployment_id, session_id, owner_id, fence)
+                    await cursor.execute(
+                        sql.SQL(
+                            "UPDATE acp_sessions SET client_capabilities = %s, "
+                            "capability_revision = capability_revision + 1 "
+                            "WHERE session_id = %s AND deployment_id = %s "
+                            "AND COALESCE(owner, principal) = %s AND capability_revision = %s "
+                            "RETURNING {}"
+                        ).format(_columns(sql)),
+                        (accepts, session_id, deployment_id, principal, expected_revision),
+                    )
+                    row = await cursor.fetchone()
+                    if row is not None:
+                        return _record_from_row(row)
+                    await cursor.execute(
+                        "SELECT capability_revision FROM acp_sessions WHERE session_id = %s "
+                        "AND deployment_id = %s AND COALESCE(owner, principal) = %s",
+                        (session_id, deployment_id, principal),
+                    )
+                    current = _row_dict(await cursor.fetchone())
+                    if current is None:
+                        raise HrnsError(
+                            "SESSION_NOT_FOUND", "No session with this id is available."
+                        )
+                    raise HrnsError(
+                        "REVISION_CONFLICT",
+                        "The capability revision has changed.",
+                        {
+                            "expectedRevision": expected_revision,
+                            "revision": current["capability_revision"],
+                        },
+                    )
 
     async def get_visible(
         self, deployment_id: str, session_id: str, principal: str
@@ -1073,15 +1197,29 @@ class PostgresSessionStore(SessionStore):
                         raise PermissionError("session was not created in this scope")
                     if row["deployment_id"] != deployment_id:
                         raise PermissionError("session belongs to another deployment")
+                    lease_expires_at: int | None = None
                     if fence is not None:
                         await cursor.execute(
-                            "SELECT fence FROM acp_session_leases "
+                            "SELECT fence, expires_at FROM acp_session_leases "
                             "WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
                             (session_id, deployment_id),
                         )
                         lease = _row_dict(await cursor.fetchone())
-                        if lease is None or int(lease["fence"]) != fence:
+                        if (
+                            lease is None
+                            or int(lease["fence"]) != fence
+                            or int(lease["expires_at"]) <= now_ms()
+                        ):
                             raise _session_conflict(deployment_id, session_id, fence)
+                        lease_expires_at = int(lease["expires_at"])
+                    await cursor.execute(
+                        "SELECT 1 FROM acp_sessions WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
+                        (session_id, deployment_id),
+                    )
+                    if fence is not None and (
+                        lease_expires_at is None or lease_expires_at <= now_ms()
+                    ):
+                        raise _session_conflict(deployment_id, session_id, fence)
                     await cursor.execute(
                         "UPDATE acp_sessions SET messages = %s, updates = %s, model = %s, "
                         "last_active_at = %s WHERE session_id = %s",
@@ -1121,6 +1259,21 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    lease_expires_at: int | None = None
+                    if fence is not None:
+                        await cursor.execute(
+                            "SELECT fence, expires_at FROM acp_session_leases "
+                            "WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
+                            (session_id, deployment_id),
+                        )
+                        lease = _row_dict(await cursor.fetchone())
+                        if (
+                            lease is None
+                            or int(lease["fence"]) != fence
+                            or int(lease["expires_at"]) <= now_ms()
+                        ):
+                            raise _session_conflict(deployment_id, session_id, fence)
+                        lease_expires_at = int(lease["expires_at"])
                     await cursor.execute(
                         "SELECT deployment_id, next_update_revision FROM acp_sessions "
                         "WHERE session_id = %s FOR UPDATE",
@@ -1131,15 +1284,10 @@ class PostgresSessionStore(SessionStore):
                         raise PermissionError("session was not created in this scope")
                     if row["deployment_id"] != deployment_id:
                         raise PermissionError("session belongs to another deployment")
-                    if fence is not None:
-                        await cursor.execute(
-                            "SELECT fence FROM acp_session_leases "
-                            "WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
-                            (session_id, deployment_id),
-                        )
-                        lease = _row_dict(await cursor.fetchone())
-                        if lease is None or int(lease["fence"]) != fence:
-                            raise _session_conflict(deployment_id, session_id, fence)
+                    if fence is not None and (
+                        lease_expires_at is None or lease_expires_at <= now_ms()
+                    ):
+                        raise _session_conflict(deployment_id, session_id, fence)
                     first = int(row["next_update_revision"])
                     await cursor.execute(
                         "UPDATE acp_sessions SET next_update_revision = %s WHERE session_id = %s",
@@ -1195,11 +1343,14 @@ class PostgresSessionStore(SessionStore):
                     row = _row_dict(await cursor.fetchone())
                     if row is None:
                         return None
+                    active = now_ms()
+                    expires_at = active + ttl_ms
                     fence = int(row["fence"])
-                    if row["owner_id"] != owner_id:
-                        if int(row["expires_at"]) > active:
-                            return None
+                    if int(row["expires_at"]) <= active:
                         fence += 1
+                        await _recover_abandoned_claims(cursor, deployment_id, session_id, active)
+                    elif row["owner_id"] != owner_id:
+                        return None
                     lease = SessionLease(
                         session_id=session_id,
                         principal=principal,
@@ -1228,19 +1379,25 @@ class PostgresSessionStore(SessionStore):
         deployment_id: str,
         session_id: str,
         owner_id: str,
+        fence: int,
         ttl_ms: int,
     ) -> SessionLease | None:
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT fence FROM acp_session_leases "
+                        "WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
+                        (session_id, deployment_id),
+                    )
                     active = now_ms()
                     expires_at = active + ttl_ms
                     await cursor.execute(
                         "UPDATE acp_session_leases SET principal = %s, expires_at = %s "
                         "WHERE session_id = %s AND deployment_id = %s AND owner_id = %s "
-                        "AND expires_at > %s RETURNING fence",
-                        (principal, expires_at, session_id, deployment_id, owner_id, active),
+                        "AND fence = %s AND expires_at > %s RETURNING fence",
+                        (principal, expires_at, session_id, deployment_id, owner_id, fence, active),
                     )
                     row = _row_dict(await cursor.fetchone())
                     if row is None:
@@ -1255,19 +1412,25 @@ class PostgresSessionStore(SessionStore):
                     )
 
     async def release_lease(
-        self, principal: str, deployment_id: str, session_id: str, owner_id: str
+        self, principal: str, deployment_id: str, session_id: str, owner_id: str, fence: int
     ) -> bool:
         del principal  # the owner id is the only credential the lease keeps
         async with self._lock:
             connection = self._require_connection()
-            async with connection.cursor() as cursor:
-                # Expire rather than delete so the fence never moves backwards.
-                await cursor.execute(
-                    "UPDATE acp_session_leases SET expires_at = 0 WHERE session_id = %s "
-                    "AND deployment_id = %s AND owner_id = %s",
-                    (session_id, deployment_id, owner_id),
-                )
-                deleted = cursor.rowcount
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT fence FROM acp_session_leases "
+                        "WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
+                        (session_id, deployment_id),
+                    )
+                    # Expire rather than delete so the fence never moves backwards.
+                    await cursor.execute(
+                        "UPDATE acp_session_leases SET expires_at = 0 WHERE session_id = %s "
+                        "AND deployment_id = %s AND owner_id = %s AND fence = %s AND expires_at > %s",
+                        (session_id, deployment_id, owner_id, fence, now_ms()),
+                    )
+                    deleted = cursor.rowcount
         return bool(deleted)
 
     async def get_lease(self, deployment_id: str, session_id: str) -> SessionLease | None:
@@ -1407,6 +1570,11 @@ class PostgresSessionStore(SessionStore):
                     error = _queue_item_error(current, expected_revision)
                     if error is not None:
                         raise error
+                    if current.origin is not None:
+                        raise HrnsError(
+                            "QUEUE_NOT_EDITABLE",
+                            "A native turn's idempotent input cannot be edited.",
+                        )
                     updated = replace(
                         current,
                         payload=payload,
@@ -1502,6 +1670,15 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    if not await _require_prompt_lease(cursor, prompt_id, owner_id, fence):
+                        return None
+                    await cursor.execute(
+                        "SELECT session_id FROM acp_prompt_queue WHERE prompt_id = %s", (prompt_id,)
+                    )
+                    identity = _row_dict(await cursor.fetchone())
+                    if identity is None:
+                        return None
+                    await self._next_sequence(cursor, str(identity["session_id"]))
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s AND state = %s "
                         "FOR UPDATE",
@@ -1511,10 +1688,27 @@ class PostgresSessionStore(SessionStore):
                     if row is None:
                         return None
                     queued = _prompt_from_row(row)
+                    if queued.kind in LIFECYCLE_OPERATION_KINDS:
+                        return None
+                    await cursor.execute(
+                        "SELECT 1 FROM acp_prompt_queue WHERE deployment_id = %s AND session_id = %s "
+                        "AND kind = ANY(%s) AND state = ANY(%s) LIMIT 1",
+                        (
+                            queued.deployment_id,
+                            queued.session_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    if await cursor.fetchone() is not None:
+                        return None
                     active = now_ms()
                     attempt = queued.attempt + 1
                     update_id = uuid.uuid4().hex
                     revision = await _reserve_queue_revision(cursor, queued.session_id)
+                    await _require_lease(
+                        cursor, queued.deployment_id, queued.session_id, owner_id, fence
+                    )
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
                         "attempt = %s, update_id = %s, revision = %s, updated_at = %s "
@@ -1554,6 +1748,20 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    await _require_lease(cursor, deployment_id, session_id, owner_id, fence)
+                    await self._next_sequence(cursor, session_id)
+                    await cursor.execute(
+                        "SELECT 1 FROM acp_prompt_queue WHERE deployment_id = %s AND session_id = %s "
+                        "AND kind = ANY(%s) AND state = ANY(%s) LIMIT 1",
+                        (
+                            deployment_id,
+                            session_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    if await cursor.fetchone() is not None:
+                        return None
                     # A stale claim blocks later work until recovery marks it
                     # uncertain. Selecting a later queued row would overtake it.
                     await cursor.execute(
@@ -1572,10 +1780,13 @@ class PostgresSessionStore(SessionStore):
                     queued = _prompt_from_row(row)
                     if queued.state is not PromptState.QUEUED:
                         return None
+                    if queued.kind in LIFECYCLE_OPERATION_KINDS:
+                        return None
                     active = now_ms()
                     attempt = queued.attempt + 1
                     update_id = uuid.uuid4().hex
                     revision = await _reserve_queue_revision(cursor, queued.session_id)
+                    await _require_lease(cursor, deployment_id, session_id, owner_id, fence)
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
                         "attempt = %s, update_id = %s, revision = %s, updated_at = %s "
@@ -1609,6 +1820,7 @@ class PostgresSessionStore(SessionStore):
         *,
         owner_id: str,
         fence: int,
+        result: TurnResult | None = None,
     ) -> QueuedPrompt | None:
         if state not in _TERMINAL_PROMPT_STATES:
             raise ValueError(f"{state.value!r} is not a terminal prompt state")
@@ -1616,6 +1828,8 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    if not await _require_prompt_lease(cursor, prompt_id, owner_id, fence):
+                        return None
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s AND state = %s "
                         "AND owner_id = %s AND fence = %s FOR UPDATE",
@@ -1628,18 +1842,23 @@ class PostgresSessionStore(SessionStore):
                     updated = replace(
                         current,
                         state=state,
+                        result=result,
                         update_id=uuid.uuid4().hex,
                         revision=await _reserve_queue_revision(cursor, current.session_id),
                         updated_at=now_ms(),
                     )
+                    await _require_lease(
+                        cursor, current.deployment_id, current.session_id, owner_id, fence
+                    )
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
-                        "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                        "revision = %s, updated_at = %s, result = %s WHERE prompt_id = %s",
                         (
                             updated.state.value,
                             updated.update_id,
                             updated.revision,
                             updated.updated_at,
+                            result.model_dump_json() if result is not None else None,
                             prompt_id,
                         ),
                     )
@@ -1654,6 +1873,30 @@ class PostgresSessionStore(SessionStore):
                 )
                 row = await cursor.fetchone()
         return _prompt_from_row(row) if row is not None else None
+
+    async def get_turn_by_mutation(
+        self, deployment_id: str, session_id: str, mutation_id: str
+    ) -> QueuedPrompt | None:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s AND session_id = %s AND mutation_id = %s AND origin IS NOT NULL",
+                    (deployment_id, session_id, mutation_id),
+                )
+                row = await cursor.fetchone()
+        return _prompt_from_row(row) if row is not None else None
+
+    async def list_recoverable_headless_turns(self) -> _PromptList:
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT * FROM acp_prompt_queue WHERE origin IS NOT NULL AND state IN (%s, %s) ORDER BY created_at, sequence",
+                    (PromptState.QUEUED.value, PromptState.CLAIMED.value),
+                )
+                rows = await cursor.fetchall()
+        return [_prompt_from_row(row) for row in rows]
 
     async def list_prompts(
         self,
@@ -1733,37 +1976,67 @@ class PostgresSessionStore(SessionStore):
             clauses.append(sql.SQL("session_id = %s"))
             values.append(session_id)
         query = sql.SQL(
-            "SELECT * FROM acp_prompt_queue WHERE {} ORDER BY sequence FOR UPDATE"
+            "SELECT DISTINCT deployment_id, session_id FROM acp_prompt_queue "
+            "WHERE {} ORDER BY deployment_id, session_id"
         ).format(sql.SQL(" AND ").join(clauses))
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
                     await cursor.execute(query, values)
-                    rows = await cursor.fetchall()
-                    active = now_ms()
+                    sessions = await cursor.fetchall()
                     affected: list[QueuedPrompt] = []
-                    for row in rows:
-                        current = _prompt_from_row(row)
-                        updated = replace(
-                            current,
-                            state=PromptState.UNCERTAIN,
-                            update_id=uuid.uuid4().hex,
-                            revision=await _reserve_queue_revision(cursor, current.session_id),
-                            updated_at=active,
-                        )
+                    for session in sessions:
+                        scope = _row_dict(session)
+                        if scope is None:
+                            continue
                         await cursor.execute(
-                            "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
-                            "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                            "SELECT owner_id, fence, expires_at FROM acp_session_leases "
+                            "WHERE deployment_id = %s AND session_id = %s FOR UPDATE",
+                            (scope["deployment_id"], scope["session_id"]),
+                        )
+                        lease = _row_dict(await cursor.fetchone())
+                        if lease is None:
+                            continue
+                        active = now_ms()
+                        await cursor.execute(
+                            "SELECT * FROM acp_prompt_queue WHERE deployment_id = %s "
+                            "AND session_id = %s AND owner_id = %s AND state = %s "
+                            "ORDER BY sequence FOR UPDATE",
                             (
-                                updated.state.value,
-                                updated.update_id,
-                                updated.revision,
-                                updated.updated_at,
-                                updated.prompt_id,
+                                scope["deployment_id"],
+                                scope["session_id"],
+                                owner_id,
+                                PromptState.CLAIMED.value,
                             ),
                         )
-                        affected.append(updated)
+                        for row in await cursor.fetchall():
+                            current = _prompt_from_row(row)
+                            if (
+                                lease["owner_id"] == current.owner_id
+                                and lease["fence"] == current.fence
+                                and int(lease["expires_at"]) > active
+                            ):
+                                continue
+                            updated = replace(
+                                current,
+                                state=PromptState.UNCERTAIN,
+                                update_id=uuid.uuid4().hex,
+                                revision=await _reserve_queue_revision(cursor, current.session_id),
+                                updated_at=active,
+                            )
+                            await cursor.execute(
+                                "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
+                                "revision = %s, updated_at = %s WHERE prompt_id = %s",
+                                (
+                                    updated.state.value,
+                                    updated.update_id,
+                                    updated.revision,
+                                    updated.updated_at,
+                                    updated.prompt_id,
+                                ),
+                            )
+                            affected.append(updated)
                     return affected
 
     async def retry_prompt(
@@ -1777,11 +2050,17 @@ class PostgresSessionStore(SessionStore):
         mutation_id: str,
         request_hash: str,
     ) -> QueueMutationResult | None:
-        del owner_id, fence  # the caller re-queues; the old claim stays as history
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    if not await _require_prompt_lease(cursor, prompt_id, owner_id, fence):
+                        raise HrnsError(
+                            "QUEUE_ITEM_NOT_FOUND",
+                            "No queued prompt with this id is available in the session.",
+                            {"sessionId": session_id, "promptId": prompt_id},
+                        )
+                    sequence = await self._next_sequence(cursor, session_id)
                     replay = await _mutation_replay(
                         cursor, session_id, mutation_id, "retry", request_hash
                     )
@@ -1800,6 +2079,21 @@ class PostgresSessionStore(SessionStore):
                             {"sessionId": session_id, "promptId": prompt_id},
                         )
                     original = _prompt_from_row(row)
+                    await cursor.execute(
+                        "SELECT 1 FROM acp_prompt_queue WHERE deployment_id = %s AND session_id = %s "
+                        "AND kind = ANY(%s) AND state = ANY(%s) LIMIT 1",
+                        (
+                            original.deployment_id,
+                            session_id,
+                            [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            [state.value for state in LIFECYCLE_PENDING_STATES],
+                        ),
+                    )
+                    if await cursor.fetchone() is not None:
+                        raise HrnsError(
+                            "SESSION_CLOSING",
+                            "The session is closing and no longer accepts new work.",
+                        )
                     if original.state is not PromptState.UNCERTAIN:
                         raise HrnsError(
                             "QUEUE_NOT_EDITABLE",
@@ -1811,7 +2105,6 @@ class PostgresSessionStore(SessionStore):
                             },
                         )
                     active = now_ms()
-                    sequence = await self._next_sequence(cursor, original.session_id)
                     stored = replace(
                         original,
                         prompt_id=new_prompt_id,
@@ -1825,6 +2118,9 @@ class PostgresSessionStore(SessionStore):
                         revision=await _reserve_queue_revision(cursor, original.session_id),
                         created_at=active,
                         updated_at=active,
+                    )
+                    await _require_lease(
+                        cursor, original.deployment_id, session_id, owner_id, fence
                     )
                     await _insert_prompt(cursor, stored)
                     await _record_mutation(
@@ -1890,9 +2186,26 @@ class PostgresSessionStore(SessionStore):
                         completed = await cursor.fetchone()
                         if completed is not None:
                             return _prompt_from_row(completed)
+                    from psycopg import sql
+
+                    await cursor.execute(
+                        sql.SQL(
+                            "SELECT {} FROM acp_sessions WHERE session_id = %s "
+                            "AND deployment_id = %s FOR UPDATE"
+                        ).format(_columns(sql)),
+                        (operation.session_id, operation.deployment_id),
+                    )
+                    session = await cursor.fetchone()
+                    if session is None:
+                        raise HrnsError(
+                            "SESSION_NOT_FOUND", "No session with this id is available."
+                        )
                     active = now_ms()
                     stored = replace(
                         operation,
+                        payload=lifecycle_policy_payload(
+                            _record_from_row(session), operation.prompt_id
+                        ),
                         sequence=sequence,
                         update_id=operation.update_id or uuid.uuid4().hex,
                         revision=await _reserve_queue_revision(cursor, operation.session_id),
@@ -1909,9 +2222,12 @@ class PostgresSessionStore(SessionStore):
         kind: OperationKind,
         *,
         principal: str | None = None,
+        operation_id: str | None = None,
     ) -> QueuedPrompt | None:
         from psycopg import sql
 
+        if kind not in LIFECYCLE_OPERATION_KINDS:
+            raise ValueError("lifecycle operation must be close or delete")
         clauses = [
             sql.SQL("deployment_id = %s"),
             sql.SQL("session_id = %s"),
@@ -1921,6 +2237,9 @@ class PostgresSessionStore(SessionStore):
         if principal is not None:
             clauses.append(sql.SQL("principal = %s"))
             values.append(principal)
+        if operation_id is not None:
+            clauses.append(sql.SQL("prompt_id = %s"))
+            values.append(operation_id)
         query = sql.SQL(
             "SELECT * FROM acp_prompt_queue WHERE {} ORDER BY sequence DESC LIMIT 1"
         ).format(sql.SQL(" AND ").join(clauses))
@@ -1956,6 +2275,8 @@ class PostgresSessionStore(SessionStore):
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    if not await _require_prompt_lease(cursor, prompt_id, owner_id, fence):
+                        return None
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s "
                         "AND kind = ANY(%s) AND state = ANY(%s) FOR UPDATE",
@@ -1973,6 +2294,9 @@ class PostgresSessionStore(SessionStore):
                     attempt = current.attempt + 1
                     update_id = uuid.uuid4().hex
                     revision = await _reserve_queue_revision(cursor, current.session_id)
+                    await _require_lease(
+                        cursor, current.deployment_id, current.session_id, owner_id, fence
+                    )
                     await cursor.execute(
                         "UPDATE acp_prompt_queue SET state = %s, owner_id = %s, fence = %s, "
                         "attempt = %s, update_id = %s, revision = %s, updated_at = %s "
@@ -2005,11 +2329,14 @@ class PostgresSessionStore(SessionStore):
         session_id: str,
         *,
         exclude_prompt_id: str,
+        owner_id: str,
+        fence: int,
     ) -> _PromptList:
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    await _require_lease(cursor, deployment_id, session_id, owner_id, fence)
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue "
                         "WHERE deployment_id = %s AND session_id = %s AND prompt_id != %s "
@@ -2034,6 +2361,7 @@ class PostgresSessionStore(SessionStore):
                             revision=await _reserve_queue_revision(cursor, current.session_id),
                             updated_at=active,
                         )
+                        await _require_lease(cursor, deployment_id, session_id, owner_id, fence)
                         await cursor.execute(
                             "UPDATE acp_prompt_queue SET state = %s, update_id = %s, "
                             "revision = %s, updated_at = %s WHERE prompt_id = %s",
@@ -2059,10 +2387,14 @@ class PostgresSessionStore(SessionStore):
     ) -> bool:
         if state not in (PromptState.COMPLETED, PromptState.FAILED):
             raise ValueError("lifecycle operation must settle as completed or failed")
+        if delete_session and state is not PromptState.COMPLETED:
+            raise ValueError("only a completed lifecycle operation may delete a session")
         async with self._lock:
             connection = self._require_connection()
             async with connection.transaction():
                 async with connection.cursor() as cursor:
+                    if not await _require_prompt_lease(cursor, prompt_id, owner_id, fence):
+                        return False
                     await cursor.execute(
                         "SELECT * FROM acp_prompt_queue WHERE prompt_id = %s AND state = %s "
                         "AND owner_id = %s AND fence = %s AND kind = ANY(%s) FOR UPDATE",
@@ -2078,6 +2410,13 @@ class PostgresSessionStore(SessionStore):
                     if row is None:
                         return False
                     operation = _prompt_from_row(row)
+                    await cursor.execute(
+                        "SELECT 1 FROM acp_sessions WHERE session_id = %s AND deployment_id = %s FOR UPDATE",
+                        (operation.session_id, operation.deployment_id),
+                    )
+                    await _require_lease(
+                        cursor, operation.deployment_id, operation.session_id, owner_id, fence
+                    )
                     if delete_session:
                         await cursor.execute(
                             "DELETE FROM acp_sessions WHERE session_id = %s AND deployment_id = %s",
@@ -2085,8 +2424,15 @@ class PostgresSessionStore(SessionStore):
                         )
                         await cursor.execute(
                             "DELETE FROM acp_prompt_queue WHERE session_id = %s "
-                            "AND deployment_id = %s AND prompt_id != %s",
-                            (operation.session_id, operation.deployment_id, prompt_id),
+                            "AND deployment_id = %s AND NOT (kind = ANY(%s))",
+                            (
+                                operation.session_id,
+                                operation.deployment_id,
+                                [kind.value for kind in LIFECYCLE_OPERATION_KINDS],
+                            ),
+                        )
+                        await _require_lease(
+                            cursor, operation.deployment_id, operation.session_id, owner_id, fence
                         )
                         await cursor.execute(
                             "DELETE FROM acp_session_leases WHERE session_id = %s "
@@ -2109,11 +2455,19 @@ class PostgresSessionStore(SessionStore):
                                 fence,
                             ),
                         )
+                    revision = (
+                        operation.revision
+                        if delete_session
+                        else await _reserve_queue_revision(cursor, operation.session_id)
+                    )
                     await cursor.execute(
-                        "UPDATE acp_prompt_queue SET state = %s, updated_at = %s "
+                        "UPDATE acp_prompt_queue SET state = %s, update_id = %s, revision = %s, "
+                        "updated_at = %s "
                         "WHERE prompt_id = %s AND state = %s AND owner_id = %s AND fence = %s",
                         (
                             state.value,
+                            uuid.uuid4().hex,
+                            revision,
                             now_ms(),
                             prompt_id,
                             PromptState.CLAIMED.value,

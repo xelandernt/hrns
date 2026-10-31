@@ -14,8 +14,9 @@ from hrns.protocol import (
 )
 
 from .composition import compose_definition
-from .host_support import HostPolicy, SessionDeps
+from .host_support import HostPolicy
 from .policy import ChangeOutcome, changes_payload_hash, jsonable_config
+from .session_policy import PolicyAction
 
 if TYPE_CHECKING:
     from .host import HrnsACPAgent
@@ -113,16 +114,21 @@ class ConfigurationService:
             if revision.models
             else self.policy.effort_support(effective_model)
         )
+        resources, deps = await agent.sessions.resolved_inputs(
+            record=record,
+            definition=revision.definition,
+            cwd=self.policy.validate_cwd(cwd, allowed=revision.allowed_cwds),
+            session_id=session_id,
+            resource_bindings=revision.resources,
+            model=next_model,
+            action=PolicyAction.CONFIGURE,
+        )
+        if agent.bundle.resource_resolver is None:
+            deps = composition.deps
         refreshed = await compose_definition(
             revision.definition,
             self.registry,
-            resources=agent.sessions.resources(
-                self.policy.validate_cwd(cwd, allowed=revision.allowed_cwds),
-                session_id,
-                revision.definition,
-                revision.resources,
-                next_model,
-            ),
+            resources=resources,
             session_id=session_id,
             principal=record.effective_owner if record is not None else agent.acting_principal(),
             deployment_id=self.policy.deployment_id,
@@ -130,11 +136,20 @@ class ConfigurationService:
             model_settings=self.policy.model_settings,
             effort=composition.effort.effort,
             effort_support=support,
-            deps=composition.deps,
+            deps=deps,
             presentation_sink=agent.sessions.presentation_sink(session_id),
             client_capabilities=agent.sessions.client_capabilities(session_id),
             accepts_client_capabilities=effective_accepts,
+            client_gate=agent.fanout.client_gates.get(session_id),
+            selected_revision=next_revision,
         )
+        gate = agent.fanout.client_gates.get(session_id)
+        if gate is not None and gate.accepts != effective_accepts:
+            raise HrnsError(
+                "CAPABILITY_UNAVAILABLE",
+                "The session capability gate changed during configuration; retry the update.",
+                {"sessionId": session_id},
+            )
         refreshed.effort.model = effective_model
         refreshed.models = revision.models
         snapshot = refreshed.catalog.snapshot(
@@ -143,28 +158,14 @@ class ConfigurationService:
             application_status="applied",
         )
         refreshed.snapshot = snapshot
-        refreshed.config = type(refreshed.config)(
-            deps=SessionDeps(session_id=session_id, composition=composition),
-            capabilities=refreshed.config.capabilities,
-            toolsets=refreshed.config.toolsets,
-            workspace=refreshed.config.workspace,
-        )
         await agent.sessions.persist_metadata(
             session_id, bindings=refreshed.catalog.export_bindings()
         )
-        # Preserve the Composition/SessionDeps identity used by the adapter's live
-        # sessions; only its contents are replaced.
-        composition.agent = refreshed.agent
-        composition.catalog = refreshed.catalog
-        composition.snapshot = refreshed.snapshot
-        composition.resources = refreshed.resources
-        composition.effort = refreshed.effort
-        composition.config = refreshed.config
-        composition.capabilities = refreshed.capabilities
-        composition.commands = refreshed.commands
-        composition.presentation = refreshed.presentation
-        composition.workspace = refreshed.workspace
-        composition.deps = refreshed.deps
+        if gate is not None:
+            refreshed.catalog.accepts_client_capabilities = gate.accepts
+            for offering in refreshed.catalog.offerings.values():
+                offering.accepts_client_capabilities = gate.accepts
+        agent.sessions.adopt_composition(session_id, composition, refreshed)
         await agent.sessions.apply_unavailable_tools(session_id, composition)
         cache[request.request_id] = (request_hash, snapshot)
         await self.send_changed(snapshot)

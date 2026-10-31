@@ -28,9 +28,10 @@ current_connection_id: contextvars.ContextVar[str | None] = contextvars.ContextV
 class RequestContext:
     """Stable attribution metadata for one authenticated request.
 
-    ``request_id`` is reserved for a per-ACP-request identifier and for queued prompts;
-    ACP-originated requests currently leave it ``None``. ``credential_id`` identifies the
-    key or token, not the human: rotating a key keeps ``principal`` stable and changes
+    ``request_id`` identifies a transport request when available. During ordered execution,
+    ``session_id`` and ``operation_id`` identify the durable session and queued operation,
+    and ``origin`` is its server-owned native origin, if any. ``credential_id`` identifies
+    the key or token, not the human: rotating a key keeps ``principal`` stable and changes
     only ``credential_id``.
     """
 
@@ -40,3 +41,6 @@ class RequestContext:
     request_id: str | None = None
     agent_id: str | None = None
     scopes: frozenset[str] | None = None
+    session_id: str | None = None
+    operation_id: str | None = None
+    origin: str | None = None

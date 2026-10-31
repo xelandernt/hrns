@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from acp import schema
@@ -19,8 +20,8 @@ from hrns.protocol import (
 
 from . import acp as acp_map
 from ._unavailable_tools import UnavailableTools
-from .acp_store import SessionRecord, finalize_usage, merge_usage, usage_payload
-from .client_io import ClientSession
+from .acp_store import SessionRecord, finalize_usage, merge_usage, now_ms, usage_payload
+from .client_io import ClientGate, ClientSession
 from .composition import Composition, compose_definition
 from .host_support import HostPolicy, RevisionSpec, SessionDeps, _iso_millis
 from .presentation import snapshot_from_metadata
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig
 
     from .acp_store import ScopedSessionStore
+    from .creation import SessionCreationOperation
     from .definitions import AgentDefinition
     from .host import HrnsACPAgent
     from .registry import PluginRegistry
@@ -73,6 +75,7 @@ class SessionService:
         self.turn_usage: dict[str, dict[str, Any]] = {}
         self.plan_channels: dict[str, PlanChannel] = {}
         self.client_sessions: dict[str, ClientSession] = {}
+        self.client_gate_locks: dict[str, asyncio.Lock] = {}
         self.new_lock = asyncio.Lock()
         self.pending_initial: list[Any] | None = None
         self.pending_effort: str | None = None
@@ -93,6 +96,9 @@ class SessionService:
         self.turn_usage.pop(session_id, None)
         self.plan_channels.pop(session_id, None)
         self.client_sessions.pop(session_id, None)
+        gate = self.agent.fanout.client_gates.pop(session_id, None)
+        if gate is not None:
+            gate.accepts = False
         self.prepared_configs.pop(session_id, None)
 
     def remember_client(
@@ -105,6 +111,9 @@ class SessionService:
         """
         if accepts is None:
             accepts = self.policy.accepts_client_capabilities
+        self.agent.fanout.client_gates.setdefault(
+            session.session_id, ClientGate(session.session_id, accepts)
+        )
         # Client-origin tools go through the fan-out so the call is routed to the
         # connection that initiated the current turn, not whichever client composed
         # the session first.
@@ -113,7 +122,9 @@ class SessionService:
         if advertised is None and current_connection_id.get() is None:
             # Local stdio has no connection registry; use the adapter's negotiated value.
             advertised = session.client_capabilities
-        capabilities = advertised if accepts else None
+        # Negotiation and authorization are separate: keep the advertised capabilities
+        # so an authorized live re-enable can use them without a reconnect.
+        capabilities = advertised
         known = self.client_sessions.get(session.session_id)
         if (
             known is not None
@@ -288,21 +299,133 @@ class SessionService:
                 self.agent.fanout.unsubscribe(connection_id, session_id)
 
     async def set_client_capabilities(
-        self, session_id: str, accepts: bool | None, *, principal: str | None = None
-    ) -> bool:
-        """Override the deployment's client-origin capability gate for one session."""
+        self,
+        session_id: str,
+        accepts: bool | None,
+        *,
+        principal: str | None = None,
+        expected_revision: int | None = None,
+    ) -> SessionRecord:
+        """Commit a fenced capability override before opening the live gate."""
         acting = principal or self.principal
-        draft = self.store.staged(session_id)
-        if draft is not None:
-            if draft.effective_owner != acting:
+        async with self.client_gate_locks.setdefault(session_id, asyncio.Lock()):
+            draft = self.store.staged(session_id)
+            record = draft or await self.store.get_visible(session_id, acting)
+            if record is None or record.effective_owner != acting:
+                raise HrnsError("SESSION_NOT_FOUND", "No session with this id is available.")
+            if expected_revision is not None and record.capability_revision != expected_revision:
                 raise HrnsError(
-                    "POLICY_DENIED",
-                    "Only the session owner may change its capability gate.",
-                    {"sessionId": session_id},
+                    "REVISION_CONFLICT",
+                    "The capability revision has changed.",
+                    {"expectedRevision": expected_revision, "revision": record.capability_revision},
                 )
-            draft.accepts_client_capabilities = accepts
-            return await self.store.materialize(session_id)
-        return await self.store.set_client_capabilities(session_id, accepts, principal=acting)
+            if draft is not None:
+                await self.store.materialize(session_id)
+            revision = self.revision_for(record)
+            effective = revision.accepts_client_capabilities if accepts is None else accepts
+            gate = self.agent.fanout.client_gates.get(session_id)
+            if gate is None:
+                previous = (
+                    record.accepts_client_capabilities
+                    if record.accepts_client_capabilities is not None
+                    else revision.accepts_client_capabilities
+                )
+                gate = self.agent.fanout.client_gates.setdefault(
+                    session_id, ClientGate(session_id, previous)
+                )
+            # Close the live gate before awaiting persistence. If the store commits but
+            # the caller is cancelled before receiving its result, the actor must not
+            # continue to grant the now-durably-revoked capability.
+            # A failed or superseded write must never leave stale authorization live.
+            gate.accepts = False
+            lease = await self.agent.acquire_session_lease(session_id)
+            temporary = lease is None
+            if temporary:
+                owner = f"local-capability:{uuid.uuid4().hex}"
+                acquisition = asyncio.create_task(
+                    self.store.acquire_lease(session_id, owner, self.policy.lease_ttl_ms)
+                )
+                try:
+                    lease = await asyncio.shield(acquisition)
+                except asyncio.CancelledError:
+                    while not acquisition.done():
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await asyncio.shield(acquisition)
+                    if not acquisition.cancelled() and acquisition.exception() is None:
+                        acquired = acquisition.result()
+                        if acquired is not None:
+                            await self._release_capability_lease(
+                                session_id, acquired.owner_id, acquired.fence
+                            )
+                    raise
+            if lease is None:
+                gate.accepts = False
+                raise HrnsError("SESSION_HELD", "Another worker owns this session.")
+            write: asyncio.Task[SessionRecord] | None = None
+            try:
+
+                async def commit() -> SessionRecord:
+                    committed = await self.store.set_client_capabilities(
+                        session_id,
+                        accepts,
+                        principal=acting,
+                        expected_revision=record.capability_revision
+                        if expected_revision is None
+                        else expected_revision,
+                        owner_id=lease.owner_id,
+                        fence=lease.fence,
+                    )
+                    # A superseded actor must not reopen its gate after its write committed.
+                    current_lease = await self.store.get_lease(session_id)
+                    if (
+                        current_lease is None
+                        or current_lease.owner_id != lease.owner_id
+                        or current_lease.fence != lease.fence
+                        or current_lease.expires_at <= now_ms()
+                    ):
+                        raise HrnsError("SESSION_CONFLICT", "The session lease was lost.")
+                    gate.accepts = effective
+                    composition = self.compositions.get(session_id)
+                    if composition is not None:
+                        composition.catalog.accepts_client_capabilities = effective
+                        for offering in composition.catalog.offerings.values():
+                            offering.accepts_client_capabilities = effective
+                    return committed
+
+                write = asyncio.create_task(commit())
+                try:
+                    return await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    while not write.done():
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await asyncio.shield(write)
+                    if not write.cancelled():
+                        write.exception()
+                    raise
+            except BaseException:
+                if (
+                    write is None
+                    or not write.done()
+                    or write.cancelled()
+                    or write.exception() is not None
+                ):
+                    gate.accepts = False
+                raise
+            finally:
+                if temporary:
+                    await self._release_capability_lease(session_id, lease.owner_id, lease.fence)
+
+    async def _release_capability_lease(self, session_id: str, owner_id: str, fence: int) -> None:
+        release = asyncio.create_task(self.store.release_lease(session_id, owner_id, fence))
+        cancelled = False
+        while not release.done():
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                cancelled = True
+        release.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     # -------------------------------------------------------- session state
 
@@ -635,7 +758,7 @@ class SessionService:
             handle = self.client_sessions.get(session_id)
             if handle is not None:
                 # Definitions may require the handle even while every client plugin is disabled.
-                # Capability acceptance is enforced by the catalog and the handle's capabilities.
+                # Capability acceptance is enforced by the catalog and the live client gate.
                 resources.bind_if_absent(CLIENT, handle)
         bound_model = model or self.agent._default_model
         if bound_model is not None:
@@ -644,7 +767,140 @@ class SessionService:
             resources.bind_if_absent(WORKSPACE, cwd)
         return resources
 
-    async def compose_session(self, session: Any) -> Any:
+    async def resolved_inputs(
+        self,
+        *,
+        record: SessionRecord | None,
+        definition: AgentDefinition,
+        cwd: str,
+        session_id: str,
+        resource_bindings: ResourceSet | ResourceBindings,
+        model: str | None,
+        action: PolicyAction,
+        creation: SessionCreationOperation | None = None,
+    ) -> tuple[ResourceSet, object]:
+        resources = self.resources(cwd, session_id, definition, resource_bindings, model)
+        if self.agent.bundle.resource_resolver is None:
+            return resources, None
+        if record is None:
+            raise HrnsError("SESSION_NOT_FOUND", "Resource resolution requires a session record.")
+        resolved = await self.agent.resolve_session_resources(record, action, creation=creation)
+        if resolved is None:
+            raise HrnsError(
+                "INVALID_CONFIGURATION", "The session resource resolver is unavailable."
+            )
+        declared = {
+            name: requirement
+            for requirement in definition.resources
+            for name in (requirement.name, requirement.slot.name, *requirement.slot.aliases)
+        }
+        for name, value in resolved.resources.values.items():
+            requirement = declared.get(name)
+            if requirement is None:
+                raise HrnsError(
+                    "INVALID_CONFIGURATION",
+                    "The session resource resolver supplied an undeclared resource.",
+                    {"resource": name},
+                )
+            for alias in (requirement.name, requirement.slot.name, *requirement.slot.aliases):
+                resources.bind(alias, None)
+            resources.bind(requirement.slot, value)
+        return resources, resolved.deps
+
+    def adopt_composition(
+        self, session_id: str, composition: Composition, refreshed: Composition
+    ) -> None:
+        """Replace a live composition without invalidating the adapter's SessionDeps."""
+        steering = self.steering.get(session_id)
+        refreshed.config = type(refreshed.config)(
+            deps=SessionDeps(session_id=session_id, composition=composition),
+            capabilities=[
+                *(refreshed.config.capabilities or ()),
+                *([SteeringCapability(steering)] if steering is not None else []),
+            ],
+            toolsets=refreshed.config.toolsets,
+            workspace=refreshed.config.workspace,
+        )
+        composition.agent = refreshed.agent
+        composition.catalog = refreshed.catalog
+        composition.snapshot = refreshed.snapshot
+        composition.resources = refreshed.resources
+        composition.effort = refreshed.effort
+        composition.config = refreshed.config
+        composition.capabilities = refreshed.capabilities
+        composition.commands = refreshed.commands
+        composition.presentation = refreshed.presentation
+        composition.workspace = refreshed.workspace
+        composition.deps = refreshed.deps
+        composition.models = refreshed.models
+
+    async def refresh_turn_resources(self, session_id: str) -> None:
+        """Compose with this turn's authorized bindings, never a previous caller's."""
+        if self.agent.bundle.resource_resolver is None:
+            return
+        composition = self.require_composition(session_id)
+        record = await self.agent.session_record(session_id)
+        if record is None:
+            raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
+        revision = self.revision_for(record)
+        cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
+        model = composition.effort.model or revision.default_model or self.agent._default_model
+        accepts = (
+            record.accepts_client_capabilities
+            if record.accepts_client_capabilities is not None
+            else revision.accepts_client_capabilities
+        )
+        resources, deps = await self.resolved_inputs(
+            record=record,
+            definition=revision.definition,
+            cwd=cwd,
+            session_id=session_id,
+            resource_bindings=revision.resources,
+            model=model,
+            action=PolicyAction.PROMPT,
+        )
+        refreshed = await compose_definition(
+            revision.definition,
+            self.registry,
+            resources=resources,
+            deps=deps,
+            session_id=session_id,
+            principal=record.effective_owner,
+            deployment_id=record.deployment_id,
+            saved_bindings=composition.catalog.export_bindings(),
+            model_settings=self.policy.model_settings,
+            effort=composition.effort.effort,
+            effort_support=(
+                revision.effort_support(model)
+                if revision.models
+                else self.policy.effort_support(model)
+            ),
+            provider_types=self.policy.provider_types,
+            presentation_sink=self.presentation_sink(session_id),
+            client_capabilities=self.client_capabilities(session_id),
+            accepts_client_capabilities=accepts,
+            client_gate=self.agent.fanout.client_gates.get(session_id),
+            selected_revision=composition.snapshot.selected_revision,
+        )
+        gate = self.agent.fanout.client_gates.get(session_id)
+        if gate is not None and gate.accepts != accepts:
+            raise HrnsError(
+                "CAPABILITY_UNAVAILABLE", "The session capability gate changed during composition."
+            )
+        refreshed.effort.model = model
+        refreshed.models = revision.models
+        self.adopt_composition(session_id, composition, refreshed)
+        await self.apply_unavailable_tools(session_id, composition)
+
+    async def compose_session(
+        self, session: Any, *, creation: SessionCreationOperation | None = None
+    ) -> Any:
+        async with self.client_gate_locks.setdefault(session.session_id, asyncio.Lock()):
+            return await self._compose_session_locked(session, creation=creation)
+
+    async def _compose_session_locked(
+        self, session: Any, *, creation: SessionCreationOperation | None = None
+    ) -> Any:
         agent = self.agent
         prepared = self.prepared_configs.pop(session.session_id, None)
         if prepared is not None:
@@ -662,6 +918,10 @@ class SessionService:
         creating = self.pending_creation is not None and (
             self.pending_creation.session_id == session.session_id
         )
+        if creating != (creation is not None):
+            raise HrnsError(
+                "SESSION_CREATION_CONFLICT", "The session creation context is missing or invalid."
+            )
         if known is None or creating:
             initial = self.pending_initial
             if self.pending_effort is not None:
@@ -688,16 +948,20 @@ class SessionService:
             revision.effort_support(model) if revision.models else self.policy.effort_support(model)
         )
         definition = revision.definition
+        resources, deps = await self.resolved_inputs(
+            record=known,
+            definition=definition,
+            cwd=cwd,
+            session_id=session.session_id,
+            resource_bindings=revision.resources,
+            model=model,
+            action=PolicyAction.CREATE if creating else PolicyAction.LOAD,
+            creation=creation,
+        )
         composition = await compose_definition(
             definition,
             self.registry,
-            resources=self.resources(
-                cwd,
-                session.session_id,
-                definition,
-                revision.resources,
-                model,
-            ),
+            resources=resources,
             session_id=session.session_id,
             principal=(known.effective_owner if known is not None else self.principal),
             deployment_id=self.policy.deployment_id,
@@ -707,10 +971,28 @@ class SessionService:
             effort=effort,
             effort_support=support,
             provider_types=self.policy.provider_types,
+            deps=deps,
             presentation_sink=self.presentation_sink(session.session_id),
             client_capabilities=handle.capabilities,
             accepts_client_capabilities=accepts,
+            client_gate=self.agent.fanout.client_gates[session.session_id],
         )
+        latest = await self.store.get_visible(session.session_id, self.principal)
+        if latest is not None:
+            effective = (
+                latest.accepts_client_capabilities
+                if latest.accepts_client_capabilities is not None
+                else revision.accepts_client_capabilities
+            )
+            gate = self.agent.fanout.client_gates[session.session_id]
+            if effective != accepts or gate.accepts != accepts:
+                if not effective:
+                    gate.accepts = False
+                raise HrnsError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "The session capability gate changed during composition; load it again.",
+                    {"sessionId": session.session_id},
+                )
         composition.effort.model = model
         composition.models = revision.models
         self.compositions[session.session_id] = composition

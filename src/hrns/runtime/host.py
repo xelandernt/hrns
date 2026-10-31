@@ -14,15 +14,17 @@ import contextvars
 import json
 import uuid
 import warnings
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import acp as acp_sdk
 from acp import schema
 from acp.exceptions import RequestError
 from acp.schema import DeleteSessionResponse
-from pydantic import TypeAdapter, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic_ai import AgentRunResultEvent, DeferredToolRequests
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -38,6 +40,7 @@ from pydantic_ai_harness.experimental.acp import (
     chain_presenters,
     default_coding_presenter,
 )
+from pydantic_core import to_jsonable_python
 
 from hrns.config import EFFORT_DEFAULT
 from hrns.protocol import (
@@ -77,7 +80,11 @@ from .acp_store import (
     QueuedPrompt,
     SessionLease,
     SessionRecord,
+    TurnReceipt,
+    TurnRequest,
+    TurnResult,
     finalize_usage,
+    lifecycle_policy_payload,
     merge_usage,
     now_ms,
     usage_payload,
@@ -86,12 +93,20 @@ from .ask_user import QuestionChannel
 from .capabilities.coder._acp import coder_tool_presenter
 from .command_service import CommandService
 from .configuration_service import ConfigurationService
-from .creation import SessionCreationResult, SessionCreationState, SessionNewInput
+from .creation import (
+    SessionCreationOperation,
+    SessionCreationResult,
+    SessionCreationState,
+    SessionNewInput,
+    check_creation_owner,
+    creation_conflict,
+)
 from .creation_service import CreationLease, creation_lifecycle_context, recover_creation
-from .fanout import FanoutClient
+from .fanout import FanoutClient, current_connection
 from .host_support import (
     HostBundle,
     HostPolicy,
+    SessionDeps,
     _ComposedAgent,
     _prompt_text,
 )
@@ -112,6 +127,8 @@ from .session_service import SessionService
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.experimental.acp._adapter import _TurnState
+
+    from hrns.server.resources import SessionResources
 
 warnings.filterwarnings("ignore", category=HarnessExperimentalWarning)
 
@@ -137,6 +154,58 @@ _current_capabilities: contextvars.ContextVar[schema.ClientCapabilities | None] 
 _conn_override: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
     "hrns_conn_override", default=None
 )
+_headless_turn: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "hrns_headless_turn", default=False
+)
+
+_TaskResult = TypeVar("_TaskResult")
+
+
+@dataclass
+class _CapturedOutput:
+    output: JsonValue = None
+
+
+_turn_output: contextvars.ContextVar[_CapturedOutput | None] = contextvars.ContextVar(
+    "hrns_turn_output", default=None
+)
+_json_value = TypeAdapter(JsonValue)
+
+
+class _OutputCapturingAgent(_ComposedAgent):
+    """Keep ACP streaming while capturing the native final result for a receipt."""
+
+    @contextlib.asynccontextmanager
+    async def run_stream_events(
+        self, *args: object, **kwargs: object
+    ) -> AsyncIterator[AsyncIterator[AgentStreamEvent | AgentRunResultEvent[object]]]:
+        deps = kwargs.get("deps")
+        if isinstance(deps, SessionDeps):
+            output_type = deps.composition.agent.output_type
+            kwargs["output_type"] = [
+                *(output_type if isinstance(output_type, list) else [output_type]),
+                DeferredToolRequests,
+            ]
+        async with super().run_stream_events(*args, **kwargs) as stream:
+
+            async def events() -> AsyncIterator[AgentStreamEvent | AgentRunResultEvent[object]]:
+                async for event in stream:
+                    if isinstance(event, AgentRunResultEvent):
+                        output = event.result.output
+                        capture = _turn_output.get()
+                        if capture is not None and not isinstance(output, DeferredToolRequests):
+                            capture.output = _json_value.validate_python(to_jsonable_python(output))
+                    yield event
+
+            yield events()
+
+
+async def _drain_task(task: asyncio.Task[_TaskResult]) -> _TaskResult:
+    """Wait through repeated caller cancellation for a shielded operation's outcome."""
+    while not task.done():
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.shield(task)
+    return task.result()
 
 
 class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
@@ -158,6 +227,10 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         bundle.registry.allow_local_binding_creation = self.policy.can_create_bindings
         self.store = bundle.store.scoped(self.policy.principal, self.policy.deployment_id)
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._activity_locks: dict[str, asyncio.Lock] = {}
+        self._suspended: set[str] = set()
+        self._local_work: set[str] = set()
+        self._local_terminating: set[str] = set()
         self.config = ConfigurationService(
             agent=self,
             policy=self.policy,
@@ -172,14 +245,17 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self._connection_principals: dict[str, str] = {}
         self.question_channel = QuestionChannel()
         self._leases: dict[str, SessionLease] = {}
+        self._retiring = False
         self._lease_ttl_ms = self.policy.lease_ttl_ms
         self._lease_task: asyncio.Task[None] | None = None
         self._session_cwd: dict[str, str] = {}
         self._creating_updates: dict[str, list[acp_map.SessionUpdate]] = {}
         self._destroyed: set[str] = set()
         self._lifecycle_tasks: dict[str, asyncio.Task[QueuedPrompt]] = {}
+        self._lifecycle_admissions: set[asyncio.Task[QueuedPrompt]] = set()
         self._operation_results: dict[str, asyncio.Future[Any]] = {}
         self._operation_kwargs: dict[str, dict[str, Any]] = {}
+        self._headless_tasks: set[asyncio.Task[None]] = set()
         models = tuple(self.policy.models)
         default = self.policy.default_model or (models[0] if models else None)
         self._default_model = default
@@ -195,7 +271,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         super().__init__(
             cast(
                 AbstractAgent[Any, str],
-                _ComposedAgent(
+                _OutputCapturingAgent(
                     name=self.definition.name or self.definition.agent_id,
                     report_usage=self.sessions.report_model_usage,
                 ),
@@ -275,31 +351,36 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         return self.policy.principal
 
     async def shutdown(self) -> None:
-        """Close every live session through the public adapter method, then the store."""
+        """Retire local actors without treating process shutdown as session deletion."""
+        self._retiring = True
+        headless_tasks = tuple(self._headless_tasks)
+        for task in headless_tasks:
+            task.cancel()
+        if headless_tasks:
+            await asyncio.gather(*headless_tasks, return_exceptions=True)
         lifecycle_tasks = tuple(self._lifecycle_tasks.values())
         for task in lifecycle_tasks:
             task.cancel()
         if lifecycle_tasks:
             await asyncio.gather(*lifecycle_tasks, return_exceptions=True)
+        admissions = tuple(self._lifecycle_admissions)
+        for task in admissions:
+            task.cancel()
+        if admissions:
+            await asyncio.gather(*admissions, return_exceptions=True)
         for session_id in list(self.sessions.compositions):
-            if await self.pending_lifecycle_operation(session_id) is not None:
+            with contextlib.suppress(Exception):
+                await super().cancel(session_id)
+            async with self._turn_lock(session_id):
                 with contextlib.suppress(Exception):
-                    await super().cancel(session_id)
+                    await self.commands.cancel_session(session_id)
+                    await super().close_session(session_id)
                 self.sessions.forget(session_id)
-                self._turn_locks.pop(session_id, None)
                 self.config.forget(session_id)
                 self.commands.forget(session_id)
                 self._session_cwd.pop(session_id, None)
                 self.fanout.unsubscribe_session(session_id)
-                continue
-            with contextlib.suppress(Exception):
-                await self._close_session_unchecked(session_id)
-        owner = self._lease_owner()
-        if owner is not None:
-            with contextlib.suppress(Exception):
-                await self.store.backend.mark_uncertain_prompts(
-                    owner, deployment_id=self.policy.deployment_id
-                )
+            self._turn_locks.pop(session_id, None)
         for session_id in list(self._leases):
             with contextlib.suppress(Exception):
                 await self.release_session_lease(session_id)
@@ -344,7 +425,6 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             await self.run_lifecycle(LifecycleEvent.DESTROY, session_id)
         finally:
             self.sessions.forget(session_id)
-            self._turn_locks.pop(session_id, None)
             self.config.forget(session_id)
             self.commands.forget(session_id)
             self._session_cwd.pop(session_id, None)
@@ -357,7 +437,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         return session_id in self._sessions or session_id in self.sessions.compositions
 
     def has_pending_lifecycle_tasks(self) -> bool:
-        return bool(self._lifecycle_tasks)
+        return bool(self._lifecycle_tasks or self._lifecycle_admissions)
 
     async def pending_lifecycle_operation(self, session_id: str) -> QueuedPrompt | None:
         for kind in (OperationKind.DELETE, OperationKind.CLOSE):
@@ -375,8 +455,90 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         authorize: bool = True,
     ) -> QueuedPrompt:
         """Run or resume one durable authoritative close/delete operation."""
+        if self._retiring:
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+        task = asyncio.create_task(
+            self._terminate_session(session_id, kind, operation=operation, authorize=authorize)
+        )
+        self._lifecycle_admissions.add(task)
+
+        def finished(done: asyncio.Task[QueuedPrompt]) -> None:
+            self._lifecycle_admissions.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def _terminate_session(
+        self,
+        session_id: str,
+        kind: OperationKind,
+        *,
+        operation: QueuedPrompt | None,
+        authorize: bool,
+    ) -> QueuedPrompt:
         if kind not in (OperationKind.CLOSE, OperationKind.DELETE):
             raise ValueError("session lifecycle kind must be close or delete")
+        if self._lease_owner() is None:
+            if operation is not None:
+                raise HrnsError(
+                    "SESSION_CONFLICT", "Local authority cannot claim a hosted receipt."
+                )
+            record = (
+                await self.authorize(
+                    session_id,
+                    PolicyAction.DELETE if kind is OperationKind.DELETE else PolicyAction.CLOSE,
+                )
+                if authorize
+                else await self.session_record(session_id)
+            )
+            if record is None:
+                raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
+            async with self._activity_lock(session_id):
+                if session_id in self._local_terminating:
+                    raise HrnsError("SESSION_CLOSING", "The session is closing.")
+                self._local_terminating.add(session_id)
+            completed = False
+            result = self._queue_row(session_id, "", kind=kind)
+            try:
+                with contextlib.suppress(Exception):
+                    await super().cancel(session_id)
+                async with self._turn_lock(session_id):
+                    await self.commands.cancel_session(session_id)
+                    await super().close_session(session_id)
+                    await self.run_lifecycle(
+                        LifecycleEvent.DESTROY, session_id, operation_id=result.prompt_id
+                    )
+                    if kind is OperationKind.DELETE:
+                        staged = self.store.staged(session_id) is not None
+                        deleted = await self.store.delete(session_id)
+                        if not staged and not deleted:
+                            raise HrnsError(
+                                "SESSION_CONFLICT", "The local session deletion was not committed."
+                            )
+                        self.store.discard(session_id)
+                        database = self.sessions.plan_database()
+                        if database is not None:
+                            from .todo import forget_plan
+
+                            await asyncio.to_thread(forget_plan, database, session_id)
+                    self.sessions.forget(session_id)
+                    self.config.forget(session_id)
+                    self.commands.forget(session_id)
+                    self._session_cwd.pop(session_id, None)
+                    self._suspended.discard(session_id)
+                    self.fanout.unsubscribe_session(session_id)
+                completed = True
+                return replace(
+                    result,
+                    payload=lifecycle_policy_payload(record, result.prompt_id),
+                    state=PromptState.COMPLETED,
+                    updated_at=now_ms(),
+                )
+            finally:
+                if not completed:
+                    self._local_terminating.discard(session_id)
         if operation is not None:
             try:
                 payload = json.loads(operation.payload)
@@ -418,13 +580,34 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 {
                     "agentId": record.agent_id,
                     "cwd": record.cwd,
+                    "owner": record.effective_owner,
+                    "definitionVersion": record.definition_version,
                 },
                 separators=(",", ":"),
             )
-            operation = await self.store.begin_lifecycle_operation(
-                self._queue_row(session_id, payload, kind=kind),
-                reuse_completed=not self.session_is_live(session_id),
+            requested = self._queue_row(session_id, payload, kind=kind)
+            begin = asyncio.create_task(
+                self.store.begin_lifecycle_operation(
+                    requested,
+                    reuse_completed=not self.session_is_live(session_id),
+                )
             )
+            try:
+                operation = await asyncio.shield(begin)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await _drain_task(begin)
+                    await self.store.get_lifecycle_operation(
+                        session_id, kind, operation_id=requested.prompt_id
+                    )
+                raise
+            except Exception:
+                durable = await self.store.get_lifecycle_operation(
+                    session_id, kind, operation_id=requested.prompt_id
+                )
+                if durable is None:
+                    raise
+                operation = durable
         if operation.state is PromptState.COMPLETED:
             return operation
         lease = await self.acquire_session_lease(session_id)
@@ -459,16 +642,22 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         owner: str,
         fence: int,
     ) -> QueuedPrompt:
-        claimed = await self.store.claim_lifecycle_operation(
-            operation.prompt_id,
-            owner,
-            fence,
+        claim = asyncio.create_task(
+            self.store.claim_lifecycle_operation(operation.prompt_id, owner, fence)
         )
+        try:
+            claimed = await asyncio.shield(claim)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await _drain_task(claim)
+                await self.store.get_prompt(operation.prompt_id)
+            raise
         if claimed is None:
             completed = await self.store.get_lifecycle_operation(
                 operation.session_id,
                 operation.kind,
                 principal=operation.principal,
+                operation_id=operation.prompt_id,
             )
             if completed is not None and completed.state is PromptState.COMPLETED:
                 return completed
@@ -489,13 +678,70 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 await self.store.cancel_queued_operations(
                     session_id,
                     exclude_prompt_id=claimed.prompt_id,
+                    owner_id=owner,
+                    fence=fence,
                 )
                 await self.commands.cancel_session(session_id)
                 await super().close_session(session_id)
-            await self.run_lifecycle(
+            payload = json.loads(claimed.payload)
+            if not isinstance(payload, dict):
+                raise HrnsError("SESSION_CONFLICT", "The lifecycle context is invalid.")
+            record = await self.store.get_visible(session_id, claimed.principal)
+            owner_principal = payload.get("owner")
+            agent_id = payload.get("agentId")
+            cwd = payload.get("cwd")
+            definition_version = payload.get("definitionVersion")
+            metadata = payload.get("metadata")
+            access = payload.get("access")
+            collaborators = payload.get("collaborators")
+            if record is not None:
+                owner_principal = owner_principal or record.effective_owner
+                agent_id = agent_id or record.agent_id
+                cwd = cwd if isinstance(cwd, str) else record.cwd
+                definition_version = definition_version or record.definition_version
+                if metadata is None:
+                    metadata = self.session_context(record, session_id).metadata
+                if access is None:
+                    access = record.access.value
+                if collaborators is None:
+                    collaborators = sorted(record.collaborators)
+            if (
+                not isinstance(owner_principal, str)
+                or not isinstance(agent_id, str)
+                or not isinstance(cwd, str)
+                or not isinstance(definition_version, str)
+                or not isinstance(metadata, dict)
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in metadata.items())
+                or not isinstance(collaborators, list)
+                or not all(isinstance(item, str) for item in collaborators)
+            ):
+                raise HrnsError("SESSION_CONFLICT", "The durable lifecycle context is incomplete.")
+            try:
+                session_access = SessionAccess(access)
+            except (ValueError, TypeError) as exc:
+                raise HrnsError(
+                    "SESSION_CONFLICT", "The durable lifecycle access is invalid."
+                ) from exc
+            await run_hook(
+                self.policy.lifecycle,
                 LifecycleEvent.DESTROY,
-                session_id,
-                operation_id=claimed.prompt_id,
+                SessionLifecycleContext(
+                    session_id=session_id,
+                    principal=owner_principal,
+                    deployment_id=claimed.deployment_id,
+                    agent_id=agent_id,
+                    cwd=cwd,
+                    credential_id=claimed.credential_id,
+                    connection_id=claimed.connection_id,
+                    operation_id=claimed.prompt_id,
+                    definition_version=definition_version,
+                    session_fence=claimed.fence,
+                    operation_owner=claimed.owner_id,
+                    operation_revision=claimed.revision,
+                    metadata=metadata,
+                    access=session_access,
+                    collaborators=frozenset(collaborators),
+                ),
             )
             if delete_session:
                 database = self.sessions.plan_database()
@@ -504,17 +750,35 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
                     await asyncio.to_thread(forget_plan, database, session_id)
             self.sessions.forget(session_id)
-            self._turn_locks.pop(session_id, None)
             self.config.forget(session_id)
             self.commands.forget(session_id)
             self._session_cwd.pop(session_id, None)
-            settled = await self.store.settle_lifecycle_operation(
-                claimed.prompt_id,
-                PromptState.COMPLETED,
-                owner_id=owner,
-                fence=fence,
-                delete_session=delete_session,
+            settlement = asyncio.create_task(
+                self.store.settle_lifecycle_operation(
+                    claimed.prompt_id,
+                    PromptState.COMPLETED,
+                    owner_id=owner,
+                    fence=fence,
+                    delete_session=delete_session,
+                )
             )
+            try:
+                settled = await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await _drain_task(settlement)
+                    durable = await self.store.get_prompt(claimed.prompt_id)
+                    if durable is not None and durable.state is PromptState.COMPLETED:
+                        self._leases.pop(session_id, None)
+                        self.store.set_fence(session_id, None)
+                raise
+            except Exception:
+                durable = await self.store.get_lifecycle_operation(
+                    session_id, claimed.kind, operation_id=claimed.prompt_id
+                )
+                if durable is None or durable.state is not PromptState.COMPLETED:
+                    raise
+                settled = True
             if not settled:
                 raise HrnsError(
                     "SESSION_CONFLICT",
@@ -541,6 +805,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
         self._leases.pop(session_id, None)
         self.store.set_fence(session_id, None)
+        self._suspended.discard(session_id)
+        durable = await self.store.get_lifecycle_operation(
+            session_id, claimed.kind, operation_id=claimed.prompt_id
+        )
+        if durable is None or durable.state is not PromptState.COMPLETED:
+            raise HrnsError("SESSION_CONFLICT", "The lifecycle settlement could not be read back.")
         await self.fanout.session_notification(
             session_id,
             "hrns/session/terminated",
@@ -551,11 +821,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             },
         )
         self.fanout.unsubscribe_session(session_id)
-        return replace(
-            claimed,
-            state=PromptState.COMPLETED,
-            updated_at=now_ms(),
-        )
+        return durable
 
     def _turn_lock(self, session_id: str) -> asyncio.Lock:
         return self._turn_locks.setdefault(session_id, asyncio.Lock())
@@ -572,11 +838,44 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         second actor from an independently loaded snapshot. Taking over an expired lease
         fences out the old owner and marks its in-flight prompts uncertain.
         """
+        if self._retiring:
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+        if self.store.fence(session_id) == -1:
+            raise HrnsError("SESSION_CONFLICT", "This actor lost its session lease.")
         owner = self._lease_owner()
         if owner is None:
             return None
         previous = await self.store.get_lease(session_id)
-        lease = await self.store.acquire_lease(session_id, owner, self._lease_ttl_ms)
+        acquisition = asyncio.create_task(
+            self.store.acquire_lease(session_id, owner, self._lease_ttl_ms)
+        )
+        try:
+            lease = await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            # A database commit can outlive the caller. Adopt the exact result, not a
+            # later same-owner generation observed by a separate read.
+            while not acquisition.done():
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(acquisition)
+            if not acquisition.cancelled() and acquisition.exception() is None:
+                acquired = acquisition.result()
+                if acquired is not None:
+                    if self._retiring:
+                        with contextlib.suppress(Exception, asyncio.CancelledError):
+                            await self.store.release_lease(session_id, owner, acquired.fence)
+                    else:
+                        current = self._leases.get(session_id)
+                        if current is not None and current.fence != acquired.fence:
+                            self._leases.pop(session_id, None)
+                            self.store.set_fence(session_id, -1)
+                            with contextlib.suppress(Exception, asyncio.CancelledError):
+                                await self.store.release_lease(session_id, owner, acquired.fence)
+                                await super().cancel(session_id)
+                        elif self.store.fence(session_id) != -1:
+                            self._leases[session_id] = acquired
+                            self.store.set_fence(session_id, acquired.fence)
+                            self._start_lease_keeper()
+            raise
         if lease is None:
             raise HrnsError(
                 "SESSION_HELD",
@@ -587,13 +886,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     "expiresAt": previous.expires_at if previous is not None else None,
                 },
             )
-        if previous is not None and previous.owner_id != owner:
+        if self._retiring:
+            await self.store.release_lease(session_id, owner, lease.fence)
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+        current = self._leases.get(session_id)
+        if self.store.fence(session_id) == -1 or (
+            current is not None and current.fence != lease.fence
+        ):
+            self._leases.pop(session_id, None)
+            self.store.set_fence(session_id, -1)
             with contextlib.suppress(Exception):
-                await self.store.backend.mark_uncertain_prompts(
-                    previous.owner_id,
-                    deployment_id=self.policy.deployment_id,
-                    session_id=session_id,
-                )
+                await self.store.release_lease(session_id, owner, lease.fence)
+                await super().cancel(session_id)
+            raise HrnsError("SESSION_CONFLICT", "This actor lost its session lease.")
         self._leases[session_id] = lease
         self.store.set_fence(session_id, lease.fence)
         self._start_lease_keeper()
@@ -603,13 +908,14 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         # Only the actor that actually holds this lease may release it. A failed
         # ``session/load`` from a second principal must not expire the live owner's
         # lease or clear its fence.
-        if self._leases.pop(session_id, None) is None:
+        lease = self._leases.pop(session_id, None)
+        if lease is None:
             return
         owner = self._lease_owner()
         self.store.set_fence(session_id, None)
         if owner is not None:
             with contextlib.suppress(Exception):
-                await self.store.release_lease(session_id, owner)
+                await self.store.release_lease(session_id, owner, lease.fence)
 
     def _start_lease_keeper(self) -> None:
         if self._lease_task is None or self._lease_task.done():
@@ -624,25 +930,24 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             while self._leases:
                 await asyncio.sleep(interval)
                 for session_id in list(self._leases):
+                    lease = self._leases.get(session_id)
+                    if lease is None:
+                        continue
                     try:
                         renewed = await self.store.renew_lease(
-                            session_id, owner, self._lease_ttl_ms
+                            session_id, owner, lease.fence, self._lease_ttl_ms
                         )
                     except Exception:
                         # A transient store failure must not kill the keeper; retry on
                         # the next tick before the lease can expire.
+                        continue
+                    if self._leases.get(session_id) != lease:
                         continue
                     if renewed is None:
                         # The lease was lost. Fence every subsequent save with an
                         # impossible token and stop the turn rather than overwrite the
                         # new owner's state. The in-flight row becomes uncertain so it
                         # can never be silently replayed.
-                        with contextlib.suppress(Exception):
-                            await self.store.backend.mark_uncertain_prompts(
-                                owner,
-                                deployment_id=self.policy.deployment_id,
-                                session_id=session_id,
-                            )
                         self._leases.pop(session_id, None)
                         self.store.set_fence(session_id, -1)
                         with contextlib.suppress(Exception):
@@ -655,22 +960,33 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
     # --- lifecycle hooks --------------------------------------------------
 
-    def lifecycle_context(
+    async def lifecycle_context(
         self,
         session_id: str,
         *,
         operation_id: str | None = None,
     ) -> SessionLifecycleContext:
         request = self.attribution()
+        record = await self.session_record(session_id)
+        if record is None:
+            raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
+        lease = self._leases.get(session_id)
         return SessionLifecycleContext(
             session_id=session_id,
-            principal=self.acting_principal(),
-            deployment_id=self.policy.deployment_id,
-            agent_id=self.definition.agent_id,
-            cwd=self._session_cwd.get(session_id, ""),
+            principal=record.effective_owner,
+            deployment_id=record.deployment_id,
+            agent_id=record.agent_id,
+            cwd=record.cwd,
             credential_id=request.credential_id,
             connection_id=request.connection_id,
             operation_id=operation_id,
+            definition_version=record.definition_version,
+            session_fence=lease.fence
+            if lease is not None and lease.expires_at > now_ms()
+            else None,
+            metadata=self.session_context(record, session_id).metadata,
+            access=record.access,
+            collaborators=record.collaborators,
         )
 
     async def run_lifecycle(
@@ -686,35 +1002,62 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             await run_hook(
                 self.policy.lifecycle,
                 event,
-                self.lifecycle_context(session_id, operation_id=operation_id),
+                await self.lifecycle_context(session_id, operation_id=operation_id),
             )
             # Only a successful destroy is final; a failed hook must remain retryable.
             self._destroyed.add(session_id)
             return
         if event in (LifecycleEvent.CREATE, LifecycleEvent.RESUME):
             self._destroyed.discard(session_id)
-        await run_hook(self.policy.lifecycle, event, self.lifecycle_context(session_id))
+        await run_hook(self.policy.lifecycle, event, await self.lifecycle_context(session_id))
+        if event in (LifecycleEvent.CREATE, LifecycleEvent.RESUME):
+            self._local_terminating.discard(session_id)
+            self._suspended.discard(session_id)
+
+    def _activity_lock(self, session_id: str) -> asyncio.Lock:
+        return self._activity_locks.setdefault(session_id, asyncio.Lock())
+
+    async def _resume_work_locked(self, session_id: str) -> None:
+        if self._retiring or session_id in self._local_terminating:
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+        if session_id in self._suspended:
+            await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
+
+    async def _begin_local_work(self, session_id: str) -> None:
+        async with self._activity_lock(session_id):
+            await self._resume_work_locked(session_id)
+            self._local_work.add(session_id)
+
+    async def _end_local_work(self, session_id: str) -> None:
+        async with self._activity_lock(session_id):
+            self._local_work.discard(session_id)
+            if not self._retiring:
+                await self._notify_queue_locked(session_id)
 
     async def pending_prompts(self, session_id: str) -> int:
-        if self._lease_owner() is None:
-            return 0
         states = (PromptState.QUEUED, PromptState.CLAIMED)
         rows = await self.store.list_prompts(session_id, states=states)
-        return len(rows)
+        return len(rows) + int(session_id in self._local_work)
 
     async def notify_queue(self, session_id: str) -> None:
+        async with self._activity_lock(session_id):
+            await self._notify_queue_locked(session_id)
+
+    async def _notify_queue_locked(self, session_id: str) -> None:
         pending = await self.pending_prompts(session_id)
         await run_hook(
             self.policy.lifecycle,
             LifecycleEvent.QUEUE,
-            self.lifecycle_context(session_id),
+            await self.lifecycle_context(session_id),
             pending,
         )
-        if pending == 0:
+        if pending == 0 and session_id not in self._suspended and not self._retiring:
+            # A cancelled/failed suspend may already have affected the resource.
+            self._suspended.add(session_id)
             await run_hook(
                 self.policy.lifecycle,
                 LifecycleEvent.SUSPEND,
-                self.lifecycle_context(session_id),
+                await self.lifecycle_context(session_id),
             )
 
     async def notify_queue_update(self, row: QueuedPrompt) -> None:
@@ -797,7 +1140,116 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             },
         )
 
+    async def resolve_session_resources(
+        self,
+        record: SessionRecord,
+        action: PolicyAction,
+        *,
+        creation: SessionCreationOperation | None = None,
+    ) -> SessionResources | None:
+        """Resolve bindings only for an authorized principal holding the session lease."""
+        resolver = self.bundle.resource_resolver
+        if resolver is None:
+            return None
+        session_id = record.session_id
+        from hrns.server.resources import (
+            SessionResourceContext,
+            SessionResourcePhase,
+            SessionResources,
+        )
+
+        phases = {
+            PolicyAction.CREATE: SessionResourcePhase.CREATION,
+            PolicyAction.LOAD: SessionResourcePhase.LOAD,
+            PolicyAction.PROMPT: SessionResourcePhase.TURN,
+            PolicyAction.CONFIGURE: SessionResourcePhase.RECOMPOSITION,
+        }
+        phase = phases.get(action)
+        if phase is None:
+            raise HrnsError("INVALID_CONFIGURATION", "Unsupported resource resolution action.")
+        if action is PolicyAction.CREATE:
+            if (
+                creation is None
+                or session_id not in self._creating_updates
+                or creation.session_id != session_id
+                or creation.deployment_id != record.deployment_id
+                or creation.principal != record.effective_owner
+                or creation.principal != self.acting_principal()
+                or creation.request.agent_id != record.agent_id
+                or creation.request.definition_version != record.definition_version
+            ):
+                raise creation_conflict()
+            current_creation = await self.store.backend.get_creation(
+                creation.principal, creation.mutation_id
+            )
+            if (
+                current_creation is None
+                or current_creation.state is not SessionCreationState.CREATING
+            ):
+                raise creation_conflict()
+            check_creation_owner(current_creation, creation, now_ms())
+            creation = current_creation.model_copy(deep=True)
+            decision = await decide_policy(
+                self.policy.session_policy, self.session_context(record, session_id), action
+            )
+            if not decision.allowed:
+                raise HrnsError(decision.code, decision.message)
+        else:
+            if creation is not None or session_id in self._creating_updates:
+                raise creation_conflict()
+            record = await self.authorize(session_id, action)
+        lease = await self.acquire_session_lease(session_id)
+        if lease is None:
+            raise HrnsError("SESSION_HELD", "Resource resolution requires a session lease.")
+        policy = self.session_context(record, session_id)
+        policy = replace(policy, metadata=MappingProxyType(dict(policy.metadata)))
+        resolved = await resolver(
+            SessionResourceContext(
+                phase=phase,
+                session_id=session_id,
+                deployment_id=record.deployment_id,
+                agent_id=record.agent_id,
+                definition_version=record.definition_version,
+                principal=policy.principal,
+                owner=record.effective_owner,
+                lease=lease,
+                policy=policy,
+                creation=creation,
+            )
+        )
+        if not isinstance(resolved, SessionResources):
+            raise HrnsError(
+                "INVALID_CONFIGURATION", "The session resource resolver returned invalid bindings."
+            )
+        current = await self.acquire_session_lease(session_id)
+        if current is None or current.fence != lease.fence:
+            raise HrnsError(
+                "SESSION_CONFLICT", "The session lease changed during resource resolution."
+            )
+        if creation is not None:
+            current_creation = await self.store.backend.get_creation(
+                creation.principal, creation.mutation_id
+            )
+            if (
+                current_creation is None
+                or current_creation.state is not SessionCreationState.CREATING
+            ):
+                raise creation_conflict()
+            check_creation_owner(current_creation, creation, now_ms())
+        else:
+            latest = await self.authorize(session_id, action)
+            if (
+                latest.definition_version != record.definition_version
+                or latest.effective_owner != record.effective_owner
+            ):
+                raise HrnsError(
+                    "SESSION_CONFLICT", "The session changed during resource resolution."
+                )
+        return resolved
+
     async def _guard_approval(self, session_id: str) -> None:
+        if _headless_turn.get():
+            raise HrnsError("CAPABILITY_UNAVAILABLE", "Approval requires an attached client.")
         await self.authorize(session_id, PolicyAction.APPROVE)
 
     async def authorize(
@@ -814,6 +1266,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         ``SESSION_READ_ONLY`` and is reported separately because the caller can replay
         the session.
         """
+        if self._retiring:
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
         if session_id in self._creating_updates:
             raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
         known = record if record is not None else await self.session_record(session_id)
@@ -971,6 +1425,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 self.sessions.pending_effort = request.effort
                 self.store.stage(record)
                 try:
+                    await self.acquire_session_lease(session_id)
                     config = await self.sessions.compose_session(
                         AcpSession(
                             cwd=request.cwd,
@@ -978,7 +1433,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                             session_id=session_id,
                             client_capabilities=request.client_capabilities,
                             client=self.fanout,
-                        )
+                        ),
+                        creation=lease.operation.model_copy(deep=True),
                     )
                 finally:
                     self.sessions.pending_creation = None
@@ -997,19 +1453,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     definition_version=request.definition_version,
                     config_options=self.sessions.options_for(session_id),
                 )
-                owner = self._lease_owner()
-                session_lease = (
-                    SessionLease(
-                        session_id=session_id,
-                        principal=operation.principal,
-                        deployment_id=operation.deployment_id,
-                        owner_id=owner,
-                        fence=1,
-                        expires_at=now_ms() + self._lease_ttl_ms,
-                    )
-                    if owner is not None
-                    else None
-                )
+                session_lease = await self.acquire_session_lease(session_id)
                 try:
                     await lease.commit(
                         record,
@@ -1086,6 +1530,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                         operation.deployment_id,
                         session_id,
                         owner,
+                        1,
                     )
             raise
         finally:
@@ -1101,6 +1546,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.NewSessionResponse:
         try:
+            if self._retiring:
+                raise HrnsError("SESSION_CLOSING", "The host is retiring.")
             if self.bundle.creation_handler is not None:
                 self.sessions.reject_additional_directories(additional_directories)
                 self.sessions.reject_client_mcp(mcp_servers)
@@ -1274,7 +1721,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 _conn_override.reset(token)
             self._session_cwd[session_id] = stored_cwd
             if not record.read_only:
-                await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
+                async with self._activity_lock(session_id):
+                    await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
         except HrnsError as exc:
             if not owned_before:
                 await self.release_session_lease(session_id)
@@ -1474,7 +1922,11 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             self.fanout.subscribe(connection_id, session_id)
         if self._lease_owner() is None:
             async with self._turn_lock(session_id):
-                return await self._run_prompt_turn(session_id, prompt, kwargs)
+                await self._begin_local_work(session_id)
+                try:
+                    return await self._run_prompt_turn(session_id, prompt, kwargs)
+                finally:
+                    await self._end_local_work(session_id)
         payload = self._queue_payload(prompt)
         self._decode_prompt(payload)
         row = self._queue_row(session_id, payload)
@@ -1494,6 +1946,9 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         kwargs: Mapping[str, Any],
     ) -> schema.PromptResponse:
         await self.sessions.ensure_title(session_id, _prompt_text(prompt))
+        if self._retiring:
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+        await self.sessions.refresh_turn_resources(session_id)
         self.sessions.turn_usage[session_id] = {}
         response = None
         try:
@@ -1625,11 +2080,16 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             }
         )
         try:
-            result = await self.store.enqueue_prompt_mutation(
-                self._queue_row(session_id, payload),
-                mutation_id=mutation_id,
-                request_hash=request_hash,
-            )
+            async with self._activity_lock(session_id):
+                if self._retiring:
+                    raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+                result = await self.store.enqueue_prompt_mutation(
+                    self._queue_row(session_id, payload),
+                    mutation_id=mutation_id,
+                    request_hash=request_hash,
+                )
+                if not result.replayed:
+                    await self._notify_queue_locked(session_id)
         except HrnsError:
             raise
         except Exception as exc:
@@ -1640,8 +2100,134 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             ) from exc
         if not result.replayed:
             await self.notify_queue_update(result.item)
-            await self.notify_queue(session_id)
         return result.item
+
+    async def submit_headless_turn(self, session_id: str, request: TurnRequest) -> TurnReceipt:
+        """Durably enqueue a native turn and schedule the existing ordered drain."""
+        if (
+            not request.origin.strip()
+            or len(request.origin) > 200
+            or not request.mutation_id.strip()
+            or len(request.mutation_id) > 200
+        ):
+            raise HrnsError("INVALID_CONFIGURATION", "origin and mutation_id must not be empty.")
+        await self.authorize_queue_mutation(session_id)
+        await self.load_headless_session(session_id)
+        await self.sessions.ensure_persisted(session_id)
+        lease = await self.acquire_session_lease(session_id)
+        if lease is None:
+            raise HrnsError("SESSION_HELD", "Headless turns require hosted session authority.")
+        payload = self._queue_payload(request.prompt)
+        principal = self.acting_principal()
+        fingerprint = canonical_hash(
+            {
+                "operation": "enqueue",
+                "sessionId": session_id,
+                "principal": principal,
+                "prompt": json.loads(payload),
+                "mutationId": request.mutation_id,
+                "origin": request.origin,
+            }
+        )
+        row = replace(
+            self._queue_row(session_id, payload),
+            origin=request.origin,
+            mutation_id=request.mutation_id,
+            connection_id=None,
+        )
+        async with self._activity_lock(session_id):
+            if self._retiring:
+                raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+            result = await self.store.enqueue_prompt_mutation(
+                row, mutation_id=request.mutation_id, request_hash=fingerprint
+            )
+            if not result.replayed:
+                await self._notify_queue_locked(session_id)
+        current = await self.store.get_prompt(result.item.prompt_id)
+        receipt = (
+            current.turn_receipt()
+            if current is not None
+            and current.principal == principal
+            and current.session_id == session_id
+            and current.deployment_id == self.policy.deployment_id
+            else None
+        )
+        if receipt is None:
+            raise HrnsError("SESSION_DURABILITY_FAILED", "The durable turn receipt is unavailable.")
+        if not result.replayed and current is not None:
+            await self.notify_queue_update(current)
+        self._schedule_headless_drain(session_id)
+        return receipt
+
+    async def get_turn_receipt(
+        self, session_id: str, prompt_id: str, *, principal: str
+    ) -> TurnReceipt | None:
+        if principal != self.acting_principal():
+            return None
+        await self.authorize(session_id, PolicyAction.LOAD)
+        return await self.store.get_turn_receipt(session_id, prompt_id, principal)
+
+    async def get_turn_receipt_by_mutation(
+        self, session_id: str, mutation_id: str, *, principal: str
+    ) -> TurnReceipt | None:
+        if principal != self.acting_principal():
+            return None
+        await self.authorize(session_id, PolicyAction.LOAD)
+        return await self.store.get_turn_receipt_by_mutation(session_id, mutation_id, principal)
+
+    async def resume_queued_turns(self, session_id: str) -> None:
+        """Schedule recovery after the server has loaded the authoritative session actor."""
+        await self.load_headless_session(session_id)
+        if await self.acquire_session_lease(session_id) is None:
+            raise HrnsError("SESSION_HELD", "Headless turns require hosted session authority.")
+        self._schedule_headless_drain(session_id)
+
+    async def load_headless_session(self, session_id: str) -> None:
+        """Load an actor without creating or routing requests to an ACP client."""
+        async with self._turn_lock(session_id):
+            if session_id in self._sessions:
+                return
+            record = await self.session_record(session_id)
+            if record is None:
+                raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
+            await self.authorize(session_id, PolicyAction.LOAD, record=record)
+            lease = await self.acquire_session_lease(session_id)
+            if lease is None:
+                raise HrnsError("SESSION_HELD", "Headless turns require hosted session authority.")
+            revision = self.sessions.revision_for(record)
+            cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
+            # An empty fanout drops replay updates without fabricating an ACP peer.
+            token = _conn_override.set(FanoutClient())
+            try:
+                await super().load_session(
+                    cwd, session_id, mcp_servers=None, additional_directories=None
+                )
+            finally:
+                _conn_override.reset(token)
+            self._session_cwd[session_id] = cwd
+            if not record.read_only:
+                async with self._activity_lock(session_id):
+                    await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
+
+    def _schedule_headless_drain(self, session_id: str) -> None:
+        async def drain() -> None:
+            while not self._retiring:
+                done = await self._drain_ordered_operations(session_id)
+                if len(done) < 100:
+                    break
+
+        task = asyncio.create_task(drain())
+        self._headless_tasks.add(task)
+
+        def completed(done: asyncio.Task[None]) -> None:
+            self._headless_tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(completed)
+
+    def has_pending_headless_tasks(self) -> bool:
+        return bool(self._headless_tasks)
 
     async def edit_queued_prompt(self, request: QueueEditRequest) -> QueueUpdate:
         """Replace one still-queued prompt without changing its identity or order."""
@@ -1683,14 +2269,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         await self.authorize_queue_mutation(request.session_id)
         request_hash = canonical_hash({"operation": "remove", **request.to_wire()})
         try:
-            result = await self.store.remove_prompt(
-                request.session_id,
-                request.prompt_id,
-                expected_revision=request.expected_revision,
-                mutation_id=request.mutation_id,
-                request_hash=request_hash,
-                update_id=uuid.uuid4().hex,
-            )
+            async with self._activity_lock(request.session_id):
+                if self._retiring:
+                    raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+                result = await self.store.remove_prompt(
+                    request.session_id,
+                    request.prompt_id,
+                    expected_revision=request.expected_revision,
+                    mutation_id=request.mutation_id,
+                    request_hash=request_hash,
+                    update_id=uuid.uuid4().hex,
+                )
+                if not result.replayed:
+                    await self._notify_queue_locked(request.session_id)
         except HrnsError:
             raise
         except Exception as exc:
@@ -1701,7 +2292,6 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             ) from exc
         if not result.replayed:
             await self.notify_queue_update(result.item)
-            await self.notify_queue(request.session_id)
         return self._public_queue_update(result.item)
 
     @staticmethod
@@ -1766,8 +2356,14 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             raise HrnsError("SESSION_HELD", "Draining ordered work requires a hosted session.")
         done: list[QueuedPrompt] = []
         async with self._turn_lock(session_id):
+            if self._retiring:
+                raise HrnsError("SESSION_CLOSING", "The host is retiring.")
             processed = 0
             while stop_id is not None or processed < limit:
+                if self._retiring:
+                    if stop_id is not None:
+                        raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+                    break
                 lifecycle = await self.pending_lifecycle_operation(session_id)
                 if lifecycle is not None:
                     if stop_id is not None:
@@ -1787,9 +2383,21 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                         "SESSION_HELD",
                         "Draining ordered work requires an owned session lease.",
                     )
-                row = await self.store.claim_next_prompt(
-                    session_id, owner, lease.fence, self._lease_ttl_ms
+                claim = asyncio.create_task(
+                    self.store.claim_next_prompt(session_id, owner, lease.fence, self._lease_ttl_ms)
                 )
+                try:
+                    row = await asyncio.shield(claim)
+                except asyncio.CancelledError:
+                    while not claim.done():
+                        with contextlib.suppress(Exception, asyncio.CancelledError):
+                            await asyncio.shield(claim)
+                    if not claim.cancelled() and claim.exception() is None:
+                        claimed = claim.result()
+                        if claimed is not None:
+                            with contextlib.suppress(Exception, asyncio.CancelledError):
+                                await self.finish_queued_prompt(claimed, PromptState.UNCERTAIN)
+                    raise
                 if row is None:
                     if stop_id is not None:
                         raise HrnsError(
@@ -1798,6 +2406,11 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                             {"sessionId": session_id, "operationId": stop_id},
                         )
                     break
+                if self._retiring:
+                    await self.finish_queued_prompt(row, PromptState.UNCERTAIN)
+                    if stop_id is not None:
+                        raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+                    break
                 processed += 1
                 if row.kind is OperationKind.PROMPT:
                     with contextlib.suppress(Exception, asyncio.CancelledError):
@@ -1805,9 +2418,13 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 outcome = PromptState.FAILED
                 result: Any = None
                 failure: BaseException | None = None
+                captured_output = _CapturedOutput()
+                output_token = _turn_output.set(captured_output)
                 try:
+                    async with self._activity_lock(session_id):
+                        await self._resume_work_locked(session_id)
                     result = await self._execute_ordered_operation(row)
-                    if (
+                    if self._retiring or (
                         row.kind is OperationKind.PROMPT
                         and getattr(result, "stop_reason", None) == "cancelled"
                     ):
@@ -1818,9 +2435,29 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     outcome = PromptState.UNCERTAIN
                     failure = exc
                 except Exception as exc:
+                    if self._retiring:
+                        outcome = PromptState.UNCERTAIN
                     failure = exc
                 finally:
-                    finished = await self.finish_queued_prompt(row, outcome)
+                    turn_result = None
+                    if row.origin is not None:
+                        if outcome is PromptState.COMPLETED and isinstance(
+                            result, schema.PromptResponse
+                        ):
+                            turn_result = TurnResult(
+                                output=captured_output.output, stop_reason=result.stop_reason
+                            )
+                        elif outcome is PromptState.FAILED:
+                            turn_result = TurnResult(
+                                error_code=failure.code
+                                if isinstance(failure, HrnsError)
+                                else "TURN_FAILED",
+                                error_message=failure.message
+                                if isinstance(failure, HrnsError)
+                                else "The turn failed.",
+                            )
+                    _turn_output.reset(output_token)
+                    finished = await self.finish_queued_prompt(row, outcome, result=turn_result)
                     if not finished and failure is None:
                         failure = HrnsError(
                             "SESSION_CONFLICT",
@@ -1848,20 +2485,47 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         return done
 
     async def _execute_ordered_operation(self, row: QueuedPrompt) -> Any:
+        if self._retiring:
+            raise HrnsError("SESSION_CLOSING", "The host is retiring.")
         request = RequestContext(
             principal=row.principal,
             credential_id=row.credential_id,
             connection_id=row.connection_id,
             agent_id=self.definition.agent_id,
+            session_id=row.session_id,
+            operation_id=row.prompt_id,
+            origin=row.origin,
         )
         request_token = current_request.set(request)
         connection_token = current_connection_id.set(row.connection_id)
         fanout_token = (
             self.fanout.select(row.connection_id) if row.connection_id is not None else None
         )
+        clear_route = current_connection.set(None) if row.origin is not None else None
+        headless_token = _headless_turn.set(True) if row.origin is not None else None
+        conn_override = (
+            _conn_override.set(self.fanout)
+            if row.origin is not None or self._conn is None
+            else None
+        )
         try:
             if row.kind is OperationKind.PROMPT:
                 kwargs = self._operation_kwargs.pop(row.prompt_id, {})
+                if row.origin is not None:
+                    async with self.sessions.client_gate_locks.setdefault(
+                        row.session_id, asyncio.Lock()
+                    ):
+                        gate = self.fanout.client_gates.get(row.session_id)
+                        previous = gate.accepts if gate is not None else False
+                        if gate is not None:
+                            gate.accepts = False
+                        try:
+                            return await self._run_prompt_turn(
+                                row.session_id, self._decode_prompt(row.payload), kwargs
+                            )
+                        finally:
+                            if gate is not None:
+                                gate.accepts = previous
                 return await self._run_prompt_turn(
                     row.session_id,
                     self._decode_prompt(row.payload),
@@ -1891,13 +2555,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 {"kind": row.kind.value},
             )
         finally:
+            if headless_token is not None:
+                _headless_turn.reset(headless_token)
+            if conn_override is not None:
+                _conn_override.reset(conn_override)
+            if clear_route is not None:
+                current_connection.reset(clear_route)
             if fanout_token is not None:
                 self.fanout.reset(fanout_token)
             current_connection_id.reset(connection_token)
             current_request.reset(request_token)
 
     async def finish_queued_prompt(
-        self, queued: QueuedPrompt | None, state: PromptState
+        self, queued: QueuedPrompt | None, state: PromptState, *, result: TurnResult | None = None
     ) -> QueuedPrompt | None:
         if queued is None:
             return None
@@ -1907,11 +2577,21 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         fence = queued.fence
         if owner is None or fence is None:
             return None
-        try:
-            finished = await asyncio.shield(
-                self.store.finish_prompt(queued.prompt_id, state, owner_id=owner, fence=fence)
+        finishing = asyncio.create_task(
+            self.store.finish_prompt(
+                queued.prompt_id, state, owner_id=owner, fence=fence, result=result
             )
-        except (Exception, asyncio.CancelledError):
+        )
+        try:
+            finished = await asyncio.shield(finishing)
+        except asyncio.CancelledError:
+            while not finishing.done():
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(finishing)
+            if not finishing.cancelled():
+                finishing.exception()
+            raise
+        except Exception:
             return None
         if finished is not None and finished.kind is OperationKind.PROMPT:
             with contextlib.suppress(Exception, asyncio.CancelledError):
@@ -1960,15 +2640,20 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 "mutationId": mutation_id,
             }
         )
-        result = await self.store.retry_prompt(
-            prompt_id,
-            session_id=session_id,
-            new_prompt_id=uuid.uuid4().hex,
-            owner_id=owner,
-            fence=lease.fence,
-            mutation_id=mutation_id,
-            request_hash=request_hash,
-        )
+        async with self._activity_lock(session_id):
+            if self._retiring:
+                raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+            result = await self.store.retry_prompt(
+                prompt_id,
+                session_id=session_id,
+                new_prompt_id=uuid.uuid4().hex,
+                owner_id=owner,
+                fence=lease.fence,
+                mutation_id=mutation_id,
+                request_hash=request_hash,
+            )
+            if result is not None and not result.replayed:
+                await self._notify_queue_locked(session_id)
         if result is None:
             raise HrnsError(
                 "INVALID_REQUEST",
@@ -1977,7 +2662,6 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             )
         if not result.replayed:
             await self.notify_queue_update(result.item)
-            await self.notify_queue(session_id)
         return self._public_queue_update(result.item)
 
     async def _submit_ordered_operation(
@@ -1990,12 +2674,15 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         if kwargs:
             self._operation_kwargs[row.prompt_id] = dict(kwargs)
         try:
-            stored = await self.store.enqueue_prompt(row)
+            async with self._activity_lock(row.session_id):
+                if self._retiring:
+                    raise HrnsError("SESSION_CLOSING", "The host is retiring.")
+                stored = await self.store.enqueue_prompt(row)
+                await self._notify_queue_locked(row.session_id)
         except BaseException:
             self._operation_results.pop(row.prompt_id, None)
             self._operation_kwargs.pop(row.prompt_id, None)
             raise
-        await self.notify_queue(row.session_id)
         try:
             await self._drain_ordered_operations(row.session_id, stop_id=stored.prompt_id)
             return await asyncio.shield(waiter)
@@ -2005,13 +2692,18 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
     async def order_configuration_update(self, request: ConfigurationUpdate) -> dict[str, Any]:
         """Order a binding transaction with prompts at the next turn boundary."""
+        self.require_queue_mutation_scope()
         await self.authorize(request.session_id, PolicyAction.CONFIGURE)
         self.config.validate(request)
         await self.sessions.ensure_persisted(request.session_id)
         await self.acquire_session_lease(request.session_id)
         if self._lease_owner() is None:
             async with self._turn_lock(request.session_id):
-                return await self.config.apply(request)
+                await self._begin_local_work(request.session_id)
+                try:
+                    return await self.config.apply(request)
+                finally:
+                    await self._end_local_work(request.session_id)
         payload = json.dumps(
             request.to_wire(),
             ensure_ascii=False,
@@ -2040,12 +2732,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.SetSessionConfigOptionResponse | None:
         try:
+            self.require_queue_mutation_scope()
             await self.authorize(session_id, PolicyAction.CONFIGURE)
             await self.sessions.ensure_persisted(session_id)
             await self.acquire_session_lease(session_id)
             if self._lease_owner() is None:
                 async with self._turn_lock(session_id):
-                    return await self._apply_config_option(config_id, session_id, value, **kwargs)
+                    await self._begin_local_work(session_id)
+                    try:
+                        return await self._apply_config_option(
+                            config_id, session_id, value, **kwargs
+                        )
+                    finally:
+                        await self._end_local_work(session_id)
             payload = json.dumps(
                 {"configId": config_id, "value": value},
                 ensure_ascii=False,
@@ -2228,6 +2927,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 return composition.snapshot.to_wire()
             if method == "hrns/configuration/update":
                 request = ConfigurationUpdate.model_validate(dict(params))
+                self.require_queue_mutation_scope()
                 await self.authorize(request.session_id, PolicyAction.CONFIGURE)
                 return await self.config.update(request)
             if method == "hrns/commands/list":
@@ -2303,6 +3003,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 session_id = params.get("sessionId", params.get("session_id"))
                 if not isinstance(session_id, str) or not session_id:
                     raise HrnsError("INVALID_CONFIGURATION", "sessionId is required.")
+                self.require_queue_mutation_scope()
                 record = await self.authorize(session_id, PolicyAction.CONFIGURE)
                 if record.effective_owner != self.acting_principal():
                     raise HrnsError(

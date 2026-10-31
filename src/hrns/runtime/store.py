@@ -14,12 +14,13 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from hrns.protocol import HrnsError
 
@@ -37,6 +38,7 @@ from .acp_store import (
     SessionPage,
     SessionRecord,
     SessionStore,
+    TurnResult,
     _DeploymentList,
     _PromptList,
     _session_conflict,
@@ -46,6 +48,7 @@ from .acp_store import (
     deserialize_collaborators,
     encode_session,
     encode_session_cursor,
+    lifecycle_policy_payload,
     now_ms,
     serialize_bindings,
     serialize_collaborators,
@@ -83,6 +86,7 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     owner TEXT,
     collaborators TEXT NOT NULL DEFAULT '[]',
     client_capabilities INTEGER,
+    capability_revision INTEGER NOT NULL DEFAULT 0,
     next_update_revision INTEGER NOT NULL DEFAULT 1,
     next_queue_revision INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
@@ -119,6 +123,9 @@ CREATE TABLE IF NOT EXISTS acp_prompt_queue (
   revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  origin TEXT,
+  mutation_id TEXT,
+  result TEXT,
   UNIQUE(session_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS idx_acp_prompt_queue_order
@@ -151,6 +158,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("owner", "TEXT"),
     ("collaborators", "TEXT NOT NULL DEFAULT '[]'"),
     ("client_capabilities", "INTEGER"),
+    ("capability_revision", "INTEGER NOT NULL DEFAULT 0"),
     ("next_update_revision", "INTEGER NOT NULL DEFAULT 1"),
     ("next_queue_revision", "INTEGER NOT NULL DEFAULT 1"),
 )
@@ -159,6 +167,9 @@ _ADDED_QUEUE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("kind", "TEXT NOT NULL DEFAULT 'prompt'"),
     ("update_id", "TEXT NOT NULL DEFAULT ''"),
     ("revision", "INTEGER NOT NULL DEFAULT 0"),
+    ("origin", "TEXT"),
+    ("mutation_id", "TEXT"),
+    ("result", "TEXT"),
 )
 
 
@@ -173,6 +184,24 @@ def default_store_path() -> Path:
 
 
 _ResultT = TypeVar("_ResultT")
+_ParamsT = ParamSpec("_ParamsT")
+
+
+async def _thread(
+    operation: Callable[_ParamsT, _ResultT], *args: _ParamsT.args, **kwargs: _ParamsT.kwargs
+) -> _ResultT:
+    """Keep the caller's connection lock until a cancelled worker actually stops."""
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+        while not task.done():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(task)
+        with suppress(Exception):
+            task.result()
+        raise exc
+
 
 #: States that may only be reached through ``finish_prompt``.
 _TERMINAL_PROMPT_STATES = frozenset(
@@ -188,8 +217,8 @@ _PROMPT_INSERT = """
 INSERT INTO acp_prompt_queue (
     prompt_id, session_id, principal, deployment_id, credential_id, connection_id,
     sequence, kind, payload, state, attempt, parent_id, owner_id, fence, update_id, revision,
-    created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, updated_at, origin, mutation_id, result
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _DEPLOYMENT_UPSERT = """
@@ -240,6 +269,7 @@ def _row_to_record(row: sqlite3.Row) -> SessionRecord:
         accepts_client_capabilities=(
             None if values["client_capabilities"] is None else bool(values["client_capabilities"])
         ),
+        capability_revision=int(values["capability_revision"]),
         created_at=int(values["created_at"]),
         last_active_at=int(values["last_active_at"]),
     )
@@ -278,6 +308,9 @@ def _row_to_prompt(row: sqlite3.Row) -> QueuedPrompt:
         revision=int(values["revision"]),
         created_at=int(values["created_at"]),
         updated_at=int(values["updated_at"]),
+        origin=values["origin"],
+        mutation_id=values["mutation_id"],
+        result=TurnResult.model_validate_json(values["result"]) if values["result"] else None,
     )
 
 
@@ -324,6 +357,9 @@ def _insert_prompt(connection: sqlite3.Connection, prompt: QueuedPrompt) -> None
             prompt.revision,
             prompt.created_at,
             prompt.updated_at,
+            prompt.origin,
+            prompt.mutation_id,
+            prompt.result.model_dump_json() if prompt.result is not None else None,
         ),
     )
 
@@ -341,6 +377,40 @@ def _reserve_queue_revision(connection: sqlite3.Connection, session_id: str) -> 
             {"sessionId": session_id},
         )
     return int(row["revision"])
+
+
+def _recover_abandoned_claims(
+    connection: sqlite3.Connection, deployment_id: str, session_id: str, active: int
+) -> None:
+    rows = connection.execute(
+        "SELECT prompt_id FROM acp_prompt_queue WHERE deployment_id = ? "
+        "AND session_id = ? AND state = ? ORDER BY sequence",
+        (deployment_id, session_id, PromptState.CLAIMED.value),
+    ).fetchall()
+    for row in rows:
+        connection.execute(
+            "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
+            "updated_at = ? WHERE prompt_id = ?",
+            (
+                PromptState.UNCERTAIN.value,
+                uuid.uuid4().hex,
+                _reserve_queue_revision(connection, session_id),
+                active,
+                row["prompt_id"],
+            ),
+        )
+
+
+def _require_lease(
+    connection: sqlite3.Connection, deployment_id: str, session_id: str, owner_id: str, fence: int
+) -> None:
+    lease = connection.execute(
+        "SELECT 1 FROM acp_session_leases WHERE session_id = ? AND deployment_id = ? "
+        "AND owner_id = ? AND fence = ? AND expires_at > ?",
+        (session_id, deployment_id, owner_id, fence, now_ms()),
+    ).fetchone()
+    if lease is None:
+        raise _session_conflict(deployment_id, session_id, fence)
 
 
 def _prompt_snapshot(prompt: QueuedPrompt) -> str:
@@ -370,6 +440,9 @@ def _prompt_from_snapshot(payload: str) -> QueuedPrompt:
         revision=int(values["revision"]),
         created_at=int(values["created_at"]),
         updated_at=int(values["updated_at"]),
+        origin=values.get("origin"),
+        mutation_id=values.get("mutation_id"),
+        result=TurnResult.model_validate(values["result"]) if values.get("result") else None,
     )
 
 
@@ -483,10 +556,26 @@ class SQLiteSessionStore(SessionStore):
             check_same_thread=False,
         )
         connection.row_factory = sqlite3.Row
-        if not self._memory:
-            connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute(f"PRAGMA busy_timeout = {int(self._busy_timeout * 1000)}")
+        try:
+            connection.execute(f"PRAGMA busy_timeout = {int(self._busy_timeout * 1000)}")
+            if not self._memory:
+                deadline = time.monotonic() + self._busy_timeout
+                while True:
+                    try:
+                        connection.execute("PRAGMA journal_mode=WAL")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+                        if (
+                            code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                            or time.monotonic() >= deadline
+                        ):
+                            raise
+                        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+            connection.execute("PRAGMA foreign_keys=ON")
+        except BaseException:
+            connection.close()
+            raise
         self._connection = connection
         return connection
 
@@ -494,26 +583,29 @@ class SQLiteSessionStore(SessionStore):
         if self._initialized:
             return
         async with self._lock:
-            await asyncio.to_thread(self._initialize_sync)
+            await _thread(self._initialize_sync)
             self._initialized = True
 
     def _initialize_sync(self) -> None:
         connection = self._connect()
         connection.executescript(_SCHEMA)
         connection.execute(CREATION_SCHEMA)
-        existing = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(acp_sessions)")
-        }
-        for name, declaration in _ADDED_COLUMNS:
-            if name not in existing:
-                connection.execute(f"ALTER TABLE acp_sessions ADD COLUMN {name} {declaration}")
-        existing_queue = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(acp_prompt_queue)")
-        }
-        for name, declaration in _ADDED_QUEUE_COLUMNS:
-            if name not in existing_queue:
-                connection.execute(f"ALTER TABLE acp_prompt_queue ADD COLUMN {name} {declaration}")
         with _immediate(connection):
+            existing = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(acp_sessions)")
+            }
+            for name, declaration in _ADDED_COLUMNS:
+                if name not in existing:
+                    connection.execute(f"ALTER TABLE acp_sessions ADD COLUMN {name} {declaration}")
+            existing_queue = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(acp_prompt_queue)")
+            }
+            for name, declaration in _ADDED_QUEUE_COLUMNS:
+                if name not in existing_queue:
+                    connection.execute(
+                        f"ALTER TABLE acp_prompt_queue ADD COLUMN {name} {declaration}"
+                    )
             rows = connection.execute(
                 "SELECT prompt_id, session_id FROM acp_prompt_queue "
                 "WHERE revision < 1 OR update_id = '' ORDER BY session_id, sequence"
@@ -547,7 +639,7 @@ class SQLiteSessionStore(SessionStore):
             self._connection = None
             self._initialized = False
             if connection is not None:
-                await asyncio.to_thread(connection.close)
+                await _thread(connection.close)
 
     def _run(self, operation: Callable[..., _ResultT], *args: Any) -> _ResultT:
         if not self._initialized:
@@ -555,19 +647,8 @@ class SQLiteSessionStore(SessionStore):
         return operation(*args)
 
     async def _creation_run(self, operation: Callable[[], _ResultT]) -> _ResultT:
-        # to_thread keeps running after cancellation. Hold the connection lock until
-        # the transaction actually finishes, including an unknown commit outcome.
         async with self._lock:
-            task = asyncio.create_task(asyncio.to_thread(self._run, operation))
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                while not task.done():
-                    with suppress(asyncio.CancelledError):
-                        await asyncio.shield(task)
-                with suppress(Exception):
-                    task.result()
-                raise exc
+            return await _thread(self._run, operation)
 
     async def reserve_creation(
         self, operation: SessionCreationOperation
@@ -736,19 +817,22 @@ class SQLiteSessionStore(SessionStore):
                     ),
                 )
                 if lease is not None:
-                    connection.execute(
-                        "INSERT INTO acp_session_leases "
-                        "(session_id, principal, deployment_id, owner_id, fence, expires_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                    changed = connection.execute(
+                        "UPDATE acp_session_leases SET expires_at = MAX(expires_at, ?) "
+                        "WHERE session_id = ? AND principal = ? AND deployment_id = ? "
+                        "AND owner_id = ? AND fence = ? AND expires_at > ?",
                         (
+                            lease.expires_at,
                             lease.session_id,
                             lease.principal,
                             lease.deployment_id,
                             lease.owner_id,
                             lease.fence,
-                            lease.expires_at,
+                            now_ms(),
                         ),
-                    )
+                    ).rowcount
+                    if changed != 1:
+                        raise creation_conflict()
                 self._creation_write(
                     operation.model_copy(
                         update={
@@ -816,13 +900,13 @@ class SQLiteSessionStore(SessionStore):
             )
 
         async with self._lock:
-            await asyncio.to_thread(self._run, operation)
+            await _thread(self._run, operation)
 
     async def get(
         self, principal: str, deployment_id: str, session_id: str
     ) -> SessionRecord | None:
         async with self._lock:
-            row = await asyncio.to_thread(
+            row = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -861,7 +945,7 @@ class SQLiteSessionStore(SessionStore):
             "ORDER BY last_active_at DESC, session_id ASC LIMIT ?"
         )
         async with self._lock:
-            rows = await asyncio.to_thread(
+            rows = await _thread(
                 self._run,
                 lambda: self._connect().execute(query, [*values, limit + 1]).fetchall(),
             )
@@ -878,7 +962,7 @@ class SQLiteSessionStore(SessionStore):
         # physical delete to the deployment only.
         del principal
         async with self._lock:
-            changed = await asyncio.to_thread(
+            changed = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -926,7 +1010,7 @@ class SQLiteSessionStore(SessionStore):
         values.extend([session_id, deployment_id])
 
         async with self._lock:
-            await asyncio.to_thread(
+            await _thread(
                 self._run,
                 lambda: self._connect().execute(
                     f"UPDATE acp_sessions SET {', '.join(assignments)} "
@@ -956,7 +1040,7 @@ class SQLiteSessionStore(SessionStore):
         values.extend([session_id, deployment_id, principal])
 
         async with self._lock:
-            changed = await asyncio.to_thread(
+            changed = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -977,27 +1061,49 @@ class SQLiteSessionStore(SessionStore):
         deployment_id: str,
         session_id: str,
         accepts: bool | None,
-    ) -> bool:
+        *,
+        expected_revision: int,
+        owner_id: str,
+        fence: int,
+    ) -> SessionRecord:
+        def update() -> SessionRecord:
+            connection = self._connect()
+            with _immediate(connection):
+                _require_lease(connection, deployment_id, session_id, owner_id, fence)
+                row = connection.execute(
+                    "UPDATE acp_sessions SET client_capabilities = ?, "
+                    "capability_revision = capability_revision + 1 "
+                    "WHERE session_id = ? AND deployment_id = ? "
+                    "AND COALESCE(owner, principal) = ? AND capability_revision = ? "
+                    f"RETURNING {SESSION_COLUMNS}",
+                    (
+                        None if accepts is None else int(accepts),
+                        session_id,
+                        deployment_id,
+                        principal,
+                        expected_revision,
+                    ),
+                ).fetchone()
+                if row is not None:
+                    return _row_to_record(row)
+                current = connection.execute(
+                    "SELECT capability_revision FROM acp_sessions WHERE session_id = ? "
+                    "AND deployment_id = ? AND COALESCE(owner, principal) = ?",
+                    (session_id, deployment_id, principal),
+                ).fetchone()
+                if current is None:
+                    raise HrnsError("SESSION_NOT_FOUND", "No session with this id is available.")
+                raise HrnsError(
+                    "REVISION_CONFLICT",
+                    "The capability revision has changed.",
+                    {
+                        "expectedRevision": expected_revision,
+                        "revision": current["capability_revision"],
+                    },
+                )
+
         async with self._lock:
-            changed = await asyncio.to_thread(
-                self._run,
-                lambda: (
-                    self._connect()
-                    .execute(
-                        "UPDATE acp_sessions SET client_capabilities = ? "
-                        "WHERE session_id = ? AND deployment_id = ? "
-                        "AND COALESCE(owner, principal) = ?",
-                        (
-                            None if accepts is None else int(accepts),
-                            session_id,
-                            deployment_id,
-                            principal,
-                        ),
-                    )
-                    .rowcount
-                ),
-            )
-        return bool(changed)
+            return await _thread(self._run, update)
 
     async def get_visible(
         self, deployment_id: str, session_id: str, principal: str
@@ -1010,7 +1116,7 @@ class SQLiteSessionStore(SessionStore):
             "WHERE json_each.value = ?)))"
         )
         async with self._lock:
-            row = await asyncio.to_thread(
+            row = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -1050,7 +1156,7 @@ class SQLiteSessionStore(SessionStore):
             "ORDER BY last_active_at DESC, session_id ASC LIMIT ?"
         )
         async with self._lock:
-            rows = await asyncio.to_thread(
+            rows = await _thread(
                 self._run,
                 lambda: self._connect().execute(query, [*values, limit + 1]).fetchall(),
             )
@@ -1086,11 +1192,15 @@ class SQLiteSessionStore(SessionStore):
                     raise PermissionError("session belongs to another deployment")
                 if fence is not None:
                     lease = connection.execute(
-                        "SELECT fence FROM acp_session_leases "
+                        "SELECT fence, expires_at FROM acp_session_leases "
                         "WHERE session_id = ? AND deployment_id = ?",
                         (session_id, deployment_id),
                     ).fetchone()
-                    if lease is None or int(lease["fence"]) != fence:
+                    if (
+                        lease is None
+                        or int(lease["fence"]) != fence
+                        or int(lease["expires_at"]) <= now_ms()
+                    ):
                         raise _session_conflict(deployment_id, session_id, fence)
                 connection.execute(
                     "UPDATE acp_sessions SET messages = ?, updates = ?, model = ?, "
@@ -1099,7 +1209,7 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         async with self._lock:
-            await asyncio.to_thread(self._run, operation)
+            await _thread(self._run, operation)
 
     async def load_scoped(
         self, principal: str, deployment_id: str, session_id: str
@@ -1108,7 +1218,7 @@ class SQLiteSessionStore(SessionStore):
         # deployment so a shared session is readable by every admitted principal.
         del principal
         async with self._lock:
-            row = await asyncio.to_thread(
+            row = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -1151,11 +1261,15 @@ class SQLiteSessionStore(SessionStore):
                     raise PermissionError("session belongs to another deployment")
                 if fence is not None:
                     lease = connection.execute(
-                        "SELECT fence FROM acp_session_leases "
+                        "SELECT fence, expires_at FROM acp_session_leases "
                         "WHERE session_id = ? AND deployment_id = ?",
                         (session_id, deployment_id),
                     ).fetchone()
-                    if lease is None or int(lease["fence"]) != fence:
+                    if (
+                        lease is None
+                        or int(lease["fence"]) != fence
+                        or int(lease["expires_at"]) <= now_ms()
+                    ):
                         raise _session_conflict(deployment_id, session_id, fence)
                 first = int(row["next_update_revision"])
                 connection.execute(
@@ -1165,7 +1279,7 @@ class SQLiteSessionStore(SessionStore):
                 return first
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     # -- Cross-worker session leases -----------------------------------------
 
@@ -1211,10 +1325,11 @@ class SQLiteSessionStore(SessionStore):
                     )
                     return lease
                 fence = int(row["fence"])
-                if row["owner_id"] != owner_id:
-                    if int(row["expires_at"]) > active:
-                        return None
+                if int(row["expires_at"]) <= active:
                     fence += 1
+                    _recover_abandoned_claims(connection, deployment_id, session_id, active)
+                elif row["owner_id"] != owner_id:
+                    return None
                 lease = SessionLease(
                     session_id=session_id,
                     principal=principal,
@@ -1238,7 +1353,7 @@ class SQLiteSessionStore(SessionStore):
                 return lease
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def renew_lease(
         self,
@@ -1246,6 +1361,7 @@ class SQLiteSessionStore(SessionStore):
         deployment_id: str,
         session_id: str,
         owner_id: str,
+        fence: int,
         ttl_ms: int,
     ) -> SessionLease | None:
         def operation() -> SessionLease | None:
@@ -1256,8 +1372,8 @@ class SQLiteSessionStore(SessionStore):
                 changed = connection.execute(
                     "UPDATE acp_session_leases SET principal = ?, expires_at = ? "
                     "WHERE session_id = ? AND deployment_id = ? AND owner_id = ? "
-                    "AND expires_at > ?",
-                    (principal, expires_at, session_id, deployment_id, owner_id, active),
+                    "AND fence = ? AND expires_at > ?",
+                    (principal, expires_at, session_id, deployment_id, owner_id, fence, active),
                 ).rowcount
                 if not changed:
                     return None
@@ -1277,10 +1393,10 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def release_lease(
-        self, principal: str, deployment_id: str, session_id: str, owner_id: str
+        self, principal: str, deployment_id: str, session_id: str, owner_id: str, fence: int
     ) -> bool:
         del principal  # the owner id is the only credential the lease keeps
 
@@ -1292,17 +1408,17 @@ class SQLiteSessionStore(SessionStore):
                 return bool(
                     connection.execute(
                         "UPDATE acp_session_leases SET expires_at = 0 WHERE session_id = ? "
-                        "AND deployment_id = ? AND owner_id = ?",
-                        (session_id, deployment_id, owner_id),
+                        "AND deployment_id = ? AND owner_id = ? AND fence = ? AND expires_at > ?",
+                        (session_id, deployment_id, owner_id, fence, now_ms()),
                     ).rowcount
                 )
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def get_lease(self, deployment_id: str, session_id: str) -> SessionLease | None:
         async with self._lock:
-            row = await asyncio.to_thread(
+            row = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -1352,7 +1468,7 @@ class SQLiteSessionStore(SessionStore):
                 return stored
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def enqueue_prompt_mutation(
         self,
@@ -1406,7 +1522,7 @@ class SQLiteSessionStore(SessionStore):
                 return QueueMutationResult(stored)
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def edit_prompt(
         self,
@@ -1441,6 +1557,10 @@ class SQLiteSessionStore(SessionStore):
                 error = _queue_item_error(current, expected_revision)
                 if error is not None:
                     raise error
+                if current.origin is not None:
+                    raise HrnsError(
+                        "QUEUE_NOT_EDITABLE", "A native turn's idempotent input cannot be edited."
+                    )
                 active = now_ms()
                 updated = replace(
                     current,
@@ -1470,7 +1590,7 @@ class SQLiteSessionStore(SessionStore):
                 return QueueMutationResult(updated)
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def remove_prompt(
         self,
@@ -1535,7 +1655,7 @@ class SQLiteSessionStore(SessionStore):
                 return QueueMutationResult(updated)
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def claim_prompt(self, prompt_id: str, owner_id: str, fence: int) -> QueuedPrompt | None:
         def operation() -> QueuedPrompt | None:
@@ -1546,6 +1666,24 @@ class SQLiteSessionStore(SessionStore):
                     (prompt_id, PromptState.QUEUED.value),
                 ).fetchone()
                 if row is None:
+                    return None
+                _require_lease(
+                    connection, str(row["deployment_id"]), str(row["session_id"]), owner_id, fence
+                )
+                if OperationKind(row["kind"]) in LIFECYCLE_OPERATION_KINDS:
+                    return None
+                pending = connection.execute(
+                    "SELECT 1 FROM acp_prompt_queue WHERE deployment_id = ? AND session_id = ? "
+                    "AND kind IN (?, ?) AND state IN (?, ?, ?, ?) LIMIT 1",
+                    (
+                        row["deployment_id"],
+                        row["session_id"],
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if pending is not None:
                     return None
                 active = now_ms()
                 attempt = int(row["attempt"]) + 1
@@ -1577,7 +1715,7 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def claim_next_prompt(
         self,
@@ -1592,6 +1730,20 @@ class SQLiteSessionStore(SessionStore):
         def operation() -> QueuedPrompt | None:
             connection = self._connect()
             with _immediate(connection):
+                _require_lease(connection, deployment_id, session_id, owner_id, fence)
+                pending = connection.execute(
+                    "SELECT 1 FROM acp_prompt_queue WHERE deployment_id = ? AND session_id = ? "
+                    "AND kind IN (?, ?) AND state IN (?, ?, ?, ?) LIMIT 1",
+                    (
+                        deployment_id,
+                        session_id,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if pending is not None:
+                    return None
                 # The earliest non-terminal operation is authoritative. A stale claim
                 # blocks later work until recovery marks it uncertain; skipping it
                 # would silently overtake an interrupted turn.
@@ -1606,6 +1758,8 @@ class SQLiteSessionStore(SessionStore):
                     ),
                 ).fetchone()
                 if row is None or row["state"] != PromptState.QUEUED.value:
+                    return None
+                if OperationKind(row["kind"]) in LIFECYCLE_OPERATION_KINDS:
                     return None
                 active = now_ms()
                 attempt = int(row["attempt"]) + 1
@@ -1637,7 +1791,7 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def finish_prompt(
         self,
@@ -1646,6 +1800,7 @@ class SQLiteSessionStore(SessionStore):
         *,
         owner_id: str,
         fence: int,
+        result: TurnResult | None = None,
     ) -> QueuedPrompt | None:
         if state not in _TERMINAL_PROMPT_STATES:
             raise ValueError(f"{state.value!r} is not a terminal prompt state")
@@ -1661,33 +1816,38 @@ class SQLiteSessionStore(SessionStore):
                 if row is None:
                     return None
                 current = _row_to_prompt(row)
+                _require_lease(
+                    connection, current.deployment_id, current.session_id, owner_id, fence
+                )
                 active = now_ms()
                 updated = replace(
                     current,
                     state=state,
+                    result=result,
                     update_id=uuid.uuid4().hex,
                     revision=_reserve_queue_revision(connection, current.session_id),
                     updated_at=active,
                 )
                 connection.execute(
                     "UPDATE acp_prompt_queue SET state = ?, update_id = ?, revision = ?, "
-                    "updated_at = ? WHERE prompt_id = ?",
+                    "updated_at = ?, result = ? WHERE prompt_id = ?",
                     (
                         state.value,
                         updated.update_id,
                         updated.revision,
                         updated.updated_at,
+                        result.model_dump_json() if result is not None else None,
                         prompt_id,
                     ),
                 )
                 return updated
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None:
         async with self._lock:
-            row = await asyncio.to_thread(
+            row = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -1696,6 +1856,38 @@ class SQLiteSessionStore(SessionStore):
                 ),
             )
         return _row_to_prompt(row) if row is not None else None
+
+    async def get_turn_by_mutation(
+        self, deployment_id: str, session_id: str, mutation_id: str
+    ) -> QueuedPrompt | None:
+        async with self._lock:
+            row = await _thread(
+                self._run,
+                lambda: (
+                    self._connect()
+                    .execute(
+                        "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? AND session_id = ? AND mutation_id = ? AND origin IS NOT NULL",
+                        (deployment_id, session_id, mutation_id),
+                    )
+                    .fetchone()
+                ),
+            )
+        return _row_to_prompt(row) if row is not None else None
+
+    async def list_recoverable_headless_turns(self) -> _PromptList:
+        async with self._lock:
+            rows = await _thread(
+                self._run,
+                lambda: (
+                    self._connect()
+                    .execute(
+                        "SELECT * FROM acp_prompt_queue WHERE origin IS NOT NULL AND state IN (?, ?) ORDER BY created_at, sequence",
+                        (PromptState.QUEUED.value, PromptState.CLAIMED.value),
+                    )
+                    .fetchall()
+                ),
+            )
+        return [_row_to_prompt(row) for row in rows]
 
     async def list_prompts(
         self,
@@ -1718,7 +1910,7 @@ class SQLiteSessionStore(SessionStore):
             "ORDER BY sequence LIMIT ?"
         )
         async with self._lock:
-            rows = await asyncio.to_thread(
+            rows = await _thread(
                 self._run,
                 lambda: self._connect().execute(query, [*values, limit]).fetchall(),
             )
@@ -1754,7 +1946,7 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def mark_uncertain_prompts(
         self,
@@ -1776,12 +1968,22 @@ class SQLiteSessionStore(SessionStore):
         def operation() -> list[QueuedPrompt]:
             connection = self._connect()
             with _immediate(connection):
+                active = now_ms()
                 rows = connection.execute(
-                    f"SELECT * FROM acp_prompt_queue WHERE {where} ORDER BY sequence", values
+                    f"SELECT * FROM acp_prompt_queue WHERE {where} "
+                    "AND EXISTS (SELECT 1 FROM acp_session_leases AS lease "
+                    "WHERE lease.session_id = acp_prompt_queue.session_id "
+                    "AND lease.deployment_id = acp_prompt_queue.deployment_id) "
+                    "AND NOT EXISTS (SELECT 1 FROM acp_session_leases AS lease "
+                    "WHERE lease.session_id = acp_prompt_queue.session_id "
+                    "AND lease.deployment_id = acp_prompt_queue.deployment_id "
+                    "AND lease.owner_id = acp_prompt_queue.owner_id "
+                    "AND lease.fence = acp_prompt_queue.fence AND lease.expires_at > ?) "
+                    "ORDER BY sequence",
+                    [*values, active],
                 ).fetchall()
                 if not rows:
                     return []
-                active = now_ms()
                 affected: list[QueuedPrompt] = []
                 for row in rows:
                     current = _row_to_prompt(row)
@@ -1807,7 +2009,7 @@ class SQLiteSessionStore(SessionStore):
                 return affected
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def retry_prompt(
         self,
@@ -1820,16 +2022,9 @@ class SQLiteSessionStore(SessionStore):
         mutation_id: str,
         request_hash: str,
     ) -> QueueMutationResult | None:
-        del owner_id, fence  # the caller re-queues; the old claim stays as history
-
         def operation() -> QueueMutationResult:
             connection = self._connect()
             with _immediate(connection):
-                replay = _mutation_replay(
-                    connection, session_id, mutation_id, "retry", request_hash
-                )
-                if replay is not None:
-                    return replay
                 row = connection.execute(
                     "SELECT * FROM acp_prompt_queue WHERE prompt_id = ? AND session_id = ?",
                     (prompt_id, session_id),
@@ -1841,6 +2036,27 @@ class SQLiteSessionStore(SessionStore):
                         {"sessionId": session_id, "promptId": prompt_id},
                     )
                 original = _row_to_prompt(row)
+                _require_lease(connection, original.deployment_id, session_id, owner_id, fence)
+                replay = _mutation_replay(
+                    connection, session_id, mutation_id, "retry", request_hash
+                )
+                if replay is not None:
+                    return replay
+                pending = connection.execute(
+                    "SELECT 1 FROM acp_prompt_queue WHERE deployment_id = ? AND session_id = ? "
+                    "AND kind IN (?, ?) AND state IN (?, ?, ?, ?) LIMIT 1",
+                    (
+                        original.deployment_id,
+                        session_id,
+                        OperationKind.CLOSE.value,
+                        OperationKind.DELETE.value,
+                        *(state.value for state in LIFECYCLE_PENDING_STATES),
+                    ),
+                ).fetchone()
+                if pending is not None:
+                    raise HrnsError(
+                        "SESSION_CLOSING", "The session is closing and no longer accepts new work."
+                    )
                 if original.state is not PromptState.UNCERTAIN:
                     raise HrnsError(
                         "QUEUE_NOT_EDITABLE",
@@ -1877,7 +2093,7 @@ class SQLiteSessionStore(SessionStore):
                 return QueueMutationResult(stored)
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, operation)
+            return await _thread(self._run, operation)
 
     async def begin_lifecycle_operation(
         self,
@@ -1932,9 +2148,17 @@ class SQLiteSessionStore(SessionStore):
                     ).fetchone()
                     if completed is not None:
                         return _row_to_prompt(completed)
+                session = connection.execute(
+                    f"SELECT {SESSION_COLUMNS} FROM acp_sessions "
+                    "WHERE session_id = ? AND deployment_id = ?",
+                    (operation.session_id, operation.deployment_id),
+                ).fetchone()
+                if session is None:
+                    raise HrnsError("SESSION_NOT_FOUND", "No session with this id is available.")
                 active = now_ms()
                 stored = replace(
                     operation,
+                    payload=lifecycle_policy_payload(_row_to_record(session), operation.prompt_id),
                     sequence=_next_sequence(connection, operation.session_id),
                     update_id=operation.update_id or uuid.uuid4().hex,
                     revision=_reserve_queue_revision(connection, operation.session_id),
@@ -1945,7 +2169,7 @@ class SQLiteSessionStore(SessionStore):
                 return stored
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, begin)
+            return await _thread(self._run, begin)
 
     async def get_lifecycle_operation(
         self,
@@ -1954,18 +2178,24 @@ class SQLiteSessionStore(SessionStore):
         kind: OperationKind,
         *,
         principal: str | None = None,
+        operation_id: str | None = None,
     ) -> QueuedPrompt | None:
+        if kind not in LIFECYCLE_OPERATION_KINDS:
+            raise ValueError("lifecycle operation must be close or delete")
         clauses = ["deployment_id = ?", "session_id = ?", "kind = ?"]
         values: list[object] = [deployment_id, session_id, kind.value]
         if principal is not None:
             clauses.append("principal = ?")
             values.append(principal)
+        if operation_id is not None:
+            clauses.append("prompt_id = ?")
+            values.append(operation_id)
         query = (
             f"SELECT * FROM acp_prompt_queue WHERE {' AND '.join(clauses)} "
             "ORDER BY sequence DESC LIMIT 1"
         )
         async with self._lock:
-            row = await asyncio.to_thread(
+            row = await _thread(
                 self._run,
                 lambda: self._connect().execute(query, values).fetchone(),
             )
@@ -1983,7 +2213,7 @@ class SQLiteSessionStore(SessionStore):
             *(state.value for state in LIFECYCLE_PENDING_STATES),
         ]
         async with self._lock:
-            rows = await asyncio.to_thread(
+            rows = await _thread(
                 self._run,
                 lambda: self._connect().execute(query, values).fetchall(),
             )
@@ -2013,6 +2243,9 @@ class SQLiteSessionStore(SessionStore):
                 if row is None:
                     return None
                 current = _row_to_prompt(row)
+                _require_lease(
+                    connection, current.deployment_id, current.session_id, owner_id, fence
+                )
                 active = now_ms()
                 attempt = current.attempt + 1
                 update_id = uuid.uuid4().hex
@@ -2043,7 +2276,7 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, claim)
+            return await _thread(self._run, claim)
 
     async def cancel_queued_operations(
         self,
@@ -2051,10 +2284,13 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         *,
         exclude_prompt_id: str,
+        owner_id: str,
+        fence: int,
     ) -> _PromptList:
         def cancel() -> list[QueuedPrompt]:
             connection = self._connect()
             with _immediate(connection):
+                _require_lease(connection, deployment_id, session_id, owner_id, fence)
                 rows = connection.execute(
                     "SELECT * FROM acp_prompt_queue WHERE deployment_id = ? "
                     "AND session_id = ? AND prompt_id != ? AND state = ? "
@@ -2096,7 +2332,7 @@ class SQLiteSessionStore(SessionStore):
                 return affected
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, cancel)
+            return await _thread(self._run, cancel)
 
     async def settle_lifecycle_operation(
         self,
@@ -2109,6 +2345,8 @@ class SQLiteSessionStore(SessionStore):
     ) -> bool:
         if state not in (PromptState.COMPLETED, PromptState.FAILED):
             raise ValueError("lifecycle operation must settle as completed or failed")
+        if delete_session and state is not PromptState.COMPLETED:
+            raise ValueError("only a completed lifecycle operation may delete a session")
 
         def settle() -> bool:
             connection = self._connect()
@@ -2128,6 +2366,9 @@ class SQLiteSessionStore(SessionStore):
                 if row is None:
                     return False
                 operation = _row_to_prompt(row)
+                _require_lease(
+                    connection, operation.deployment_id, operation.session_id, owner_id, fence
+                )
                 if delete_session:
                     connection.execute(
                         "DELETE FROM acp_sessions WHERE session_id = ? AND deployment_id = ?",
@@ -2135,8 +2376,13 @@ class SQLiteSessionStore(SessionStore):
                     )
                     connection.execute(
                         "DELETE FROM acp_prompt_queue WHERE session_id = ? "
-                        "AND deployment_id = ? AND prompt_id != ?",
-                        (operation.session_id, operation.deployment_id, prompt_id),
+                        "AND deployment_id = ? AND kind NOT IN (?, ?)",
+                        (
+                            operation.session_id,
+                            operation.deployment_id,
+                            OperationKind.CLOSE.value,
+                            OperationKind.DELETE.value,
+                        ),
                     )
                     connection.execute(
                         "DELETE FROM acp_session_leases WHERE session_id = ? "
@@ -2183,13 +2429,13 @@ class SQLiteSessionStore(SessionStore):
                 return bool(changed)
 
         async with self._lock:
-            return await asyncio.to_thread(self._run, settle)
+            return await _thread(self._run, settle)
 
     # -- Deployment revision metadata ----------------------------------------
 
     async def upsert_deployment(self, record: DeploymentRecord) -> None:
         async with self._lock:
-            await asyncio.to_thread(
+            await _thread(
                 self._run,
                 lambda: self._connect().execute(
                     _DEPLOYMENT_UPSERT,
@@ -2211,7 +2457,7 @@ class SQLiteSessionStore(SessionStore):
             "ORDER BY agent_id ASC, registered_at ASC, version ASC"
         )
         async with self._lock:
-            rows = await asyncio.to_thread(
+            rows = await _thread(
                 self._run,
                 lambda: self._connect().execute(query).fetchall(),
             )
@@ -2219,7 +2465,7 @@ class SQLiteSessionStore(SessionStore):
 
     async def set_deployment_visible(self, agent_id: str, version: str, visible: bool) -> bool:
         async with self._lock:
-            changed = await asyncio.to_thread(
+            changed = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -2234,7 +2480,7 @@ class SQLiteSessionStore(SessionStore):
 
     async def set_deployment_retained(self, agent_id: str, version: str, retained: bool) -> bool:
         async with self._lock:
-            changed = await asyncio.to_thread(
+            changed = await _thread(
                 self._run,
                 lambda: (
                     self._connect()
@@ -2250,7 +2496,7 @@ class SQLiteSessionStore(SessionStore):
 
     async def delete_deployment(self, agent_id: str, version: str) -> bool:
         async with self._lock:
-            changed = await asyncio.to_thread(
+            changed = await _thread(
                 self._run,
                 lambda: (
                     self._connect()

@@ -20,7 +20,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from acp import schema
-from pydantic import TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 from pydantic_ai.messages import ModelMessage
 
 from hrns.protocol import HrnsError, order_session_updates
@@ -46,6 +46,10 @@ __all__ = [
     "SessionRecord",
     "SessionStore",
     "ScopedSessionStore",
+    "TurnReceipt",
+    "TurnRequest",
+    "TurnResult",
+    "TurnState",
     "decode_session",
     "decode_session_cursor",
     "deserialize_collaborators",
@@ -58,7 +62,7 @@ __all__ = [
 #: Metadata projection shared by both stores. Session bodies are only read by ``load_scoped``.
 SESSION_COLUMNS = (
     "session_id, principal, deployment_id, agent_id, definition_version, cwd, title, effort, "
-    "bindings, usage, model, access, owner, collaborators, client_capabilities, created_at, "
+    "bindings, usage, model, access, owner, collaborators, client_capabilities, capability_revision, created_at, "
     "last_active_at"
 )
 
@@ -168,6 +172,48 @@ class PromptState(StrEnum):
     UNCERTAIN = "uncertain"
 
 
+class TurnState(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    UNCERTAIN = "uncertain"
+
+
+class TurnResult(BaseModel):
+    output: JsonValue = None
+    stop_reason: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class TurnRequest(BaseModel):
+    prompt: list[
+        schema.TextContentBlock
+        | schema.ImageContentBlock
+        | schema.AudioContentBlock
+        | schema.ResourceContentBlock
+        | schema.EmbeddedResourceContentBlock
+    ]
+    mutation_id: str
+    origin: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnReceipt:
+    session_id: str
+    prompt_id: str
+    mutation_id: str
+    origin: str
+    sequence: int
+    state: TurnState
+    result: TurnResult | None
+
+    @property
+    def operation_id(self) -> str:
+        return self.prompt_id
+
+
 class OperationKind(StrEnum):
     """Kinds of work sharing the authoritative per-session order."""
 
@@ -230,6 +276,7 @@ class SessionRecord:
     owner: str | None = None
     collaborators: frozenset[str] = frozenset()
     accepts_client_capabilities: bool | None = None
+    capability_revision: int = 0
     created_at: int = 0
     last_active_at: int = 0
 
@@ -249,6 +296,30 @@ class SessionRecord:
         if self.access is SessionAccess.PRIVATE:
             return False
         return principal in self.collaborators
+
+
+def lifecycle_policy_payload(record: SessionRecord, operation_id: str) -> str:
+    """Serialize the durable policy context at lifecycle intent admission."""
+    capability = record.accepts_client_capabilities
+    return json.dumps(
+        {
+            "operationId": operation_id,
+            "agentId": record.agent_id,
+            "deploymentId": record.deployment_id,
+            "cwd": record.cwd,
+            "owner": record.effective_owner,
+            "definitionVersion": record.definition_version,
+            "access": record.access.value,
+            "collaborators": sorted(record.collaborators),
+            "metadata": {
+                "clientCapabilities": "deployment"
+                if capability is None
+                else ("enabled" if capability else "disabled")
+            },
+            "fenceDomain": "sessionLease",
+        },
+        separators=(",", ":"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +370,35 @@ class QueuedPrompt:
     revision: int
     created_at: int
     updated_at: int
+    origin: str | None = None
+    mutation_id: str | None = None
+    result: TurnResult | None = None
+
+    def turn_receipt(self) -> TurnReceipt | None:
+        if self.kind is not OperationKind.PROMPT or self.origin is None or self.mutation_id is None:
+            return None
+        state = {
+            PromptState.QUEUED: TurnState.QUEUED,
+            PromptState.CLAIMED: TurnState.RUNNING,
+            PromptState.COMPLETED: TurnState.COMPLETED,
+            PromptState.FAILED: TurnState.FAILED,
+            PromptState.CANCELLED: TurnState.FAILED,
+            PromptState.UNCERTAIN: TurnState.UNCERTAIN,
+        }[self.state]
+        result = self.result
+        if self.state is PromptState.CANCELLED and result is None:
+            result = TurnResult(
+                error_code="TURN_CANCELLED", error_message="The queued turn was cancelled."
+            )
+        return TurnReceipt(
+            self.session_id,
+            self.prompt_id,
+            self.mutation_id,
+            self.origin,
+            self.sequence,
+            state,
+            result,
+        )
 
     def to_public(self) -> dict[str, object]:
         """Render the prompt as a transport-friendly dict."""
@@ -321,6 +421,9 @@ class QueuedPrompt:
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "origin": self.origin,
+            "mutation_id": self.mutation_id,
+            "result": self.result.model_dump(mode="json") if self.result is not None else None,
         }
 
 
@@ -437,8 +540,12 @@ class SessionStore(ABC):
         deployment_id: str,
         session_id: str,
         accepts: bool | None,
-    ) -> bool:
-        """Override (or clear, with ``None``) the deployment's capability gate."""
+        *,
+        expected_revision: int,
+        owner_id: str,
+        fence: int,
+    ) -> SessionRecord:
+        """Atomically update under a live lease; stale revisions raise REVISION_CONFLICT."""
 
     @abstractmethod
     async def get_visible(
@@ -506,15 +613,16 @@ class SessionStore(ABC):
         deployment_id: str,
         session_id: str,
         owner_id: str,
+        fence: int,
         ttl_ms: int,
     ) -> SessionLease | None:
         """Extend a lease that this owner still holds and that has not expired."""
 
     @abstractmethod
     async def release_lease(
-        self, principal: str, deployment_id: str, session_id: str, owner_id: str
+        self, principal: str, deployment_id: str, session_id: str, owner_id: str, fence: int
     ) -> bool:
-        """Drop the lease, but only when ``owner_id`` still holds it."""
+        """Expire the live lease only if owner and generation still match."""
 
     @abstractmethod
     async def get_lease(self, deployment_id: str, session_id: str) -> SessionLease | None: ...
@@ -590,11 +698,21 @@ class SessionStore(ABC):
         *,
         owner_id: str,
         fence: int,
+        result: TurnResult | None = None,
     ) -> QueuedPrompt | None:
         """Move a claimed prompt to a terminal state; ``None`` when it was not ours."""
 
     @abstractmethod
     async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None: ...
+
+    @abstractmethod
+    async def get_turn_by_mutation(
+        self, deployment_id: str, session_id: str, mutation_id: str
+    ) -> QueuedPrompt | None: ...
+
+    @abstractmethod
+    async def list_recoverable_headless_turns(self) -> _PromptList:
+        """List queued and claimed native work for trusted startup reconciliation."""
 
     @abstractmethod
     async def list_prompts(
@@ -623,10 +741,9 @@ class SessionStore(ABC):
         deployment_id: str | None = None,
         session_id: str | None = None,
     ) -> _PromptList:
-        """Park claims held by a worker that lost a lease as ``UNCERTAIN``.
+        """Park abandoned claims, never a claim backed by its live lease generation.
 
-        ``session_id`` narrows the operation to one session; without it every claim of
-        that owner in the deployment is affected.
+        Claims without a lease row are left for explicit reconciliation.
         """
 
     @abstractmethod
@@ -660,8 +777,9 @@ class SessionStore(ABC):
         kind: OperationKind,
         *,
         principal: str | None = None,
+        operation_id: str | None = None,
     ) -> QueuedPrompt | None:
-        """Return the latest lifecycle operation matching the requested intent."""
+        """Return a scoped lifecycle receipt by ID, or the latest matching kind."""
 
     @abstractmethod
     async def list_pending_lifecycle_operations(self) -> _PromptList:
@@ -683,6 +801,8 @@ class SessionStore(ABC):
         session_id: str,
         *,
         exclude_prompt_id: str,
+        owner_id: str,
+        fence: int,
     ) -> _PromptList:
         """Cancel queued non-lifecycle work after lifecycle admission has stopped."""
 
@@ -923,10 +1043,23 @@ class ScopedSessionStore:
         )
 
     async def set_client_capabilities(
-        self, session_id: str, accepts: bool | None, *, principal: str | None = None
-    ) -> bool:
+        self,
+        session_id: str,
+        accepts: bool | None,
+        *,
+        principal: str,
+        expected_revision: int,
+        owner_id: str,
+        fence: int,
+    ) -> SessionRecord:
         return await self.backend.set_client_capabilities(
-            principal or self.principal, self.deployment_id, session_id, accepts
+            principal,
+            self.deployment_id,
+            session_id,
+            accepts,
+            expected_revision=expected_revision,
+            owner_id=owner_id,
+            fence=fence,
         )
 
     async def acquire_lease(
@@ -936,14 +1069,16 @@ class ScopedSessionStore:
             self.principal, self.deployment_id, session_id, owner_id, ttl_ms
         )
 
-    async def renew_lease(self, session_id: str, owner_id: str, ttl_ms: int) -> SessionLease | None:
+    async def renew_lease(
+        self, session_id: str, owner_id: str, fence: int, ttl_ms: int
+    ) -> SessionLease | None:
         return await self.backend.renew_lease(
-            self.principal, self.deployment_id, session_id, owner_id, ttl_ms
+            self.principal, self.deployment_id, session_id, owner_id, fence, ttl_ms
         )
 
-    async def release_lease(self, session_id: str, owner_id: str) -> bool:
+    async def release_lease(self, session_id: str, owner_id: str, fence: int) -> bool:
         return await self.backend.release_lease(
-            self.principal, self.deployment_id, session_id, owner_id
+            self.principal, self.deployment_id, session_id, owner_id, fence
         )
 
     async def get_lease(self, session_id: str) -> SessionLease | None:
@@ -1018,9 +1153,42 @@ class ScopedSessionStore:
         )
 
     async def finish_prompt(
-        self, prompt_id: str, state: PromptState, *, owner_id: str, fence: int
+        self,
+        prompt_id: str,
+        state: PromptState,
+        *,
+        owner_id: str,
+        fence: int,
+        result: TurnResult | None = None,
     ) -> QueuedPrompt | None:
-        return await self.backend.finish_prompt(prompt_id, state, owner_id=owner_id, fence=fence)
+        return await self.backend.finish_prompt(
+            prompt_id, state, owner_id=owner_id, fence=fence, result=result
+        )
+
+    async def get_turn_receipt(
+        self, session_id: str, prompt_id: str, principal: str
+    ) -> TurnReceipt | None:
+        record = await self.backend.get_visible(self.deployment_id, session_id, principal)
+        if record is None:
+            return None
+        row = await self.backend.get_prompt(prompt_id)
+        if (
+            row is None
+            or row.session_id != session_id
+            or row.deployment_id != self.deployment_id
+            or row.principal != principal
+        ):
+            return None
+        return row.turn_receipt()
+
+    async def get_turn_receipt_by_mutation(
+        self, session_id: str, mutation_id: str, principal: str
+    ) -> TurnReceipt | None:
+        record = await self.backend.get_visible(self.deployment_id, session_id, principal)
+        if record is None:
+            return None
+        row = await self.backend.get_turn_by_mutation(self.deployment_id, session_id, mutation_id)
+        return row.turn_receipt() if row is not None and row.principal == principal else None
 
     async def get_prompt(self, prompt_id: str) -> QueuedPrompt | None:
         return await self.backend.get_prompt(prompt_id)
@@ -1086,12 +1254,14 @@ class ScopedSessionStore:
         kind: OperationKind,
         *,
         principal: str | None = None,
+        operation_id: str | None = None,
     ) -> QueuedPrompt | None:
         return await self.backend.get_lifecycle_operation(
             self.deployment_id,
             session_id,
             kind,
             principal=principal,
+            operation_id=operation_id,
         )
 
     async def list_pending_lifecycle_operations(self) -> _PromptList:
@@ -1114,11 +1284,15 @@ class ScopedSessionStore:
         session_id: str,
         *,
         exclude_prompt_id: str,
+        owner_id: str,
+        fence: int,
     ) -> _PromptList:
         return await self.backend.cancel_queued_operations(
             self.deployment_id,
             session_id,
             exclude_prompt_id=exclude_prompt_id,
+            owner_id=owner_id,
+            fence=fence,
         )
 
     async def settle_lifecycle_operation(

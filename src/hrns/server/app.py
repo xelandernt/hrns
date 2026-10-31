@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 import re
 import uuid
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager, suppress
+from functools import wraps
 from pathlib import Path
+from typing import Concatenate, ParamSpec, TypeVar
 
 from acp import schema
 from fastapi import FastAPI, WebSocket
@@ -28,18 +31,26 @@ from hrns.runtime import (
     PluginRegistry,
     PolicyAction,
     PromptState,
+    QueuedPrompt,
     RequestContext,
     ResourceBindings,
     ResourceSet,
+    ResourceSlot,
     SessionAccess,
     SessionContext,
+    SessionLease,
     SessionLifecycleHooks,
     SessionPolicy,
     SessionStore,
     decide_policy,
 )
 from hrns.runtime.acp import canonical_root
-from hrns.runtime.acp_store import now_ms
+from hrns.runtime.acp_store import (
+    SessionRecord,
+    TurnReceipt,
+    TurnRequest,
+    now_ms,
+)
 from hrns.runtime.creation import (
     InitialSessionPolicy,
     SessionCreateRequest,
@@ -53,6 +64,7 @@ from hrns.runtime.host import HrnsACPAgent
 from hrns.runtime.host_support import HostBundle, HostPolicy, RevisionSpec
 from hrns.runtime.local import thinking_support
 from hrns.runtime.request_context import current_connection_id, current_request
+from hrns.runtime.resources import SLOTS
 
 from .catalog import CursorCodec
 from .connections import ConnectionInfo, ConnectionRegistry
@@ -65,10 +77,40 @@ from .models import (
     RegisteredAgent,
     SessionLifecycleResult,
 )
+from .resources import SessionResourceResolver
 
 
 async def _local_principal() -> Principal:
     return Principal("local")
+
+
+_Params = ParamSpec("_Params")
+_Result = TypeVar("_Result")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SessionCapabilitySettings:
+    """Durable override, effective pinned deployment setting, and CAS revision."""
+
+    override: bool | None
+    effective: bool
+    revision: int
+
+
+def _admitted(
+    method: Callable[Concatenate[AgentServer, _Params], Awaitable[_Result]],
+) -> Callable[Concatenate[AgentServer, _Params], Awaitable[_Result]]:
+    """Keep embedding calls visible to shutdown from admission through finalization."""
+
+    @wraps(method)
+    async def wrapped(self: AgentServer, *args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        task = self._admit()
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            self._leave(task)
+
+    return wrapped
 
 
 class AgentServer:
@@ -83,6 +125,7 @@ class AgentServer:
         session_policy: SessionPolicy | None = None,
         lifecycle: SessionLifecycleHooks | None = None,
         initial_session_policy: InitialSessionPolicy | InitialSessionPolicyFactory | None = None,
+        resource_resolver: SessionResourceResolver | None = None,
         lease_ttl_ms: int = 120_000,
     ) -> None:
         if lease_ttl_ms < 1_000:
@@ -100,26 +143,76 @@ class AgentServer:
         self.session_policy: SessionPolicy = session_policy or DefaultSessionPolicy()
         self.lifecycle = lifecycle
         self.initial_session_policy = initial_session_policy or InitialSessionPolicy()
+        self.resource_resolver = resource_resolver
         self.lease_ttl_ms = lease_ttl_ms
         self.deployments = DeploymentRegistry()
         self.connections = ConnectionRegistry()
         self._instance_id = uuid.uuid4().hex
         self._hosts: dict[str, HrnsACPAgent] = {}
         self._actors: dict[str, HrnsACPAgent] = {}
+        self._headless_actors: set[str] = set()
         self._actor_locks: dict[str, asyncio.Lock] = {}
+        self._retirements: dict[str, asyncio.Task[None]] = {}
         self._native_deployments: set[tuple[str, str]] = set()
         self._pending_deployments: dict[tuple[str, str], DeploymentRecord] = {}
         self._persist_tasks: set[asyncio.Task[None]] = set()
         self._creation_tasks: set[asyncio.Task[SessionCreationResult]] = set()
+        self._admitted_tasks: dict[asyncio.Task[object], int] = {}
+        self._connection_tasks: set[asyncio.Task[object]] = set()
         self._cursor_codec = CursorCodec()
         self._mounted = False
         self._running = False
+        self._starting = False
+        self._stopping = False
+
+    def _admit(self) -> asyncio.Task[object]:
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        task = asyncio.current_task()
+        if task is None:
+            raise ApiError("SERVER_BUSY", "No task for this server operation")
+        self._admitted_tasks[task] = self._admitted_tasks.get(task, 0) + 1
+        return task
+
+    def _leave(self, task: asyncio.Task[object]) -> None:
+        count = self._admitted_tasks[task] - 1
+        if count:
+            self._admitted_tasks[task] = count
+        else:
+            del self._admitted_tasks[task]
+
+    @asynccontextmanager
+    async def _actor_scope(self, namespace: str) -> AsyncGenerator[None, None]:
+        """Serialize actor selection without waiting for retirement under the actor lock."""
+        lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
+        while True:
+            await lock.acquire()
+            retirement = self._retirements.get(namespace)
+            if retirement is None:
+                break
+            lock.release()
+            await asyncio.shield(retirement)
+            if self._retirements.get(namespace) is retirement:
+                self._retirements.pop(namespace, None)
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def _retire_actor(self, namespace: str, host: HrnsACPAgent) -> asyncio.Task[None]:
+        """Called under the actor lock; the returned task must be awaited outside it."""
+        if self._actors.get(namespace) is host:
+            self._actors.pop(namespace, None)
+        retirement = asyncio.create_task(host.shutdown())
+        self._retirements[namespace] = retirement
+        return retirement
 
     def add_agent(
         self,
         definition: BoundDefinition | AgentDefinition,
         *,
         resources: ResourceSet | ResourceBindings | None = None,
+        session_resource_slots: Sequence[ResourceSlot[object]] = (),
         models: Sequence[str] = (),
         allowed_cwds: Sequence[str | Path] | None = None,
         default_cwd: str | Path | None = None,
@@ -127,9 +220,9 @@ class AgentServer:
     ) -> RegisteredAgent:
         """Register an immutable deployment revision.
 
-        A bare ``AgentDefinition`` is resolved against this server's registry and bound to
-        ``resources`` here, so a capability whose requirements are missing fails at
-        registration rather than on the first ``session/new``.
+        Required slots must be bound at registration unless explicitly listed in
+        ``session_resource_slots`` for the server's resource resolver. Every required
+        slot is validated again during session composition.
 
         Registration may happen before or after :meth:`mount`. A new ``definition_version``
         for an existing agent id becomes the revision new sessions resolve, while older
@@ -139,15 +232,51 @@ class AgentServer:
         default gate advertised during ACP initialization and can be overridden per session
         with :meth:`set_session_capabilities`.
         """
+        if session_resource_slots and self.resource_resolver is None:
+            raise ValueError("session_resource_slots requires a resource_resolver")
         if isinstance(definition, BoundDefinition):
             if resources is not None:
                 raise TypeError("resources are already bound by the BoundDefinition")
-            bound = definition
+            agent_definition = definition.definition
+            bound_resources = definition.resources
         elif isinstance(definition, AgentDefinition):
-            bound = definition.bind(resources, registry=self.registry)
+            agent_definition = definition.resolve(self.registry)
+            bound_resources = ResourceSet(resources)
         else:
             raise TypeError("definition must be an AgentDefinition or BoundDefinition")
-        agent_definition = bound.definition
+        for binding in agent_definition.bindings:
+            descriptor = binding.plugin
+            if descriptor is None:
+                raise HrnsError("INVALID_CONFIGURATION", "An agent binding is unresolved.")
+            if descriptor.config_model is not None and binding.config:
+                try:
+                    descriptor.config_model.model_validate(binding.config)
+                except ValidationError as exc:
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION",
+                        f"Configuration for binding {binding.binding_id!r} is invalid.",
+                    ) from exc
+        for slot in session_resource_slots:
+            if not isinstance(slot, ResourceSlot):
+                raise TypeError("session_resource_slots must contain ResourceSlot objects")
+            if not agent_definition.declares(slot):
+                raise ValueError(f"Session resource slot {slot.name!r} is not declared")
+            SLOTS.register(slot)
+        deferred = {slot.name for slot in session_resource_slots}
+        requirements = [
+            requirement.model_copy(update={"required": False})
+            if requirement.slot.name in deferred
+            else requirement
+            for requirement in agent_definition.resources
+        ]
+        # Deferred bindings may still be supplied statically and must be type-checked.
+        for slot in session_resource_slots:
+            for name in (slot.name, *slot.aliases):
+                if name in bound_resources.values:
+                    slot.validate_value(bound_resources.values[name])
+        bound_resources.validate_requirements(
+            requirements, context=f"Definition {agent_definition.agent_id!r}"
+        )
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}", agent_definition.agent_id):
             raise ValueError("agent_id must be a URL segment using letters, digits, ._-")
         if isinstance(allowed_cwds, (str, Path)):
@@ -167,7 +296,7 @@ class AgentServer:
             not isinstance(model, str) or not model.strip() for model in models
         ):
             raise ValueError("models must be a sequence of non-empty model IDs")
-        selected = bound.resources.get(MODEL) or agent_definition.model
+        selected = bound_resources.get(MODEL) or agent_definition.model
         offered = tuple(
             dict.fromkeys([*([selected] if isinstance(selected, str) else []), *models])
         )
@@ -188,7 +317,7 @@ class AgentServer:
                 allowed_cwds=roots,
                 default_cwd=cwd,
                 models=offered,
-                resources=bound.resources.values,
+                resources=bound_resources.values,
                 accepts_client_capabilities=accepts_client_capabilities,
             ),
             replace=existing is not None,
@@ -219,8 +348,12 @@ class AgentServer:
         self._refresh_actor_definition(agent_definition.agent_id)
         return revision.agent
 
+    @_admitted
     async def flush_deployments(self) -> None:
         """Persist revision metadata registered outside the event loop."""
+        await self._flush_deployments()
+
+    async def _flush_deployments(self) -> None:
         for record in list(self._pending_deployments.values()):
             await self._write_deployment(record)
 
@@ -276,6 +409,7 @@ class AgentServer:
                 registered_at=record.registered_at,
             )
 
+    @_admitted
     async def unregister_agent(self, agent_id: str) -> int:
         """Hide every revision of an agent, retaining it for pinned sessions."""
         count = self.deployments.unregister(agent_id)
@@ -285,6 +419,7 @@ class AgentServer:
         self._refresh_actor_definition(agent_id)
         return count
 
+    @_admitted
     async def set_agent_visible(self, agent_id: str, version: str, visible: bool) -> None:
         """Hide or show one revision and persist the decision."""
         revision = self.deployments.set_visible(agent_id, version, visible)
@@ -414,6 +549,7 @@ class AgentServer:
             )
         return revision
 
+    @_admitted
     async def create_session(
         self,
         principal: Principal,
@@ -566,8 +702,7 @@ class AgentServer:
         if revision is None or (agent_id, definition_version) not in self._native_deployments:
             raise ApiError("NOT_FOUND", "No deployment is available to this principal.")
         namespace = revision.agent.session_namespace
-        actor_lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
-        async with actor_lock:
+        async with self._actor_scope(namespace):
             # Re-read after waiting for this process's actor; another attempt may have
             # committed. Cross-process claims are arbitrated by the database fence.
             current = await self.store.get_creation(principal.id, mutation_id)
@@ -636,7 +771,7 @@ class AgentServer:
                                 release=True,
                             )
                     if temporary:
-                        await host.shutdown()
+                        self._retire_actor(namespace, host)
                     if isinstance(exc, (HrnsError, ApiError, asyncio.CancelledError)):
                         raise
                     raise HrnsError(
@@ -645,6 +780,7 @@ class AgentServer:
                 finally:
                     current_request.reset(token)
 
+    @_admitted
     async def get_session_creation(
         self, principal: Principal, mutation_id: str
     ) -> SessionCreationOperation:
@@ -700,14 +836,16 @@ class AgentServer:
                 "SESSION_CREATION_DENIED", "No deployment is available to this principal."
             )
 
+    @_admitted
     async def reconcile_session_creations(self) -> tuple[SessionCreationOperation, ...]:
         """Recover expired creation attempts without publishing provisional sessions.
 
         Live claims in other workers are left alone. Call again after their expiry;
         cleanup hook failures remain pending and fail closed.
         """
-        if not self._running:
-            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        return await self._reconcile_session_creations()
+
+    async def _reconcile_session_creations(self) -> tuple[SessionCreationOperation, ...]:
         results: list[SessionCreationOperation] = []
         for operation in await self.store.list_pending_creations():
             claimed = await self.store.claim_creation(
@@ -749,6 +887,7 @@ class AgentServer:
         }
         return ApiError(error.code, error.message, status_code=statuses.get(error.code, 500))
 
+    @_admitted
     async def set_session_access(
         self,
         principal: Principal,
@@ -764,49 +903,377 @@ class AgentServer:
         Archived sessions stay loadable and replayable but reject every mutation.
         """
         agent = self.get_agent(agent_id, principal, allow_hidden=True)
-        host = self._host_for_deployment(agent.session_namespace)
-        temporary = await self._admin_lease(principal, agent.session_namespace, session_id)
-        try:
-            if host is not None:
-                return await host.sessions.set_access(
+        async with self._actor_scope(agent.session_namespace):
+            host = self._host_for_deployment(agent.session_namespace)
+            temporary = await self._admin_lease(principal, agent.session_namespace, session_id)
+            try:
+                if host is not None:
+                    return await host.sessions.set_access(
+                        session_id,
+                        access=access,
+                        collaborators=collaborators,
+                        principal=principal.id,
+                    )
+                return await self.store.set_access(
+                    principal.id,
+                    agent.session_namespace,
                     session_id,
                     access=access,
                     collaborators=collaborators,
-                    principal=principal.id,
                 )
-            return await self.store.set_access(
-                principal.id,
-                agent.session_namespace,
-                session_id,
-                access=access,
-                collaborators=collaborators,
-            )
-        finally:
-            if temporary is not None:
-                await self.store.release_lease(
-                    principal.id, agent.session_namespace, session_id, temporary
-                )
+            finally:
+                if temporary is not None:
+                    await self._release_admin_lease(temporary)
 
-    async def set_session_capabilities(
-        self, principal: Principal, agent_id: str, session_id: str, accepts: bool | None
-    ) -> bool:
-        """Override the deployment's client-origin capability gate for one session."""
+    @_admitted
+    async def get_session_capabilities(
+        self, principal: Principal, agent_id: str, session_id: str
+    ) -> SessionCapabilitySettings:
+        """Read owner-scoped durable capability settings under the current LOAD policy."""
         agent = self.get_agent(agent_id, principal, allow_hidden=True)
-        host = self._host_for_deployment(agent.session_namespace)
-        temporary = await self._admin_lease(principal, agent.session_namespace, session_id)
-        try:
-            if host is not None:
-                return await host.sessions.set_client_capabilities(
-                    session_id, accepts, principal=principal.id
-                )
-            return await self.store.set_client_capabilities(
-                principal.id, agent.session_namespace, session_id, accepts
+        request = current_request.get()
+        missing = ApiError("NOT_FOUND", "No session is available to this principal.")
+        if request is not None and (
+            request.principal != principal.id or request.credential_id != principal.credential_id
+        ):
+            raise missing
+        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
+        if record is None or record.effective_owner != principal.id:
+            raise missing
+        context = self._capability_policy_context(principal, agent, record)
+        if not (await decide_policy(self.session_policy, context, PolicyAction.LOAD)).allowed:
+            raise missing
+        return self._capability_settings(principal, agent_id, record)
+
+    def _capability_settings(
+        self, principal: Principal, agent_id: str, record: SessionRecord
+    ) -> SessionCapabilitySettings:
+        pinned = self.get_revision(agent_id, principal, version=record.definition_version)
+        override = record.accepts_client_capabilities
+        return SessionCapabilitySettings(
+            override=override,
+            effective=pinned.agent.accepts_client_capabilities if override is None else override,
+            revision=record.capability_revision,
+        )
+
+    @_admitted
+    async def set_session_capabilities(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+        accepts: bool | None,
+        *,
+        expected_revision: int,
+    ) -> SessionCapabilitySettings:
+        """Atomically change the capability override at the expected revision."""
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ApiError("INVALID_REQUEST", "expected_revision must be a non-negative integer.")
+        if accepts is not None and not isinstance(accepts, bool):
+            raise ApiError("INVALID_REQUEST", "accepts must be a boolean or None.")
+        agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        request = current_request.get()
+        if request is not None and (
+            request.principal != principal.id or request.credential_id != principal.credential_id
+        ):
+            raise ApiError("NOT_FOUND", "No session is available to this principal.")
+        if (principal.scopes is not None and "queue:mutate" not in principal.scopes) or (
+            request is not None
+            and request.scopes is not None
+            and "queue:mutate" not in request.scopes
+        ):
+            raise ApiError(
+                "INSUFFICIENT_SCOPE",
+                "The credential does not grant queue mutation scope.",
+                details={"requiredScope": "queue:mutate"},
+                status_code=403,
             )
+        async with self._actor_scope(agent.session_namespace):
+            host = self._host_for_deployment(agent.session_namespace)
+            await self._authorize_capability_change(principal, agent, session_id, host)
+            temporary = await self._admin_lease(principal, agent.session_namespace, session_id)
+            try:
+                await self._authorize_capability_change(principal, agent, session_id, host)
+                if host is not None:
+                    record = await host.sessions.set_client_capabilities(
+                        session_id,
+                        accepts,
+                        principal=principal.id,
+                        expected_revision=expected_revision,
+                    )
+                else:
+                    if temporary is None:
+                        raise ApiError("CONFLICT", "No administrative session lease is available.")
+                    record = await self.store.set_client_capabilities(
+                        principal.id,
+                        agent.session_namespace,
+                        session_id,
+                        accepts,
+                        expected_revision=expected_revision,
+                        owner_id=temporary.owner_id,
+                        fence=temporary.fence,
+                    )
+                return self._capability_settings(principal, agent_id, record)
+            except HrnsError as exc:
+                if exc.code == "SESSION_NOT_FOUND":
+                    raise ApiError(
+                        "NOT_FOUND", "No session is available to this principal."
+                    ) from exc
+                if exc.code in {"REVISION_CONFLICT", "SESSION_CONFLICT", "SESSION_HELD"}:
+                    raise ApiError(
+                        exc.code, exc.message, details=exc.details, status_code=409
+                    ) from exc
+                raise
+            finally:
+                if temporary is not None:
+                    await self._release_admin_lease(temporary)
+
+    async def _authorize_capability_change(
+        self,
+        principal: Principal,
+        agent: RegisteredAgent,
+        session_id: str,
+        host: HrnsACPAgent | None,
+    ) -> None:
+        record = host.sessions.store.staged(session_id) if host is not None else None
+        if record is None:
+            record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
+        if record is None or record.effective_owner != principal.id:
+            raise ApiError("NOT_FOUND", "No session is available to this principal.")
+        if record.read_only:
+            raise ApiError(
+                "SESSION_READ_ONLY",
+                "This session is archived and cannot be modified.",
+                status_code=403,
+            )
+        context = self._capability_policy_context(principal, agent, record)
+        decision = await decide_policy(self.session_policy, context, PolicyAction.CONFIGURE)
+        if not decision.allowed:
+            if decision.code == "SESSION_NOT_FOUND":
+                raise ApiError("NOT_FOUND", "No session is available to this principal.")
+            raise ApiError(decision.code, decision.message, status_code=403)
+
+    @staticmethod
+    def _capability_policy_context(
+        principal: Principal, agent: RegisteredAgent, record: SessionRecord
+    ) -> SessionContext:
+        request = current_request.get()
+        if request is not None and (
+            request.principal != principal.id or request.credential_id != principal.credential_id
+        ):
+            request = None
+        return SessionContext(
+            session_id=record.session_id,
+            principal=principal.id,
+            deployment_id=agent.session_namespace,
+            agent_id=agent.id,
+            owner=record.effective_owner,
+            access=record.access,
+            collaborators=record.collaborators,
+            credential_id=principal.credential_id,
+            connection_id=request.connection_id if request is not None else None,
+            request_id=request.request_id if request is not None else None,
+            metadata={
+                "clientCapabilities": "deployment"
+                if record.accepts_client_capabilities is None
+                else "enabled"
+                if record.accepts_client_capabilities
+                else "disabled"
+            },
+        )
+
+    @_admitted
+    async def submit_session_turn(
+        self, principal: Principal, agent_id: str, session_id: str, request: TurnRequest
+    ) -> TurnReceipt:
+        """Submit one durable headless turn using a server-supplied origin and mutation ID."""
+        if not isinstance(request, TurnRequest):
+            raise ApiError("INVALID_REQUEST", "A validated turn request is required.")
+        if (
+            not request.mutation_id
+            or len(request.mutation_id) > 200
+            or not request.origin
+            or len(request.origin) > 200
+        ):
+            raise ApiError("INVALID_REQUEST", "Invalid turn mutation ID or origin.")
+        request = request.model_copy(deep=True)
+        ambient = current_request.get()
+        if ambient is not None and (
+            ambient.principal != principal.id or ambient.credential_id != principal.credential_id
+        ):
+            raise ApiError("NOT_FOUND", "No session is available to this principal.")
+        if (principal.scopes is not None and "queue:mutate" not in principal.scopes) or (
+            ambient is not None
+            and ambient.scopes is not None
+            and "queue:mutate" not in ambient.scopes
+        ):
+            raise ApiError(
+                "INSUFFICIENT_SCOPE",
+                "The credential does not grant queue mutation scope.",
+                status_code=403,
+            )
+        agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
+        if record is None:
+            raise ApiError("NOT_FOUND", "No session is available to this principal.")
+        self.get_revision(agent_id, principal, version=record.definition_version)
+        context = RequestContext(
+            principal=principal.id,
+            credential_id=principal.credential_id,
+            agent_id=agent_id,
+            scopes=principal.scopes,
+        )
+        token = current_request.set(context)
+        connection_token = current_connection_id.set(None)
+        try:
+            async with self._actor_scope(agent.session_namespace):
+                host = self._actors.get(agent.session_namespace)
+                if host is None:
+                    host = self._build_host(agent, principal)
+                    self._actors[agent.session_namespace] = host
+                # Headless work can outlive an embedding request and the last viewer.
+                self._headless_actors.add(agent.session_namespace)
+                return await host.submit_headless_turn(session_id, request)
+        except HrnsError as exc:
+            if exc.code in {"SESSION_NOT_FOUND", "QUEUE_ITEM_NOT_FOUND"}:
+                raise ApiError("NOT_FOUND", "No session is available to this principal.") from exc
+            status = {
+                "MUTATION_ID_REUSED": 409,
+                "SESSION_CONFLICT": 409,
+                "SESSION_HELD": 409,
+                "SESSION_CLOSING": 409,
+                "FORBIDDEN": 403,
+                "POLICY_DENIED": 403,
+                "SESSION_READ_ONLY": 403,
+                "INVALID_CONFIGURATION": 400,
+                "SESSION_DURABILITY_FAILED": 503,
+            }.get(exc.code, 500)
+            raise ApiError(exc.code, exc.message, details=exc.details, status_code=status) from exc
         finally:
-            if temporary is not None:
-                await self.store.release_lease(
-                    principal.id, agent.session_namespace, session_id, temporary
+            current_connection_id.reset(connection_token)
+            current_request.reset(token)
+
+    @_admitted
+    async def get_session_turn(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+        operation_id: str | None = None,
+        *,
+        mutation_id: str | None = None,
+    ) -> TurnReceipt:
+        """Read a durable headless turn by operation or mutation ID under LOAD policy."""
+        missing = ApiError("NOT_FOUND", "No session turn is available to this principal.")
+        if (
+            (operation_id is None) == (mutation_id is None)
+            or (
+                operation_id is not None and (not isinstance(operation_id, str) or not operation_id)
+            )
+            or (mutation_id is not None and (not isinstance(mutation_id, str) or not mutation_id))
+        ):
+            raise missing
+        request = current_request.get()
+        if request is not None and (
+            request.principal != principal.id or request.credential_id != principal.credential_id
+        ):
+            raise missing
+        agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
+        if record is None:
+            raise missing
+        self.get_revision(agent_id, principal, version=record.definition_version)
+        context = RequestContext(
+            principal=principal.id,
+            credential_id=principal.credential_id,
+            connection_id=request.connection_id if request is not None else None,
+            request_id=request.request_id if request is not None else None,
+            agent_id=agent_id,
+            scopes=principal.scopes,
+        )
+        token = current_request.set(context)
+        connection_token = current_connection_id.set(None)
+        retirement = None
+        try:
+            async with self._actor_scope(agent.session_namespace):
+                host = self._actors.get(agent.session_namespace)
+                temporary = host is None
+                if host is None:
+                    host = self._build_host(agent, principal)
+                    self._actors[agent.session_namespace] = host
+                try:
+                    receipt = (
+                        await host.get_turn_receipt(
+                            session_id, operation_id, principal=principal.id
+                        )
+                        if operation_id is not None
+                        else await host.get_turn_receipt_by_mutation(
+                            session_id, mutation_id or "", principal=principal.id
+                        )
+                    )
+                finally:
+                    if temporary:
+                        retirement = self._retire_actor(agent.session_namespace, host)
+        except HrnsError:
+            raise missing from None
+        finally:
+            current_connection_id.reset(connection_token)
+            current_request.reset(token)
+            if retirement is not None:
+                await asyncio.shield(retirement)
+        if receipt is None:
+            raise missing
+        return receipt
+
+    @_admitted
+    async def reconcile_session_turns(self) -> None:
+        """Resume recoverable queued turns; live foreign leases remain untouched."""
+        await self._reconcile_session_turns()
+
+    async def _reconcile_session_turns(self) -> None:
+        seen: set[tuple[str, str]] = set()
+        for row in await self.store.list_recoverable_headless_turns():
+            key = (row.deployment_id, row.session_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            principal = Principal(row.principal, credential_id=row.credential_id)
+            context = RequestContext(principal=principal.id, credential_id=principal.credential_id)
+            token = current_request.set(context)
+            connection_token = current_connection_id.set(None)
+            try:
+                record = await self.store.get_visible(
+                    row.deployment_id, row.session_id, principal.id
                 )
+                if record is None:
+                    continue
+                revision = next(
+                    (
+                        candidate
+                        for agent_id in self.deployments.agent_ids()
+                        for candidate in self.deployments.revisions(agent_id)
+                        if candidate.agent.session_namespace == row.deployment_id
+                        and candidate.version == record.definition_version
+                        and (candidate.agent_id, candidate.version) in self._native_deployments
+                    ),
+                    None,
+                )
+                if revision is None:
+                    continue
+                async with self._actor_scope(row.deployment_id):
+                    host = self._actors.get(row.deployment_id)
+                    if host is None:
+                        host = self._build_host(revision.agent, principal)
+                        self._actors[row.deployment_id] = host
+                    self._headless_actors.add(row.deployment_id)
+                    await host.authorize(row.session_id, PolicyAction.PROMPT)
+                    await host.resume_queued_turns(row.session_id)
+            except (ApiError, HrnsError):
+                # Live leases and current policy denials remain for a later reconciliation.
+                continue
+            finally:
+                current_connection_id.reset(connection_token)
+                current_request.reset(token)
 
     async def close_session(
         self,
@@ -836,6 +1303,7 @@ class AgentServer:
             OperationKind.DELETE,
         )
 
+    @_admitted
     async def _terminate_session(
         self,
         principal: Principal,
@@ -847,15 +1315,16 @@ class AgentServer:
             raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         agent = self.get_agent(agent_id, principal, allow_hidden=True)
         namespace = agent.session_namespace
-        actor_lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
         request = RequestContext(
             principal=principal.id,
             credential_id=principal.credential_id,
             agent_id=agent_id,
+            scopes=principal.scopes,
         )
         request_token = current_request.set(request)
+        retirement = None
         try:
-            async with actor_lock:
+            async with self._actor_scope(namespace):
                 host = self._actors.get(namespace)
                 temporary = host is None
                 if host is None:
@@ -865,9 +1334,9 @@ class AgentServer:
                     operation = await host.terminate_session(session_id, kind)
                 finally:
                     if temporary and not host.has_pending_lifecycle_tasks():
-                        if self._actors.get(namespace) is host:
-                            self._actors.pop(namespace, None)
-                        await host.shutdown()
+                        retirement = self._retire_actor(namespace, host)
+            if retirement is not None:
+                await asyncio.shield(retirement)
         except HrnsError as exc:
             raise self._embedding_lifecycle_error(exc) from exc
         finally:
@@ -879,6 +1348,125 @@ class AgentServer:
             operation=kind,
         )
 
+    @_admitted
+    async def get_session_lifecycle(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+        kind: OperationKind,
+        operation_id: str | None = None,
+    ) -> QueuedPrompt:
+        """Read one owner-scoped durable close/delete receipt, including after deletion.
+
+        Without an operation ID, discovery succeeds only when exactly one receipt of
+        this kind exists for the session. Ambiguous histories require an explicit ID.
+        The returned state is the stored operation state; a failed or uncertain
+        operation is not proof that its external effects did or did not occur.
+        """
+        missing = ApiError(
+            "NOT_FOUND", "No session lifecycle operation is available to this principal."
+        )
+        if (
+            not principal.may_use(agent_id)
+            or not isinstance(kind, OperationKind)
+            or kind not in (OperationKind.CLOSE, OperationKind.DELETE)
+            or (
+                operation_id is not None and (not isinstance(operation_id, str) or not operation_id)
+            )
+        ):
+            raise missing
+        request = current_request.get()
+        if request is not None and (
+            request.principal != principal.id or request.credential_id != principal.credential_id
+        ):
+            raise missing
+        try:
+            agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        except ApiError:
+            raise missing from None
+        ambiguous = False
+        if operation_id is None:
+            # list_prompts is a single ordered store snapshot. A full page may have
+            # omitted later generations, so never guess when the bound is reached.
+            limit = 10_001
+            history = await self.store.list_prompts(
+                agent.session_namespace, session_id, limit=limit
+            )
+            matches = [item for item in history if item.kind is kind]
+            operation = matches[-1] if matches else None
+            ambiguous = len(matches) > 1 or len(history) == limit
+        else:
+            operation = await self.store.get_lifecycle_operation(
+                agent.session_namespace, session_id, kind, operation_id=operation_id
+            )
+        if operation is None:
+            raise missing
+        try:
+            payload = json.loads(operation.payload)
+        except (ValueError, TypeError):
+            raise missing from None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("owner") != principal.id
+            or payload.get("agentId") != agent_id
+            or payload.get("deploymentId") != agent.session_namespace
+            or payload.get("operationId") != operation.prompt_id
+            or payload.get("fenceDomain") != "sessionLease"
+        ):
+            raise missing
+        definition_version = payload.get("definitionVersion")
+        if not isinstance(definition_version, str) or not definition_version:
+            raise missing
+        try:
+            self.get_revision(agent_id, principal, version=definition_version)
+        except ApiError:
+            raise missing from None
+        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
+        if record is None:
+            collaborators = payload.get("collaborators")
+            metadata = payload.get("metadata")
+            if (
+                not isinstance(collaborators, list)
+                or not all(isinstance(item, str) for item in collaborators)
+                or not isinstance(metadata, dict)
+                or not all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in metadata.items()
+                )
+            ):
+                raise missing
+            try:
+                access = SessionAccess(payload.get("access"))
+            except (TypeError, ValueError):
+                raise missing from None
+            context = SessionContext(
+                session_id=session_id,
+                principal=principal.id,
+                deployment_id=agent.session_namespace,
+                agent_id=agent_id,
+                owner=principal.id,
+                access=access,
+                collaborators=frozenset(collaborators),
+                credential_id=principal.credential_id,
+                connection_id=request.connection_id if request is not None else None,
+                request_id=request.request_id if request is not None else None,
+                metadata=metadata,
+            )
+        else:
+            if (
+                record.effective_owner != principal.id
+                or record.definition_version != definition_version
+            ):
+                raise missing
+            context = self._capability_policy_context(principal, agent, record)
+        if not (await decide_policy(self.session_policy, context, PolicyAction.LOAD)).allowed:
+            raise missing
+        if ambiguous:
+            raise ApiError("CONFLICT", "Multiple lifecycle generations require an operation ID.")
+        return operation
+
+    @_admitted
     async def reconcile_session_lifecycle(self) -> tuple[SessionLifecycleResult, ...]:
         """Finish durable close/delete intents left by cancellation or process loss."""
         if not self._running:
@@ -913,9 +1501,9 @@ class AgentServer:
                 agent_id=agent.id,
             )
             request_token = current_request.set(request)
-            actor_lock = self._actor_locks.setdefault(operation.deployment_id, asyncio.Lock())
+            retirement = None
             try:
-                async with actor_lock:
+                async with self._actor_scope(operation.deployment_id):
                     host = self._actors.get(operation.deployment_id)
                     temporary = host is None
                     if host is None:
@@ -930,9 +1518,9 @@ class AgentServer:
                         )
                     finally:
                         if temporary and not host.has_pending_lifecycle_tasks():
-                            if self._actors.get(operation.deployment_id) is host:
-                                self._actors.pop(operation.deployment_id, None)
-                            await host.shutdown()
+                            retirement = self._retire_actor(operation.deployment_id, host)
+                if retirement is not None:
+                    await asyncio.shield(retirement)
             except HrnsError as exc:
                 raise self._embedding_lifecycle_error(exc) from exc
             finally:
@@ -977,7 +1565,7 @@ class AgentServer:
 
     async def _admin_lease(
         self, principal: Principal, deployment_id: str, session_id: str
-    ) -> str | None:
+    ) -> SessionLease | None:
         """Guard an embedding-API write with the session lease.
 
         A live actor reuses its own lease. With no actor in this process a short-lived
@@ -1010,21 +1598,57 @@ class AgentServer:
                 raise ApiError("CONFLICT", exc.message) from exc
             return None
         owner = f"{self._instance_id}:admin:{uuid.uuid4().hex}"
-        lease = await self.store.acquire_lease(
-            principal.id, deployment_id, session_id, owner, self.lease_ttl_ms
+        acquisition = asyncio.create_task(
+            self.store.acquire_lease(
+                principal.id, deployment_id, session_id, owner, self.lease_ttl_ms
+            )
         )
+        try:
+            lease = await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            while not acquisition.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(acquisition)
+            if not acquisition.cancelled() and acquisition.exception() is None:
+                acquired = acquisition.result()
+                if acquired is not None:
+                    with suppress(asyncio.CancelledError, Exception):
+                        await self._release_admin_lease(acquired)
+            raise
         if lease is None:
             raise ApiError(
                 "CONFLICT",
                 "The session is owned by another live worker.",
                 details={"sessionId": session_id},
             )
-        return owner
+        return lease
 
+    async def _release_admin_lease(self, lease: SessionLease) -> None:
+        release = asyncio.create_task(
+            self.store.release_lease(
+                lease.principal,
+                lease.deployment_id,
+                lease.session_id,
+                lease.owner_id,
+                lease.fence,
+            )
+        )
+        cancelled = False
+        while not release.done():
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                cancelled = True
+        release.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    @_admitted
     async def revoke_credential(self, credential_id: str) -> int:
         """Close every live connection using ``credential_id`` before returning."""
         return await self.connections.revoke_credential(credential_id)
 
+    @_admitted
     async def revoke_principal(self, principal: str) -> int:
         """Close every live connection of ``principal`` across all its credentials."""
         return await self.connections.revoke_principal(principal)
@@ -1037,33 +1661,84 @@ class AgentServer:
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
-        if self._running:
+        if self._running or self._starting or self._stopping:
             raise RuntimeError("AgentServer is already running")
-        self._running = True
+        self._starting = True
         try:
             await self.store.initialize()
             await self._restore_deployments()
-            await self.flush_deployments()
-            await self.reconcile_session_creations()
+            await self._flush_deployments()
+            await self._reconcile_session_creations()
+            self._running = True
+            await self._reconcile_session_turns()
+            self._starting = False
             yield
         finally:
+            # Close admission synchronously before taking any task or connection snapshot.
+            self._running = False
+            self._starting = False
+            self._stopping = True
+            cleanup = asyncio.create_task(self._shutdown())
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            # Propagate cleanup errors before reporting cancellation.
+            cleanup.result()
+            self._stopping = False
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _shutdown(self) -> None:
+        failures: list[BaseException] = []
+        try:
+            current = asyncio.current_task()
+            requests = tuple(task for task in self._admitted_tasks if task is not current)
+            creations = tuple(self._creation_tasks)
+            for task in (*requests, *creations):
+                task.cancel()
+            if requests or creations:
+                await asyncio.gather(*requests, *creations, return_exceptions=True)
             try:
-                for task in tuple(self._creation_tasks):
-                    task.cancel()
-                if self._creation_tasks:
-                    await asyncio.gather(*tuple(self._creation_tasks), return_exceptions=True)
                 await self.connections.close_all()
-                for namespace, host in list(self._actors.items()):
-                    if self._actors.get(namespace) is host:
-                        self._actors.pop(namespace, None)
-                    await host.shutdown()
-                self._hosts.clear()
-                await self.flush_deployments()
-                if self._persist_tasks:
-                    await asyncio.gather(*tuple(self._persist_tasks), return_exceptions=True)
-            finally:
+            except Exception as exc:
+                failures.append(exc)
+            connections = tuple(task for task in self._connection_tasks if task is not current)
+            for task in connections:
+                task.cancel()
+            if connections:
+                await asyncio.gather(*connections, return_exceptions=True)
+            if self._retirements:
+                results = await asyncio.gather(
+                    *tuple(self._retirements.values()), return_exceptions=True
+                )
+                failures.extend(result for result in results if isinstance(result, BaseException))
+                self._retirements.clear()
+            hosts = tuple(self._actors.values())
+            self._actors.clear()
+            self._headless_actors.clear()
+            if hosts:
+                results = await asyncio.gather(
+                    *(host.shutdown() for host in hosts), return_exceptions=True
+                )
+                failures.extend(result for result in results if isinstance(result, BaseException))
+            self._hosts.clear()
+            if self._persist_tasks:
+                results = await asyncio.gather(*tuple(self._persist_tasks), return_exceptions=True)
+                failures.extend(result for result in results if isinstance(result, BaseException))
+            try:
+                await self._flush_deployments()
+            except Exception as exc:
+                failures.append(exc)
+        finally:
+            try:
                 await self.store.close()
-                self._running = False
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise BaseExceptionGroup("Agent server shutdown failed", failures)
 
     def _build_host(self, agent: RegisteredAgent, principal: Principal) -> HrnsACPAgent:
         version = agent.definition.definition_version or ""
@@ -1078,17 +1753,23 @@ class AgentServer:
                 else principal.credential_id,
                 scopes=request_context.scopes if request_context is not None else principal.scopes,
             )
+            mutation_id = incoming.mutation_id or uuid.uuid4().hex
             selected = incoming.definition_version
             if selected is None:
-                current = self._native_revision(agent.id)
-                if current is None:
-                    raise HrnsError(
-                        "DEPLOYMENT_UNAVAILABLE", "No deployment is available to this principal."
-                    )
-                selected = current.version
+                existing = await self.store.get_creation(acting.id, mutation_id)
+                if existing is not None and existing.request.agent_id == agent.id:
+                    selected = existing.request.definition_version
+                else:
+                    current = self._native_revision(agent.id)
+                    if current is None:
+                        raise HrnsError(
+                            "DEPLOYMENT_UNAVAILABLE",
+                            "No deployment is available to this principal.",
+                        )
+                    selected = current.version
             incoming = incoming.model_copy(
                 update={
-                    "mutation_id": incoming.mutation_id or uuid.uuid4().hex,
+                    "mutation_id": mutation_id,
                     "definition_version": selected,
                 }
             )
@@ -1144,6 +1825,7 @@ class AgentServer:
             close_store=False,
             revision_resolver=resolve_revision,
             creation_handler=hosted_create,
+            resource_resolver=self.resource_resolver,
         )
         return HrnsACPAgent(
             bundle,
@@ -1173,8 +1855,26 @@ class AgentServer:
     ) -> AsyncGenerator[HrnsACPAgent, None]:
         if not self._running:
             raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        task = asyncio.current_task()
+        if task is None:
+            raise ApiError("SERVER_BUSY", "No ASGI handler task for this connection")
+        self._connection_tasks.add(task)
+        try:
+            async with self._connection(socket, agent, principal) as host:
+                yield host
+        finally:
+            self._connection_tasks.discard(task)
+
+    @asynccontextmanager
+    async def _connection(
+        self, socket: WebSocket, agent: RegisteredAgent, principal: Principal
+    ) -> AsyncGenerator[HrnsACPAgent, None]:
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         if self._pending_deployments:
-            await self.flush_deployments()
+            await self._flush_deployments()
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         if len(self.connections.list_connections()) >= 32 or (
             self.connections.count_for_principal(principal.id) >= 4
         ):
@@ -1192,10 +1892,12 @@ class AgentServer:
             )
         except PermissionError as exc:
             raise ApiError("UNAUTHORIZED", str(exc)) from exc
+        if not self._running:
+            self.connections.unregister(info.connection_id)
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         namespace = agent.session_namespace
-        actor_lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
         try:
-            async with actor_lock:
+            async with self._actor_scope(namespace):
                 host = self._actors.get(namespace)
                 if host is None:
                     host = self._build_host(agent, principal)
@@ -1220,14 +1922,32 @@ class AgentServer:
         finally:
             current_request.reset(request_token)
             current_connection_id.reset(connection_token)
-            async with actor_lock:
-                host.detach(info.connection_id)
-                self._hosts.pop(info.connection_id, None)
-                self.connections.unregister(info.connection_id)
-                # A reconnect either registers against this actor before retirement
-                # starts or waits until shutdown has released all of its leases.
-                still_attached = any(candidate is host for candidate in self._hosts.values())
-                if not host.fanout.connections() and not still_attached:
-                    await host.shutdown()
-                    if self._actors.get(namespace) is host:
-                        self._actors.pop(namespace, None)
+            cleanup = asyncio.create_task(self._detach_connection(namespace, info, host))
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def _detach_connection(
+        self, namespace: str, info: ConnectionInfo, host: HrnsACPAgent
+    ) -> None:
+        retirement = None
+        async with self._actor_scope(namespace):
+            host.detach(info.connection_id)
+            self._hosts.pop(info.connection_id, None)
+            self.connections.unregister(info.connection_id)
+            # A reconnect either attaches first or waits outside the lock for retirement.
+            still_attached = any(candidate is host for candidate in self._hosts.values())
+            if (
+                namespace not in self._headless_actors
+                and not host.fanout.connections()
+                and not still_attached
+            ):
+                retirement = self._retire_actor(namespace, host)
+        if retirement is not None:
+            await asyncio.shield(retirement)
