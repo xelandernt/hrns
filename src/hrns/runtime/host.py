@@ -1948,7 +1948,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         await self.sessions.ensure_title(session_id, _prompt_text(prompt))
         if self._retiring:
             raise HrnsError("SESSION_CLOSING", "The host is retiring.")
-        await self.sessions.refresh_turn_resources(session_id)
+        await self.sessions.refresh_session_resources(session_id, action=PolicyAction.PROMPT)
         self.sessions.turn_usage[session_id] = {}
         response = None
         try:
@@ -2183,10 +2183,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self._schedule_headless_drain(session_id)
 
     async def load_headless_session(self, session_id: str) -> None:
-        """Load an actor without creating or routing requests to an ACP client."""
+        """Authorize and load or refresh a session without executing queued work."""
         async with self._turn_lock(session_id):
-            if session_id in self._sessions:
-                return
             record = await self.session_record(session_id)
             if record is None:
                 raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
@@ -2194,20 +2192,41 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             lease = await self.acquire_session_lease(session_id)
             if lease is None:
                 raise HrnsError("SESSION_HELD", "Headless turns require hosted session authority.")
-            revision = self.sessions.revision_for(record)
-            cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
-            # An empty fanout drops replay updates without fabricating an ACP peer.
-            token = _conn_override.set(FanoutClient())
-            try:
-                await super().load_session(
-                    cwd, session_id, mcp_servers=None, additional_directories=None
-                )
-            finally:
-                _conn_override.reset(token)
-            self._session_cwd[session_id] = cwd
-            if not record.read_only:
-                async with self._activity_lock(session_id):
+            if session_id in self._sessions:
+                await self.sessions.refresh_session_resources(session_id, action=PolicyAction.LOAD)
+            else:
+                revision = self.sessions.revision_for(record)
+                cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
+                # An empty fanout drops replay updates without fabricating an ACP peer.
+                token = _conn_override.set(FanoutClient())
+                try:
+                    await super().load_session(
+                        cwd, session_id, mcp_servers=None, additional_directories=None
+                    )
+                finally:
+                    _conn_override.reset(token)
+                self._session_cwd[session_id] = cwd
+            async with self._activity_lock(session_id):
+                record = await self.authorize(session_id, PolicyAction.LOAD)
+                current = await self.acquire_session_lease(session_id)
+                if (
+                    current is None
+                    or current.owner_id != lease.owner_id
+                    or current.fence != lease.fence
+                    or current.expires_at <= now_ms()
+                ):
+                    raise HrnsError("SESSION_CONFLICT", "The session lease changed during load.")
+                if not record.read_only:
                     await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
+            await self.authorize(session_id, PolicyAction.LOAD)
+            current = await self.acquire_session_lease(session_id)
+            if (
+                current is None
+                or current.owner_id != lease.owner_id
+                or current.fence != lease.fence
+                or current.expires_at <= now_ms()
+            ):
+                raise HrnsError("SESSION_CONFLICT", "The session lease changed during load.")
 
     def _schedule_headless_drain(self, session_id: str) -> None:
         async def drain() -> None:

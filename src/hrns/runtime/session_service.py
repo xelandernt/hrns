@@ -834,8 +834,10 @@ class SessionService:
         composition.deps = refreshed.deps
         composition.models = refreshed.models
 
-    async def refresh_turn_resources(self, session_id: str) -> None:
-        """Compose with this turn's authorized bindings, never a previous caller's."""
+    async def refresh_session_resources(self, session_id: str, *, action: PolicyAction) -> None:
+        """Recompose with the current authorized caller's session bindings."""
+        if action not in (PolicyAction.LOAD, PolicyAction.PROMPT):
+            raise HrnsError("INVALID_CONFIGURATION", "Unsupported session resource refresh action.")
         if self.agent.bundle.resource_resolver is None:
             return
         composition = self.require_composition(session_id)
@@ -857,7 +859,7 @@ class SessionService:
             session_id=session_id,
             resource_bindings=revision.resources,
             model=model,
-            action=PolicyAction.PROMPT,
+            action=action,
         )
         refreshed = await compose_definition(
             revision.definition,

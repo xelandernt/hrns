@@ -1083,6 +1083,80 @@ class AgentServer:
         )
 
     @_admitted
+    async def load_session(self, principal: Principal, agent_id: str, session_id: str) -> None:
+        """Load a pinned session headlessly without executing queued work.
+
+        The embedding application must supply an authenticated principal. A missing
+        credential ID is not itself an authorization grant.
+        """
+        missing = ApiError("NOT_FOUND", "No session is available to this principal.")
+        if not isinstance(principal, Principal):
+            raise missing
+        ambient = current_request.get()
+        if ambient is not None and (
+            ambient.principal != principal.id or ambient.credential_id != principal.credential_id
+        ):
+            raise missing
+        agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
+        if record is None or record.agent_id != agent_id:
+            raise missing
+        agent = self.get_revision(agent_id, principal, version=record.definition_version).agent
+        scopes = principal.scopes
+        if ambient is not None and ambient.scopes is not None:
+            scopes = ambient.scopes if scopes is None else scopes & ambient.scopes
+        context = RequestContext(
+            principal=principal.id,
+            credential_id=principal.credential_id,
+            connection_id=ambient.connection_id if ambient is not None else None,
+            request_id=ambient.request_id if ambient is not None else None,
+            agent_id=agent_id,
+            scopes=scopes,
+            session_id=session_id,
+            operation_id=ambient.operation_id if ambient is not None else None,
+            origin=ambient.origin if ambient is not None else None,
+        )
+        token = current_request.set(context)
+        connection_token = current_connection_id.set(None)
+        retirement = None
+        try:
+            async with self._actor_scope(agent.session_namespace):
+                host = self._actors.get(agent.session_namespace)
+                temporary = host is None
+                if host is None:
+                    host = self._build_host(agent, principal)
+                    self._actors[agent.session_namespace] = host
+                try:
+                    try:
+                        await host.authorize(session_id, PolicyAction.LOAD)
+                    except HrnsError:
+                        raise missing from None
+                    await host.load_headless_session(session_id)
+                    self._headless_actors.add(agent.session_namespace)
+                except BaseException:
+                    if temporary:
+                        retirement = self._retire_actor(agent.session_namespace, host)
+                    raise
+        except HrnsError as exc:
+            if exc.code in {"SESSION_NOT_FOUND", "FORBIDDEN", "POLICY_DENIED"}:
+                raise missing from None
+            status = {
+                "SESSION_HELD": 409,
+                "SESSION_CONFLICT": 409,
+                "SESSION_CLOSING": 409,
+                "SESSION_READ_ONLY": 403,
+                "DEPLOYMENT_UNAVAILABLE": 503,
+                "SESSION_DURABILITY_FAILED": 503,
+                "SESSION_REPLAY_UNAVAILABLE": 503,
+            }.get(exc.code, 500)
+            raise ApiError(exc.code, exc.message, details=exc.details, status_code=status) from exc
+        finally:
+            current_connection_id.reset(connection_token)
+            current_request.reset(token)
+            if retirement is not None:
+                await asyncio.shield(retirement)
+
+    @_admitted
     async def submit_session_turn(
         self, principal: Principal, agent_id: str, session_id: str, request: TurnRequest
     ) -> TurnReceipt:
@@ -1163,7 +1237,12 @@ class AgentServer:
         *,
         mutation_id: str | None = None,
     ) -> TurnReceipt:
-        """Read a durable headless turn by operation or mutation ID under LOAD policy."""
+        """Read a durable turn under LOAD policy.
+
+        ``TURN_NOT_FOUND`` means an authorized active-session lookup observed no
+        caller-owned receipt. A concurrent submission may still succeed; retry only
+        with the same mutation ID and request.
+        """
         missing = ApiError("NOT_FOUND", "No session turn is available to this principal.")
         if (
             (operation_id is None) == (mutation_id is None)
@@ -1211,6 +1290,24 @@ class AgentServer:
                             session_id, mutation_id or "", principal=principal.id
                         )
                     )
+                    if receipt is None:
+                        current = await self.store.get_visible(
+                            agent.session_namespace, session_id, principal.id
+                        )
+                        if (
+                            current is None
+                            or current.read_only
+                            or current.agent_id != agent_id
+                            or current.definition_version != record.definition_version
+                            or current.effective_owner != record.effective_owner
+                        ):
+                            raise missing
+                        await host.authorize(session_id, PolicyAction.LOAD, record=current)
+                        raise ApiError(
+                            "TURN_NOT_FOUND",
+                            "No turn receipt was observed for this principal.",
+                            status_code=404,
+                        )
                 finally:
                     if temporary:
                         retirement = self._retire_actor(agent.session_namespace, host)
