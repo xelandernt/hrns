@@ -48,6 +48,7 @@ class FanoutClient:
         self._subscriptions: dict[str, set[str]] = {}
         self._connection_sessions: dict[str, set[str]] = {}
         self._approval_guard: Callable[[str], Awaitable[None]] | None = None
+        self._muted_sessions: set[str] = set()
         #: A local stdio host has one client and no connection registry, so the sole
         #: client is a legitimate default. Hosted servers never use that shortcut.
         self.local = local
@@ -74,7 +75,7 @@ class FanoutClient:
 
     def subscribe(self, connection_id: str, session_id: str) -> None:
         """Subscribe one connection to one session's update stream."""
-        if connection_id not in self._clients:
+        if connection_id not in self._clients or session_id in self._muted_sessions:
             return
         self._subscriptions.setdefault(session_id, set()).add(connection_id)
         self._connection_sessions.setdefault(connection_id, set()).add(session_id)
@@ -100,6 +101,14 @@ class FanoutClient:
                 sessions.discard(session_id)
                 if not sessions:
                     self._connection_sessions.pop(connection_id, None)
+
+    def mute_session(self, session_id: str) -> None:
+        """Quarantine provisional creation from all viewers."""
+        self._muted_sessions.add(session_id)
+        self.unsubscribe_session(session_id)
+
+    def unmute_session(self, session_id: str) -> None:
+        self._muted_sessions.discard(session_id)
 
     def subscribers(self, session_id: str) -> tuple[Client, ...]:
         """The clients currently watching a session, in attachment order."""
@@ -335,6 +344,8 @@ class FanoutClient:
         back to the current connection after an unsubscribe would deliver updates to a
         viewer whose access was just revoked.
         """
+        if session_id in self._muted_sessions:
+            return ()
         targets = self.subscribers(session_id)
         if targets or not self.local:
             return targets

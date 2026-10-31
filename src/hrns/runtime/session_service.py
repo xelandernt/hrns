@@ -41,7 +41,7 @@ from .todo import PLAN_TABLE, PlanChannel, plan_update
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from pydantic_ai_harness.experimental.acp import AcpSession
+    from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig
 
     from .acp_store import ScopedSessionStore
     from .definitions import AgentDefinition
@@ -76,6 +76,8 @@ class SessionService:
         self.new_lock = asyncio.Lock()
         self.pending_initial: list[Any] | None = None
         self.pending_effort: str | None = None
+        self.pending_creation: SessionRecord | None = None
+        self.prepared_configs: dict[str, AcpSessionConfig[object]] = {}
 
     @property
     def principal(self) -> str:
@@ -91,6 +93,7 @@ class SessionService:
         self.turn_usage.pop(session_id, None)
         self.plan_channels.pop(session_id, None)
         self.client_sessions.pop(session_id, None)
+        self.prepared_configs.pop(session_id, None)
 
     def remember_client(
         self, session: AcpSession, cwd: str, *, accepts: bool | None = None
@@ -643,6 +646,9 @@ class SessionService:
 
     async def compose_session(self, session: Any) -> Any:
         agent = self.agent
+        prepared = self.prepared_configs.pop(session.session_id, None)
+        if prepared is not None:
+            return prepared
         # Subscribe the initiator before composition can publish presentation, plan, or
         # configuration notifications. Hosted actors have no no-subscriber fallback.
         connection_id = current_connection_id.get()
@@ -653,7 +659,10 @@ class SessionService:
         known = record or draft
         initial = None
         effort = self.policy.default_effort
-        if known is None:
+        creating = self.pending_creation is not None and (
+            self.pending_creation.session_id == session.session_id
+        )
+        if known is None or creating:
             initial = self.pending_initial
             if self.pending_effort is not None:
                 effort = self.pending_effort
@@ -674,7 +683,7 @@ class SessionService:
             or revision.default_model
             or agent._default_model
         )
-        saved = known.bindings if known is not None else None
+        saved = known.bindings if known is not None and not creating else None
         support = (
             revision.effort_support(model) if revision.models else self.policy.effort_support(model)
         )
@@ -707,18 +716,24 @@ class SessionService:
         self.compositions[session.session_id] = composition
         if record is None:
             # Composed, not yet used: the row is staged and written when the session is used.
-            self.store.stage(
-                SessionRecord(
-                    session_id=session.session_id,
-                    principal=self.principal,
-                    deployment_id=self.policy.deployment_id,
-                    agent_id=definition.agent_id,
-                    definition_version=definition.version or "",
-                    cwd=cwd,
-                    effort=effort or EFFORT_DEFAULT,
-                    bindings=composition.catalog.export_bindings(),
+            if creating and self.pending_creation is not None:
+                self.pending_creation.bindings = composition.catalog.export_bindings()
+                self.pending_creation.model = model
+                self.pending_creation.effort = composition.effort.effort or EFFORT_DEFAULT
+                self.store.stage(self.pending_creation)
+            else:
+                self.store.stage(
+                    SessionRecord(
+                        session_id=session.session_id,
+                        principal=self.principal,
+                        deployment_id=self.policy.deployment_id,
+                        agent_id=definition.agent_id,
+                        definition_version=definition.version or "",
+                        cwd=cwd,
+                        effort=effort or EFFORT_DEFAULT,
+                        bindings=composition.catalog.export_bindings(),
+                    )
                 )
-            )
         elif not record.read_only:
             await self.store.update(
                 session.session_id,

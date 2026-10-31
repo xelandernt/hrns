@@ -25,7 +25,10 @@ from pydantic_ai.messages import ModelMessage
 
 from hrns.protocol import HrnsError, order_session_updates
 
+from .creation import SessionCreationOperation
 from .session_policy import SessionAccess
+
+_CreationList = list[SessionCreationOperation]
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.experimental.acp import StoredSession
@@ -719,6 +722,40 @@ class SessionStore(ABC):
 
     def scoped(self, principal: str, deployment_id: str) -> ScopedSessionStore:
         return ScopedSessionStore(self, principal, deployment_id)
+
+    @abstractmethod
+    async def reserve_creation(
+        self, operation: SessionCreationOperation
+    ) -> SessionCreationOperation:
+        """Atomically reserve a principal-scoped intent or replay/conflict."""
+
+    @abstractmethod
+    async def get_creation(
+        self, principal: str, mutation_id: str
+    ) -> SessionCreationOperation | None: ...
+
+    @abstractmethod
+    async def list_pending_creations(self) -> _CreationList: ...
+
+    @abstractmethod
+    async def claim_creation(
+        self, principal: str, mutation_id: str, owner_id: str, ttl_ms: int
+    ) -> SessionCreationOperation | None:
+        """Claim an unowned/expired operation, advancing its fence."""
+
+    @abstractmethod
+    async def update_creation(self, operation: SessionCreationOperation) -> None:
+        """Fenced state transition/renewal; must reject an expired or superseded owner."""
+
+    @abstractmethod
+    async def commit_creation(
+        self,
+        operation: SessionCreationOperation,
+        record: SessionRecord,
+        session: StoredSession,
+        lease: SessionLease | None = None,
+    ) -> None:
+        """Atomically publish the complete session and successful creation result."""
 
 
 class ScopedSessionStore:

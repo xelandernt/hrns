@@ -48,6 +48,7 @@ class SessionAccess(StrEnum):
 class PolicyAction(StrEnum):
     """One operation a policy may authorize."""
 
+    CREATE = "create"
     LIST = "list"
     LOAD = "load"
     REPLAY = "replay"
