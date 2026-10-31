@@ -1082,6 +1082,30 @@ class AgentServer:
             },
         )
 
+    async def _authorized_session_candidate(
+        self,
+        principal: Principal,
+        agent: RegisteredAgent,
+        session_id: str,
+        *,
+        action: PolicyAction = PolicyAction.LOAD,
+    ) -> SessionRecord:
+        """Authorize an exact internal candidate before using its metadata."""
+        missing = ApiError("NOT_FOUND", "No session is available to this principal.")
+        record = await self.store.get_policy_candidate(agent.session_namespace, session_id)
+        if record is None or record.agent_id != agent.id:
+            raise missing
+        context = self._capability_policy_context(principal, agent, record)
+        if not (await decide_policy(self.session_policy, context, PolicyAction.LOAD)).allowed:
+            raise missing
+        if action is not PolicyAction.LOAD:
+            decision = await decide_policy(self.session_policy, context, action)
+            if not decision.allowed:
+                if decision.code == "SESSION_NOT_FOUND":
+                    raise missing
+                raise ApiError(decision.code, decision.message, status_code=403)
+        return record
+
     @_admitted
     async def load_session(self, principal: Principal, agent_id: str, session_id: str) -> None:
         """Load a pinned session headlessly without executing queued work.
@@ -1098,9 +1122,7 @@ class AgentServer:
         ):
             raise missing
         agent = self.get_agent(agent_id, principal, allow_hidden=True)
-        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
-        if record is None or record.agent_id != agent_id:
-            raise missing
+        record = await self._authorized_session_candidate(principal, agent, session_id)
         agent = self.get_revision(agent_id, principal, version=record.definition_version).agent
         scopes = principal.scopes
         if ambient is not None and ambient.scopes is not None:
@@ -1187,15 +1209,23 @@ class AgentServer:
                 status_code=403,
             )
         agent = self.get_agent(agent_id, principal, allow_hidden=True)
-        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
-        if record is None:
-            raise ApiError("NOT_FOUND", "No session is available to this principal.")
-        self.get_revision(agent_id, principal, version=record.definition_version)
+        record = await self._authorized_session_candidate(
+            principal, agent, session_id, action=PolicyAction.PROMPT
+        )
+        agent = self.get_revision(agent_id, principal, version=record.definition_version).agent
+        scopes = principal.scopes
+        if ambient is not None and ambient.scopes is not None:
+            scopes = ambient.scopes if scopes is None else scopes & ambient.scopes
         context = RequestContext(
             principal=principal.id,
             credential_id=principal.credential_id,
+            connection_id=ambient.connection_id if ambient is not None else None,
+            request_id=ambient.request_id if ambient is not None else None,
             agent_id=agent_id,
-            scopes=principal.scopes,
+            scopes=scopes,
+            session_id=session_id,
+            operation_id=ambient.operation_id if ambient is not None else None,
+            origin=ambient.origin if ambient is not None else None,
         )
         token = current_request.set(context)
         connection_token = current_connection_id.set(None)
@@ -1258,17 +1288,18 @@ class AgentServer:
         ):
             raise missing
         agent = self.get_agent(agent_id, principal, allow_hidden=True)
-        record = await self.store.get_visible(agent.session_namespace, session_id, principal.id)
-        if record is None:
-            raise missing
-        self.get_revision(agent_id, principal, version=record.definition_version)
+        record = await self._authorized_session_candidate(principal, agent, session_id)
+        agent = self.get_revision(agent_id, principal, version=record.definition_version).agent
+        scopes = principal.scopes
+        if request is not None and request.scopes is not None:
+            scopes = request.scopes if scopes is None else scopes & request.scopes
         context = RequestContext(
             principal=principal.id,
             credential_id=principal.credential_id,
             connection_id=request.connection_id if request is not None else None,
             request_id=request.request_id if request is not None else None,
             agent_id=agent_id,
-            scopes=principal.scopes,
+            scopes=scopes,
         )
         token = current_request.set(context)
         connection_token = current_connection_id.set(None)
@@ -1291,8 +1322,8 @@ class AgentServer:
                         )
                     )
                     if receipt is None:
-                        current = await self.store.get_visible(
-                            agent.session_namespace, session_id, principal.id
+                        current = await self.store.get_policy_candidate(
+                            agent.session_namespace, session_id
                         )
                         if (
                             current is None
@@ -1339,9 +1370,7 @@ class AgentServer:
             token = current_request.set(context)
             connection_token = current_connection_id.set(None)
             try:
-                record = await self.store.get_visible(
-                    row.deployment_id, row.session_id, principal.id
-                )
+                record = await self.store.get_policy_candidate(row.deployment_id, row.session_id)
                 if record is None:
                     continue
                 revision = next(
@@ -1350,6 +1379,7 @@ class AgentServer:
                         for agent_id in self.deployments.agent_ids()
                         for candidate in self.deployments.revisions(agent_id)
                         if candidate.agent.session_namespace == row.deployment_id
+                        and candidate.agent_id == record.agent_id
                         and candidate.version == record.definition_version
                         and (candidate.agent_id, candidate.version) in self._native_deployments
                     ),

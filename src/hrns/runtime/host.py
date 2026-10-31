@@ -1102,8 +1102,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         )
 
     async def session_record(self, session_id: str) -> SessionRecord | None:
-        """The visible stored record, or the staged record of a session not yet used."""
-        record = await self.store.get_visible(session_id, self.acting_principal())
+        """Get metadata for policy evaluation; this is not an authorization grant."""
+        record = await self.store.get_policy_candidate(session_id)
         if record is not None:
             return record
         return self.store.staged(session_id)
@@ -1307,6 +1307,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     "operation": pending.kind.value,
                 },
             )
+        self.store.bind_storage_principal(known)
         if action in READ_ONLY_ACTIONS and self._lease_owner() is not None:
             # Every mutation is fenced. A stale actor that lost its lease cannot write
             # metadata, delete, or re-share a session even though policy still allows it.
@@ -1645,7 +1646,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         try:
             self.sessions.reject_additional_directories(additional_directories)
             self.sessions.reject_client_mcp(mcp_servers)
-            record = await self.store.get_visible(session_id, self.acting_principal())
+            record = await self.store.get_policy_candidate(session_id)
             if record is None:
                 raise RequestError.invalid_params(
                     {"sessionId": session_id, "reason": "no stored session with this id"}
@@ -1963,7 +1964,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 for name, value in usage_payload(response.usage).items():
                     if isinstance(value, int) and not isinstance(value, bool):
                         increment[name] = max(increment.get(name, 0), value)
-            record = await self.store.get_visible(session_id, self.acting_principal())
+            record = await self.session_record(session_id)
             if record is not None and (self._lease_owner() is None or session_id in self._leases):
                 title = record.title
                 if not title and response is not None:
@@ -2440,8 +2441,6 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 captured_output = _CapturedOutput()
                 output_token = _turn_output.set(captured_output)
                 try:
-                    async with self._activity_lock(session_id):
-                        await self._resume_work_locked(session_id)
                     result = await self._execute_ordered_operation(row)
                     if self._retiring or (
                         row.kind is OperationKind.PROMPT
@@ -2528,6 +2527,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             else None
         )
         try:
+            action = (
+                PolicyAction.PROMPT if row.kind is OperationKind.PROMPT else PolicyAction.CONFIGURE
+            )
+            await self.authorize(row.session_id, action)
+            async with self._activity_lock(row.session_id):
+                await self._resume_work_locked(row.session_id)
             if row.kind is OperationKind.PROMPT:
                 kwargs = self._operation_kwargs.pop(row.prompt_id, {})
                 if row.origin is not None:

@@ -1105,6 +1105,19 @@ class SQLiteSessionStore(SessionStore):
         async with self._lock:
             return await _thread(self._run, update)
 
+    async def get_policy_candidate(
+        self, deployment_id: str, session_id: str
+    ) -> SessionRecord | None:
+        query = (
+            f"SELECT {SESSION_COLUMNS} FROM acp_sessions WHERE session_id = ? AND deployment_id = ?"
+        )
+        async with self._lock:
+            row = await _thread(
+                self._run,
+                lambda: self._connect().execute(query, (session_id, deployment_id)).fetchone(),
+            )
+        return _row_to_record(row) if row is not None else None
+
     async def get_visible(
         self, deployment_id: str, session_id: str, principal: str
     ) -> SessionRecord | None:

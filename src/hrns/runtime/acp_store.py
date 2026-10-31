@@ -554,6 +554,12 @@ class SessionStore(ABC):
         """Read a session visible to ``principal`` under its own access mode."""
 
     @abstractmethod
+    async def get_policy_candidate(
+        self, deployment_id: str, session_id: str
+    ) -> SessionRecord | None:
+        """Read exact-session metadata for policy evaluation, never as an access grant."""
+
+    @abstractmethod
     async def list_visible(
         self,
         deployment_id: str,
@@ -892,6 +898,7 @@ class ScopedSessionStore:
         self.principal = principal
         self.deployment_id = deployment_id
         self._staged: dict[str, SessionRecord] = {}
+        self._storage_principals: dict[str, str] = {}
         self._materialize_lock = asyncio.Lock()
         self._fences: dict[str, int] = {}
         self._revision_lock = asyncio.Lock()
@@ -913,6 +920,19 @@ class ScopedSessionStore:
 
     def discard(self, session_id: str) -> None:
         self._staged.pop(session_id, None)
+        self._storage_principals.pop(session_id, None)
+
+    def bind_storage_principal(self, record: SessionRecord) -> None:
+        """Pin physical storage to the session creator after policy authorization."""
+        if record.deployment_id != self.deployment_id:
+            raise HrnsError("SESSION_CONFLICT", "The session belongs to another deployment.")
+        previous = self._storage_principals.get(record.session_id)
+        if previous is not None and previous != record.principal:
+            raise HrnsError("SESSION_CONFLICT", "The session storage owner changed.")
+        self._storage_principals[record.session_id] = record.principal
+
+    def storage_principal(self, session_id: str) -> str:
+        return self._storage_principals.get(session_id, self.principal)
 
     async def materialize(self, session_id: str) -> bool:
         """Write the staged record; ``False`` when the session was never staged."""
@@ -946,7 +966,7 @@ class ScopedSessionStore:
         # The first content save is also the moment a staged session becomes durable.
         await self.materialize(session_id)
         await self.backend.save_scoped(
-            self.principal,
+            self.storage_principal(session_id),
             self.deployment_id,
             session_id,
             session,
@@ -954,7 +974,9 @@ class ScopedSessionStore:
         )
 
     async def load(self, session_id: str) -> StoredSession | None:
-        return await self.backend.load_scoped(self.principal, self.deployment_id, session_id)
+        return await self.backend.load_scoped(
+            self.storage_principal(session_id), self.deployment_id, session_id
+        )
 
     async def reserve_update_revisions(self, session_id: str, count: int = 1) -> range:
         """Reserve non-reusable revisions, amortizing durable reservations in blocks."""
@@ -975,7 +997,7 @@ class ScopedSessionStore:
 
             reservation_size = max(128, count)
             first = await self.backend.reserve_update_revisions(
-                self.principal,
+                self.storage_principal(session_id),
                 self.deployment_id,
                 session_id,
                 reservation_size,
@@ -989,7 +1011,9 @@ class ScopedSessionStore:
             return range(first, first + count)
 
     async def get(self, session_id: str) -> SessionRecord | None:
-        return await self.backend.get(self.principal, self.deployment_id, session_id)
+        return await self.backend.get(
+            self.storage_principal(session_id), self.deployment_id, session_id
+        )
 
     async def list(
         self,
@@ -1003,10 +1027,15 @@ class ScopedSessionStore:
         )
 
     async def delete(self, session_id: str) -> bool:
-        return await self.backend.delete(self.principal, self.deployment_id, session_id)
+        return await self.backend.delete(
+            self.storage_principal(session_id), self.deployment_id, session_id
+        )
 
     async def get_visible(self, session_id: str, principal: str) -> SessionRecord | None:
         return await self.backend.get_visible(self.deployment_id, session_id, principal)
+
+    async def get_policy_candidate(self, session_id: str) -> SessionRecord | None:
+        return await self.backend.get_policy_candidate(self.deployment_id, session_id)
 
     async def list_visible(
         self,
@@ -1066,19 +1095,24 @@ class ScopedSessionStore:
         self, session_id: str, owner_id: str, ttl_ms: int
     ) -> SessionLease | None:
         return await self.backend.acquire_lease(
-            self.principal, self.deployment_id, session_id, owner_id, ttl_ms
+            self.storage_principal(session_id), self.deployment_id, session_id, owner_id, ttl_ms
         )
 
     async def renew_lease(
         self, session_id: str, owner_id: str, fence: int, ttl_ms: int
     ) -> SessionLease | None:
         return await self.backend.renew_lease(
-            self.principal, self.deployment_id, session_id, owner_id, fence, ttl_ms
+            self.storage_principal(session_id),
+            self.deployment_id,
+            session_id,
+            owner_id,
+            fence,
+            ttl_ms,
         )
 
     async def release_lease(self, session_id: str, owner_id: str, fence: int) -> bool:
         return await self.backend.release_lease(
-            self.principal, self.deployment_id, session_id, owner_id, fence
+            self.storage_principal(session_id), self.deployment_id, session_id, owner_id, fence
         )
 
     async def get_lease(self, session_id: str) -> SessionLease | None:
@@ -1168,9 +1202,7 @@ class ScopedSessionStore:
     async def get_turn_receipt(
         self, session_id: str, prompt_id: str, principal: str
     ) -> TurnReceipt | None:
-        record = await self.backend.get_visible(self.deployment_id, session_id, principal)
-        if record is None:
-            return None
+        """Read a caller-owned receipt after the host authorizes the session."""
         row = await self.backend.get_prompt(prompt_id)
         if (
             row is None
@@ -1184,9 +1216,7 @@ class ScopedSessionStore:
     async def get_turn_receipt_by_mutation(
         self, session_id: str, mutation_id: str, principal: str
     ) -> TurnReceipt | None:
-        record = await self.backend.get_visible(self.deployment_id, session_id, principal)
-        if record is None:
-            return None
+        """Read a caller-owned receipt after the host authorizes the session."""
         row = await self.backend.get_turn_by_mutation(self.deployment_id, session_id, mutation_id)
         return row.turn_receipt() if row is not None and row.principal == principal else None
 
@@ -1323,7 +1353,7 @@ class ScopedSessionStore:
         touch: bool = False,
     ) -> None:
         await self.backend.update(
-            self.principal,
+            self.storage_principal(session_id),
             self.deployment_id,
             session_id,
             title=title,
