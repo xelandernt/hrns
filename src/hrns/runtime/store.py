@@ -16,7 +16,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Callable, Generator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -49,6 +49,13 @@ from .acp_store import (
     now_ms,
     serialize_bindings,
     serialize_collaborators,
+)
+from .creation import (
+    CREATION_SCHEMA,
+    SessionCreationOperation,
+    SessionCreationState,
+    check_creation_owner,
+    creation_conflict,
 )
 from .session_policy import SessionAccess
 
@@ -493,6 +500,7 @@ class SQLiteSessionStore(SessionStore):
     def _initialize_sync(self) -> None:
         connection = self._connect()
         connection.executescript(_SCHEMA)
+        connection.execute(CREATION_SCHEMA)
         existing = {
             str(row["name"]) for row in connection.execute("PRAGMA table_info(acp_sessions)")
         }
@@ -545,6 +553,213 @@ class SQLiteSessionStore(SessionStore):
         if not self._initialized:
             raise RuntimeError("SessionStore.initialize() must run before use")
         return operation(*args)
+
+    async def _creation_run(self, operation: Callable[[], _ResultT]) -> _ResultT:
+        # to_thread keeps running after cancellation. Hold the connection lock until
+        # the transaction actually finishes, including an unknown commit outcome.
+        async with self._lock:
+            task = asyncio.create_task(asyncio.to_thread(self._run, operation))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                while not task.done():
+                    with suppress(asyncio.CancelledError):
+                        await asyncio.shield(task)
+                with suppress(Exception):
+                    task.result()
+                raise exc
+
+    async def reserve_creation(
+        self, operation: SessionCreationOperation
+    ) -> SessionCreationOperation:
+        def reserve() -> SessionCreationOperation:
+            connection = self._connect()
+            with _immediate(connection):
+                connection.execute(
+                    "INSERT INTO acp_session_creations "
+                    "(principal, mutation_id, session_id, state, owner_id, fence, expires_at, payload) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (principal, mutation_id) DO NOTHING",
+                    self._creation_values(operation),
+                )
+                current = self._creation_read(operation.principal, operation.mutation_id)
+                if current is None:
+                    raise creation_conflict()
+                if current.request_hash != operation.request_hash:
+                    raise HrnsError(
+                        "SESSION_CREATION_IDEMPOTENCY_CONFLICT",
+                        "The mutation ID was already used with different session creation input.",
+                    )
+                return current
+
+        return await self._creation_run(reserve)
+
+    @staticmethod
+    def _creation_values(operation: SessionCreationOperation) -> tuple[object, ...]:
+        return (
+            operation.principal,
+            operation.mutation_id,
+            operation.session_id,
+            operation.state.value,
+            operation.owner_id,
+            operation.fence,
+            operation.expires_at,
+            operation.model_dump_json(),
+        )
+
+    def _creation_read(self, principal: str, mutation_id: str) -> SessionCreationOperation | None:
+        row = (
+            self._connect()
+            .execute(
+                "SELECT payload FROM acp_session_creations WHERE principal = ? AND mutation_id = ?",
+                (principal, mutation_id),
+            )
+            .fetchone()
+        )
+        return SessionCreationOperation.model_validate_json(row["payload"]) if row else None
+
+    async def get_creation(
+        self, principal: str, mutation_id: str
+    ) -> SessionCreationOperation | None:
+        return await self._creation_run(lambda: self._creation_read(principal, mutation_id))
+
+    async def list_pending_creations(self) -> list[SessionCreationOperation]:
+        def read() -> list[SessionCreationOperation]:
+            rows = (
+                self._connect()
+                .execute(
+                    "SELECT payload FROM acp_session_creations WHERE state NOT IN ('succeeded', 'failed')"
+                )
+                .fetchall()
+            )
+            return [SessionCreationOperation.model_validate_json(row["payload"]) for row in rows]
+
+        return await self._creation_run(read)
+
+    def _creation_write(self, operation: SessionCreationOperation) -> None:
+        self._connect().execute(
+            "UPDATE acp_session_creations SET state = ?, owner_id = ?, fence = ?, "
+            "expires_at = ?, payload = ? WHERE principal = ? AND mutation_id = ?",
+            (
+                operation.state.value,
+                operation.owner_id,
+                operation.fence,
+                operation.expires_at,
+                operation.model_dump_json(),
+                operation.principal,
+                operation.mutation_id,
+            ),
+        )
+
+    async def claim_creation(
+        self, principal: str, mutation_id: str, owner_id: str, ttl_ms: int
+    ) -> SessionCreationOperation | None:
+        def claim() -> SessionCreationOperation | None:
+            with _immediate(self._connect()):
+                current = self._creation_read(principal, mutation_id)
+                now = now_ms()
+                if (
+                    current is None
+                    or current.state
+                    in {SessionCreationState.SUCCEEDED, SessionCreationState.FAILED}
+                    or (current.owner_id is not None and current.expires_at > now)
+                ):
+                    return None
+                claimed = current.model_copy(
+                    update={
+                        "owner_id": owner_id,
+                        "fence": current.fence + 1,
+                        "expires_at": now + ttl_ms,
+                        "updated_at": now,
+                    }
+                )
+                self._creation_write(claimed)
+                return claimed
+
+        return await self._creation_run(claim)
+
+    async def update_creation(self, operation: SessionCreationOperation) -> None:
+        def update() -> None:
+            with _immediate(self._connect()):
+                current = self._creation_read(operation.principal, operation.mutation_id)
+                if current is None or operation.state is SessionCreationState.SUCCEEDED:
+                    raise creation_conflict()
+                check_creation_owner(current, operation, now_ms())
+                self._creation_write(operation)
+
+        await self._creation_run(update)
+
+    async def commit_creation(
+        self,
+        operation: SessionCreationOperation,
+        record: SessionRecord,
+        session: StoredSession,
+        lease: SessionLease | None = None,
+    ) -> None:
+        messages, updates, model = encode_session(session)
+
+        def commit() -> None:
+            connection = self._connect()
+            with _immediate(connection):
+                current = self._creation_read(operation.principal, operation.mutation_id)
+                if current is None:
+                    raise creation_conflict()
+                check_creation_owner(current, operation, now_ms())
+                if current.state is not SessionCreationState.CREATING or operation.result is None:
+                    raise creation_conflict()
+                connection.execute(
+                    "INSERT INTO acp_sessions (session_id, principal, deployment_id, agent_id, "
+                    "definition_version, cwd, title, effort, bindings, usage, messages, updates, "
+                    "model, access, owner, collaborators, client_capabilities, created_at, "
+                    "last_active_at, next_update_revision) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.session_id,
+                        record.principal,
+                        record.deployment_id,
+                        record.agent_id,
+                        record.definition_version,
+                        record.cwd,
+                        record.title,
+                        record.effort,
+                        serialize_bindings(record.bindings),
+                        json.dumps(record.usage),
+                        messages,
+                        updates,
+                        model,
+                        record.access.value,
+                        record.effective_owner,
+                        serialize_collaborators(record.collaborators),
+                        record.accepts_client_capabilities,
+                        record.created_at,
+                        record.last_active_at,
+                        len(session.updates) + 1,
+                    ),
+                )
+                if lease is not None:
+                    connection.execute(
+                        "INSERT INTO acp_session_leases "
+                        "(session_id, principal, deployment_id, owner_id, fence, expires_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            lease.session_id,
+                            lease.principal,
+                            lease.deployment_id,
+                            lease.owner_id,
+                            lease.fence,
+                            lease.expires_at,
+                        ),
+                    )
+                self._creation_write(
+                    operation.model_copy(
+                        update={
+                            "state": SessionCreationState.SUCCEEDED,
+                            "owner_id": None,
+                            "expires_at": 0,
+                        }
+                    )
+                )
+
+        await self._creation_run(commit)
 
     async def create(self, record: SessionRecord) -> None:
         record.created_at = record.created_at or now_ms()

@@ -386,7 +386,7 @@ def _remove(target: Path, root: Path) -> None:
 class WindowsWorkspace(Workspace):
     """A ``Workspace`` facade that resolves Windows paths with ``ntpath``.
 
-    Pydantic AI's facade uses ``posixpath``, which treats ``C:\\DEV\\fixit`` as relative and
+    Pydantic AI's facade uses ``posixpath``, which treats ``C:\\DEV\\project`` as relative and
     joins it as text. Every file method routes through ``resolve``, so overriding it (and
     ``realpath``) gives the rest of the tool surface Windows semantics.
     """

@@ -19,6 +19,7 @@ from hrns.protocol import EXTENSION_METHODS, HrnsError
 from . import acp as acp_map
 from .acp_store import SessionStore
 from .composition import Composition
+from .creation import SessionCreationResult, SessionNewInput
 from .definitions import AgentDefinition
 from .lifecycle import NoopLifecycleHooks, SessionLifecycleHooks
 from .registry import PluginRegistry
@@ -99,6 +100,8 @@ class HostBundle:
     model_resolver: Callable[[str], Any] | None = None
     revision_resolver: Callable[[str], RevisionSpec | None] | None = None
     """Resolve a retained revision for loading or reconfiguring a pinned session."""
+    creation_handler: Callable[[SessionNewInput], Awaitable[SessionCreationResult]] | None = None
+    """Route hosted session/new through the embedding server's authority."""
 
 
 @dataclass(frozen=True, slots=True)

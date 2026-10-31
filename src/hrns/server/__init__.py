@@ -18,6 +18,14 @@ from hrns.runtime import (
     SessionLifecycleHooks,
     SessionPolicy,
 )
+from hrns.runtime.creation import (
+    InitialSessionPolicy,
+    SessionCreateRequest,
+    SessionCreationOperation,
+    SessionCreationResult,
+    SessionCreationState,
+    SessionNewInput,
+)
 
 from ._version import __version__
 from .app import AgentServer
@@ -30,13 +38,25 @@ from .deployments import (
     MissingDeployment,
 )
 from .errors import ACP_SUBPROTOCOL, MAX_MESSAGE_BYTES, ApiError
-from .models import AuthenticationDependency, Principal, SessionLifecycleResult
+from .models import (
+    AuthenticationDependency,
+    InitialSessionPolicyFactory,
+    Principal,
+    SessionLifecycleResult,
+)
 
 __all__ = [
     "__version__",
     "ACP_SUBPROTOCOL",
     "MAX_MESSAGE_BYTES",
     "AgentServer",
+    "InitialSessionPolicy",
+    "InitialSessionPolicyFactory",
+    "SessionCreateRequest",
+    "SessionCreationOperation",
+    "SessionCreationResult",
+    "SessionCreationState",
+    "SessionNewInput",
     "AuthenticationDependency",
     "BearerAuth",
     "ApiError",

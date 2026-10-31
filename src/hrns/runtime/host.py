@@ -32,6 +32,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
+    AcpSession,
     PydanticAIACPAgent,
     StoredSession,
     chain_presenters,
@@ -85,6 +86,8 @@ from .ask_user import QuestionChannel
 from .capabilities.coder._acp import coder_tool_presenter
 from .command_service import CommandService
 from .configuration_service import ConfigurationService
+from .creation import SessionCreationResult, SessionCreationState, SessionNewInput
+from .creation_service import CreationLease, creation_lifecycle_context, recover_creation
 from .fanout import FanoutClient
 from .host_support import (
     HostBundle,
@@ -172,6 +175,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self._lease_ttl_ms = self.policy.lease_ttl_ms
         self._lease_task: asyncio.Task[None] | None = None
         self._session_cwd: dict[str, str] = {}
+        self._creating_updates: dict[str, list[acp_map.SessionUpdate]] = {}
         self._destroyed: set[str] = set()
         self._lifecycle_tasks: dict[str, asyncio.Task[QueuedPrompt]] = {}
         self._operation_results: dict[str, asyncio.Future[Any]] = {}
@@ -810,6 +814,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         ``SESSION_READ_ONLY`` and is reported separately because the caller can replay
         the session.
         """
+        if session_id in self._creating_updates:
+            raise HrnsError("SESSION_NOT_FOUND", "no stored session with this id")
         known = record if record is not None else await self.session_record(session_id)
         if known is None:
             raise HrnsError(
@@ -920,6 +926,173 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
 
     # --- session lifecycle -----------------------------------------------
 
+    async def create_authoritative(self, lease: CreationLease) -> SessionCreationResult:
+        """Compose provisionally, invoke create, and atomically publish durable state.
+
+        The upstream adapter still owns session execution and replay. Its public load
+        operation adopts the already prepared configuration only after the durable
+        creation commit; no parallel session runtime is introduced.
+        """
+        operation = lease.operation
+        request = operation.request
+        session_id = operation.session_id
+        record = SessionRecord(
+            session_id=session_id,
+            principal=operation.principal,
+            deployment_id=operation.deployment_id,
+            agent_id=request.agent_id,
+            definition_version=request.definition_version,
+            cwd=request.cwd,
+            access=request.policy.access,
+            owner=operation.principal,
+            collaborators=request.policy.collaborators,
+            accepts_client_capabilities=request.policy.accepts_client_capabilities,
+            created_at=operation.created_at,
+            last_active_at=operation.created_at,
+        )
+        if not self.policy.can_create_bindings and any(
+            change.type == "add" for change in request.initial_configuration
+        ):
+            raise HrnsError(
+                "POLICY_DENIED", "Local binding creation is prohibited for this deployment."
+            )
+        self._creating_updates[session_id] = []
+        self.fanout.mute_session(session_id)
+        self._session_cwd[session_id] = request.cwd
+        capability_token = _current_capabilities.set(request.client_capabilities)
+        if self._base_conn is None:
+            self._base_conn = self.fanout
+        try:
+            async with self.sessions.new_lock:
+                # Intent precedes any factory/hook that may allocate external state.
+                await lease.transition(SessionCreationState.CREATING)
+                self.sessions.pending_creation = record
+                self.sessions.pending_initial = list(request.initial_configuration)
+                self.sessions.pending_effort = request.effort
+                self.store.stage(record)
+                try:
+                    config = await self.sessions.compose_session(
+                        AcpSession(
+                            cwd=request.cwd,
+                            mcp_servers=[],
+                            session_id=session_id,
+                            client_capabilities=request.client_capabilities,
+                            client=self.fanout,
+                        )
+                    )
+                finally:
+                    self.sessions.pending_creation = None
+                    self.sessions.pending_initial = None
+                    self.sessions.pending_effort = None
+                await run_hook(
+                    self.policy.lifecycle,
+                    LifecycleEvent.CREATE,
+                    creation_lifecycle_context(lease.operation),
+                )
+                result = SessionCreationResult(
+                    operation_id=operation.operation_id,
+                    session_id=session_id,
+                    agent_id=request.agent_id,
+                    deployment_id=operation.deployment_id,
+                    definition_version=request.definition_version,
+                    config_options=self.sessions.options_for(session_id),
+                )
+                owner = self._lease_owner()
+                session_lease = (
+                    SessionLease(
+                        session_id=session_id,
+                        principal=operation.principal,
+                        deployment_id=operation.deployment_id,
+                        owner_id=owner,
+                        fence=1,
+                        expires_at=now_ms() + self._lease_ttl_ms,
+                    )
+                    if owner is not None
+                    else None
+                )
+                try:
+                    await lease.commit(
+                        record,
+                        StoredSession(
+                            messages=[],
+                            updates=list(self._creating_updates[session_id]),
+                            model=record.model,
+                        ),
+                        result,
+                        session_lease,
+                    )
+                except HrnsError:
+                    raise
+                except Exception as exc:
+                    raise HrnsError(
+                        "SESSION_DURABILITY_FAILED",
+                        "The session creation commit could not be confirmed.",
+                    ) from exc
+                self.store.discard(session_id)
+                self.sessions.prepared_configs[session_id] = config
+                await self.acquire_session_lease(session_id)
+                await super().load_session(request.cwd, session_id)
+            self.fanout.unmute_session(session_id)
+            connection_id = self.connection_key()
+            if connection_id is not None:
+                self.fanout.subscribe(connection_id, session_id)
+                for update in self._creating_updates[session_id]:
+                    await self.fanout.session_update(session_id=session_id, update=update)
+            return result
+        except BaseException as exc:
+            # A failed/unknown commit must be read back before compensation. Never
+            # destroy a successfully committed session because its response was lost.
+            try:
+                current = await self.store.backend.get_creation(
+                    operation.principal, operation.mutation_id
+                )
+                if current is not None and current.state is not SessionCreationState.SUCCEEDED:
+                    if current.owner_id == operation.owner_id and current.fence == operation.fence:
+                        code = (
+                            exc.code if isinstance(exc, HrnsError) else "SESSION_COMPOSITION_FAILED"
+                        )
+                        message = (
+                            exc.message
+                            if isinstance(exc, HrnsError)
+                            else "Session creation failed."
+                        )
+                        if isinstance(exc, asyncio.CancelledError):
+                            code = None
+                            message = None
+                        await lease.transition(
+                            SessionCreationState.CLEANUP,
+                            error_code=code,
+                            error_message=message,
+                        )
+                        await recover_creation(lease, self.policy.lifecycle)
+            except BaseException:
+                # Keep the durable pending intent for reconciliation, including a
+                # cleanup hook failure or an unavailable database.
+                pass
+            await super().close_session(session_id)
+            self.sessions.forget(session_id)
+            self.config.forget(session_id)
+            self.commands.forget(session_id)
+            self._session_cwd.pop(session_id, None)
+            self.fanout.unsubscribe_session(session_id)
+            with contextlib.suppress(Exception):
+                await self.release_session_lease(session_id)
+                owner = self._lease_owner()
+                if owner is not None:
+                    # Commit may have installed the initial lease before an unknown
+                    # response prevented this host from adopting it into _leases.
+                    await self.store.backend.release_lease(
+                        operation.principal,
+                        operation.deployment_id,
+                        session_id,
+                        owner,
+                    )
+            raise
+        finally:
+            _current_capabilities.reset(capability_token)
+            self._creating_updates.pop(session_id, None)
+            self.fanout.unmute_session(session_id)
+
     async def new_session(
         self,
         cwd: str,
@@ -928,6 +1101,36 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         **kwargs: Any,
     ) -> schema.NewSessionResponse:
         try:
+            if self.bundle.creation_handler is not None:
+                self.sessions.reject_additional_directories(additional_directories)
+                self.sessions.reject_client_mcp(mcp_servers)
+                meta = kwargs.get("hrns")
+                initial = acp_map.initial_configuration_changes(meta)
+                values = meta if isinstance(meta, Mapping) else {}
+                try:
+                    incoming = SessionNewInput(
+                        cwd=cwd,
+                        initial_configuration=initial,
+                        effort=values.get("effort"),
+                        mutation_id=values.get("clientMutationId"),
+                        definition_version=values.get("definitionVersion"),
+                        client_capabilities=self.current_capabilities(),
+                    )
+                except ValidationError as exc:
+                    raise HrnsError(
+                        "INVALID_CONFIGURATION", "Invalid session creation input."
+                    ) from exc
+                result = await self.bundle.creation_handler(incoming)
+                if not self.session_is_live(result.session_id):
+                    await self.load_session(cwd, result.session_id)
+                connection_id = self.connection_key()
+                if connection_id is not None:
+                    self.fanout.subscribe(connection_id, result.session_id)
+                return schema.NewSessionResponse(
+                    session_id=result.session_id,
+                    config_options=result.config_options,
+                    field_meta={"hrns": {"creation": result.model_dump(mode="json")}},
+                )
             if not self.allow_new_sessions:
                 raise HrnsError(
                     "DEPLOYMENT_UNAVAILABLE",
@@ -1216,6 +1419,18 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         durable: bool,
     ) -> None:
         """Position and publish a host-owned update, persisting it first when durable."""
+        pending = self._creating_updates.get(session_id)
+        if pending is not None:
+            pending.append(
+                with_session_update_position(
+                    update,
+                    SessionUpdatePosition(
+                        update_id=uuid.uuid4().hex,
+                        revision=len(pending) + 1,
+                    ),
+                )
+            )
+            return
         positioned = (await self._position_updates(session_id, [update]))[0]
         if durable:
             state = self._sessions.get(session_id)

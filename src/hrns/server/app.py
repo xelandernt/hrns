@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import re
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from acp import schema
 from fastapi import FastAPI, WebSocket
+from pydantic import ValidationError
 
+from hrns.protocol import BindingChange, canonical_hash
 from hrns.runtime import (
     MODEL,
     AgentDefinition,
@@ -22,16 +26,29 @@ from hrns.runtime import (
     NoopLifecycleHooks,
     OperationKind,
     PluginRegistry,
+    PolicyAction,
     PromptState,
     RequestContext,
     ResourceBindings,
     ResourceSet,
     SessionAccess,
+    SessionContext,
     SessionLifecycleHooks,
     SessionPolicy,
     SessionStore,
+    decide_policy,
 )
 from hrns.runtime.acp import canonical_root
+from hrns.runtime.acp_store import now_ms
+from hrns.runtime.creation import (
+    InitialSessionPolicy,
+    SessionCreateRequest,
+    SessionCreationOperation,
+    SessionCreationResult,
+    SessionCreationState,
+    SessionNewInput,
+)
+from hrns.runtime.creation_service import creation_lease, recover_creation
 from hrns.runtime.host import HrnsACPAgent
 from hrns.runtime.host_support import HostBundle, HostPolicy, RevisionSpec
 from hrns.runtime.local import thinking_support
@@ -43,6 +60,7 @@ from .deployments import DeploymentConflict, DeploymentRegistry, DeploymentRevis
 from .errors import ApiError
 from .models import (
     AuthenticationDependency,
+    InitialSessionPolicyFactory,
     Principal,
     RegisteredAgent,
     SessionLifecycleResult,
@@ -64,6 +82,7 @@ class AgentServer:
         registry: PluginRegistry | None = None,
         session_policy: SessionPolicy | None = None,
         lifecycle: SessionLifecycleHooks | None = None,
+        initial_session_policy: InitialSessionPolicy | InitialSessionPolicyFactory | None = None,
         lease_ttl_ms: int = 120_000,
     ) -> None:
         if lease_ttl_ms < 1_000:
@@ -80,6 +99,7 @@ class AgentServer:
         self.registry = registry
         self.session_policy: SessionPolicy = session_policy or DefaultSessionPolicy()
         self.lifecycle = lifecycle
+        self.initial_session_policy = initial_session_policy or InitialSessionPolicy()
         self.lease_ttl_ms = lease_ttl_ms
         self.deployments = DeploymentRegistry()
         self.connections = ConnectionRegistry()
@@ -90,6 +110,7 @@ class AgentServer:
         self._native_deployments: set[tuple[str, str]] = set()
         self._pending_deployments: dict[tuple[str, str], DeploymentRecord] = {}
         self._persist_tasks: set[asyncio.Task[None]] = set()
+        self._creation_tasks: set[asyncio.Task[SessionCreationResult]] = set()
         self._cursor_codec = CursorCodec()
         self._mounted = False
         self._running = False
@@ -393,6 +414,341 @@ class AgentServer:
             )
         return revision
 
+    async def create_session(
+        self,
+        principal: Principal,
+        agent_id: str,
+        *,
+        definition_version: str,
+        mutation_id: str,
+        policy: InitialSessionPolicy | None = None,
+        cwd: str | None = None,
+        initial_configuration: Sequence[BindingChange] = (),
+        effort: str | None = None,
+        client_capabilities: schema.ClientCapabilities | None = None,
+    ) -> SessionCreationResult:
+        """Create a fully durable, authenticated session pinned to an exact revision.
+
+        ``principal`` must come from the embedding application's authentication.
+        ``policy`` is trusted server input, not REST/ACP client configuration. A
+        mutation ID identifies one product intent across credentials and deployments.
+        Unknown responses can be retried with identical input; conflicting reuse fails.
+        """
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        if not principal.may_use(agent_id) or (
+            principal.scopes is not None and "session:create" not in principal.scopes
+        ):
+            raise ApiError("NOT_FOUND", "No deployment is available to this principal.")
+        if not isinstance(mutation_id, str) or not mutation_id.strip() or len(mutation_id) > 200:
+            raise ApiError(
+                "INVALID_REQUEST",
+                "mutation_id must be a non-empty string of at most 200 characters.",
+            )
+        if not isinstance(definition_version, str) or not definition_version.strip():
+            raise ApiError("INVALID_REQUEST", "definition_version must be a non-empty string.")
+        task = asyncio.create_task(
+            self._create_session(
+                principal,
+                agent_id,
+                definition_version=definition_version,
+                mutation_id=mutation_id,
+                policy=(policy or InitialSessionPolicy()).model_copy(deep=True),
+                cwd=cwd,
+                initial_configuration=[
+                    change.model_copy(deep=True) for change in initial_configuration
+                ],
+                effort=effort,
+                client_capabilities=client_capabilities.model_copy(deep=True)
+                if client_capabilities
+                else None,
+            )
+        )
+        self._creation_tasks.add(task)
+
+        def completed(done: asyncio.Task[SessionCreationResult]) -> None:
+            self._creation_tasks.discard(done)
+            # Retrieve exceptions even when the transport lost the response.
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(completed)
+        try:
+            return await asyncio.shield(task)
+        except HrnsError as exc:
+            raise self._embedding_creation_error(exc) from exc
+        except ApiError:
+            raise
+        except Exception as exc:
+            raise ApiError(
+                "SESSION_DURABILITY_FAILED",
+                "The session creation outcome could not be confirmed; retry with the same mutation ID.",
+                status_code=503,
+            ) from exc
+
+    async def _create_session(
+        self,
+        principal: Principal,
+        agent_id: str,
+        *,
+        definition_version: str,
+        mutation_id: str,
+        policy: InitialSessionPolicy,
+        cwd: str | None,
+        initial_configuration: Sequence[BindingChange],
+        effort: str | None,
+        client_capabilities: schema.ClientCapabilities | None,
+    ) -> SessionCreationResult:
+        existing = await self.store.get_creation(principal.id, mutation_id)
+        revision = self.deployments.get(agent_id, definition_version)
+        # Completed retries remain usable after hiding their original revision. New
+        # intents require an exact visible native revision, with a uniform absence error.
+        if existing is None and (
+            revision is None
+            or not revision.visible
+            or (agent_id, definition_version) not in self._native_deployments
+        ):
+            raise ApiError("NOT_FOUND", "No deployment is available to this principal.")
+        default_cwd = (
+            existing.request.cwd
+            if existing is not None and cwd is None
+            else revision.agent.default_cwd
+            if revision is not None
+            else ""
+        )
+        try:
+            request = SessionCreateRequest(
+                agent_id=agent_id,
+                definition_version=definition_version,
+                cwd=canonical_root(cwd if cwd is not None else default_cwd),
+                policy=policy,
+                initial_configuration=list(initial_configuration),
+                effort=effort,
+                client_capabilities=client_capabilities
+                if policy.accepts_client_capabilities
+                else None,
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise ApiError("INVALID_REQUEST", "Invalid session creation input.") from exc
+        payload = request.model_dump(mode="json")
+        payload["policy"]["collaborators"] = sorted(policy.collaborators)
+        timestamp = now_ms()
+        attribution = current_request.get()
+        candidate = SessionCreationOperation(
+            operation_id=uuid.uuid4().hex,
+            session_id=uuid.uuid4().hex,
+            mutation_id=mutation_id,
+            principal=principal.id,
+            credential_id=principal.credential_id,
+            connection_id=attribution.connection_id if attribution is not None else None,
+            scopes=principal.scopes,
+            deployment_id=revision.agent.session_namespace
+            if revision is not None
+            else existing.deployment_id
+            if existing is not None
+            else "",
+            request=request,
+            request_hash=canonical_hash(payload),
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        await self._authorize_creation(existing or candidate, principal)
+        operation = await self.store.reserve_creation(candidate)
+        if operation.operation_id != (existing or candidate).operation_id:
+            await self._authorize_creation(operation, principal)
+        if operation.result is not None and operation.state is SessionCreationState.SUCCEEDED:
+            return operation.result
+        if operation.state is SessionCreationState.FAILED:
+            raise HrnsError(
+                operation.error_code or "SESSION_CREATION_FAILED",
+                operation.error_message or "Session creation failed.",
+            )
+        if revision is None or (agent_id, definition_version) not in self._native_deployments:
+            raise ApiError("NOT_FOUND", "No deployment is available to this principal.")
+        namespace = revision.agent.session_namespace
+        actor_lock = self._actor_locks.setdefault(namespace, asyncio.Lock())
+        async with actor_lock:
+            # Re-read after waiting for this process's actor; another attempt may have
+            # committed. Cross-process claims are arbitrated by the database fence.
+            current = await self.store.get_creation(principal.id, mutation_id)
+            if current is not None and current.result is not None:
+                return current.result
+            if current is not None and current.state is SessionCreationState.FAILED:
+                raise HrnsError(
+                    current.error_code or "SESSION_CREATION_FAILED",
+                    current.error_message or "Session creation failed.",
+                )
+            claimed = await self.store.claim_creation(
+                principal.id,
+                mutation_id,
+                f"{self._instance_id}:create:{uuid.uuid4().hex}",
+                self.lease_ttl_ms,
+            )
+            if claimed is None:
+                current = await self.store.get_creation(principal.id, mutation_id)
+                if current is not None and current.result is not None:
+                    return current.result
+                raise HrnsError(
+                    "SESSION_CREATION_IN_PROGRESS",
+                    "The session creation intent is pending; retry with the same mutation ID.",
+                )
+            async with creation_lease(self.store, claimed, self.lease_ttl_ms) as lease:
+                if claimed.state is not SessionCreationState.RESERVED:
+                    await recover_creation(lease, self.lifecycle or NoopLifecycleHooks())
+                    raise HrnsError(
+                        "SESSION_CREATION_IN_PROGRESS",
+                        "The previous attempt was reconciled; retry with the same mutation ID.",
+                    )
+                host = self._actors.get(namespace)
+                temporary = host is None
+                if host is None:
+                    host = self._build_host(revision.agent, principal)
+                context = RequestContext(
+                    principal=principal.id,
+                    credential_id=principal.credential_id,
+                    connection_id=claimed.connection_id,
+                    request_id=claimed.operation_id,
+                    agent_id=agent_id,
+                    scopes=principal.scopes,
+                )
+                token = current_request.set(context)
+                try:
+                    result = await host.create_authoritative(lease)
+                    if temporary:
+                        self._actors[namespace] = host
+                    return result
+                except BaseException as exc:
+                    if (
+                        lease.operation.state is SessionCreationState.RESERVED
+                        and lease.operation.expires_at
+                    ):
+                        if isinstance(exc, asyncio.CancelledError):
+                            await lease.transition(SessionCreationState.RESERVED, release=True)
+                        else:
+                            await lease.transition(
+                                SessionCreationState.FAILED,
+                                error_code=exc.code
+                                if isinstance(exc, HrnsError)
+                                else "SESSION_COMPOSITION_FAILED",
+                                error_message=exc.message
+                                if isinstance(exc, HrnsError)
+                                else "Session creation failed.",
+                                release=True,
+                            )
+                    if temporary:
+                        await host.shutdown()
+                    if isinstance(exc, (HrnsError, ApiError, asyncio.CancelledError)):
+                        raise
+                    raise HrnsError(
+                        "SESSION_COMPOSITION_FAILED", "Session composition failed."
+                    ) from exc
+                finally:
+                    current_request.reset(token)
+
+    async def get_session_creation(
+        self, principal: Principal, mutation_id: str
+    ) -> SessionCreationOperation:
+        """Read durable intent status without constructing a session or actor."""
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        operation = await self.store.get_creation(principal.id, mutation_id)
+        if (
+            operation is None
+            or not principal.may_use(operation.request.agent_id)
+            or (principal.scopes is not None and "session:create" not in principal.scopes)
+        ):
+            raise ApiError(
+                "NOT_FOUND", "No session creation operation is available to this principal."
+            )
+        try:
+            await self._authorize_creation(operation, principal)
+        except HrnsError as exc:
+            raise self._embedding_creation_error(exc) from exc
+        return operation
+
+    async def _authorize_creation(
+        self, operation: SessionCreationOperation, principal: Principal
+    ) -> None:
+        policy = operation.request.policy
+        request_context = current_request.get()
+        context = SessionContext(
+            session_id=operation.session_id,
+            principal=principal.id,
+            deployment_id=operation.deployment_id,
+            agent_id=operation.request.agent_id,
+            owner=operation.principal,
+            access=policy.access,
+            collaborators=policy.collaborators,
+            credential_id=principal.credential_id,
+            connection_id=request_context.connection_id if request_context is not None else None,
+            request_id=operation.operation_id,
+            metadata={
+                **policy.metadata,
+                "clientCapabilities": "enabled"
+                if policy.accepts_client_capabilities
+                else "disabled",
+            },
+        )
+        try:
+            decision = await decide_policy(self.session_policy, context, PolicyAction.CREATE)
+        except Exception as exc:
+            raise HrnsError(
+                "POLICY_EVALUATION_FAILED", "The session creation policy could not be evaluated."
+            ) from exc
+        if not decision.allowed:
+            raise HrnsError(
+                "SESSION_CREATION_DENIED", "No deployment is available to this principal."
+            )
+
+    async def reconcile_session_creations(self) -> tuple[SessionCreationOperation, ...]:
+        """Recover expired creation attempts without publishing provisional sessions.
+
+        Live claims in other workers are left alone. Call again after their expiry;
+        cleanup hook failures remain pending and fail closed.
+        """
+        if not self._running:
+            raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
+        results: list[SessionCreationOperation] = []
+        for operation in await self.store.list_pending_creations():
+            claimed = await self.store.claim_creation(
+                operation.principal,
+                operation.mutation_id,
+                f"{self._instance_id}:reconcile:{uuid.uuid4().hex}",
+                self.lease_ttl_ms,
+            )
+            if claimed is None:
+                continue
+            try:
+                async with creation_lease(self.store, claimed, self.lease_ttl_ms) as lease:
+                    await recover_creation(lease, self.lifecycle or NoopLifecycleHooks())
+                    results.append(lease.operation)
+            except HrnsError as exc:
+                raise self._embedding_creation_error(exc) from exc
+        return tuple(results)
+
+    @staticmethod
+    def _embedding_creation_error(error: HrnsError) -> ApiError:
+        if error.code in {
+            "SESSION_NOT_FOUND",
+            "DEPLOYMENT_UNAVAILABLE",
+            "FORBIDDEN",
+            "SESSION_CREATION_DENIED",
+        }:
+            return ApiError("NOT_FOUND", "No deployment is available to this principal.")
+        statuses = {
+            "SESSION_CREATION_IDEMPOTENCY_CONFLICT": 409,
+            "SESSION_CREATION_IN_PROGRESS": 409,
+            "SESSION_CREATION_CONFLICT": 409,
+            "POLICY_DENIED": 403,
+            "SESSION_READ_ONLY": 403,
+            "INVALID_CONFIGURATION": 400,
+            "CAPABILITY_UNAVAILABLE": 400,
+            "LIFECYCLE_FAILED": 500,
+            "SESSION_COMPOSITION_FAILED": 500,
+            "SESSION_DURABILITY_FAILED": 503,
+        }
+        return ApiError(error.code, error.message, status_code=statuses.get(error.code, 500))
+
     async def set_session_access(
         self,
         principal: Principal,
@@ -688,9 +1044,14 @@ class AgentServer:
             await self.store.initialize()
             await self._restore_deployments()
             await self.flush_deployments()
+            await self.reconcile_session_creations()
             yield
         finally:
             try:
+                for task in tuple(self._creation_tasks):
+                    task.cancel()
+                if self._creation_tasks:
+                    await asyncio.gather(*tuple(self._creation_tasks), return_exceptions=True)
                 await self.connections.close_all()
                 for namespace, host in list(self._actors.items()):
                     if self._actors.get(namespace) is host:
@@ -706,6 +1067,56 @@ class AgentServer:
 
     def _build_host(self, agent: RegisteredAgent, principal: Principal) -> HrnsACPAgent:
         version = agent.definition.definition_version or ""
+
+        async def hosted_create(incoming: SessionNewInput) -> SessionCreationResult:
+            request_context = current_request.get()
+            acting = Principal(
+                request_context.principal if request_context is not None else principal.id,
+                agent_ids=frozenset({agent.id}),
+                credential_id=request_context.credential_id
+                if request_context is not None
+                else principal.credential_id,
+                scopes=request_context.scopes if request_context is not None else principal.scopes,
+            )
+            selected = incoming.definition_version
+            if selected is None:
+                current = self._native_revision(agent.id)
+                if current is None:
+                    raise HrnsError(
+                        "DEPLOYMENT_UNAVAILABLE", "No deployment is available to this principal."
+                    )
+                selected = current.version
+            incoming = incoming.model_copy(
+                update={
+                    "mutation_id": incoming.mutation_id or uuid.uuid4().hex,
+                    "definition_version": selected,
+                }
+            )
+            policy_source = self.initial_session_policy
+            try:
+                policy = (
+                    policy_source(acting, incoming) if callable(policy_source) else policy_source
+                )
+                if inspect.isawaitable(policy):
+                    policy = await policy
+            except Exception as exc:
+                raise HrnsError(
+                    "POLICY_EVALUATION_FAILED", "The initial session policy could not be resolved."
+                ) from exc
+            try:
+                return await self.create_session(
+                    acting,
+                    agent.id,
+                    definition_version=selected,
+                    mutation_id=incoming.mutation_id or "",
+                    policy=policy,
+                    cwd=incoming.cwd,
+                    initial_configuration=incoming.initial_configuration,
+                    effort=incoming.effort,
+                    client_capabilities=incoming.client_capabilities,
+                )
+            except ApiError as exc:
+                raise HrnsError(exc.code, exc.message) from exc
 
         def resolve_revision(definition_version: str) -> RevisionSpec | None:
             key = (agent.id, definition_version)
@@ -732,6 +1143,7 @@ class AgentServer:
             store=self.store,
             close_store=False,
             revision_resolver=resolve_revision,
+            creation_handler=hosted_create,
         )
         return HrnsACPAgent(
             bundle,

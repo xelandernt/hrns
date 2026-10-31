@@ -13,8 +13,8 @@ only by the application and must be idempotent.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Mapping
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from hrns.protocol import HrnsError
@@ -39,8 +39,12 @@ class SessionLifecycleContext:
     cwd: str
     credential_id: str | None = None
     connection_id: str | None = None
-    #: Stable close/delete idempotency key; ``None`` for create/resume/suspend/queue.
+    #: Stable creation/close/delete idempotency key; reused during crash recovery.
     operation_id: str | None = None
+    definition_version: str | None = None
+    mutation_id: str | None = None
+    operation_fence: int | None = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 class LifecycleEvent:

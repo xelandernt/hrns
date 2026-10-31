@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TypeAlias
 
 from hrns.runtime import AgentDefinition, OperationKind
+from hrns.runtime.creation import InitialSessionPolicy, SessionNewInput
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,8 @@ class Principal:
             user share ``id`` and differ here, so usage attribution and revocation can
             target one key without changing session ownership.
         scopes: Credential permissions. ``None`` grants the historical unrestricted
-            behavior; an explicit set must contain ``queue:mutate`` for queue writes.
+            behavior; an explicit set must contain ``queue:mutate`` for queue writes
+            and ``session:create`` for authoritative session creation.
 
     Authentication dependencies return this object after validating credentials;
     it is not itself a token. Without an authentication dependency, every caller
@@ -53,6 +55,11 @@ request access on both HTTP and WebSocket routes. Reject invalid credentials by
 raising HTTPException(401), rather than returning None. Yield dependencies must
 yield exactly one Principal and may release application resources during cleanup.
 """
+
+InitialSessionPolicyFactory: TypeAlias = Callable[
+    [Principal, SessionNewInput], InitialSessionPolicy | Awaitable[InitialSessionPolicy]
+]
+"""Server-owned initial policy resolver for hosted ACP creation, never client policy."""
 
 
 @dataclass(frozen=True)

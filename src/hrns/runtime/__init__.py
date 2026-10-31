@@ -44,6 +44,13 @@ from .acp_store import (
     SessionStore,
 )
 from .composition import Composition, EffortState, compose_definition
+from .creation import (
+    InitialSessionPolicy,
+    SessionCreateRequest,
+    SessionCreationOperation,
+    SessionCreationResult,
+    SessionCreationState,
+)
 from .definitions import (
     AGENT_FACTORY_PARAM,
     AgentDefinition,
@@ -190,6 +197,11 @@ __all__ = [
     "SessionAccess",
     "SessionContext",
     "SessionPolicy",
+    "InitialSessionPolicy",
+    "SessionCreateRequest",
+    "SessionCreationOperation",
+    "SessionCreationResult",
+    "SessionCreationState",
     "decide_policy",
     # attribution and transport
     "RequestContext",
