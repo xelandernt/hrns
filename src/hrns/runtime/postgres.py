@@ -1111,6 +1111,21 @@ class PostgresSessionStore(SessionStore):
                         },
                     )
 
+    async def get_policy_candidate(
+        self, deployment_id: str, session_id: str
+    ) -> SessionRecord | None:
+        from psycopg import sql
+
+        query = sql.SQL(
+            "SELECT {} FROM acp_sessions WHERE session_id = %s AND deployment_id = %s"
+        ).format(_columns(sql))
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.cursor() as cursor:
+                await cursor.execute(query, (session_id, deployment_id))
+                row = await cursor.fetchone()
+        return _record_from_row(row) if row is not None else None
+
     async def get_visible(
         self, deployment_id: str, session_id: str, principal: str
     ) -> SessionRecord | None:

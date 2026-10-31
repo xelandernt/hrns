@@ -182,7 +182,7 @@ class SessionService:
         """
         draft = self.store.staged(session_id)
         if draft is None:
-            return await self.store.get_visible(session_id, self.principal) is not None
+            return await self.agent.session_record(session_id) is not None
         composition = self.compositions.get(session_id)
         if composition is not None:
             draft.effort = composition.effort.effort or EFFORT_DEFAULT
@@ -195,14 +195,14 @@ class SessionService:
         draft = self.store.staged(session_id)
         if draft is not None:
             return draft.cwd
-        record = await self.store.get_visible(session_id, self.principal)
+        record = await self.agent.session_record(session_id)
         return record.cwd if record is not None else None
 
     async def ensure_title(self, session_id: str, title: str) -> None:
         """Name a session after its first prompt, so even a failed turn stays recognizable."""
         if not title:
             return
-        record = await self.store.get_visible(session_id, self.principal)
+        record = await self.agent.session_record(session_id)
         if record is None or record.title:
             return
         await self.store.update(session_id, title=title)
@@ -500,7 +500,7 @@ class SessionService:
         increment["requests"] = 1
         current = merge_usage(current, increment)
         self.turn_usage[session_id] = current
-        record = await self.store.get_visible(session_id, self.principal)
+        record = await self.agent.session_record(session_id)
         await self.send_session_usage(
             session_id,
             finalize_usage(merge_usage(record.usage if record is not None else {}, current)),
@@ -907,12 +907,13 @@ class SessionService:
         prepared = self.prepared_configs.pop(session.session_id, None)
         if prepared is not None:
             return prepared
-        # Subscribe the initiator before composition can publish presentation, plan, or
-        # configuration notifications. Hosted actors have no no-subscriber fallback.
+        record = await self.store.get_policy_candidate(session.session_id)
+        if record is not None:
+            record = await agent.authorize(session.session_id, PolicyAction.LOAD, record=record)
+        # Subscribe only after policy authorization, before composition can publish updates.
         connection_id = current_connection_id.get()
         if connection_id is not None:
             self.agent.fanout.subscribe(connection_id, session.session_id)
-        record = await self.store.get_visible(session.session_id, self.principal)
         draft = self.store.staged(session.session_id) if record is None else None
         known = record or draft
         initial = None
@@ -979,7 +980,7 @@ class SessionService:
             accepts_client_capabilities=accepts,
             client_gate=self.agent.fanout.client_gates[session.session_id],
         )
-        latest = await self.store.get_visible(session.session_id, self.principal)
+        latest = await self.store.get_policy_candidate(session.session_id)
         if latest is not None:
             effective = (
                 latest.accepts_client_capabilities
