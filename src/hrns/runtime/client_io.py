@@ -12,13 +12,20 @@ requires a path the ACP schema already has needs no change here.
 
 from __future__ import annotations
 
+import contextvars
+import inspect
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import get_args
 
 from acp import Client, schema
+from pydantic_ai import RunContext, ToolFailed
+from pydantic_ai.capabilities import WrapperCapability
+from pydantic_ai.capabilities.abstract import AgentToolset
+from pydantic_ai.toolsets import AbstractToolset, WrapperToolset
+from pydantic_ai.toolsets.abstract import ToolsetTool
 
-from hrns.protocol import acp_capability_spelling
+from hrns.protocol import HrnsError, acp_capability_spelling
 
 __all__ = [
     "ClientSession",
@@ -27,6 +34,79 @@ __all__ = [
     "describe_missing",
     "missing_client_capability",
 ]
+
+
+@dataclass
+class ClientGate:
+    """Mutable, session-scoped authorization shared by live compositions."""
+
+    session_id: str
+    accepts: bool
+
+    def require(self) -> None:
+        if not self.accepts:
+            raise HrnsError(
+                "CAPABILITY_UNAVAILABLE",
+                "Client-origin capabilities are disabled for this session.",
+                {"sessionId": self.session_id},
+            )
+
+
+current_client_gate: contextvars.ContextVar[ClientGate | None] = contextvars.ContextVar(
+    "hrns_client_gate", default=None
+)
+
+
+@dataclass
+class _ClientToolset(WrapperToolset[object]):
+    gate: ClientGate
+
+    @property
+    def id(self) -> str | None:
+        return self.wrapped.id
+
+    async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
+        return {
+            name: replace(tool, toolset=self)
+            for name, tool in (await self.wrapped.get_tools(ctx)).items()
+        }
+
+    async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, object],
+        ctx: RunContext[object],
+        tool: ToolsetTool[object],
+    ) -> object:
+        if not self.gate.accepts:
+            raise ToolFailed("Client-origin capabilities are disabled for this session.")
+        token = current_client_gate.set(self.gate)
+        try:
+            return await self.wrapped.call_tool(name, tool_args, ctx, tool)
+        finally:
+            current_client_gate.reset(token)
+
+
+@dataclass
+class ClientCapability(WrapperCapability[object]):
+    """Preserve native capability behavior while gating its contributed tools."""
+
+    gate: ClientGate
+
+    def get_toolset(self) -> AgentToolset[object] | None:
+        toolset = self.wrapped.get_toolset()
+        if toolset is None:
+            return None
+        if isinstance(toolset, AbstractToolset):
+            return _ClientToolset(toolset, self.gate)
+
+        async def resolve(ctx: RunContext[object]) -> AbstractToolset[object] | None:
+            result = toolset(ctx)
+            if inspect.isawaitable(result):
+                result = await result
+            return _ClientToolset(result, self.gate) if result is not None else None
+
+        return resolve
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

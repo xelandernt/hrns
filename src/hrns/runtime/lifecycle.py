@@ -19,6 +19,8 @@ from typing import Protocol, runtime_checkable
 
 from hrns.protocol import HrnsError
 
+from .session_policy import SessionAccess
+
 __all__ = [
     "LifecycleEvent",
     "NoopLifecycleHooks",
@@ -43,8 +45,14 @@ class SessionLifecycleContext:
     operation_id: str | None = None
     definition_version: str | None = None
     mutation_id: str | None = None
+    #: Creation-attempt generation, not comparable with a session lease fence.
     operation_fence: int | None = None
+    session_fence: int | None = None
+    operation_owner: str | None = None
+    operation_revision: int | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    access: SessionAccess | None = None
+    collaborators: frozenset[str] = frozenset()
 
 
 class LifecycleEvent:

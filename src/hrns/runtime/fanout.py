@@ -29,6 +29,7 @@ from typing import Any
 from acp import schema
 from acp.interfaces import Agent, Client
 
+from .client_io import ClientGate, current_client_gate
 from .request_context import current_connection_id
 
 __all__ = ["FanoutClient", "current_connection"]
@@ -49,6 +50,9 @@ class FanoutClient:
         self._connection_sessions: dict[str, set[str]] = {}
         self._approval_guard: Callable[[str], Awaitable[None]] | None = None
         self._muted_sessions: set[str] = set()
+        self.client_gates: dict[str, ClientGate] = {}
+        # Terminal IDs are client-local; never authorize cleanup by ID alone.
+        self._terminals: set[tuple[str, str, str]] = set()
         #: A local stdio host has one client and no connection registry, so the sole
         #: client is a legitimate default. Hosted servers never use that shortcut.
         self.local = local
@@ -61,11 +65,14 @@ class FanoutClient:
 
     def attach(self, connection_id: str, client: Client) -> None:
         """Register a live client, replacing any previous client with the same id."""
+        if self._clients.get(connection_id) is not client:
+            self._terminals = {item for item in self._terminals if item[0] != connection_id}
         self._clients[connection_id] = client
 
     def detach(self, connection_id: str) -> None:
         """Remove a client and all of its session subscriptions."""
         self._clients.pop(connection_id, None)
+        self._terminals = {item for item in self._terminals if item[0] != connection_id}
         for session_id in self._connection_sessions.pop(connection_id, set()):
             subscribers = self._subscriptions.get(session_id)
             if subscribers is not None:
@@ -131,6 +138,7 @@ class FanoutClient:
         self._clients.clear()
         self._subscriptions.clear()
         self._connection_sessions.clear()
+        self._terminals.clear()
 
     # -- per-request selection ---------------------------------------------
 
@@ -228,6 +236,7 @@ class FanoutClient:
     async def write_text_file(
         self, session_id: str, path: str, content: str, **kwargs: Any
     ) -> schema.WriteTextFileResponse | None:
+        self._require_client_gate(session_id)
         return await self._require_client().write_text_file(session_id, path, content, **kwargs)
 
     async def read_text_file(
@@ -238,6 +247,7 @@ class FanoutClient:
         limit: int | None = None,
         **kwargs: Any,
     ) -> schema.ReadTextFileResponse:
+        self._require_client_gate(session_id)
         return await self._require_client().read_text_file(
             session_id, path, line=line, limit=limit, **kwargs
         )
@@ -252,7 +262,12 @@ class FanoutClient:
         output_byte_limit: int | None = None,
         **kwargs: Any,
     ) -> schema.CreateTerminalResponse:
-        return await self._require_client().create_terminal(
+        self._require_client_gate(session_id)
+        client = self._require_client()
+        connection_id = self._routed_connection_id()
+        if connection_id is None:
+            raise RuntimeError("no attached client")
+        result = await client.create_terminal(
             session_id,
             command,
             args=args,
@@ -261,20 +276,32 @@ class FanoutClient:
             output_byte_limit=output_byte_limit,
             **kwargs,
         )
+        # A request sent before revocation may complete afterwards. Retain its exact
+        # connection and session so cancellation can still dispose of that resource.
+        if self._clients.get(connection_id) is client:
+            self._terminals.add((connection_id, session_id, result.terminal_id))
+        return result
 
     async def terminal_output(
         self, session_id: str, terminal_id: str, **kwargs: Any
     ) -> schema.TerminalOutputResponse:
+        self._require_client_gate(session_id)
         return await self._require_client().terminal_output(session_id, terminal_id, **kwargs)
 
     async def release_terminal(
         self, session_id: str, terminal_id: str, **kwargs: Any
     ) -> schema.ReleaseTerminalResponse | None:
-        return await self._require_client().release_terminal(session_id, terminal_id, **kwargs)
+        client = self._terminal_cleanup_client(session_id, terminal_id)
+        connection_id = self._routed_connection_id()
+        result = await client.release_terminal(session_id, terminal_id, **kwargs)
+        if connection_id is not None:
+            self._terminals.discard((connection_id, session_id, terminal_id))
+        return result
 
     async def wait_for_terminal_exit(
         self, session_id: str, terminal_id: str, **kwargs: Any
     ) -> schema.WaitForTerminalExitResponse:
+        self._require_client_gate(session_id)
         return await self._require_client().wait_for_terminal_exit(
             session_id, terminal_id, **kwargs
         )
@@ -282,7 +309,8 @@ class FanoutClient:
     async def kill_terminal(
         self, session_id: str, terminal_id: str, **kwargs: Any
     ) -> schema.KillTerminalResponse | None:
-        return await self._require_client().kill_terminal(session_id, terminal_id, **kwargs)
+        client = self._terminal_cleanup_client(session_id, terminal_id)
+        return await client.kill_terminal(session_id, terminal_id, **kwargs)
 
     async def create_elicitation(
         self, message: str, mode: Any, **kwargs: Any
@@ -359,20 +387,49 @@ class FanoutClient:
         fall back to that client. A multi-viewer host never guesses: routing a
         permission or client-origin call to an arbitrary viewer would cross tenants.
         """
+        selected = self._routed_connection_id()
+        return self._clients.get(selected) if selected is not None else None
+
+    def _routed_connection_id(self) -> str | None:
         selected = self.selected() or current_connection_id.get()
         if selected is not None:
-            client = self._clients.get(selected)
-            if client is not None:
-                return client
+            if selected in self._clients:
+                return selected
         if self.local and len(self._clients) == 1:
-            return next(iter(self._clients.values()))
+            return next(iter(self._clients))
         return None
 
+    def _terminal_cleanup_client(self, session_id: str, terminal_id: str) -> Client:
+        gate = self.client_gates.get(session_id)
+        active = current_client_gate.get()
+        if (gate is None or gate.accepts) and (active is None or active.accepts):
+            return self._require_client()
+        connection_id = self._routed_connection_id()
+        if (
+            connection_id is None
+            or (active is not None and active.session_id != session_id)
+            or (connection_id, session_id, terminal_id) not in self._terminals
+        ):
+            if gate is not None and not gate.accepts:
+                gate.require()
+            if active is not None:
+                active.require()
+            raise RuntimeError("no attached client")
+        return self._clients[connection_id]
+
     def _require_client(self) -> Client:
+        gate = current_client_gate.get()
+        if gate is not None:
+            gate.require()
         client = self._routed_client()
         if client is None:
             raise RuntimeError("no attached client")
         return client
+
+    def _require_client_gate(self, session_id: str) -> None:
+        gate = self.client_gates.get(session_id)
+        if gate is not None:
+            gate.require()
 
     async def _deliver(
         self,

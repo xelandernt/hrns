@@ -127,6 +127,44 @@ agent, and composition re-checks them before the plugin factory runs. `add_agent
 a bare definition plus `resources=`, but it performs the same bind internally, so a coder
 definition without a workspace fails at registration rather than at `session/new`.
 
+### Session-scoped resources and dependencies
+
+An embedding application can supply an async `resource_resolver` to `AgentServer`:
+
+```python
+from hrns.runtime import ResourceSet
+from hrns.server.resources import SessionResourceContext, SessionResourcePhase, SessionResources
+
+async def resolve_resources(context: SessionResourceContext) -> SessionResources:
+    # Resolve and validate application-owned resources using the authoritative context.
+    # CREATION can use a durable creation intent; TURN requires a settled session.
+    resource, deps = await application_resources_for(context)
+    return SessionResources(resources=ResourceSet({MY_RESOURCE: resource}), deps=deps)
+
+agents = AgentServer(store=store, resource_resolver=resolve_resources)
+agents.add_agent(definition, session_resource_slots=(MY_RESOURCE,))
+```
+
+The resolver runs for authorized composition under the current session lease. Its `phase` is
+`CREATION`, `LOAD`, `TURN` (after lifecycle resume), or `RECOMPOSITION` (configuration
+changes). Only `TURN` represents a turn; creation and load do not grant turn execution.
+The context also contains `session_id`, `deployment_id`, `agent_id`, pinned
+`definition_version`, acting `principal`, stored `owner`, `lease`, and the `policy`
+`SessionContext` snapshot. In `CREATION`, `creation` is a snapshot of the fenced durable
+`SessionCreationOperation`; otherwise it is `None`. The owner may differ from the principal
+submitting the turn.
+The lease is a fencing snapshot, not authority to keep using a resource after the turn or
+lease loss. Client-supplied metadata is not an authority for choosing application resources.
+The application must validate its durable session and resource binding and fail closed if
+they do not match; it remains responsible for the external resource's lifecycle.
+
+Returned bindings address slots declared by the pinned definition and are type-checked;
+the native agent receives `deps` for its run. Return `SessionResources()` when no additional
+resources are needed. Register resolver-provided slots explicitly with
+`session_resource_slots`; other required slots must be bound at registration. All required
+slots, including deferred slots, are validated during composition. Slot names are registered
+process-wide and must not conflict with a different slot.
+
 The current directory at registration is the default allowed workspace root. Paths are
 canonicalized; `default_cwd` must be one of the roots. ACP session paths must remain inside
 those roots, and reopening uses the recorded path. A bound workspace backend wins over the
@@ -165,11 +203,14 @@ configuration, commands, rename, approvals, close, delete — is rejected with
 authorized client.
 
 `set_session_capabilities(principal, agent_id, session_id, True | False | None)` overrides
-the deployment's `accepts_client_capabilities` default for one session. `None` restores the
-deployment default. Composition binds client-origin tools only when the resulting gate is
-open; advertising a wider mode from the client cannot widen it. A change to a live
-session takes effect on its next `session/load` (or new session), when composition is
-rebuilt.
+the pinned deployment's `accepts_client_capabilities` default for one session. `None` restores
+that default. Composition binds client-origin tools only when the resulting gate is open;
+advertising a wider mode from the client cannot widen it. Once a successful revocation returns,
+already-bound client-origin tools cannot start and new client filesystem or terminal operations
+are denied, including within an active turn. Requests already sent to the client cannot be undone.
+Re-enabling the gate requires an authorized, persisted gate change. A saved selection containing
+an enabled client binding cannot be loaded while the gate is closed; re-enable the gate before
+loading it again. Host-origin tools are unaffected.
 
 Pass `session_policy=...` to `AgentServer` for custom rules. A policy implements
 `decide(context, action)` and returns `PolicyDecision.allow()`, `.deny(...)`, or

@@ -32,6 +32,7 @@ from hrns.protocol import (
 )
 
 from ._model_usage import normalize_model_usage
+from .client_io import ClientCapability, ClientGate
 from .commands import CommandRegistry, build_command_registry
 from .definitions import (
     AGENT_FACTORY_PARAM,
@@ -410,6 +411,8 @@ async def compose_definition(
     presentation_sink: PresentationSink | None = None,
     client_capabilities: schema.ClientCapabilities | None = None,
     accepts_client_capabilities: bool = False,
+    client_gate: ClientGate | None = None,
+    selected_revision: int = 1,
 ) -> Composition:
     """Compose a definition into a native agent and an ACP session configuration.
 
@@ -440,8 +443,8 @@ async def compose_definition(
         catalog.restore_bindings(saved_bindings)
     catalog.validate_selected_state()
     snapshot = catalog.snapshot(
-        selected_revision=1,
-        active_revision=1,
+        selected_revision=selected_revision,
+        active_revision=selected_revision,
         application_status="applied",
     )
     resource_set = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
@@ -457,6 +460,18 @@ async def compose_definition(
             binding_ids=tuple(offering.binding_id for offering in catalog.enabled_ordered()),
         ),
     )
+    # Validate the original capabilities before wrappers obscure their toolset identities.
+    _validate_composed_identities(definition, composed)
+    gate = client_gate or ClientGate(session_id, accepts_client_capabilities)
+    composed = [
+        (
+            binding_id,
+            ClientCapability(wrapped=_session_capability(capability), gate=gate)
+            if catalog.offerings[binding_id].descriptor.origin == "client"
+            else capability,
+        )
+        for binding_id, capability in composed
+    ]
     selected_model = (
         normalize_model_usage(model)
         or normalize_model_usage(resource_set.get(MODEL))

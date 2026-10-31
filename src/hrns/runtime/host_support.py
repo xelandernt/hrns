@@ -27,6 +27,8 @@ from .resources import MODEL, ResourceBindings, ResourceSet
 from .session_policy import DefaultSessionPolicy, SessionPolicy
 
 if TYPE_CHECKING:
+    from hrns.server.resources import SessionResourceResolver
+
     from .host import HrnsACPAgent
 
 _EXTENSION_METHODS = tuple(EXTENSION_METHODS)
@@ -102,6 +104,8 @@ class HostBundle:
     """Resolve a retained revision for loading or reconfiguring a pinned session."""
     creation_handler: Callable[[SessionNewInput], Awaitable[SessionCreationResult]] | None = None
     """Route hosted session/new through the embedding server's authority."""
+    resource_resolver: SessionResourceResolver | None = None
+    """Resolve authorized, lease-fenced session bindings for composition."""
 
 
 @dataclass(frozen=True, slots=True)
