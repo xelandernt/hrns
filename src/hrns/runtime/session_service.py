@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from acp import schema
+from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai_harness.planning import PlanItem, PlanStore, SqlitePlanStore
 
 from hrns.config import EFFORT_DEFAULT
@@ -40,7 +43,7 @@ from .steering import SteeringCapability, SteeringChannel
 from .todo import PLAN_TABLE, PlanChannel, plan_update
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Mapping
 
     from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig
 
@@ -49,6 +52,25 @@ if TYPE_CHECKING:
     from .definitions import AgentDefinition
     from .host import HrnsACPAgent
     from .registry import PluginRegistry
+
+
+@runtime_checkable
+class _OutputToolset(Protocol):
+    _tool_defs: Sequence[ToolDefinition]
+
+
+@runtime_checkable
+class _AgentWithOutputToolset(Protocol):
+    _output_toolset: _OutputToolset | None
+
+
+def _output_tool_names(agent: AbstractAgent) -> frozenset[str]:
+    if not isinstance(agent, _AgentWithOutputToolset):
+        return frozenset()
+    toolset = agent._output_toolset
+    if toolset is None:
+        return frozenset()
+    return frozenset(tool.name for tool in toolset._tool_defs if tool.kind == "output")
 
 
 class SessionService:
@@ -602,7 +624,12 @@ class SessionService:
 
         return publish
 
-    async def remembered_tool_names(self, session_id: str) -> frozenset[str]:
+    async def remembered_tool_names(
+        self,
+        session_id: str,
+        *,
+        excluded_names: frozenset[str] = frozenset(),
+    ) -> frozenset[str]:
         """Function-tool names already present in the session's native history.
 
         Parts the framework emits for its own tools — a typed `ToolCallPart` such as
@@ -617,7 +644,12 @@ class SessionService:
         names: set[str] = set()
         for message in stored.messages:
             for part in getattr(message, "parts", ()):
-                if isinstance(part, ToolCallPart) and part.tool_kind is None and part.tool_name:
+                if (
+                    isinstance(part, ToolCallPart)
+                    and part.tool_kind is None
+                    and part.tool_name
+                    and part.tool_name not in excluded_names
+                ):
                     names.add(part.tool_name)
         return frozenset(names)
 
@@ -639,7 +671,10 @@ class SessionService:
             if not isinstance(capability, UnavailableTools)
         ]
         if disabled:
-            remembered = await self.remembered_tool_names(session_id)
+            remembered = await self.remembered_tool_names(
+                session_id,
+                excluded_names=_output_tool_names(composition.agent),
+            )
             if remembered:
                 capabilities.insert(
                     0,
