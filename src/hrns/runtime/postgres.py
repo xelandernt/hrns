@@ -28,6 +28,7 @@ from .acp_store import (
     SESSION_COLUMNS,
     DeploymentRecord,
     OperationKind,
+    PromptQueueMetrics,
     PromptQueueSnapshot,
     PromptState,
     QueuedPrompt,
@@ -1940,6 +1941,34 @@ class PostgresSessionStore(SessionStore):
                 await cursor.execute(query, values)
                 rows = await cursor.fetchall()
         return [_prompt_from_row(row) for row in rows]
+
+    async def prompt_queue_metrics(self, deployment_id: str, session_id: str) -> PromptQueueMetrics:
+        query = """
+            SELECT
+                COUNT(*) AS active_depth,
+                MIN(created_at) FILTER (WHERE state = %s) AS oldest_queued_created_at
+            FROM acp_prompt_queue
+            WHERE deployment_id = %s AND session_id = %s AND kind = %s AND state = ANY(%s)
+        """
+        values = (
+            PromptState.QUEUED.value,
+            deployment_id,
+            session_id,
+            OperationKind.PROMPT.value,
+            [PromptState.QUEUED.value, PromptState.CLAIMED.value],
+        )
+        async with self._lock:
+            connection = self._require_connection()
+            async with connection.cursor() as cursor:
+                await cursor.execute(query, values)
+                metrics = _row_dict(await cursor.fetchone())
+        if metrics is None:
+            raise RuntimeError("prompt queue aggregate query returned no result")
+        oldest = metrics["oldest_queued_created_at"]
+        return PromptQueueMetrics(
+            active_depth=int(metrics["active_depth"]),
+            oldest_queued_created_at=int(oldest) if oldest is not None else None,
+        )
 
     async def queue_snapshot(
         self,

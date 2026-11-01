@@ -36,6 +36,7 @@ from ._version import __version__
 from .acp_store import (
     DeploymentRecord,
     OperationKind,
+    PromptQueueMetrics,
     PromptState,
     QueuedPrompt,
     ScopedSessionStore,
@@ -116,6 +117,16 @@ from .session_policy import (
     decide_policy,
 )
 from .store import SQLiteSessionStore, default_store_path
+from .telemetry import (
+    ConnectionTelemetryEvent,
+    ConnectionTransition,
+    QueueTelemetryEvent,
+    QueueTransition,
+    RuntimeTelemetry,
+    RuntimeTelemetryEvent,
+    TurnTelemetryEvent,
+    TurnTransition,
+)
 
 __all__ = [
     # protocol models used in signatures
@@ -217,11 +228,21 @@ __all__ = [
     "ScopedSessionStore",
     "DeploymentRecord",
     "OperationKind",
+    "PromptQueueMetrics",
     "PromptState",
     "QueuedPrompt",
     "SessionLease",
     "SessionRecord",
     "SessionStore",
     "default_store_path",
+    # aggregate embedding telemetry
+    "ConnectionTelemetryEvent",
+    "ConnectionTransition",
+    "QueueTelemetryEvent",
+    "QueueTransition",
+    "RuntimeTelemetry",
+    "RuntimeTelemetryEvent",
+    "TurnTelemetryEvent",
+    "TurnTransition",
     "__version__",
 ]

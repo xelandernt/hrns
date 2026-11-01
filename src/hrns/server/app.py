@@ -23,6 +23,8 @@ from hrns.runtime import (
     MODEL,
     AgentDefinition,
     BoundDefinition,
+    ConnectionTelemetryEvent,
+    ConnectionTransition,
     DefaultSessionPolicy,
     DeploymentRecord,
     HrnsError,
@@ -36,6 +38,7 @@ from hrns.runtime import (
     ResourceBindings,
     ResourceSet,
     ResourceSlot,
+    RuntimeTelemetry,
     SessionAccess,
     SessionContext,
     SessionLease,
@@ -65,6 +68,7 @@ from hrns.runtime.host_support import HostBundle, HostPolicy, RevisionSpec
 from hrns.runtime.local import thinking_support
 from hrns.runtime.request_context import current_connection_id, current_request
 from hrns.runtime.resources import SLOTS
+from hrns.runtime.telemetry import emit_telemetry
 
 from .catalog import CursorCodec
 from .connections import ConnectionInfo, ConnectionRegistry
@@ -127,11 +131,14 @@ class AgentServer:
         initial_session_policy: InitialSessionPolicy | InitialSessionPolicyFactory | None = None,
         resource_resolver: SessionResourceResolver | None = None,
         lease_ttl_ms: int = 120_000,
+        telemetry: RuntimeTelemetry | None = None,
     ) -> None:
         if lease_ttl_ms < 1_000:
             raise ValueError("lease_ttl_ms must be at least 1000")
         if not isinstance(store, SessionStore):
             raise TypeError("store must be a SessionStore/PostgresSessionStore instance")
+        if telemetry is not None and not isinstance(telemetry, RuntimeTelemetry):
+            raise TypeError("telemetry must implement RuntimeTelemetry")
         self.store = store
         self.authenticate: AuthenticationDependency = (
             authenticate if authenticate is not None else _local_principal
@@ -145,6 +152,7 @@ class AgentServer:
         self.initial_session_policy = initial_session_policy or InitialSessionPolicy()
         self.resource_resolver = resource_resolver
         self.lease_ttl_ms = lease_ttl_ms
+        self.telemetry = telemetry
         self.deployments = DeploymentRegistry()
         self.connections = ConnectionRegistry()
         self._instance_id = uuid.uuid4().hex
@@ -1974,6 +1982,7 @@ class AgentServer:
                 worker_id=f"{self._instance_id}:{uuid.uuid4().hex}",
                 lease_ttl_ms=self.lease_ttl_ms,
             ),
+            telemetry=self.telemetry,
         )
 
     @asynccontextmanager
@@ -2005,6 +2014,13 @@ class AgentServer:
         if len(self.connections.list_connections()) >= 32 or (
             self.connections.count_for_principal(principal.id) >= 4
         ):
+            emit_telemetry(
+                self.telemetry,
+                ConnectionTelemetryEvent(
+                    transition=ConnectionTransition.REJECTED,
+                    active_connections=len(self.connections.list_connections()),
+                ),
+            )
             raise ApiError("SERVER_BUSY", "Too many active agent connections")
         task = asyncio.current_task()
         if task is None:
@@ -2018,14 +2034,23 @@ class AgentServer:
                 agent_id=agent.id,
             )
         except PermissionError as exc:
+            emit_telemetry(
+                self.telemetry,
+                ConnectionTelemetryEvent(
+                    transition=ConnectionTransition.REJECTED,
+                    active_connections=len(self.connections.list_connections()),
+                ),
+            )
             raise ApiError("UNAUTHORIZED", str(exc)) from exc
         if not self._running:
             self.connections.unregister(info.connection_id)
             raise ApiError("SERVER_BUSY", "The agent server lifespan is not running")
         namespace = agent.session_namespace
+        reconnected = False
         try:
             async with self._actor_scope(namespace):
                 host = self._actors.get(namespace)
+                reconnected = host is not None and bool(host.fanout.connections())
                 if host is None:
                     host = self._build_host(agent, principal)
                     self._actors[namespace] = host
@@ -2033,6 +2058,13 @@ class AgentServer:
         except BaseException:
             # A constructor failure must not keep counting against the connection limit.
             self.connections.unregister(info.connection_id)
+            emit_telemetry(
+                self.telemetry,
+                ConnectionTelemetryEvent(
+                    transition=ConnectionTransition.REJECTED,
+                    active_connections=len(self.connections.list_connections()),
+                ),
+            )
             raise
         request = RequestContext(
             principal=principal.id,
@@ -2044,6 +2076,17 @@ class AgentServer:
         request_token = current_request.set(request)
         connection_token = current_connection_id.set(info.connection_id)
         host.request_context = request
+        emit_telemetry(
+            self.telemetry,
+            ConnectionTelemetryEvent(
+                transition=(
+                    ConnectionTransition.RECONNECTED
+                    if reconnected
+                    else ConnectionTransition.CONNECTED
+                ),
+                active_connections=len(self.connections.list_connections()),
+            ),
+        )
         try:
             yield host
         finally:
@@ -2068,6 +2111,13 @@ class AgentServer:
             host.detach(info.connection_id)
             self._hosts.pop(info.connection_id, None)
             self.connections.unregister(info.connection_id)
+            emit_telemetry(
+                self.telemetry,
+                ConnectionTelemetryEvent(
+                    transition=ConnectionTransition.DISCONNECTED,
+                    active_connections=len(self.connections.list_connections()),
+                ),
+            )
             # A reconnect either attaches first or waits outside the lock for retirement.
             still_attached = any(candidate is host for candidate in self._hosts.values())
             if (
