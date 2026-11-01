@@ -29,9 +29,6 @@ from pydantic_ai import AgentRunResultEvent, DeferredToolRequests
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import (
     AgentStreamEvent,
-    EnqueuedMessagesEvent,
-    ModelRequest,
-    UserPromptPart,
 )
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
 from pydantic_ai_harness.experimental.acp import (
@@ -165,6 +162,9 @@ _conn_override: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
 )
 _headless_turn: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "hrns_headless_turn", default=False
+)
+_published_prompt_update_ids: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "hrns_published_prompt_update_ids", default=None
 )
 
 _TaskResult = TypeVar("_TaskResult")
@@ -1822,24 +1822,6 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         except HrnsError as exc:
             raise acp_map.hrns_rpc_error(exc) from exc
 
-    async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
-        """Record and render steering at delivery time, in stream order."""
-        if isinstance(event, EnqueuedMessagesEvent):
-            for message in event.messages:
-                if not isinstance(message, ModelRequest):
-                    continue
-                for part in message.parts:
-                    if isinstance(part, UserPromptPart) and isinstance(part.content, str):
-                        await self._send_update(
-                            turn,
-                            schema.UserMessageChunk(
-                                session_update="user_message_chunk",
-                                content=schema.TextContentBlock(type="text", text=part.content),
-                            ),
-                        )
-            return
-        await super()._emit_event(turn, event)
-
     async def _position_updates(
         self,
         session_id: str,
@@ -1883,8 +1865,26 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         turn: _TurnState,
         update: acp_map.SessionUpdate,
     ) -> None:
-        """Position live updates before delivery, including the replay-only user prompt."""
+        """Publish persisted user prompts before the next streamed update."""
+        prompt_indexes = [
+            index
+            for index, existing in enumerate(turn.updates)
+            if isinstance(existing, schema.UserMessageChunk)
+            and maybe_session_update_position(existing) is None
+        ]
         turn.updates[:] = await self._position_updates(turn.session_id, turn.updates)
+        published = _published_prompt_update_ids.get()
+        for index in prompt_indexes:
+            prompt_update = turn.updates[index]
+            position = maybe_session_update_position(prompt_update)
+            if position is None:
+                raise RuntimeError("Positioned prompt update is missing metadata.")
+            await self.fanout.session_update(
+                session_id=turn.session_id,
+                update=prompt_update,
+            )
+            if published is not None:
+                published.add(position.update_id)
         positioned = (await self._position_updates(turn.session_id, [update]))[0]
         await super()._send_update(turn, positioned)
 
@@ -2023,11 +2023,28 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             raise HrnsError("SESSION_CLOSING", "The host is retiring.")
         await self.sessions.refresh_session_resources(session_id, action=PolicyAction.PROMPT)
         self.sessions.turn_usage[session_id] = {}
+        state = self._sessions[session_id]
+        update_count = len(state.transcript)
         response = None
+        published_prompt_update_ids: set[str] = set()
+        published_token = _published_prompt_update_ids.set(published_prompt_update_ids)
         try:
             response = await super().prompt(session_id, prompt, **dict(kwargs))
+            for update in state.transcript[update_count:]:
+                position = maybe_session_update_position(update)
+                if (
+                    isinstance(update, schema.UserMessageChunk)
+                    and position is not None
+                    and position.update_id not in published_prompt_update_ids
+                ):
+                    await self.fanout.session_update(
+                        session_id=session_id,
+                        update=update,
+                    )
+                    published_prompt_update_ids.add(position.update_id)
             return response
         finally:
+            _published_prompt_update_ids.reset(published_token)
             channel = self.sessions.steering.get(session_id)
             if channel is not None:
                 channel.detach()
