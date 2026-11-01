@@ -39,6 +39,7 @@ __all__ = [
     "LIFECYCLE_OPERATION_KINDS",
     "LIFECYCLE_PENDING_STATES",
     "OperationKind",
+    "PromptQueueMetrics",
     "PromptState",
     "QueuedPrompt",
     "SessionLease",
@@ -443,6 +444,14 @@ class PromptQueueSnapshot:
     items: list[QueuedPrompt]
 
 
+@dataclass(frozen=True, slots=True)
+class PromptQueueMetrics:
+    """Aggregate state for active prompt work without loading queued payloads."""
+
+    active_depth: int
+    oldest_queued_created_at: int | None
+
+
 #: Return type of ``list_prompts``. Aliased because the store classes define a ``list``
 #: method, which shadows the builtin inside their bodies.
 _PromptList = list[QueuedPrompt]
@@ -730,6 +739,10 @@ class SessionStore(ABC):
         limit: int = 100,
     ) -> _PromptList:
         """List a session's prompts in queue order."""
+
+    @abstractmethod
+    async def prompt_queue_metrics(self, deployment_id: str, session_id: str) -> PromptQueueMetrics:
+        """Return active prompt depth and oldest queued creation time without payloads."""
 
     @abstractmethod
     async def queue_snapshot(
@@ -1233,6 +1246,9 @@ class ScopedSessionStore:
         return await self.backend.list_prompts(
             self.deployment_id, session_id, states=states, limit=limit
         )
+
+    async def prompt_queue_metrics(self, session_id: str) -> PromptQueueMetrics:
+        return await self.backend.prompt_queue_metrics(self.deployment_id, session_id)
 
     async def queue_snapshot(self, session_id: str) -> PromptQueueSnapshot:
         return await self.backend.queue_snapshot(self.deployment_id, session_id)

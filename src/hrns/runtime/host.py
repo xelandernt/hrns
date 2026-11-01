@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import contextvars
 import json
+import logging
 import uuid
 import warnings
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -124,6 +125,14 @@ from .session_policy import (
     decide_policy,
 )
 from .session_service import SessionService
+from .telemetry import (
+    QueueTelemetryEvent,
+    QueueTransition,
+    RuntimeTelemetry,
+    TurnTelemetryEvent,
+    TurnTransition,
+    emit_telemetry,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.experimental.acp._adapter import _TurnState
@@ -159,6 +168,7 @@ _headless_turn: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 _TaskResult = TypeVar("_TaskResult")
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -217,11 +227,15 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         policy: HostPolicy | None = None,
         *,
         refresh_models: Callable[[], tuple[str, ...]] | None = None,
+        telemetry: RuntimeTelemetry | None = None,
     ) -> None:
         """``refresh_models`` re-advertises ids that appear after the runtime started."""
         self._base_conn: Any | None = None
         self.bundle = bundle
         self._refresh_models = refresh_models
+        if telemetry is not None and not isinstance(telemetry, RuntimeTelemetry):
+            raise TypeError("telemetry must implement RuntimeTelemetry")
+        self.telemetry = telemetry
         self.policy = policy or HostPolicy()
         self.definition = bundle.definition
         bundle.registry.allow_local_binding_creation = self.policy.can_create_bindings
@@ -1071,6 +1085,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         """Fan out one durable queue transition to currently authorized viewers."""
         if row.deployment_id != self.policy.deployment_id:
             return
+        await self._emit_queue_telemetry(row)
         record = await self.store.get_policy_candidate(row.session_id)
         if record is None:
             return
@@ -1099,6 +1114,38 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     "hrns/queue/changed",
                     self._public_queue_update(row).to_wire(),
                 )
+
+    async def _emit_queue_telemetry(self, row: QueuedPrompt) -> None:
+        """Emit one bounded observation after an authoritative state transition."""
+        if row.kind is not OperationKind.PROMPT or self.telemetry is None:
+            return
+        try:
+            metrics = await self.store.prompt_queue_metrics(row.session_id)
+        except Exception:
+            _LOG.warning("HRNS telemetry queue observation failed; continuing")
+            return
+        oldest_queued_age_ms = (
+            max(0, now_ms() - metrics.oldest_queued_created_at)
+            if metrics.oldest_queued_created_at is not None
+            else None
+        )
+        emit_telemetry(
+            self.telemetry,
+            QueueTelemetryEvent(
+                transition=QueueTransition(row.state),
+                depth=metrics.active_depth,
+                oldest_queued_age_ms=oldest_queued_age_ms,
+            ),
+        )
+        if row.origin is not None:
+            transition = (
+                TurnTransition.RUNNING
+                if row.state is PromptState.CLAIMED
+                else TurnTransition.FAILED
+                if row.state is PromptState.CANCELLED
+                else TurnTransition(row.state)
+            )
+            emit_telemetry(self.telemetry, TurnTelemetryEvent(transition=transition))
 
     # --- per-session authorization ---------------------------------------
 

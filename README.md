@@ -118,6 +118,16 @@ agents.add_agent(definition)
 agents.mount(app)
 ```
 
+### Optional aggregate runtime telemetry
+
+An embedding can receive safe, aggregate runtime events without adding a Logfire or
+OpenTelemetry dependency. Implement `RuntimeTelemetry.emit(event)` and pass it to
+`AgentServer(..., telemetry=observer)` (or directly to `HrnsACPAgent(...,
+telemetry=observer)`). Events contain only lifecycle/transition enums plus connection
+counts, queue depth, and oldest queued age; they never contain prompts, errors, URLs,
+credentials, or principal/session/key identifiers. Observer failures are logged and
+ignored by the runtime.
+
 `add_agent` binds and validates the definition's resource requirements at registration; pass
 `resources=`, or a `definition.bind(...)` result, when a capability needs host values.
 Install the `server` extra, register your `AgentDefinition` objects, and run the app

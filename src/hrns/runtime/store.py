@@ -30,6 +30,7 @@ from .acp_store import (
     SESSION_COLUMNS,
     DeploymentRecord,
     OperationKind,
+    PromptQueueMetrics,
     PromptQueueSnapshot,
     PromptState,
     QueuedPrompt,
@@ -1928,6 +1929,35 @@ class SQLiteSessionStore(SessionStore):
                 lambda: self._connect().execute(query, [*values, limit]).fetchall(),
             )
         return [_row_to_prompt(row) for row in rows]
+
+    async def prompt_queue_metrics(self, deployment_id: str, session_id: str) -> PromptQueueMetrics:
+        query = """
+            SELECT
+                COUNT(*) AS active_depth,
+                MIN(CASE WHEN state = ? THEN created_at END) AS oldest_queued_created_at
+            FROM acp_prompt_queue
+            WHERE deployment_id = ? AND session_id = ? AND kind = ? AND state IN (?, ?)
+        """
+        values = (
+            PromptState.QUEUED.value,
+            deployment_id,
+            session_id,
+            OperationKind.PROMPT.value,
+            PromptState.QUEUED.value,
+            PromptState.CLAIMED.value,
+        )
+        async with self._lock:
+            metrics = await _thread(
+                self._run,
+                lambda: self._connect().execute(query, values).fetchone(),
+            )
+        if metrics is None:
+            raise RuntimeError("prompt queue aggregate query returned no result")
+        oldest = metrics["oldest_queued_created_at"]
+        return PromptQueueMetrics(
+            active_depth=int(metrics["active_depth"]),
+            oldest_queued_created_at=int(oldest) if oldest is not None else None,
+        )
 
     async def queue_snapshot(
         self,
