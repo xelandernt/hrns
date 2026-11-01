@@ -91,8 +91,6 @@ class SessionWorkflow:
             screen._replay_target = None
             screen._loading_session = False
             await screen._notice(f"Could not load session {session_id}: {exc.message}", "error")
-            if initial:
-                await self.new()
             return
         await pane.end_replay()
         tool_ids = pane.retained_tool_ids()

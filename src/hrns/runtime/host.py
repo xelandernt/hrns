@@ -1498,6 +1498,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 self.sessions.pending_initial = list(request.initial_configuration)
                 self.sessions.pending_effort = request.effort
                 self.store.stage(record)
+                self.store.bind_storage_principal(record)
                 try:
                     await self.acquire_session_lease(session_id)
                     config = await self.sessions.compose_session(
