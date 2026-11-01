@@ -28,6 +28,7 @@ __all__ = [
     "hrns_rpc_error",
     "initial_configuration_changes",
     "mcp_forbidden_error",
+    "session_not_found_error",
     "validate_requested_cwd",
 ]
 
@@ -152,14 +153,29 @@ def initial_configuration_changes(meta: Any) -> list[BindingChange]:
 
 
 def hrns_rpc_error(error: BaseException) -> RequestError:
-    """Translate a :class:`HrnsError` (or generic failure) into an ACP RPC error."""
+    """Translate a :class:`HrnsError` (or generic failure) into an ACP RPC error.
+
+    Session-policy denials use the same invalid-params response as an absent session
+    so an ACP caller cannot distinguish an inaccessible session from a nonexistent one.
+    """
     if isinstance(error, HrnsError):
+        if error.code == "SESSION_NOT_FOUND":
+            session_id = error.details.get("sessionId")
+            if isinstance(session_id, str):
+                return session_not_found_error(session_id)
         return RequestError(-32000, error.message, {"code": error.code, "details": error.details})
     if isinstance(error, ValidationError):
         return RequestError.invalid_params({"errors": exc_errors(error)})
     if isinstance(error, RequestError):
         return error
     return RequestError.internal_error({"details": str(error) or type(error).__name__})
+
+
+def session_not_found_error(session_id: str) -> RequestError:
+    """Return the ACP response shared by absent and unauthorized session lookups."""
+    return RequestError.invalid_params(
+        {"sessionId": session_id, "reason": "no stored session with this id"}
+    )
 
 
 def exc_errors(error: ValidationError) -> list[Any]:

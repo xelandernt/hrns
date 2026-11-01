@@ -1721,9 +1721,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             self.sessions.reject_client_mcp(mcp_servers)
             record = await self.store.get_policy_candidate(session_id)
             if record is None:
-                raise RequestError.invalid_params(
-                    {"sessionId": session_id, "reason": "no stored session with this id"}
-                )
+                raise acp_map.session_not_found_error(session_id)
             await self.authorize(session_id, PolicyAction.LOAD, record=record)
             await self.authorize(session_id, PolicyAction.REPLAY, record=record)
             revision = self.sessions.revision_for(record)
