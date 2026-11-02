@@ -107,7 +107,7 @@ class HrnsAcpClient:
         session_new_meta: dict[str, Any] | None = None,
         connect_timeout: float = CONNECT_TIMEOUT,
         auth_method: str = "",
-        client_io: ClientIoMode = "off",
+        client_io: ClientIoMode = "all",
     ) -> None:
         self.policy: InteractionPolicy = policy or DEFAULT_INTERACTION_POLICY
         self.advertise_extension = advertise_extension

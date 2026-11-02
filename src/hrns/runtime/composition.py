@@ -39,6 +39,7 @@ from .definitions import (
     AgentDefinition,
     AgentFactory,
     AgentFactoryContext,
+    DefinitionBinding,
     factory_declared_params,
     factory_managed_param,
 )
@@ -351,7 +352,7 @@ def _validate_resource_needs(
     the slot and the deployment must fill it before the factory runs, so the capability can
     read the value without a defensive check of its own.
     """
-    for offering in catalog.enabled_ordered():
+    for offering in catalog.active_enabled_ordered():
         for slot in offering.descriptor.needs:
             if not definition.declares(slot):
                 raise HrnsError(
@@ -413,6 +414,7 @@ async def compose_definition(
     accepts_client_capabilities: bool = False,
     client_gate: ClientGate | None = None,
     selected_revision: int = 1,
+    capability_bindings: Sequence[DefinitionBinding] = (),
 ) -> Composition:
     """Compose a definition into a native agent and an ACP session configuration.
 
@@ -427,6 +429,24 @@ async def compose_definition(
             "A session composition cannot be both initial and restored.",
         )
     definition = definition.resolve(registry)
+    if capability_bindings:
+        existing = {binding.binding_id for binding in definition.bindings}
+        duplicate = next(
+            (
+                binding.binding_id
+                for binding in capability_bindings
+                if binding.binding_id in existing
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise HrnsError(
+                "DEPENDENCY_CONFLICT",
+                f"Session capability binding {duplicate!r} conflicts with the definition.",
+                details={"binding_id": duplicate},
+            )
+        definition = definition.snapshot()
+        definition.bindings.extend(binding.model_copy(deep=True) for binding in capability_bindings)
     catalog = PolicyCatalog(
         definition,
         registry,
@@ -457,7 +477,7 @@ async def compose_definition(
             session_id=session_id,
             principal=principal,
             deployment_id=deployment_id,
-            binding_ids=tuple(offering.binding_id for offering in catalog.enabled_ordered()),
+            binding_ids=tuple(offering.binding_id for offering in catalog.active_enabled_ordered()),
         ),
     )
     # Validate the original capabilities before wrappers obscure their toolset identities.
@@ -509,7 +529,7 @@ async def compose_definition(
     )
     commands = build_command_registry(
         registry=registry,
-        enabled=catalog.enabled_ordered(),
+        enabled=catalog.active_enabled_ordered(),
         resources=resource_set,
         snapshot=snapshot,
         session_id=session_id,

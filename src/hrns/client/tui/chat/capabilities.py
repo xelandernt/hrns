@@ -71,7 +71,6 @@ class CapabilityWorkflow:
                     active_revision=snapshot.active_revision,
                     selected_revision=snapshot.selected_revision,
                     can_write=screen.client.extension.supports("_hrns/configuration/update"),
-                    accepts_client_capabilities=screen.client.extension.accepts_client_capabilities,
                 )
                 self.sync_mcp_panel(snapshot)
                 await screen.prompts.refresh_skills()
@@ -95,7 +94,6 @@ class CapabilityWorkflow:
                 active_revision=snapshot.active_revision,
                 selected_revision=snapshot.selected_revision,
                 can_write=screen.client.extension.supports("_hrns/configuration/update"),
-                accepts_client_capabilities=screen.client.extension.accepts_client_capabilities,
             )
             self.sync_mcp_panel(snapshot)
 

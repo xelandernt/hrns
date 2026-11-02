@@ -83,6 +83,7 @@ _UPDATE_TYPES: dict[str, type[Any]] = {
     "agent_thought_chunk": schema.AgentThoughtChunk,
     "tool_call": schema.ToolCallStart,
     "tool_call_update": schema.ToolCallProgress,
+    "plan": schema.AgentPlanUpdate,
     "plan_update": schema.AgentPlanUpdate,
     "available_commands_update": schema.AvailableCommandsUpdate,
     "current_mode_update": schema.CurrentModeUpdate,

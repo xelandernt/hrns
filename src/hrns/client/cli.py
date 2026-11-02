@@ -71,7 +71,8 @@ ClientIoOption = Annotated[
         help=(
             "Advertise client-side capabilities to the agent: 'off' offers nothing, 'read' "
             "serves fs/read_text_file, and 'all' also serves writes and terminal/* so the "
-            "agent runs commands in this terminal. Defaults to the profile's client_io."
+            "agent runs commands in this terminal. Defaults to 'all' unless a profile or "
+            "TUI setting overrides it."
         ),
     ),
 ]
@@ -627,7 +628,13 @@ async def _resolve_target(
             cwd=local_cwd(profile, cwd_override),
         )
     agent = await resolve_agent(profile, getattr(args, "agent", None))
-    cwd = default_remote_cwd(agent, cwd_override)
+    # Fix the client I/O root to the local process directory by default. The remote
+    # host resolves an existing session's server workspace authoritatively during load.
+    cwd = (
+        str(Path.cwd())
+        if getattr(args, "session", None) and cwd_override is None
+        else default_remote_cwd(agent, cwd_override)
+    )
     return ConnectionTarget(name=profile.name, kind="remote", profile=profile, agent=agent, cwd=cwd)
 
 
@@ -679,11 +686,14 @@ async def _command_run(args: argparse.Namespace) -> int:
     target = await _resolve_target(profiles, args, remainder=target_remainder)
     policy_name = "allow" if args.allow_all else "deny" if args.deny_all else "required"
     policy = HeadlessInteractions(policy_name, answers=_answers(args))
+    client_io = args.client_io or target.profile.client_io
+    if client_io is None and args.session and args.cwd is None:
+        client_io = "off"
     client = HrnsAcpClient(
         lambda: transport_for(target),
         policy=policy,
         auth_method=target.profile.auth_method,
-        client_io=parse_client_io(args.client_io or target.profile.client_io),
+        client_io=parse_client_io(client_io or "all"),
     )
     try:
         outcome = await run_headless(

@@ -67,6 +67,7 @@ class RegisteredAgent:
     definition: AgentDefinition
     allowed_cwds: tuple[str, ...]
     default_cwd: str
+    advertise_workspaces: bool = True
     models: tuple[str, ...] = ()
     resources: dict[str, object] = field(default_factory=dict)
     accepts_client_capabilities: bool = False

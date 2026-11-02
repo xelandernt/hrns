@@ -46,7 +46,7 @@ class Profile:
     token: str = ""  # secret reference for bearer token
     remote_cwd: str = ""  # bridge rewrite target
     auth_method: str = ""  # agent-advertised auth method id to try automatically
-    client_io: ClientIoMode = "off"  # what this terminal offers the agent: files and commands
+    client_io: ClientIoMode | None = None  # what this terminal offers the agent: files and commands
     default_for_server: bool = False
     notes: str = ""
 
@@ -82,7 +82,7 @@ class Profile:
             data["remoteCwd"] = self.remote_cwd
         if self.auth_method:
             data["authMethod"] = self.auth_method
-        if self.client_io != "off":
+        if self.client_io is not None:
             data["clientIo"] = self.client_io
         if self.default_for_server:
             data["default"] = True
@@ -127,7 +127,7 @@ class Profile:
             token=str(data.get("token", "")),
             remote_cwd=str(data.get("remoteCwd", "")),
             auth_method=str(data.get("authMethod", "")),
-            client_io=parse_client_io(str(data.get("clientIo", "off"))),
+            client_io=parse_client_io(str(data["clientIo"])) if "clientIo" in data else None,
             default_for_server=bool(data.get("default", False)),
             notes=str(data.get("notes", "")),
         )

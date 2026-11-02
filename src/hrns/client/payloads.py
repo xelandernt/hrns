@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
+import ntpath
+import posixpath
 from typing import Any
 
 from acp.schema import (
@@ -41,7 +42,12 @@ def _raw_arguments(value: Any) -> Any:
 
 
 def absolute_path(value: str, *, label: str) -> str:
-    if not isinstance(value, str) or not os.path.isabs(value):
+    """Check a path that belongs to the *agent's* filesystem, not this client's.
+
+    A remote agent may be POSIX while the terminal runs on Windows, so both rootings
+    are accepted; the host validates the path against its own workspace policy.
+    """
+    if not isinstance(value, str) or not (posixpath.isabs(value) or ntpath.isabs(value)):
         raise HrnsClientError(f"The {label} must be an absolute path, got '{value}'.")
     return value
 

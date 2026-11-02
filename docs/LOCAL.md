@@ -311,11 +311,12 @@ Headless execution requires `--allow-all`, `--deny-all`, or reports that interac
 is required. The local workspace starts at the selected project; it is **not a
 sandbox**. Approved commands execute with your user's permissions.
 
-`--client-io` decides what this terminal offers the agent it connects to: `off` (the default)
-offers nothing, `read` serves `fs/read_text_file` in the session directory, and `all` also
-serves writes and `terminal/*` so an accepting agent can run commands in this terminal
-alongside its server shell. Enabling terminal support lets the agent run commands with your permissions
-without a further prompt, so it is a per-connection choice; a profile stores it as `clientIo`.
+`--client-io` decides what this terminal offers the agent it connects to: `all` (the default)
+serves reads, writes, and `terminal/*`; `read` serves only `fs/read_text_file` in the session
+directory; and `off` disables all client-side capabilities. Enabling terminal support lets the
+agent run commands with your permissions without a further prompt, so use `--client-io off`
+when the remote deployment should not access this machine. A profile stores the choice as
+`clientIo`.
 On the agent side the `client.terminal` binding is what routes commands through that terminal,
 and it is usable only when the server accepts client capabilities and the connected client
 advertises support. Local model mode refuses client capabilities by default, so this binding

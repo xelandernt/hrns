@@ -80,6 +80,17 @@ class BindingOffering:
         return missing_client_capability(self.client_capabilities, self.descriptor.requires_client)
 
     @property
+    def transiently_unavailable(self) -> bool:
+        """Whether only the currently connected client's advertisement is missing."""
+        return (
+            self.descriptor.origin == "client"
+            and self.accepts_client_capabilities
+            and self.policy.available
+            and self.descriptor.compatibility.runtime_compatible
+            and self.missing_client is not None
+        )
+
+    @property
     def availability_reason(self) -> str | None:
         if self.descriptor.origin == "client" and not self.accepts_client_capabilities:
             return "the server does not accept client capabilities"

@@ -122,20 +122,22 @@ def parse_limit(raw: str | None) -> int:
 
 def agent_descriptor(agent: RegisteredAgent, *, prefix: str = "") -> dict[str, Any]:
     """Catalog descriptor compatible with the hrns network client."""
-    return {
+    descriptor: dict[str, Any] = {
         "agentId": agent.id,
         "name": agent.definition.name,
         "version": agent.definition.definition_version,
         "description": agent.definition.description,
         "recommended": True,
-        "defaultWorkspace": agent.default_cwd,
-        "allowedWorkspaces": list(agent.allowed_cwds),
         "connection": {
             "url": f"{prefix}/v1/agents/{agent.id}/acp",
             "subprotocol": ACP_SUBPROTOCOL,
             "maxMessageBytes": MAX_MESSAGE_BYTES,
         },
     }
+    if agent.advertise_workspaces:
+        descriptor["defaultWorkspace"] = agent.default_cwd
+        descriptor["allowedWorkspaces"] = list(agent.allowed_cwds)
+    return descriptor
 
 
 def paginate_agents(

@@ -710,7 +710,7 @@ class HrnsApp(App[int]):
         """
         if self.client_io is not None:
             return self.client_io
-        if target.profile.client_io != "off":
+        if target.profile.client_io is not None:
             return target.profile.client_io
         return self.settings.client_io
 

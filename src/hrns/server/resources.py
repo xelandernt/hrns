@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from hrns.runtime.acp_store import SessionLease
 from hrns.runtime.creation import SessionCreationOperation
+from hrns.runtime.definitions import DefinitionBinding
 from hrns.runtime.resources import ResourceSet
 from hrns.runtime.session_policy import SessionContext
 
@@ -41,6 +42,7 @@ class SessionResources:
 
     resources: ResourceSet = field(default_factory=ResourceSet)
     deps: object = None
+    capability_bindings: tuple[DefinitionBinding, ...] = ()
 
 
 SessionResourceResolver = Callable[[SessionResourceContext], Awaitable[SessionResources]]

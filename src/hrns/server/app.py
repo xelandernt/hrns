@@ -18,7 +18,13 @@ from acp import schema
 from fastapi import FastAPI, WebSocket
 from pydantic import ValidationError
 
-from hrns.protocol import BindingChange, canonical_hash
+from hrns.protocol import (
+    BindingChange,
+    ConfigurationSnapshot,
+    ConfigurationUpdate,
+    EnableChange,
+    canonical_hash,
+)
 from hrns.runtime import (
     MODEL,
     AgentDefinition,
@@ -224,6 +230,7 @@ class AgentServer:
         models: Sequence[str] = (),
         allowed_cwds: Sequence[str | Path] | None = None,
         default_cwd: str | Path | None = None,
+        advertise_workspaces: bool = True,
         accepts_client_capabilities: bool = False,
     ) -> RegisteredAgent:
         """Register an immutable deployment revision.
@@ -239,6 +246,9 @@ class AgentServer:
         ``accepts_client_capabilities`` permits offered client-origin plugins; it is the
         default gate advertised during ACP initialization and can be overridden per session
         with :meth:`set_session_capabilities`.
+
+        ``advertise_workspaces`` controls only the public catalog descriptor. Host-side
+        workspace policy and session defaults remain available when it is false.
         """
         if session_resource_slots and self.resource_resolver is None:
             raise ValueError("session_resource_slots requires a resource_resolver")
@@ -324,6 +334,7 @@ class AgentServer:
                 definition=agent_definition.snapshot(),
                 allowed_cwds=roots,
                 default_cwd=cwd,
+                advertise_workspaces=advertise_workspaces,
                 models=offered,
                 resources=bound_resources.values,
                 accepts_client_capabilities=accepts_client_capabilities,
@@ -1035,6 +1046,104 @@ class AgentServer:
             finally:
                 if temporary is not None:
                     await self._release_admin_lease(temporary)
+
+    @_admitted
+    async def set_session_binding_enabled(
+        self,
+        principal: Principal,
+        agent_id: str,
+        session_id: str,
+        *,
+        binding_id: str,
+        enabled: bool,
+    ) -> ConfigurationSnapshot:
+        """Authoritatively select an existing binding for the next session turn.
+
+        This embedding-only operation retains the normal session ownership and
+        configuration policy checks, but does not grant ACP clients permission to
+        toggle a host-managed binding.
+        """
+        if not isinstance(binding_id, str) or not binding_id:
+            raise ApiError("INVALID_REQUEST", "binding_id must be a non-empty string.")
+        if not isinstance(enabled, bool):
+            raise ApiError("INVALID_REQUEST", "enabled must be a boolean.")
+        agent = self.get_agent(agent_id, principal, allow_hidden=True)
+        request = current_request.get()
+        if request is not None and (
+            request.principal != principal.id or request.credential_id != principal.credential_id
+        ):
+            raise ApiError("NOT_FOUND", "No session is available to this principal.")
+        scopes = principal.scopes
+        if request is not None and request.scopes is not None:
+            scopes = request.scopes if scopes is None else scopes & request.scopes
+        context = RequestContext(
+            principal=principal.id,
+            credential_id=principal.credential_id,
+            connection_id=request.connection_id if request is not None else None,
+            request_id=request.request_id if request is not None else None,
+            agent_id=agent_id,
+            scopes=scopes,
+            session_id=session_id,
+            operation_id=request.operation_id if request is not None else None,
+            origin=request.origin if request is not None else None,
+        )
+        token = current_request.set(context)
+        connection_token = current_connection_id.set(None)
+        try:
+            async with self._actor_scope(agent.session_namespace):
+                host = self._host_for_deployment(agent.session_namespace)
+                temporary = host is None
+                if host is None:
+                    host = self._build_host(agent, principal)
+                    self._actors[agent.session_namespace] = host
+                    try:
+                        await host.load_headless_session(session_id)
+                    except BaseException:
+                        self._actors.pop(agent.session_namespace, None)
+                        await host.shutdown()
+                        raise
+                try:
+                    await self._authorize_capability_change(principal, agent, session_id, host)
+                    composition = host.sessions.require_composition(session_id)
+                    for _ in range(2):
+                        selected = composition.snapshot.bindings.get(binding_id)
+                        if selected is not None and selected.enabled is enabled:
+                            return composition.snapshot
+                        update = ConfigurationUpdate(
+                            session_id=session_id,
+                            request_id=f"host:{uuid.uuid4().hex}",
+                            expected_revision=composition.snapshot.selected_revision,
+                            changes=[EnableChange(binding_id=binding_id, enabled=enabled)],
+                        )
+                        try:
+                            payload = await host.order_configuration_update(
+                                update,
+                                host_authoritative=True,
+                            )
+                        except HrnsError as exc:
+                            if exc.code != "REVISION_CONFLICT":
+                                raise
+                            composition = host.sessions.require_composition(session_id)
+                            continue
+                        return ConfigurationSnapshot.model_validate(payload)
+                    return composition.snapshot
+                except HrnsError as exc:
+                    if exc.code == "SESSION_NOT_FOUND":
+                        raise ApiError(
+                            "NOT_FOUND", "No session is available to this principal."
+                        ) from exc
+                    if exc.code in {"REVISION_CONFLICT", "SESSION_CONFLICT", "SESSION_HELD"}:
+                        raise ApiError(
+                            exc.code, exc.message, details=exc.details, status_code=409
+                        ) from exc
+                    raise
+                finally:
+                    if temporary:
+                        self._actors.pop(agent.session_namespace, None)
+                        await host.shutdown()
+        finally:
+            current_connection_id.reset(connection_token)
+            current_request.reset(token)
 
     async def _authorize_capability_change(
         self,

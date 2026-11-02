@@ -78,9 +78,9 @@ directory: reads are automatic, while writes, edits, and commands ask for approv
 `hrns.ask_user` lets the model ask structured multiple-choice questions in the terminal;
 disable it with `[capabilities] ask_user = false` for headless runs. `hrns.todo` gives
 the model a session-scoped plan and shows it in the **Todos** tab of the right drawer.
-A second family of tools can run in the terminal instead of on the host: `/settings` →
-**Client-side tools** (or `--client-io all`) lets the agent use this client's files and
-terminal, and the `client.terminal` binding routes its commands there.
+A second family of tools runs in the terminal instead of on the host by default: use
+`--client-io off` to disable these client-side tools, or `/settings` to choose a narrower
+mode. The `client.terminal` binding routes commands to this client's files and terminal.
 Configuration uses pydantic-settings. Providers that authenticate with an account
 rather than a key work too: `hrns login github-copilot` runs GitHub's device flow, or
 press **Ctrl+G** in the provider form. See
