@@ -264,6 +264,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         self._lease_task: asyncio.Task[None] | None = None
         self._session_cwd: dict[str, str] = {}
         self._creating_updates: dict[str, list[acp_map.SessionUpdate]] = {}
+        self._active_turn_updates: dict[str, list[acp_map.SessionUpdate]] = {}
         self._destroyed: set[str] = set()
         self._lifecycle_tasks: dict[str, asyncio.Task[QueuedPrompt]] = {}
         self._lifecycle_admissions: set[asyncio.Task[QueuedPrompt]] = set()
@@ -1732,6 +1733,24 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 self.fanout.subscribe(connection_id, session_id)
             live = self._sessions.get(session_id)
             if live is not None:
+                stored_cwd = self.policy.validate_cwd(record.cwd, allowed=revision.allowed_cwds)
+                accepts = (
+                    record.accepts_client_capabilities
+                    if record.accepts_client_capabilities is not None
+                    else revision.accepts_client_capabilities
+                )
+                self.sessions.remember_client(
+                    AcpSession(
+                        cwd=stored_cwd,
+                        mcp_servers=[],
+                        session_id=session_id,
+                        client_capabilities=self.current_capabilities(),
+                        client=self.fanout,
+                    ),
+                    stored_cwd,
+                    accepts=accepts,
+                )
+                await self.sessions.refresh_session_resources(session_id, action=PolicyAction.LOAD)
                 # Another connection already owns the live actor. Attach this viewer and
                 # replay its transcript to it only; do not tear down or rebuild the
                 # session that the first connection is using.
@@ -1742,17 +1761,24 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                         "The replay target connection is unavailable.",
                         {"sessionId": session_id, "restartFullLoad": True},
                     )
-                async with live.lock:
-                    try:
-                        replay = order_session_updates(live.transcript)
-                    except SessionUpdateProtocolError as exc:
-                        raise HrnsError(
-                            "SESSION_UPDATE_PROTOCOL_ERROR",
-                            "The live session transcript has conflicting update positions.",
-                            {"sessionId": session_id, "restartFullLoad": True},
-                        ) from exc
-                    for update in replay:
-                        await client.session_update(session_id=session_id, update=update)
+                # Do not wait for the active turn's lock: it is held for the full run.
+                # Subscription happens before this snapshot, and durable update positions
+                # let clients deduplicate any replay/live overlap.
+                try:
+                    replay = order_session_updates(
+                        [
+                            *live.transcript,
+                            *self._active_turn_updates.get(session_id, ()),
+                        ]
+                    )
+                except SessionUpdateProtocolError as exc:
+                    raise HrnsError(
+                        "SESSION_UPDATE_PROTOCOL_ERROR",
+                        "The live session transcript has conflicting update positions.",
+                        {"sessionId": session_id, "restartFullLoad": True},
+                    ) from exc
+                for update in replay:
+                    await client.session_update(session_id=session_id, update=update)
                 return schema.LoadSessionResponse(
                     config_options=self.sessions.options_for(session_id)
                 )
@@ -1882,11 +1908,19 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             await self.fanout.session_update(
                 session_id=turn.session_id,
                 update=prompt_update,
+                exclude_connection_id=self.connection_key(),
             )
             if published is not None:
                 published.add(position.update_id)
         positioned = (await self._position_updates(turn.session_id, [update]))[0]
         await super()._send_update(turn, positioned)
+        self._active_turn_updates[turn.session_id] = list(turn.updates)
+        if not isinstance(positioned, schema.UserMessageChunk):
+            await self.fanout.session_update(
+                session_id=turn.session_id,
+                update=positioned,
+                exclude_connection_id=self.connection_key(),
+            )
 
     async def _fail_outstanding_tool_calls(
         self,
@@ -1900,6 +1934,9 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             positioned = (await self._position_updates(turn.session_id, [update]))[0]
             if record:
                 turn.updates.append(positioned)
+            active = self._active_turn_updates.get(turn.session_id)
+            if active is not None:
+                active.append(positioned)
             with contextlib.suppress(Exception):
                 await turn.conn.session_update(session_id=turn.session_id, update=positioned)
 
@@ -2028,6 +2065,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
         response = None
         published_prompt_update_ids: set[str] = set()
         published_token = _published_prompt_update_ids.set(published_prompt_update_ids)
+        self._active_turn_updates[session_id] = []
         try:
             response = await super().prompt(session_id, prompt, **dict(kwargs))
             for update in state.transcript[update_count:]:
@@ -2040,10 +2078,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                     await self.fanout.session_update(
                         session_id=session_id,
                         update=update,
+                        exclude_connection_id=self.connection_key(),
                     )
                     published_prompt_update_ids.add(position.update_id)
             return response
         finally:
+            self._active_turn_updates.pop(session_id, None)
             _published_prompt_update_ids.reset(published_token)
             channel = self.sessions.steering.get(session_id)
             if channel is not None:
@@ -2646,8 +2686,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 )
             if row.kind is OperationKind.CONFIGURATION:
                 payload = json.loads(row.payload)
+                authoritative = False
+                if isinstance(payload, dict) and "request" in payload:
+                    authoritative = payload.get("hostAuthoritative", False) is True
+                    payload = payload["request"]
                 request = ConfigurationUpdate.model_validate(payload)
-                return await self.config.apply(request)
+                return await self.config.apply(request, host_authoritative=authoritative)
             if row.kind is OperationKind.CONFIG_OPTION:
                 payload = json.loads(row.payload)
                 if not isinstance(payload, dict):
@@ -2803,9 +2847,12 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             self._operation_results.pop(stored.prompt_id, None)
             self._operation_kwargs.pop(stored.prompt_id, None)
 
-    async def order_configuration_update(self, request: ConfigurationUpdate) -> dict[str, Any]:
+    async def order_configuration_update(
+        self, request: ConfigurationUpdate, *, host_authoritative: bool = False
+    ) -> dict[str, Any]:
         """Order a binding transaction with prompts at the next turn boundary."""
-        self.require_queue_mutation_scope()
+        if not host_authoritative:
+            self.require_queue_mutation_scope()
         await self.authorize(request.session_id, PolicyAction.CONFIGURE)
         self.config.validate(request)
         await self.sessions.ensure_persisted(request.session_id)
@@ -2814,11 +2861,18 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
             async with self._turn_lock(request.session_id):
                 await self._begin_local_work(request.session_id)
                 try:
-                    return await self.config.apply(request)
+                    return await self.config.apply(request, host_authoritative=host_authoritative)
                 finally:
                     await self._end_local_work(request.session_id)
         payload = json.dumps(
-            request.to_wire(),
+            (
+                {
+                    "request": request.to_wire(),
+                    "hostAuthoritative": True,
+                }
+                if host_authoritative
+                else request.to_wire()
+            ),
             ensure_ascii=False,
             separators=(",", ":"),
         )

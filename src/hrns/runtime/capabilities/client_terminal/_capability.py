@@ -7,6 +7,7 @@ import contextlib
 from datetime import timedelta
 
 from pydantic_ai.capabilities import Toolset
+from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.toolsets import FunctionToolset
 
 from hrns.protocol import TERMINAL, HrnsError
@@ -30,20 +31,26 @@ def build_client_terminal(binding: BindingContext) -> Toolset[object]:
             details={"binding_id": binding.binding_id, "requires_client": [TERMINAL]},
         )
 
-    async def run_command(command: str, args: list[str] | None = None) -> str:
+    async def run_command(
+        command: str,
+        args: list[str] | None = None,
+        cwd: str | None = None,
+    ) -> str:
         """Run a program in the connected ACP client's environment, and return its output.
 
         Args:
             command: Executable name or absolute path, without arguments.
             args: Separate program arguments. For shell syntax, explicitly invoke the
                 client's shell with its command flag and the script as arguments.
+            cwd: Working directory on the client. Absolute paths may be anywhere on the
+                client machine; relative paths are resolved from the client workspace.
         """
         create = asyncio.create_task(
             session.client.create_terminal(
                 command=command,
                 args=args,
                 session_id=session.session_id,
-                cwd=session.cwd or None,
+                cwd=cwd,
             )
         )
         terminal_id: str | None = None
@@ -70,6 +77,8 @@ def build_client_terminal(binding: BindingContext) -> Toolset[object]:
         except asyncio.CancelledError:
             cancelled = True
             raise
+        except Exception as exc:
+            raise ToolFailed(f"Client terminal failed: {exc}") from exc
         finally:
 
             async def cleanup() -> None:

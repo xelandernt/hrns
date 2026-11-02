@@ -169,6 +169,8 @@ def validate_enable(
     change: EnableChange,
     work: dict[str, tuple[bool, dict[str, Any]]],
     initial: bool,
+    *,
+    host_authoritative: bool = False,
 ) -> bool:
     offering = catalog.offerings.get(change.binding_id)
     if offering is None:
@@ -188,7 +190,7 @@ def validate_enable(
                 },
             )
     # Initial selections get a lifecycle exception, but host toggle policy still applies.
-    if not (offering.policy.client_can_toggle or offering.session_added):
+    if not host_authoritative and not (offering.policy.client_can_toggle or offering.session_added):
         raise HrnsError(
             "POLICY_DENIED",
             f"Client policy forbids toggling binding {offering.binding_id!r}.",

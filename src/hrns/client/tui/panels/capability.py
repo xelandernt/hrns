@@ -106,11 +106,9 @@ class CapabilityPanel(Vertical):
         active_revision: int | None = None,
         selected_revision: int | None = None,
         can_write: bool = True,
-        accepts_client_capabilities: bool = False,
     ) -> None:
         self.extension_mode = True
         self.can_write = can_write
-        self.accepts_client_capabilities = accepts_client_capabilities
         self._plugin_bindings = list(bindings)
         self._snapshot = snapshot
         self._render_rows(active_revision=active_revision, selected_revision=selected_revision)
@@ -130,12 +128,6 @@ class CapabilityPanel(Vertical):
         self._list.clear_options()
         for raw in self._plugin_bindings:
             summary = binding_summary(raw, self._snapshot)
-            if summary["origin"] == "client" and not self.accepts_client_capabilities:
-                summary.update(
-                    available=False,
-                    locked=True,
-                    reason="the server does not accept client capabilities",
-                )
             binding_id = summary["bindingId"]
             if not binding_id:
                 continue
@@ -174,8 +166,6 @@ class CapabilityPanel(Vertical):
         notes = [f"{total} plugin" + ("" if total == 1 else "s")]
         if selected is not None and active is not None and selected != active:
             notes.append("selected changes apply next turn")
-        if not self.accepts_client_capabilities:
-            notes.append("client capabilities unavailable")
         if not self.can_write:
             notes.append("read-only")
         self._status.update(Text(" · ".join(notes), style="dim"))

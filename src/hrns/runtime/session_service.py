@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
     from .acp_store import ScopedSessionStore
     from .creation import SessionCreationOperation
-    from .definitions import AgentDefinition
+    from .definitions import AgentDefinition, DefinitionBinding
     from .host import HrnsACPAgent
     from .registry import PluginRegistry
 
@@ -168,6 +168,14 @@ class SessionService:
         """What the connected client advertised, for recomposition outside ``session_config``."""
         handle = self.client_sessions.get(session_id)
         return handle.capabilities if handle is not None else None
+
+    def refresh_client_capabilities(self, session_id: str) -> None:
+        """Refresh client-dependent availability without rebuilding the composition."""
+        capabilities = self.client_capabilities(session_id)
+        catalog = self.require_composition(session_id).catalog
+        catalog.client_capabilities = capabilities
+        for offering in catalog.offerings.values():
+            offering.client_capabilities = capabilities
 
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None
@@ -813,10 +821,10 @@ class SessionService:
         model: str | None,
         action: PolicyAction,
         creation: SessionCreationOperation | None = None,
-    ) -> tuple[ResourceSet, object]:
+    ) -> tuple[ResourceSet, object, tuple[DefinitionBinding, ...]]:
         resources = self.resources(cwd, session_id, definition, resource_bindings, model)
         if self.agent.bundle.resource_resolver is None:
-            return resources, None
+            return resources, None, ()
         if record is None:
             raise HrnsError("SESSION_NOT_FOUND", "Resource resolution requires a session record.")
         resolved = await self.agent.resolve_session_resources(record, action, creation=creation)
@@ -840,7 +848,7 @@ class SessionService:
             for alias in (requirement.name, requirement.slot.name, *requirement.slot.aliases):
                 resources.bind(alias, None)
             resources.bind(requirement.slot, value)
-        return resources, resolved.deps
+        return resources, resolved.deps, resolved.capability_bindings
 
     def adopt_composition(
         self, session_id: str, composition: Composition, refreshed: Composition
@@ -874,6 +882,7 @@ class SessionService:
         if action not in (PolicyAction.LOAD, PolicyAction.PROMPT):
             raise HrnsError("INVALID_CONFIGURATION", "Unsupported session resource refresh action.")
         if self.agent.bundle.resource_resolver is None:
+            self.refresh_client_capabilities(session_id)
             return
         composition = self.require_composition(session_id)
         record = await self.agent.session_record(session_id)
@@ -887,7 +896,7 @@ class SessionService:
             if record.accepts_client_capabilities is not None
             else revision.accepts_client_capabilities
         )
-        resources, deps = await self.resolved_inputs(
+        resources, deps, capability_bindings = await self.resolved_inputs(
             record=record,
             definition=revision.definition,
             cwd=cwd,
@@ -918,6 +927,7 @@ class SessionService:
             accepts_client_capabilities=accepts,
             client_gate=self.agent.fanout.client_gates.get(session_id),
             selected_revision=composition.snapshot.selected_revision,
+            capability_bindings=capability_bindings,
         )
         gate = self.agent.fanout.client_gates.get(session_id)
         if gate is not None and gate.accepts != accepts:
@@ -927,6 +937,7 @@ class SessionService:
         refreshed.effort.model = model
         refreshed.models = revision.models
         self.adopt_composition(session_id, composition, refreshed)
+        await self.persist_metadata(session_id, bindings=composition.catalog.export_bindings())
         await self.apply_unavailable_tools(session_id, composition)
 
     async def compose_session(
@@ -986,7 +997,7 @@ class SessionService:
             revision.effort_support(model) if revision.models else self.policy.effort_support(model)
         )
         definition = revision.definition
-        resources, deps = await self.resolved_inputs(
+        resources, deps, capability_bindings = await self.resolved_inputs(
             record=known,
             definition=definition,
             cwd=cwd,
@@ -1014,6 +1025,7 @@ class SessionService:
             client_capabilities=handle.capabilities,
             accepts_client_capabilities=accepts,
             client_gate=self.agent.fanout.client_gates[session.session_id],
+            capability_bindings=capability_bindings,
         )
         latest = await self.store.get_policy_candidate(session.session_id)
         if latest is not None:

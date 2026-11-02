@@ -750,7 +750,7 @@ class Settings:
     auto_expand_tools: bool = False
     show_thoughts: bool = False
     permission_mode: str = "ask"
-    client_io: ClientIoMode = "off"
+    client_io: ClientIoMode = "all"
     sidebar_width: int = 52
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -776,7 +776,7 @@ class Settings:
             show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
             permission_mode=mode,
             client_io=parse_client_io(
-                str(mapping.get("clientIo", mapping.get("client_io", "off")))
+                str(mapping.get("clientIo", mapping.get("client_io", "all")))
             ),
             sidebar_width=sidebar_width,
         )

@@ -68,7 +68,7 @@ _SUPPRESS = contextlib.suppress(ProcessLookupError, RuntimeError, OSError)
 
 
 def parse_client_io(value: str) -> ClientIoMode:
-    """The mode a profile or flag spelled, defaulting to offering nothing."""
+    """Parse an explicit mode, treating an unrecognized value as disabled."""
     if value == "read":
         return "read"
     if value == "all":
@@ -89,7 +89,7 @@ class ClientIoPolicy:
     connection profile.
     """
 
-    mode: ClientIoMode = "off"
+    mode: ClientIoMode = "all"
     max_file_bytes: int = MAX_FILE_BYTES
     max_output_bytes: int = MAX_OUTPUT_BYTES
     max_terminals: int = MAX_TERMINALS
@@ -211,8 +211,7 @@ class ClientIo:
             raise RequestError.invalid_params(
                 {"reason": "too many terminals are open", "limit": self.policy.max_terminals}
             )
-        root = self._root(session_id)
-        working = self._resolve(session_id, cwd) if cwd else root
+        working = self._terminal_cwd(session_id, cwd)
         environment = dict(os.environ)
         for variable in env or []:
             environment[variable.name] = variable.value
@@ -295,6 +294,13 @@ class ClientIo:
                 {"path": str(path), "reason": "outside the session working directory"}
             )
         return resolved
+
+    def _terminal_cwd(self, session_id: str, path: str | None) -> Path:
+        root = self._root(session_id)
+        if not path:
+            return root
+        candidate = Path(path).expanduser()
+        return (candidate if candidate.is_absolute() else root / candidate).resolve()
 
     def _check_writable(self, session_id: str, target: Path, path: str) -> None:
         relative = target.relative_to(self._root(session_id)).as_posix()

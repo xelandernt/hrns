@@ -177,13 +177,14 @@ class PolicyCatalog:
         """Reject a selected composition that is invalid under current host policy.
 
         Used after restoring a saved revision, where deployment defaults may have changed
-        since the session was created. Unavailable enabled bindings and broken dependency
-        graphs must block new work; the runtime never quietly grants a revoked capability.
+        since the session was created. Host-unavailable enabled bindings and broken dependency
+        graphs must block new work; a missing capability on the current viewer only degrades
+        that binding so the session remains readable from other clients.
         """
         validate_all_configs(self)
         enabled = [offering for offering in self.offerings.values() if offering.enabled]
         for offering in enabled:
-            if not offering.available:
+            if not offering.available and not offering.transiently_unavailable:
                 raise HrnsError(
                     "CAPABILITY_UNAVAILABLE",
                     f"Binding {offering.binding_id!r} is enabled by the saved configuration "
@@ -290,6 +291,7 @@ class PolicyCatalog:
         changes: Sequence[BindingChange],
         *,
         initial_configuration: bool = False,
+        host_authoritative: bool = False,
     ) -> ChangeOutcome:
         """Validate an atomic change list and return the prospective outcome.
 
@@ -321,7 +323,13 @@ class PolicyCatalog:
         changed = False
         for change in changes:
             if isinstance(change, EnableChange):
-                changed |= validate_enable(self, change, work, initial_configuration)
+                changed |= validate_enable(
+                    self,
+                    change,
+                    work,
+                    initial_configuration,
+                    host_authoritative=host_authoritative,
+                )
             elif isinstance(change, ConfigureChange):
                 changed |= validate_configure(self, change, work, initial_configuration)
             elif isinstance(change, AddChange):
@@ -408,6 +416,23 @@ class PolicyCatalog:
             [offering.binding_id for offering in self.ordered_offerings() if offering.enabled],
         )
 
+    def active_enabled_ordered(self) -> list[BindingOffering]:
+        """Enabled offerings usable with the currently connected client's capabilities."""
+        active: list[BindingOffering] = []
+        active_ids: set[str] = set()
+        for offering in self.enabled_ordered():
+            binding_requirements = [
+                requirement
+                for requirement in offering.requirements
+                if requirement in self.offerings
+            ]
+            if offering.available and all(
+                requirement in active_ids for requirement in binding_requirements
+            ):
+                active.append(offering)
+                active_ids.add(offering.binding_id)
+        return active
+
     def instantiate(
         self,
         offering: BindingOffering,
@@ -437,9 +462,9 @@ class PolicyCatalog:
         active_configuration: ConfigurationSnapshot | None = None,
         agent_context: Any = None,
     ) -> list[tuple[str, AgentCapability]]:
-        """Instantiate every enabled binding, in stable order, exactly once."""
+        """Instantiate every active enabled binding, in stable order, exactly once."""
         composed: list[tuple[str, AgentCapability]] = []
-        for offering in self.enabled_ordered():
+        for offering in self.active_enabled_ordered():
             capability = self.instantiate(
                 offering,
                 resources=resources,

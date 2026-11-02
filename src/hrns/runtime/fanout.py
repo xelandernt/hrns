@@ -160,7 +160,14 @@ class FanoutClient:
 
     # -- broadcast ----------------------------------------------------------
 
-    async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
+    async def session_update(
+        self,
+        session_id: str,
+        update: Any,
+        *,
+        exclude_connection_id: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Deliver a session update only to that session's subscribers.
 
         A hosted session has no fallback: after access revocation or an explicit
@@ -172,7 +179,11 @@ class FanoutClient:
         async def deliver(client: Client) -> None:
             await client.session_update(session_id=session_id, update=update, **kwargs)
 
-        await self._deliver(self._session_targets(session_id), "session_update", deliver)
+        await self._deliver(
+            self._session_targets(session_id, exclude_connection_id),
+            "session_update",
+            deliver,
+        )
 
     async def session_notification(
         self, session_id: str, method: str, params: dict[str, Any]
@@ -365,7 +376,11 @@ class FanoutClient:
 
     # -- internals ----------------------------------------------------------
 
-    def _session_targets(self, session_id: str) -> tuple[Client, ...]:
+    def _session_targets(
+        self,
+        session_id: str,
+        exclude_connection_id: str | None = None,
+    ) -> tuple[Client, ...]:
         """Subscribers for a session, with a fallback only for local stdio.
 
         Hosted actors rely on the initiator subscribing before a turn starts. Falling
@@ -374,7 +389,12 @@ class FanoutClient:
         """
         if session_id in self._muted_sessions:
             return ()
-        targets = self.subscribers(session_id)
+        targets = tuple(
+            client
+            for connection_id, client in self._clients.items()
+            if connection_id != exclude_connection_id
+            and connection_id in self._subscriptions.get(session_id, set())
+        )
         if targets or not self.local:
             return targets
         current = self.current()

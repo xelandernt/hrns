@@ -49,26 +49,25 @@ descriptor, so a client can present them as different kinds of capability.
 
 The `hrns` terminal advertises `session.configOptions.boolean`, `plan`, and `elicitation`, and
 answers `session/request_permission`, `elicitation/create`, `session/update`, and the `_hrns`
-extension. Filesystem and terminal support are opt-in per connection:
+extension. Filesystem and terminal support are configured per connection:
 
 | `--client-io` (or `clientIo` in a profile) | Advertised | Agent may |
 | --- | --- | --- |
-| `off` (default) | nothing | nothing; both methods answer method-not-found |
+| `off` | nothing | nothing; both methods answer method-not-found |
 | `read` | `fs.readTextFile` | read files under the session `cwd` |
-| `all` | adds `fs.writeTextFile` and `terminal` | also write files and run commands there |
+| `all` (default) | adds `fs.writeTextFile` and `terminal` | also write files and run commands there |
 
 Both are answered inside the session's working directory only: paths resolve against `cwd`,
 symlinks are followed before the containment check, files larger than 2 MiB are refused rather
 than truncated, writes are refused inside `.git` and for credential files, terminal output is
 bounded at 1 MiB per terminal, and at most eight terminals stay open at once. Terminal support
 means an agent runs commands as your user with no approval prompt: ACP has no permission
-request for it, which is why it is off by default and lives on the connection profile rather
-than on the agent.
+request for it. Use `--client-io off` or a profile's `clientIo = "off"` to disable it.
 
 The value is decided once, at `initialize`: the `--client-io` flag wins, then `clientIo` in the
 profile, then the terminal's saved `/settings` value, and a change applies when you reconnect.
-Nothing is advertised by default, and a handler that was not advertised answers
-method-not-found rather than guessing.
+The default is `all`; a handler that was not advertised answers method-not-found rather than
+guessing.
 
 The mode is a three-step ladder over the handlers this client implements, not a per-capability
 switch: `all` unlocks filesystem writes and the terminal together. What a binding may require is

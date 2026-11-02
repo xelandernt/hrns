@@ -65,7 +65,9 @@ class ConfigurationService:
                 "Local binding creation is prohibited for this deployment.",
             )
 
-    async def apply(self, request: ConfigurationUpdate) -> dict[str, Any]:
+    async def apply(
+        self, request: ConfigurationUpdate, *, host_authoritative: bool = False
+    ) -> dict[str, Any]:
         """Apply one configuration transaction at an ordered turn boundary."""
         agent = self.agent
         session_id = request.session_id
@@ -91,7 +93,10 @@ class ConfigurationService:
                     "expectedRevision": request.expected_revision,
                 },
             )
-        outcome = composition.catalog.apply_changes(list(request.changes))
+        outcome = composition.catalog.apply_changes(
+            list(request.changes),
+            host_authoritative=host_authoritative,
+        )
         if outcome.noop:
             snapshot = composition.snapshot
             cache[request.request_id] = (request_hash, snapshot)
@@ -114,7 +119,7 @@ class ConfigurationService:
             if revision.models
             else self.policy.effort_support(effective_model)
         )
-        resources, deps = await agent.sessions.resolved_inputs(
+        resources, deps, capability_bindings = await agent.sessions.resolved_inputs(
             record=record,
             definition=revision.definition,
             cwd=self.policy.validate_cwd(cwd, allowed=revision.allowed_cwds),
@@ -142,6 +147,7 @@ class ConfigurationService:
             accepts_client_capabilities=effective_accepts,
             client_gate=agent.fanout.client_gates.get(session_id),
             selected_revision=next_revision,
+            capability_bindings=capability_bindings,
         )
         gate = agent.fanout.client_gates.get(session_id)
         if gate is not None and gate.accepts != effective_accepts:
