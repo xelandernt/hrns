@@ -1820,6 +1820,7 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 _conn_override.reset(token)
             self._session_cwd[session_id] = stored_cwd
             if not record.read_only:
+                await self.sessions.publish_current_plan(session_id)
                 async with self._activity_lock(session_id):
                     await self.run_lifecycle(LifecycleEvent.RESUME, session_id)
         except HrnsError as exc:
@@ -2336,6 +2337,8 @@ class HrnsACPAgent(PydanticAIACPAgent[Any, str]):
                 finally:
                     _conn_override.reset(token)
                 self._session_cwd[session_id] = cwd
+                if not record.read_only:
+                    await self.sessions.publish_current_plan(session_id)
             async with self._activity_lock(session_id):
                 record = await self.authorize(session_id, PolicyAction.LOAD)
                 current = await self.acquire_session_lease(session_id)

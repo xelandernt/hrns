@@ -1084,12 +1084,15 @@ class SessionService:
         )
         self.steering[session.session_id] = steering
         await self.apply_unavailable_tools(session.session_id, composition)
-        channel = self.plan_channels.get(session.session_id)
-        if channel is not None:
-            await channel.publish_current()
         return composition.config
 
     # ------------------------------------------------------- small helpers
+
+    async def publish_current_plan(self, session_id: str) -> None:
+        """Publish persisted plan state after the ACP session is open."""
+        channel = self.plan_channels.get(session_id)
+        if channel is not None:
+            await channel.publish_current()
 
     @staticmethod
     def reject_additional_directories(additional_directories: Sequence[str] | None) -> None:
