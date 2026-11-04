@@ -1,7 +1,7 @@
 [project]
 site_name = "hrns"
 site_url = "https://xelandernt.github.io/hrns/"
-site_description = "Pydantic AI agents with ACP and AG-UI adapters"
+site_description = "Pydantic AI agents with an ACP adapter"
 repo_url = "https://github.com/xelandernt/hrns"
 edit_uri = "edit/main/docs/"
 docs_dir = "docs"

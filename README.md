@@ -1,13 +1,9 @@
 # hrns
 
-**One Pydantic AI agent. Two protocol adapters. No custom backend.**
+**One Pydantic AI agent. One protocol adapter. No custom backend.**
 
-hrns builds a Pydantic AI `Agent` from capabilities and exposes it over either:
-
-- **ACP** (`pydantic-ai-harness`), for terminals and editors.
-- **AG-UI** (`pydantic-ai`), for web and multi-client frontends.
-
-Both adapters can be mounted on the same FastAPI app.
+hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**
+(`pydantic-ai-harness`), for terminals and editors.
 
 ## Install
 
@@ -15,8 +11,7 @@ Both adapters can be mounted on the same FastAPI app.
 uv sync --extra app
 ```
 
-ACP support comes from `pydantic-ai-harness[acp]`; AG-UI comes from
-`pydantic-ai-slim[ag-ui]`.
+ACP support comes from `pydantic-ai-harness[acp]`.
 
 ## Define the agent
 
@@ -64,10 +59,30 @@ app = FastAPI()
 mount_acp(app, lambda _principal: build_agent(), path="/acp")
 ```
 
-Each WebSocket gets its own `PydanticAIACPAgent` and session namespace. The upstream
-adapter is stdio-oriented and single-connection, so the FastAPI mount bridges each
-WebSocket text frame to the adapter's newline-delimited JSON stream. Shared multi-viewer
+Each WebSocket gets its own `PydanticAIACPAgent`. The upstream adapter is
+stdio-oriented and single-connection, so the FastAPI mount bridges each WebSocket
+text frame to the adapter's newline-delimited JSON stream. Shared multi-viewer
 ACP sessions still need a fan-out layer above it.
+
+### ACP model switching
+
+ACP exposes model selection as a standard session config option, but the adapter
+only advertises it when given a list. Pass `models`; the first id is each
+session's default. Use `model_resolver` when the advertised ids are not Pydantic
+AI model ids:
+
+```python
+mount_acp(
+    app,
+    lambda _principal: build_agent(),
+    models=["openai:gpt-5.1", "anthropic:claude-sonnet-4-5"],
+)
+```
+
+The terminal client consumes that option for remote agents. In local mode,
+`/model provider:model` saves the choice and applies it live when the runtime
+advertises the id. Without an argument, `/model` still opens the picker.
+`hrns-local` advertises every model configured in `hrns.local.toml`.
 
 The terminal client can connect to that endpoint directly:
 
@@ -84,25 +99,25 @@ hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN --cwd /wor
 hrns run --profile team "summarize this repo"
 ```
 
-## AG-UI on FastAPI
+`--token` also accepts a literal token, and the TUI can connect directly:
 
-```python
-from hrns.app.fastapi import mount_agui
-
-mount_agui(app, lambda _principal: build_agent(), path="/agui")
+```text
+/connect wss://host/acp --token env:TEAM_TOKEN --cwd /workspace
 ```
 
-`POST /agui` accepts a `RunAgentInput` and returns an AG-UI event stream. The Pydantic
-adapter is per-request: it does not own a thread registry or multi-client fan-out.
+In the TUI connection picker, `n` adds a remote or stdio target and `e` edits the
+selected saved profile, including renaming it.
 
-## Both protocols in one app
+Prefer `env:` or `keyring:` references: literal tokens are stored in the profile file
+when a profile is saved.
+
+## Run the FastAPI app
 
 ```python
 from hrns.app.fastapi import create_app
 
 app = create_app(lambda _principal: build_agent())
 # WS /acp
-# POST /agui
 ```
 
 Or run it:
@@ -113,17 +128,16 @@ HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app serve --port 8000
 
 ## Authentication
 
-`mount_acp`, `mount_agui`, and `create_app` accept an async `authenticate`
-callback. It receives the raw FastAPI `WebSocket` for ACP or `Request` for AG-UI,
-and returns an identity. Returning `None` rejects the peer: ACP closes before the
-upgrade is accepted, and AG-UI responds `401`. Exceptions are server errors and
+`mount_acp` and `create_app` accept an async `authenticate` callback. It receives
+the raw FastAPI `WebSocket` and returns an identity. Returning `None` rejects the
+peer: ACP closes before the upgrade is accepted. Exceptions are server errors and
 never produce an accepted connection.
 
 ```python
-from fastapi import Request, WebSocket
+from fastapi import WebSocket
 from hrns.app.fastapi import create_app
 
-async def authenticate(connection: WebSocket | Request) -> str | None:
+async def authenticate(connection: WebSocket) -> str | None:
     token = connection.headers.get("authorization")
     return user_for_token(token) if token else None
 
@@ -131,23 +145,52 @@ app = create_app(lambda principal: build_agent(), authenticate=authenticate)
 ```
 
 The agent factory always takes exactly one argument: the principal, or `None`
-when no callback is configured. It runs once per accepted ACP connection and once
-per accepted AG-UI request. The principal type is generic, so the callback can
-return whatever identity object the deployment uses and the factory receives that
-same type.
+when no callback is configured. It runs once per accepted ACP connection. The
+principal type is generic, so the callback can return whatever identity object
+the deployment uses and the factory receives that same type.
+
+### Per-user ACP sessions
+
+ACP stores sessions in a `SessionStore`. Give each principal their own store so a
+reconnecting user can `session/load` their sessions without ever seeing another
+user's:
+
+```python
+from hrns.app.acp import InMemorySessionStore
+from hrns.app.fastapi import create_app
+
+stores: dict[str, InMemorySessionStore] = {}
+
+def session_store_for(principal: str | None) -> InMemorySessionStore:
+    return stores.setdefault(principal or "anonymous", InMemorySessionStore())
+
+app = create_app(
+    lambda principal: build_agent(),
+    authenticate=authenticate,
+    session_store_factory=session_store_for,
+)
+```
+
+`InMemorySessionStore` is process-local. Use a shared durable implementation for
+multiple workers or restarts.
+
+`InMemorySessionStore` also implements `session/list`: clients can list sessions,
+filter by `cwd`, and page with the returned cursor. A title is the first user text
+in the session transcript, and `updatedAt` advances whenever a turn is committed.
+A durable store gets the same support by implementing `ListableSessionStore`
+(`save`, `load`, `remember`, and `list_sessions`) from `hrns.app.acp`.
 
 ## Adapter API
 
 ```python
-from hrns.app import PydanticAIACPAgent, PydanticAIAGUIAgent, build_agent
+from hrns.app import PydanticAIACPAgent, build_agent
+from hrns.app.acp import InMemorySessionStore
 
 agent = build_agent("openai:gpt-6.1-sol")
-
 acp = PydanticAIACPAgent(agent, session_store=InMemorySessionStore())
-agui = PydanticAIAGUIAgent(agent)
 ```
 
-The adapters are deliberately thin. They translate protocol events; they do not
+The adapter is deliberately thin. It translates protocol events; it does not
 define agent behavior.
 
 ## Local configuration
@@ -156,19 +199,24 @@ define agent behavior.
 launches the ACP entrypoint with the configured provider and model. The existing
 terminal client still uses this entrypoint.
 
+In the TUI connection picker, `l` opens provider management. Add or edit a provider
+to paste its API key into the password field; the key is stored in the OS keyring,
+not in the TOML file. After saving a provider without an active model, the model
+picker opens so a catalog or custom id can be selected. `/model provider:model` also
+sets it directly.
+
 ## What was removed
 
 `hrns.runtime`, `hrns.server`, `hrns.protocol`, the plugin registry, policy catalog,
 manifests, SQLite/PostgreSQL session machinery, durable queue, leases, and every
-`_hrns/*` extension are gone. ACP and AG-UI are the only backend surfaces, and the
-terminal client speaks standard ACP only.
+`_hrns/*` extension are gone. ACP is the only backend surface, and the terminal
+client speaks standard ACP only.
 
 ## Limitations
 
-- The upstream ACP adapter has one connection per adapter and two store methods
-  (`save`/`load`); there is no built-in session list, delete, or multi-viewer fan-out.
-- The AG-UI adapter is per-run/request; multi-client thread management is an
-  application concern.
+- The ACP adapter has one connection per adapter. `session/list` works for listable
+  stores (including `InMemorySessionStore`); `session/delete` and multi-viewer fan-out
+  are not implemented.
 - `build_agent` adds a small approval capability by default: reads run freely, writes and
   shell calls are marked `unapproved` so ACP can request permission. Pass
   `approval=False` to disable it.

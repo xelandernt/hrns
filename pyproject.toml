@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hrns"
 dynamic = ["version"]
-description = "Programmable Pydantic AI agents with ACP and AG-UI adapters"
+description = "Programmable Pydantic AI agents with an ACP adapter"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -19,7 +19,7 @@ dependencies = [
     "textual>=8.2,<9",
     "keyring>=25",
     "fastmcp-slim[client]>=3.3,<5",
-    "pydantic-ai-slim[ag-ui,mcp,openai]==2.57.0",
+    "pydantic-ai-slim[mcp,openai]==2.57.0",
     "pydantic-ai-harness[acp]==0.57.0",
     "PyYAML>=6,<7",
     "packaging>=24",

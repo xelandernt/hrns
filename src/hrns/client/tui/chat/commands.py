@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from ...errors import ExtensionUnavailable, HrnsClientError
+from ...launch import remote_target
 from ..commands import resolve_local_command
 from ..composer import Composer
 from ..transcript import TranscriptPane
@@ -12,6 +14,44 @@ from ..transcript import TranscriptPane
 if TYPE_CHECKING:
     from ...client import SessionProxy
     from .screen import ChatScreen
+
+_CONNECT_USAGE = "Usage: /connect [wss://host/acp] [--token REF] [--cwd PATH]"
+
+
+def _parse_connect_args(rest: str) -> tuple[str, str, str]:
+    """Parse ``URL [--token REF] [--cwd PATH]`` for the `/connect` command."""
+    try:
+        words = shlex.split(rest)
+    except ValueError as exc:
+        raise HrnsClientError(f"Could not parse /connect arguments: {exc}") from exc
+    url = ""
+    token = ""
+    cwd = ""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        key, equals, inline = word.partition("=")
+        if key in {"--token", "--cwd"}:
+            if equals:
+                value = inline
+                index += 1
+            else:
+                if index + 1 >= len(words):
+                    raise HrnsClientError(f"{key} needs a value. {_CONNECT_USAGE}")
+                value = words[index + 1]
+                index += 2
+            if key == "--token":
+                token = value
+            else:
+                cwd = value
+            continue
+        if word.startswith("-") or url:
+            raise HrnsClientError(_CONNECT_USAGE)
+        url = word
+        index += 1
+    if not url:
+        raise HrnsClientError(_CONNECT_USAGE)
+    return url, token, cwd
 
 
 class CommandWorkflow:
@@ -71,6 +111,20 @@ class CommandWorkflow:
         composer = screen.query_one("#composer", Composer)
         composer.load_text(text)
 
+    async def connect(self, rest: str) -> None:
+        """Open the picker, or connect directly when a URL is supplied."""
+        screen = self.screen
+        if not rest:
+            await screen.app.choose_agent(screen)
+            return
+        try:
+            url, token, cwd = _parse_connect_args(rest)
+            target = remote_target(url, token=token, cwd=cwd)
+        except HrnsClientError as exc:
+            await screen._notice(exc.message, "error")
+            return
+        await screen.app.switch_agent(screen, target)
+
     async def run_local_command(self, name: str, rest: str = "") -> None:
         screen = self.screen
         composer = screen.query_one("#composer", Composer)
@@ -78,7 +132,7 @@ class CommandWorkflow:
         if name == "attach":
             await screen.prompts.stage_attachment(rest)
         elif name == "connect":
-            await screen.app.choose_agent(screen)
+            await self.connect(rest)
         elif name == "rename":
             await screen.sessions.rename(rest)
         elif name == "sessions":
@@ -97,7 +151,10 @@ class CommandWorkflow:
         elif name == "todo":
             screen.action_show_todos()
         elif name == "models":
-            await screen.models.show_models()
+            if rest:
+                await screen.models.set_model(rest)
+            else:
+                await screen.models.show_models()
         elif name == "providers":
             screen.models.open_providers()
         elif name == "effort":

@@ -16,7 +16,13 @@ from .transport import (
     check_websocket_url,
 )
 
-__all__ = ["ConnectionTarget", "local_cwd", "remote_cwd", "transport_for"]
+__all__ = [
+    "ConnectionTarget",
+    "local_cwd",
+    "remote_cwd",
+    "remote_target",
+    "transport_for",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +65,29 @@ def remote_cwd(profile: Profile, override: str | None = None) -> str:
     if not Path(candidate).is_absolute():
         raise HrnsClientError(f"The remote working directory must be absolute: {candidate}")
     return candidate
+
+
+def remote_target(
+    url: str,
+    *,
+    name: str = "remote",
+    token: str = "",
+    cwd: str = "",
+) -> ConnectionTarget:
+    """Build a remote target from a URL and optional token reference."""
+    profile = Profile(
+        name=name,
+        transport="server",
+        url=check_websocket_url(url),
+        token=token,
+        remote_cwd=cwd,
+    )
+    return ConnectionTarget(
+        name=name,
+        kind="remote",
+        profile=profile,
+        cwd=remote_cwd(profile),
+    )
 
 
 def transport_for(target: ConnectionTarget) -> AgentTransport:

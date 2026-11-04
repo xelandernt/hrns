@@ -116,7 +116,16 @@ def main() -> None:
         cwd=args.cwd,
         model_settings=ModelSettings(**settings.model_settings),
     )
-    run_acp_stdio(agent)
+    # Advertise every configured model and resolve the client's choice through
+    # this entry's provider configuration. The active model stays the default.
+    targets = list(settings.model_targets(_known_models()))
+    active = settings.active_target()
+    models = [active, *(target for target in targets if target != active)]
+    run_acp_stdio(
+        agent,
+        models=models,
+        model_resolver=lambda target: configured_model(settings, target),
+    )
 
 
 if __name__ == "__main__":

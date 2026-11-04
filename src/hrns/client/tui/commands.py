@@ -36,14 +36,17 @@ class LocalCommand:
 
 
 LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
-    LocalCommand("connect", "Choose a connection or add a remote/ACP target"),
+    LocalCommand(
+        "connect",
+        "Choose a connection, add a target, or connect directly to a wss:// URL",
+    ),
     LocalCommand(
         "providers",
         "Add, edit or delete local providers, their endpoints and keys",
     ),
     LocalCommand(
         "models",
-        "Select a model across providers, or add a custom model id",
+        "Select a model, or set one directly with /model [provider:]model",
         aliases=("model",),
     ),
     LocalCommand("effort", "Set the local model's reasoning effort"),
