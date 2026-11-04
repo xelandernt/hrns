@@ -1,7 +1,7 @@
 """The standalone hrns client: ACP terminal and headless runner.
 
 This module is independent of ``hrns.app``. It speaks standard ACP v1 over
-stdio. The UI is Textual; the protocol layer is ``acp``.
+stdio or a WebSocket. The UI is Textual; the protocol layer is ``acp``.
 """
 
 from ._version import __version__
@@ -52,7 +52,7 @@ from .interactions import (
 from .profiles import Profile, Profiles, default_profiles_path, secret_value
 from .renderers import RendererRegistry, readable_text
 from .session import SessionProxy
-from .transport import StdioAgentTransport
+from .transport import StdioAgentTransport, WebSocketAgentTransport
 
 __all__ = [
     "__version__",
@@ -96,6 +96,7 @@ __all__ = [
     "TurnStarted",
     "UsageUpdated",
     "UserMessageReplayed",
+    "WebSocketAgentTransport",
     "ask_user_payload",
     "auto_permission",
     "parse_ask_user_request",

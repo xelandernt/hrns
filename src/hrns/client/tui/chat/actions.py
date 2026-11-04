@@ -162,10 +162,9 @@ class ChatActions:
 | `Ctrl+Enter` | send the prompt (works from any panel or the transcript) |
 | `Ctrl+K` | command palette (local and agent sections) |
 | `F1` | this help |
-| `F2` | plugins panel |
 | `F3` | sessions panel |
 | `F4` | activity panel |
-| `Tab` / `Shift+Tab` inside the side panel | switch between plugins, sessions and activity |
+| `Tab` / `Shift+Tab` inside the side panel | switch between todos, sessions and activity |
 | `Esc` inside the side panel | close it and return to the composer |
 | `Up` / `Down` or `Tab` in a form | move between fields |
 | `Left` / `Right` in a form | change a choice or toggle a switch |

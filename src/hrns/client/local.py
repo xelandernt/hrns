@@ -20,6 +20,7 @@ __all__ = [
     "LocalCatalog",
     "is_local_hrns",
     "local_credential_available",
+    "local_detail",
     "local_executable",
     "local_login_providers",
     "local_model_catalog",
@@ -171,26 +172,17 @@ def local_credential_available(provider: str, api_key_env: str = "") -> bool:
     return stored_api_key_ref(provider, api_key_env) is not None
 
 
-def local_target(
-    config: Path | None = None,
-    cwd: str | None = None,
-    *,
-    api_key_ref: str | None = None,
-) -> ConnectionTarget:
+def _load_local(config: Path | None) -> LocalSettings:
     try:
         settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
         settings.require_model()
-        entry = settings.require_entry()
-        env_has_key = bool(
-            settings.api_key is not None
-            or (entry.api_key_env and os.environ.get(entry.api_key_env))
-        )
-        if api_key_ref is None and not env_has_key:
-            api_key_ref = stored_api_key_ref(settings.provider, entry.api_key_env)
-        if api_key_ref is None:
-            settings.resolved_api_key()
+        settings.require_entry()
     except (ValueError, OSError) as exc:
         raise HrnsClientError(str(exc)) from exc
+    return settings
+
+
+def _local_profile(settings: LocalSettings, cwd: str | None) -> Profile:
     executable = local_executable()
     if executable is None:
         raise HrnsClientError(
@@ -198,10 +190,7 @@ def local_target(
             "console scripts are on PATH."
         )
     path = settings.config_file.expanduser().absolute() if settings.config_file else None
-    env = {name: f"env:{name}" for name in os.environ}
-    if api_key_ref is not None:
-        env["HRNS_LOCAL_API_KEY"] = api_key_ref
-    profile = Profile(
+    return Profile(
         name=f"{settings.provider}:{settings.model}",
         command=executable,
         args=["--config", str(path)] if path and path.is_file() else ["--env-only"],
@@ -209,11 +198,44 @@ def local_target(
         # Unlike generic ACP agents, the explicitly selected local runtime needs the
         # user's provider credentials/settings (AWS, Google, proxies, etc.). Keep
         # references here so secret values never enter profile display/storage.
-        env=env,
+        env={name: f"env:{name}" for name in os.environ},
     )
+
+
+def _target(settings: LocalSettings, cwd: str | None) -> ConnectionTarget:
+    profile = _local_profile(settings, cwd)
     return ConnectionTarget(
         name=profile.name,
         kind="local",
         profile=profile,
         cwd=local_cwd(profile),
     )
+
+
+def local_detail(config: Path | None = None, cwd: str | None = None) -> str:
+    """The picker's description of the local target, without reading the keyring."""
+    return _target(_load_local(config), cwd).location_text()
+
+
+def local_target(
+    config: Path | None = None,
+    cwd: str | None = None,
+    *,
+    api_key_ref: str | None = None,
+) -> ConnectionTarget:
+    settings = _load_local(config)
+    entry = settings.require_entry()
+    env_has_key = bool(
+        settings.api_key is not None or (entry.api_key_env and os.environ.get(entry.api_key_env))
+    )
+    if api_key_ref is None and not env_has_key:
+        api_key_ref = stored_api_key_ref(settings.provider, entry.api_key_env)
+    if api_key_ref is None:
+        try:
+            settings.resolved_api_key()
+        except ValueError as exc:
+            raise HrnsClientError(str(exc)) from exc
+    target = _target(settings, cwd)
+    if api_key_ref is not None:
+        target.profile.env["HRNS_LOCAL_API_KEY"] = api_key_ref
+    return target

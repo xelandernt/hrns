@@ -61,7 +61,7 @@ from fastapi import FastAPI
 from hrns.app.fastapi import mount_acp
 
 app = FastAPI()
-mount_acp(app, lambda: build_agent(), path="/acp")
+mount_acp(app, lambda _principal: build_agent(), path="/acp")
 ```
 
 Each WebSocket gets its own `PydanticAIACPAgent` and session namespace. The upstream
@@ -69,12 +69,27 @@ adapter is stdio-oriented and single-connection, so the FastAPI mount bridges ea
 WebSocket text frame to the adapter's newline-delimited JSON stream. Shared multi-viewer
 ACP sessions still need a fan-out layer above it.
 
+The terminal client can connect to that endpoint directly:
+
+```sh
+hrns connect --server ws://127.0.0.1:8000/acp
+hrns run --server ws://127.0.0.1:8000/acp "summarize this repo"
+```
+
+`ws://` is accepted only for loopback development; remote hosts need `wss://`. Pass a
+bearer token with `--token env:NAME` (or `keyring:service/user`), or save the endpoint:
+
+```sh
+hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN --cwd /workspace
+hrns run --profile team "summarize this repo"
+```
+
 ## AG-UI on FastAPI
 
 ```python
 from hrns.app.fastapi import mount_agui
 
-mount_agui(app, build_agent(), path="/agui")
+mount_agui(app, lambda _principal: build_agent(), path="/agui")
 ```
 
 `POST /agui` accepts a `RunAgentInput` and returns an AG-UI event stream. The Pydantic
@@ -85,7 +100,7 @@ adapter is per-request: it does not own a thread registry or multi-client fan-ou
 ```python
 from hrns.app.fastapi import create_app
 
-app = create_app(build_agent())
+app = create_app(lambda _principal: build_agent())
 # WS /acp
 # POST /agui
 ```
@@ -95,6 +110,31 @@ Or run it:
 ```sh
 HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app serve --port 8000
 ```
+
+## Authentication
+
+`mount_acp`, `mount_agui`, and `create_app` accept an async `authenticate`
+callback. It receives the raw FastAPI `WebSocket` for ACP or `Request` for AG-UI,
+and returns an identity. Returning `None` rejects the peer: ACP closes before the
+upgrade is accepted, and AG-UI responds `401`. Exceptions are server errors and
+never produce an accepted connection.
+
+```python
+from fastapi import Request, WebSocket
+from hrns.app.fastapi import create_app
+
+async def authenticate(connection: WebSocket | Request) -> str | None:
+    token = connection.headers.get("authorization")
+    return user_for_token(token) if token else None
+
+app = create_app(lambda principal: build_agent(), authenticate=authenticate)
+```
+
+The agent factory always takes exactly one argument: the principal, or `None`
+when no callback is configured. It runs once per accepted ACP connection and once
+per accepted AG-UI request. The principal type is generic, so the callback can
+return whatever identity object the deployment uses and the factory receives that
+same type.
 
 ## Adapter API
 
