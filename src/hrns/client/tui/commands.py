@@ -47,11 +47,6 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
         aliases=("model",),
     ),
     LocalCommand("effort", "Set the local model's reasoning effort"),
-    LocalCommand(
-        "plugins",
-        "Enable, disable, add or edit plugins",
-        aliases=("capabilities",),
-    ),
     LocalCommand("mcp", "Show MCP servers, tools and connection state"),
     LocalCommand(
         "todo",

@@ -27,10 +27,11 @@ from .errors import HrnsClientError, InteractionRequired
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
 from .io import parse_client_io
-from .launch import ConnectionTarget, local_cwd, transport_for
+from .launch import ConnectionTarget, local_cwd, remote_cwd, transport_for
 from .local import local_target
 from .login import DeviceAuthorization, login, login_target
 from .profiles import Profile, Profiles, default_profiles_path
+from .transport import check_websocket_url
 
 __all__ = ["main", "build_parser"]
 
@@ -86,6 +87,8 @@ def _target_options(
     local_config: Path | None = None,
     profile: str | None = None,
     cwd: str | None = None,
+    server: str | None = None,
+    token: str | None = None,
 ) -> dict[str, object]:
     return {
         "profiles": _profile_values(profiles),
@@ -94,6 +97,8 @@ def _target_options(
         "local_config": local_config,
         "profile": profile,
         "cwd": cwd,
+        "server": server,
+        "token": token,
     }
 
 
@@ -105,6 +110,8 @@ def _connect_command(
     local_config: Path | None = None,
     profile: str | None = None,
     cwd: str | None = None,
+    server: str | None = None,
+    token: str | None = None,
     client_io: ClientIoOption = None,
     session: str | None = None,
 ) -> int:
@@ -116,6 +123,8 @@ def _connect_command(
             local_config=local_config,
             profile=profile,
             cwd=cwd,
+            server=server,
+            token=token,
         ),
         remainder=list(remainder),
         client_io=client_io,
@@ -132,6 +141,8 @@ def _run_command(
     local_config: Path | None = None,
     profile: str | None = None,
     cwd: str | None = None,
+    server: str | None = None,
+    token: str | None = None,
     client_io: ClientIoOption = None,
     json: bool = False,
     allow_all: bool = False,
@@ -151,6 +162,8 @@ def _run_command(
             local_config=local_config,
             profile=profile,
             cwd=cwd,
+            server=server,
+            token=token,
         ),
         remainder=list(remainder),
         client_io=client_io,
@@ -183,6 +196,8 @@ def _profiles_add_command(
     *remainder: str,
     profiles: ProfilesOption = None,
     stdio: bool = False,
+    server: str | None = None,
+    token: str | None = None,
     cwd: str | None = None,
     default: bool = False,
 ) -> int:
@@ -193,6 +208,8 @@ def _profiles_add_command(
             name=name,
             remainder=list(remainder),
             stdio=stdio,
+            server=server,
+            token=token,
             cwd=cwd,
             default=default,
         )
@@ -363,6 +380,23 @@ def _extract_global_profiles(argv: list[str]) -> list[str]:
     return argv
 
 
+#: Leading options that describe a connection, so `hrns --server …` opens the terminal.
+_CONNECT_DEFAULT_OPTIONS = frozenset(
+    {
+        "--profiles",
+        "--stdio",
+        "--local",
+        "--local-config",
+        "--profile",
+        "--cwd",
+        "--server",
+        "--token",
+        "--client-io",
+        "--session",
+    }
+)
+
+
 def build_parser() -> App:
     parser = App(
         name="hrns",
@@ -431,11 +465,31 @@ async def _resolve_target(
     remainder: Sequence[str] = (),
     split_prompt: bool = True,
 ) -> ConnectionTarget:
-    """Apply CLI precedence: explicit stdio > local model."""
+    """Apply CLI precedence: explicit server or stdio > local model."""
     cwd_override = getattr(args, "cwd", None)
     local_requested = bool(getattr(args, "local", False) or getattr(args, "local_config", None))
     stdio_requested = bool(getattr(args, "stdio", False))
     profile_name = getattr(args, "profile", None)
+    server_url = (getattr(args, "server", None) or "").strip()
+    token = (getattr(args, "token", None) or "").strip()
+    if server_url:
+        if local_requested or stdio_requested or profile_name:
+            raise HrnsClientError(
+                "--server cannot be combined with --local/--local-config, --stdio or --profile."
+            )
+        command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
+        if command:
+            raise HrnsClientError(
+                "A command was supplied without --stdio. Use `--stdio -- CMD ARGS`."
+            )
+        profile = Profile(
+            name="remote",
+            transport="server",
+            url=server_url,
+            token=token,
+            remote_cwd=cwd_override or "",
+        )
+        return _remote_target(profile, cwd_override)
     if local_requested or not (stdio_requested or profile_name):
         if local_requested and (stdio_requested or profile_name):
             raise HrnsClientError(
@@ -463,8 +517,12 @@ async def _resolve_target(
     profile = _profile_from_args(profiles, args)
     if profile is None:
         raise HrnsClientError(
-            "No connection target. Use `--stdio -- CMD` or configure a local model."
+            "No connection target. Use `--server URL`, `--stdio -- CMD` or configure a local model."
         )
+    if token:
+        profile.token = token
+    if profile.is_remote:
+        return _remote_target(profile, cwd_override)
     if not profile.command:
         raise HrnsClientError(f"Profile '{profile.name}' has no command.")
     return ConnectionTarget(
@@ -472,6 +530,19 @@ async def _resolve_target(
         kind="local",
         profile=profile,
         cwd=local_cwd(profile, cwd_override),
+    )
+
+
+def _remote_target(profile: Profile, cwd_override: str | None = None) -> ConnectionTarget:
+    """A remote ACP target; the workspace path is the agent's, not this machine's."""
+    if not profile.url:
+        raise HrnsClientError(f"Profile '{profile.name}' has no server URL.")
+    check_websocket_url(profile.url)
+    return ConnectionTarget(
+        name=profile.name,
+        kind="remote",
+        profile=profile,
+        cwd=remote_cwd(profile, cwd_override),
     )
 
 
@@ -504,8 +575,9 @@ async def _command_run(args: argparse.Namespace) -> int:
     prompt = " ".join(prompt_words).strip()
     if not prompt:
         raise HrnsClientError(
-            'No prompt supplied. Usage: `hrns run --stdio -- CMD ARGS -- "your prompt"` or '
-            '`hrns run --server team --agent research-assistant "your prompt"`.'
+            'No prompt supplied. Usage: `hrns run --stdio -- CMD ARGS -- "your prompt"`, '
+            '`hrns run --server wss://host/acp "your prompt"` or '
+            '`hrns run --profile NAME "your prompt"`.'
         )
     target = await _resolve_target(profiles, args, remainder=target_remainder)
     policy_name = "allow" if args.allow_all else "deny" if args.deny_all else "required"
@@ -552,10 +624,22 @@ def _command_profiles(args: argparse.Namespace) -> int:
     if args.profiles_command == "add":
         if not profiles.sources:
             profiles.sources.append(default_profiles_path())
-        if not args.stdio:
-            raise HrnsClientError("`profiles add` needs --stdio (with `-- CMD`).")
-        command, _ = _split_stdio_remainder(args.remainder)
-        profile = _stdio_profile(args.name, command, args.cwd)
+        if args.server:
+            if args.stdio:
+                raise HrnsClientError("`profiles add` takes --stdio or --server, not both.")
+            profile = Profile(
+                name=args.name,
+                transport="server",
+                url=check_websocket_url(args.server),
+                token=args.token or "",
+                remote_cwd=args.cwd or "",
+            )
+            _remote_target(profile)
+        elif args.stdio:
+            command, _ = _split_stdio_remainder(args.remainder)
+            profile = _stdio_profile(args.name, command, args.cwd)
+        else:
+            raise HrnsClientError("`profiles add` needs --stdio (with `-- CMD`) or --server URL.")
         profiles.upsert(profile, set_default=args.default)
         path = profiles.save(profiles.sources[0])
         print(f"Saved profile '{profile.name}' to {path}")
@@ -603,7 +687,7 @@ def _command_connect(args: argparse.Namespace) -> int:
     preselect: ConnectionTarget | None = None
     status_message: str | None = None
     explicit = any(
-        getattr(args, name, None) for name in ("stdio", "profile", "local_config")
+        getattr(args, name, None) for name in ("stdio", "profile", "local_config", "server")
     ) or getattr(args, "local", False)
     try:
         preselect = asyncio.run(
@@ -865,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
     tokens = list(sys.argv[1:] if argv is None else argv)
     try:
         tokens = _extract_global_profiles(tokens)
-        if not tokens or tokens[0] == "--profiles":
+        if not tokens or tokens[0] in _CONNECT_DEFAULT_OPTIONS:
             tokens = ["connect", *tokens]
         result = parser(
             tokens,

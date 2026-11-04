@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+from pydantic_ai.agent import AbstractAgent
+
 from .acp import run_acp_stdio
 from .agent import build_agent
 
@@ -23,17 +25,19 @@ def main() -> None:
     serve.add_argument("--port", type=int, default=8000)
 
     args = parser.parse_args()
-    agent = build_agent(args.model, cwd=args.cwd)
 
     if args.command == "acp":
-        run_acp_stdio(agent)
+        run_acp_stdio(build_agent(args.model, cwd=args.cwd))
         return
 
     import uvicorn
 
     from .fastapi import create_app
 
-    uvicorn.run(create_app(agent), host=args.host, port=args.port)
+    def agent_factory(_principal: object) -> AbstractAgent[None, str]:
+        return build_agent(args.model, cwd=args.cwd)
+
+    uvicorn.run(create_app(agent_factory), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

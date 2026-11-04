@@ -84,7 +84,7 @@ class SidebarResizeHandle(Widget, can_focus=True):
 
 
 class SidePanel(TabbedContent):
-    """Todos, plugins, MCP servers, sessions and activity in a responsive pane."""
+    """Todos, sessions and activity in a responsive pane."""
 
     PANE_ORDER: tuple[str, ...] = ("todos", "sessions", "activity")
 

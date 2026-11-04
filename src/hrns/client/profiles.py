@@ -21,6 +21,8 @@ from typing import Any
 
 import tomli_w
 
+from hrns.config.credentials import keyring_secret
+
 from .constants import (
     CONFIG_DIR_NAME,
     CONFIG_ENV_OVERRIDE,
@@ -56,8 +58,7 @@ class Profile:
 
     def describe_location(self) -> str:
         if self.is_remote:
-            target = self.agent or "(agent unspecified)"
-            return f"{self.url or self.name} · {target}"
+            return f"{self.url or self.name}" + (f" · {self.agent}" if self.agent else "")
         command = " ".join([self.command, *self.args]) if self.command else "(command unspecified)"
         where = f" in {self.cwd}" if self.cwd else ""
         return f"{command}{where}"
@@ -313,11 +314,7 @@ def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | 
         if username == "":
             username = "default"
         try:
-            import keyring
-        except Exception as exc:  # pragma: no cover - keyring is generally available
-            raise SecretMissing(reference, f"keyring backend unavailable ({exc})") from exc
-        try:
-            value = keyring.get_password(service, username)
+            value = keyring_secret(service, username)
         except Exception as exc:
             raise SecretMissing(reference, f"keyring lookup failed ({exc})") from exc
         if value is None:

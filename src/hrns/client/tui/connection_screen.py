@@ -14,9 +14,10 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, ListItem, ListView, Static
 
 from ..errors import HrnsClientError
-from ..launch import ConnectionTarget, local_cwd
-from ..local import local_target
+from ..launch import ConnectionTarget, local_cwd, remote_cwd
+from ..local import local_detail, local_target
 from ..profiles import Profile, Profiles, default_profiles_path
+from ..transport import check_websocket_url
 from .choice_keys import handle_choice_arrow
 from .dialogs import FormDialog
 from .screen_base import _HrnsScreen
@@ -121,27 +122,27 @@ class ConnectScreen(_HrnsScreen):
 
     def _render_entries(self) -> None:
         local_ok = True
-        local_detail = "Configured hrns.local.toml or HRNS_LOCAL_* environment"
+        detail = "Configured hrns.local.toml or HRNS_LOCAL_* environment"
         try:
-            local = local_target()
-            local_detail = local.location_text()
+            detail = local_detail()
         except HrnsClientError as exc:
             local_ok = False
-            local_detail = exc.message
+            detail = exc.message
         entries = [
             PickEntry(
                 kind="local",
                 label="Local model",
-                detail=local_detail,
+                detail=detail,
             )
         ]
         for profile in sorted(self.profiles.profiles.values(), key=lambda item: item.name):
-            if not profile.command:
+            if not (profile.command or (profile.is_remote and profile.url)):
                 continue
+            transport = "remote" if profile.is_remote else "stdio"
             entries.append(
                 PickEntry(
                     kind="profile",
-                    label=f"stdio · {profile.name}",
+                    label=f"{transport} · {profile.name}",
                     detail=profile.describe_location(),
                     profile=profile,
                 )
@@ -156,7 +157,7 @@ class ConnectScreen(_HrnsScreen):
         self.entries = entries
         self._render_visible("")
         if not local_ok:
-            self._status.update(local_detail)
+            self._status.update(detail)
 
     def _render_visible(self, needle: str) -> None:
         needle = needle.lower()
@@ -166,16 +167,18 @@ class ConnectScreen(_HrnsScreen):
             if not needle or needle in entry.label.lower() or needle in entry.detail.lower()
         ]
         self._list.clear()
-        for index, entry in enumerate(self._visible):
+        for entry in self._visible:
             label = Text()
             if entry.kind == "local":
                 label.append("local  ", style="bold")
             elif entry.kind == "add":
                 label.append("+      ", style="bold")
+            elif entry.profile is not None and entry.profile.is_remote:
+                label.append("remote ", style="bold")
             else:
                 label.append("stdio  ", style="bold")
             label.append(entry.label)
-            self._list.append(ListItem(Static(label, markup=False), id=f"entry-{index}"))
+            self._list.append(ListItem(Static(label, markup=False)))
         if self._visible:
             self._list.index = 0
             self._show_detail(self._visible[0])
@@ -283,6 +286,25 @@ class ConnectScreen(_HrnsScreen):
         self._connect_worker(target)
 
     def _connect_profile(self, profile: Profile) -> None:
+        if profile.is_remote:
+            if not profile.url:
+                self._status.update(f"Profile '{profile.name}' has no server URL.")
+                return
+            try:
+                check_websocket_url(profile.url)
+                cwd = remote_cwd(profile)
+            except HrnsClientError as exc:
+                self._status.update(f"error · {exc.message}")
+                return
+            self._connect_worker(
+                ConnectionTarget(
+                    name=profile.name,
+                    kind="remote",
+                    profile=profile,
+                    cwd=cwd,
+                )
+            )
+            return
         if not profile.command:
             self._status.update(f"Profile '{profile.name}' has no command.")
             return

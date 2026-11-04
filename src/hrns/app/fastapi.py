@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from typing import TypeAlias, TypeVar
 
 import acp
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic_ai.agent import AbstractAgent
 from starlette.requests import Request
 from starlette.responses import Response
@@ -18,12 +19,29 @@ from .agent import build_agent
 from .agui import PydanticAIAGUIAgent
 
 __all__ = [
+    "AgentFactory",
+    "Authenticator",
     "create_app",
     "mount_acp",
-    "mount_acp_adapter",
     "mount_agui",
-    "mount_agui_adapter",
 ]
+
+Principal = TypeVar("Principal")
+"""The identity type produced by an :data:`Authenticator`."""
+
+AgentFactory: TypeAlias = Callable[[Principal | None], AbstractAgent[None, str]]
+"""Build the agent for one connection or request.
+
+The factory always takes exactly one argument: the authenticated principal, or
+``None`` when no authenticator is configured.
+"""
+
+Authenticator: TypeAlias = Callable[[WebSocket | Request], Awaitable[Principal | None]]
+"""Resolve the principal for an incoming connection or request.
+
+Return the principal to admit it, or ``None`` to reject it. Raise to report a
+server-side failure; the exception is never turned into an accepted connection.
+"""
 
 
 @asynccontextmanager
@@ -107,69 +125,85 @@ async def _serve_acp(
         await websocket.close()
 
 
-def mount_acp_adapter(
-    app: FastAPI,
-    adapter: PydanticAIACPAgent[None, str],
-    *,
-    path: str = "/acp",
-) -> None:
-    """Mount one pre-built ACP adapter.
-
-    The upstream adapter holds one connection and one session namespace, so this
-    endpoint is intended for a single WebSocket. Use :func:`mount_acp` when each
-    connection should get its own adapter.
-    """
-
-    @app.websocket(path)
-    async def acp_adapter_endpoint(websocket: WebSocket) -> None:
-        await _serve_acp(websocket, adapter)
+async def _authorize(
+    connection: WebSocket | Request,
+    authenticate: Authenticator[Principal] | None,
+) -> tuple[bool, Principal | None]:
+    """Run the authenticator and report whether the peer may proceed."""
+    if authenticate is None:
+        return True, None
+    principal = await authenticate(connection)
+    return principal is not None, principal
 
 
 def mount_acp(
     app: FastAPI,
-    agent_factory: Callable[[], AbstractAgent[None, str]] = build_agent,
+    agent_factory: AgentFactory[Principal],
     *,
     path: str = "/acp",
+    authenticate: Authenticator[Principal] | None = None,
 ) -> None:
     """Expose an ACP agent over a WebSocket endpoint.
 
-    Each WebSocket gets its own adapter and session namespace. Sharing one ACP
-    session across several sockets needs a fan-out layer above this; the upstream
-    adapter itself is single-connection.
+    Authentication runs before the WebSocket is accepted. A rejected peer gets
+    close code ``1008`` and its factory is never called. Each accepted WebSocket
+    gets its own adapter and session namespace.
     """
 
     @app.websocket(path)
     async def acp_endpoint(websocket: WebSocket) -> None:
-        await _serve_acp(websocket, create_acp_agent(agent_factory()))
-
-
-def mount_agui_adapter(
-    app: FastAPI,
-    adapter: PydanticAIAGUIAgent,
-    *,
-    path: str = "/agui",
-) -> None:
-    """Mount a pre-built AG-UI adapter."""
-
-    @app.post(path)
-    async def agui_adapter_endpoint(request: Request) -> Response:
-        return await adapter.dispatch_request(request)
+        try:
+            admitted, principal = await _authorize(websocket, authenticate)
+        except Exception:
+            with suppress(Exception):
+                await websocket.close(code=1011)
+            raise
+        if not admitted:
+            await websocket.close(code=1008)
+            return
+        await _serve_acp(websocket, create_acp_agent(agent_factory(principal)))
 
 
 def mount_agui(
     app: FastAPI,
-    agent: AbstractAgent[None, str],
+    agent_factory: AgentFactory[Principal],
     *,
     path: str = "/agui",
+    authenticate: Authenticator[Principal] | None = None,
 ) -> None:
-    """Expose an agent over an AG-UI POST endpoint."""
-    mount_agui_adapter(app, PydanticAIAGUIAgent(agent), path=path)
+    """Expose an agent over an AG-UI POST endpoint.
+
+    Authentication runs before the agent is built. A rejected request gets
+    ``401`` and its factory is never called. Each accepted request builds one
+    agent and dispatches one AG-UI run.
+    """
+
+    @app.post(path)
+    async def agui_endpoint(request: Request) -> Response:
+        admitted, principal = await _authorize(request, authenticate)
+        if not admitted:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        adapter = PydanticAIAGUIAgent(agent_factory(principal))
+        return await adapter.dispatch_request(request)
 
 
-def create_app(agent: AbstractAgent[None, str] | None = None) -> FastAPI:
-    """Create the FastAPI app with both protocol adapters mounted."""
+def _default_agent_factory(_principal: object) -> AbstractAgent[None, str]:
+    return build_agent()
+
+
+def create_app(
+    agent_factory: AgentFactory[Principal] | None = None,
+    *,
+    authenticate: Authenticator[Principal] | None = None,
+) -> FastAPI:
+    """Create the FastAPI app with both protocol adapters mounted.
+
+    Without an ``agent_factory`` the packaged :func:`build_agent` default is
+    used. Without an ``authenticate`` callback every peer is admitted and the
+    factory receives ``None`` as its principal.
+    """
     app = FastAPI(title="hrns")
-    shared = agent or build_agent()
-    mount_acp(app, (lambda: shared) if agent is not None else build_agent)
-    mount_agui(app, shared)
+    factory: AgentFactory[Principal] = agent_factory or _default_agent_factory
+    mount_acp(app, factory, authenticate=authenticate)
+    mount_agui(app, factory, authenticate=authenticate)
     return app

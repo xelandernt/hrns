@@ -23,6 +23,7 @@ dependencies = [
     "pydantic-ai-harness[acp]==0.57.0",
     "PyYAML>=6,<7",
     "packaging>=24",
+    "websockets>=13,<16",
 ]
 
 [project.optional-dependencies]
