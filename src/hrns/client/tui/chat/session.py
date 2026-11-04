@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from ...errors import ExtensionUnavailable, HrnsClientError
+from ...errors import HrnsClientError
 from ..composer import Composer
-from ..dialogs import ConfirmDialog, FormDialog
+from ..dialogs import ConfirmDialog
 from ..panels import SidePanel
 from ..transcript import TranscriptPane
 
@@ -93,14 +93,6 @@ class SessionWorkflow:
             await screen._notice(f"Could not load session {session_id}: {exc.message}", "error")
             return
         await pane.end_replay()
-        tool_ids = pane.retained_tool_ids()
-        if tool_ids and screen.client.extension.supports("_hrns/presentation/get"):
-            try:
-                snapshots = await loaded.presentations(tool_ids)
-            except (ExtensionUnavailable, HrnsClientError):
-                snapshots = ()
-            for snapshot in snapshots:
-                await pane.apply_presentation(snapshot)
         screen._replay_target = None
         screen._loading_session = False
         screen.prompts.save_draft()
@@ -221,39 +213,4 @@ class SessionWorkflow:
         await self.refresh(load_more=True)
 
     async def rename(self, title: str) -> None:
-        screen = self.screen
-        if not screen.client.extension.supports("_hrns/session/rename"):
-            await screen._notice("This agent does not support session renaming.", "warning")
-            return
-        if not title.strip():
-
-            def apply(values: dict[str, Any] | None) -> None:
-                if values:
-                    screen._rename_session_worker(str(values["title"]))
-
-            screen.app.push_screen(
-                FormDialog(
-                    "Rename session",
-                    "Choose a name for this conversation.",
-                    [
-                        {
-                            "name": "title",
-                            "title": "Session name",
-                            "kind": "string",
-                            "required": True,
-                            "default": screen._session_title or "",
-                        }
-                    ],
-                ),
-                apply,
-            )
-            return
-        try:
-            renamed = await screen.session.rename(title.strip())
-        except (HrnsClientError, ValueError) as exc:
-            await screen._notice(str(exc), "error")
-            return
-        screen._session_title = renamed
-        screen.chrome.update_chrome()
-        screen.refresh_sessions()
-        await screen._notice(f"Session renamed to {screen._session_title}.", "success")
+        await self.screen._notice("Standard ACP has no session rename.", "warning")

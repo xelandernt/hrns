@@ -12,7 +12,6 @@ from acp.schema import Implementation
 from .constants import CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION, PROTOCOL_VERSION
 from .errors import ConnectionLost, HrnsClientError, ProtocolError, TransportError
 from .events import ConnectionEvent
-from .extension import HrnsExtension, parse_advertisement
 from .transport import AgentTransport, ConnectionBundle
 
 if TYPE_CHECKING:
@@ -88,7 +87,6 @@ class ConnectionLifecycle:
                     client_info=Implementation(
                         name=CLIENT_NAME, title=CLIENT_TITLE, version=CLIENT_VERSION
                     ),
-                    **client._initialize_meta(),
                 ),
                 timeout=self.connect_timeout,
             )
@@ -122,11 +120,6 @@ class ConnectionLifecycle:
             client.agent_title = info.title or client.agent_name
             client.agent_version = info.version
         client.auth_methods = list(getattr(response, "auth_methods", []) or [])
-        client.extension = (
-            parse_advertisement(getattr(response, "field_meta", None))
-            if client.advertise_extension
-            else HrnsExtension()
-        )
         if client.auth_method:
             advertised = {str(getattr(method, "id", "")) for method in client.auth_methods}
             if client.auth_method not in advertised:
@@ -182,11 +175,7 @@ class ConnectionLifecycle:
 
     def _publish_connection(self, state: str, detail: str) -> None:
         self.state = state
-        location = {
-            "kind": "local"
-            if self._transport and "stdio" in type(self._transport).__name__.lower()
-            else "remote"
-        }
+        location = {"kind": "local"}
         self.client.bus.publish(
             ConnectionEvent(
                 state=state,

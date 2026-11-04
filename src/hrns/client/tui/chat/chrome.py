@@ -107,17 +107,8 @@ class ChromeWorkflow:
                 f"command: {screen.target.profile.command} {' '.join(screen.target.profile.args)}".rstrip()
             )
             lines.append(f"workspace: {screen.target.cwd}")
-        else:
-            lines.append(f"server: {screen.target.profile.url}")
-            lines.append(f"agent: {screen.target.agent_id}")
-            lines.append(f"remote workspace: {screen.target.cwd}")
         lines.append(f"client: hrns-client {CLIENT_VERSION}")
-        if screen.client.extension.enabled:
-            lines.append(f"extension: {screen.client.extension.describe()}")
-            if screen.client.extension.local_binding_creation:
-                lines.append("plugin creation: allowed by host")
-        else:
-            lines.append("extension: not advertised (standard ACP only)")
+        lines.append("protocol: standard ACP")
         activity.set_connection(lines)
         attached = screen.session is not None and screen.session.client is screen.client
         activity.set_session(

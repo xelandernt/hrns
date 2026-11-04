@@ -215,6 +215,5 @@ def local_target(
         name=profile.name,
         kind="local",
         profile=profile,
-        agent=None,
         cwd=local_cwd(profile),
     )

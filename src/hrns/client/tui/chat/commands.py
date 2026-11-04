@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from ...errors import ExtensionUnavailable, HrnsClientError
@@ -97,11 +96,6 @@ class CommandWorkflow:
             await screen.prompts.show_skills(rest)
         elif name == "todo":
             screen.action_show_todos()
-        elif name == "plugins":
-            screen.action_show_capabilities()
-            screen.refresh_capabilities()
-        elif name == "mcp":
-            screen.action_show_mcp()
         elif name == "models":
             await screen.models.show_models()
         elif name == "providers":
@@ -156,22 +150,7 @@ class CommandWorkflow:
         return ViewContext(session_id=session.session_id, invoke=invoke)
 
     async def run_plugin_command(self, binding_id: str, command_name: str, arguments: str) -> None:
-        """Slash invocation: dispatch without creating a model turn or tool call."""
-        screen = self.screen
-        if not screen.client.extension.supports("_hrns/commands/invoke"):
-            await screen._notice("This agent does not negotiate hrns plugin commands.", "warning")
-            return
-        if screen.busy:
-            await screen._notice(
-                "Stop the running turn before running a plugin command.", "warning"
-            )
-            return
-        composer = screen.query_one("#composer", Composer)
-        composer.clear_composer()
-        try:
-            await self.invoke_plugin_command(binding_id, command_name, text=arguments)
-        except (ExtensionUnavailable, HrnsClientError):
-            return
+        await self.screen._notice("Plugin commands are not available in standard ACP.", "warning")
 
     async def invoke_plugin_command(
         self,
@@ -182,68 +161,7 @@ class CommandWorkflow:
         arguments: dict[str, Any] | None = None,
         request_id: str | None = None,
     ) -> Any:
-        screen = self.screen
-        if not screen.client.extension.supports("_hrns/commands/invoke"):
-            raise ExtensionUnavailable("_hrns/commands/invoke")
-        session = screen.session
-        request_id = request_id or f"ui-{uuid.uuid4().hex}"
-        try:
-            response = await session.invoke_command(
-                binding_id,
-                command_name,
-                text=text,
-                arguments=arguments,
-                expected_revision=screen._plugin_revision,
-                request_id=request_id,
-            )
-        except (ExtensionUnavailable, HrnsClientError) as exc:
-            await screen._notice(f"Command failed: {exc}", "error")
-            raise
-        if screen.session is not session:
-            # The user switched sessions while the handler ran; stale output must not be
-            # presented in, or start a turn for, a different conversation.
-            return response
-        result = response.result
-        fallback = (
-            result.presentation.fallback
-            if result.presentation is not None
-            else "Command completed."
-        )
-        await screen.query_one("#transcript", TranscriptPane).add_command(
-            {
-                "sessionId": session.session_id,
-                "bindingId": response.binding_id,
-                "commandName": response.command_name,
-                "requestId": request_id,
-                "fallback": fallback,
-                "presentation": (
-                    result.presentation.to_wire() if result.presentation is not None else None
-                ),
-            }
-        )
-        action = result.conversation
-        if action is None:
-            return response
-        key = (session.session_id, request_id)
-        if key in screen._consumed_command_actions:
-            return response
-        screen._consumed_command_actions.add(key)
-        if len(screen._consumed_command_actions) > 200:
-            screen._consumed_command_actions.clear()
-            screen._consumed_command_actions.add(key)
-        if getattr(action, "type", "") != "start_turn":
-            await screen._notice(
-                f"Command '/{binding_id}:{command_name}' requested an unsupported "
-                "conversation action.",
-                "warning",
-            )
-            return response
-        await screen.prompts.start_prompt(
-            action.prompt,
-            attachments=[],
-            from_queue=True,
-        )
-        return response
+        raise ExtensionUnavailable("plugin commands")
 
     async def send_agent_command(self, name: str, arguments: str) -> None:
         screen = self.screen

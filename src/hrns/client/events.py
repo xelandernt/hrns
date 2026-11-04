@@ -8,12 +8,9 @@ objects.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .constants import CLIENT_NAME
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from hrns.protocol import ConfigurationSnapshot, QueueItem, SessionUpdatePosition
 
 #: Rendered on the header, like ``{"kind": "local", "label": "/work/dir"}``.
 LocationInfo = dict[str, str]
@@ -37,7 +34,6 @@ class UserMessageReplayed:
     session_id: str
     text: str
     message_id: str | None = None
-    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +45,6 @@ class AgentTextChunk:
     message_id: str | None = None
     thought: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
-    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +62,6 @@ class ToolEvent:
     raw_input: Any = None
     raw_output: Any = None
     meta: dict[str, Any] = field(default_factory=dict)
-    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +71,6 @@ class PlanChanged:
     session_id: str
     entries: tuple[tuple[str, str, str], ...] = ()  # (content, priority, status)
     cleared: bool = False
-    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,24 +79,6 @@ class CommandsUpdated:
 
     session_id: str
     commands: tuple[dict[str, Any], ...] = ()
-    position: SessionUpdatePosition | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PluginCommandsListed:
-    """User-only commands contributed by enabled hrns plugin bindings."""
-
-    session_id: str
-    commands: tuple[Any, ...] = ()
-    selected_revision: int = 0
-    supported_operations: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ToolPresentationUpdated:
-    """Supplemental presentation snapshots keyed by session and tool-call id."""
-
-    snapshots: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +88,6 @@ class ModesUpdated:
     session_id: str
     current_mode_id: str
     available_modes: tuple[dict[str, str], ...] = ()
-    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,24 +96,6 @@ class ConfigOptionsUpdated:
 
     session_id: str
     options: tuple[dict[str, Any], ...] = ()
-    position: SessionUpdatePosition | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ConfigurationChanged:
-    """The project extension published a complete configuration snapshot."""
-
-    session_id: str
-    snapshot: ConfigurationSnapshot
-
-
-@dataclass(frozen=True, slots=True)
-class QueueChanged:
-    """The converged complete authoritative prompt queue changed."""
-
-    session_id: str
-    revision: int
-    items: tuple[QueueItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +104,6 @@ class UsageUpdated:
 
     session_id: str
     summary: dict[str, Any]
-    position: SessionUpdatePosition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,25 +125,6 @@ class TurnCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilitiesListed:
-    """The paginated extension capability list result."""
-
-    session_id: str | None
-    bindings: tuple[dict[str, Any], ...] = ()
-    selected_revision: int | None = None
-    policy_revision: int | None = None
-    next_cursor: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PluginListed:
-    """Paginated plugins offered for local binding creation."""
-
-    plugins: tuple[Any, ...] = ()
-    next_cursor: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class SessionsListed:
     """``session/list`` result used by the sessions panel."""
 
@@ -200,4 +136,3 @@ class SessionsListed:
 class SessionInfoChanged:
     session_id: str
     title: str | None = None
-    position: SessionUpdatePosition | None = None

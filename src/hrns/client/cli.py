@@ -1,4 +1,4 @@
-"""``hrns`` command line: terminal app, headless runner, catalog and bridge."""
+"""``hrns`` command line: terminal app and headless runner."""
 
 from __future__ import annotations
 
@@ -22,20 +22,12 @@ from ..config.mcp import (
     server_target,
 )
 from ._version import __version__
-from .catalog import AgentDeployment
 from .client import HrnsAcpClient
 from .errors import HrnsClientError, InteractionRequired
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
 from .io import parse_client_io
-from .launch import (
-    ConnectionTarget,
-    catalog_for,
-    default_remote_cwd,
-    local_cwd,
-    resolve_agent,
-    transport_for,
-)
+from .launch import ConnectionTarget, local_cwd, transport_for
 from .local import local_target
 from .login import DeviceAuthorization, login, login_target
 from .profiles import Profile, Profiles, default_profiles_path
@@ -92,24 +84,16 @@ def _target_options(
     stdio: bool = False,
     local: bool = False,
     local_config: Path | None = None,
-    server: str | None = None,
-    agent: str | None = None,
     profile: str | None = None,
     cwd: str | None = None,
-    url: str | None = None,
-    token: str | None = None,
 ) -> dict[str, object]:
     return {
         "profiles": _profile_values(profiles),
         "stdio": stdio,
         "local": local,
         "local_config": local_config,
-        "server": server,
-        "agent": agent,
         "profile": profile,
         "cwd": cwd,
-        "url": url,
-        "token": token,
     }
 
 
@@ -119,12 +103,8 @@ def _connect_command(
     stdio: bool = False,
     local: bool = False,
     local_config: Path | None = None,
-    server: str | None = None,
-    agent: str | None = None,
     profile: str | None = None,
     cwd: str | None = None,
-    url: str | None = None,
-    token: str | None = None,
     client_io: ClientIoOption = None,
     session: str | None = None,
 ) -> int:
@@ -134,12 +114,8 @@ def _connect_command(
             stdio=stdio,
             local=local,
             local_config=local_config,
-            server=server,
-            agent=agent,
             profile=profile,
             cwd=cwd,
-            url=url,
-            token=token,
         ),
         remainder=list(remainder),
         client_io=client_io,
@@ -154,12 +130,8 @@ def _run_command(
     stdio: bool = False,
     local: bool = False,
     local_config: Path | None = None,
-    server: str | None = None,
-    agent: str | None = None,
     profile: str | None = None,
     cwd: str | None = None,
-    url: str | None = None,
-    token: str | None = None,
     client_io: ClientIoOption = None,
     json: bool = False,
     allow_all: bool = False,
@@ -177,12 +149,8 @@ def _run_command(
             stdio=stdio,
             local=local,
             local_config=local_config,
-            server=server,
-            agent=agent,
             profile=profile,
             cwd=cwd,
-            url=url,
-            token=token,
         ),
         remainder=list(remainder),
         client_io=client_io,
@@ -191,87 +159,11 @@ def _run_command(
         deny_all=deny_all,
         answer=answer or [],
         resume=resume,
+        session=None,
         timeout=timeout,
         attach=attach or [],
     )
     return asyncio.run(_command_run(args))
-
-
-def _agents_list_command(
-    *,
-    profiles: ProfilesOption = None,
-    server: str | None = None,
-    url: str | None = None,
-    token: str | None = None,
-    limit: int = 50,
-    cursor: str | None = None,
-    all: bool = False,
-    json: bool = False,
-) -> int:
-    return asyncio.run(
-        _command_agents(
-            _namespace(
-                profiles=_profile_values(profiles),
-                agents_command="list",
-                server=server,
-                url=url,
-                token=token,
-                limit=limit,
-                cursor=cursor,
-                all=all,
-                json=json,
-            )
-        )
-    )
-
-
-def _agents_show_command(
-    agent: str,
-    *,
-    profiles: ProfilesOption = None,
-    server: str | None = None,
-    url: str | None = None,
-    token: str | None = None,
-    json: bool = False,
-) -> int:
-    return asyncio.run(
-        _command_agents(
-            _namespace(
-                profiles=_profile_values(profiles),
-                agents_command="show",
-                server=server,
-                url=url,
-                token=token,
-                agent=agent,
-                json=json,
-            )
-        )
-    )
-
-
-def _bridge_command(
-    *,
-    profiles: ProfilesOption = None,
-    server: str | None = None,
-    url: str | None = None,
-    token: str | None = None,
-    agent: str | None = None,
-    remote_cwd: str | None = None,
-    profile: str | None = None,
-) -> int:
-    return asyncio.run(
-        _command_bridge(
-            _namespace(
-                profiles=_profile_values(profiles),
-                server=server,
-                url=url,
-                token=token,
-                agent=agent,
-                remote_cwd=remote_cwd,
-                profile=profile,
-            )
-        )
-    )
 
 
 def _profiles_list_command(*, profiles: ProfilesOption = None) -> int:
@@ -291,11 +183,7 @@ def _profiles_add_command(
     *remainder: str,
     profiles: ProfilesOption = None,
     stdio: bool = False,
-    server: str | None = None,
-    agent: str | None = None,
-    token: str | None = None,
     cwd: str | None = None,
-    remote_cwd: str | None = None,
     default: bool = False,
 ) -> int:
     return _command_profiles(
@@ -305,11 +193,7 @@ def _profiles_add_command(
             name=name,
             remainder=list(remainder),
             stdio=stdio,
-            server=server,
-            agent=agent,
-            token=token,
             cwd=cwd,
-            remote_cwd=remote_cwd,
             default=default,
         )
     )
@@ -341,7 +225,6 @@ def _mcp_add_command(
     name: str,
     *command_words: str,
     local_config: Path | None = None,
-    url: str | None = None,
     stdio_command: Annotated[str | None, Parameter(name="--command", metavar="CMD")] = None,
     env: RepeatedStringOption = None,
     cwd: str | None = None,
@@ -363,7 +246,6 @@ def _mcp_add_command(
         _namespace(
             local_config=local_config,
             name=name,
-            url=url,
             stdio_command=stdio_command,
             env=env or [],
             cwd=cwd,
@@ -416,7 +298,6 @@ def _mcp_logout_command(name: str, *, local_config: Path | None = None) -> int:
 def _register_commands(app: App) -> None:
     app.command(_connect_command, name="connect", help="Open the full-screen terminal")
     app.command(_run_command, name="run", help="Run one prompt headlessly and print the result")
-    app.command(_bridge_command, name="bridge", help="Bridge local stdio ACP to a hosted agent")
     app.command(
         _login_command, name="login", help="Sign in to a local provider with an account login"
     )
@@ -425,11 +306,6 @@ def _register_commands(app: App) -> None:
         name="clean",
         help="Delete local session history and, with --config, the local provider config",
     )
-
-    agents = App(name="agents", help="Inspect the hosted deployment catalog")
-    agents.command(_agents_list_command, name="list", help="List accessible agent deployments")
-    agents.command(_agents_show_command, name="show", help="Show one deployment descriptor")
-    app.command(agents)
 
     profiles = App(name="profiles", help="Manage saved connection profiles")
     profiles.command(_profiles_list_command, name="list", help="List saved profiles")
@@ -479,9 +355,9 @@ def _extract_global_profiles(argv: list[str]) -> list[str]:
         return argv
 
     command = argv[0] if argv else "connect"
-    if command not in {"connect", "run", "agents", "bridge", "profiles"}:
+    if command not in {"connect", "run", "profiles"}:
         return argv
-    command_index = 1 if command in {"agents", "profiles"} and len(argv) > 1 else 0
+    command_index = 1 if command == "profiles" and len(argv) > 1 else 0
     options = [item for value in values for item in ("--profiles", value)]
     argv[command_index + 1 : command_index + 1] = options
     return argv
@@ -490,7 +366,7 @@ def _extract_global_profiles(argv: list[str]) -> list[str]:
 def build_parser() -> App:
     parser = App(
         name="hrns",
-        help="Keyboard-first ACP terminal, headless runner and stdio bridge.",
+        help="Keyboard-first ACP terminal and headless runner.",
         version=f"hrns {__version__}",
         exit_on_error=False,
     )
@@ -506,45 +382,19 @@ def _profiles(args: argparse.Namespace) -> Profiles:
 
 
 def _profile_from_args(profiles: Profiles, args: argparse.Namespace) -> Profile | None:
-    """Pick the saved profile named by --profile/--server, or build an ad-hoc one."""
-    name = getattr(args, "profile", None) or getattr(args, "server", None)
+    """Pick the saved profile named by --profile, or the default."""
+    name = getattr(args, "profile", None)
     if name:
         if name in profiles.profiles:
             profile = profiles.get(name)
-            # --url/--token/--agent flags override the saved values.
-            overrides = {
-                "url": getattr(args, "url", None),
-                "token": getattr(args, "token", None),
-                "agent": getattr(args, "agent", None),
-            }
-            for field, value in overrides.items():
-                if value:
-                    setattr(profile, field, value)
-            if getattr(args, "cwd", None) and profile.transport == "stdio":
+            if getattr(args, "cwd", None):
                 profile.cwd = args.cwd
             return profile
-        if "://" in name:
-            return Profile(
-                name="cli-server",
-                transport="server",
-                url=name,
-                token=getattr(args, "token", None) or "",
-                agent=getattr(args, "agent", None) or "",
-            )
         raise HrnsClientError(
             f"No profile named '{name}'. Saved: {', '.join(profiles.names) or '(none)'}. "
             "Run `hrns profiles list`."
         )
-    if getattr(args, "url", None):
-        return Profile(
-            name="cli-server",
-            transport="server",
-            url=args.url,
-            token=getattr(args, "token", None) or "",
-            agent=getattr(args, "agent", None) or "",
-        )
-    profile = profiles.default_profile()
-    return profile
+    return profiles.default_profile()
 
 
 def _split_stdio_remainder(
@@ -581,14 +431,13 @@ async def _resolve_target(
     remainder: Sequence[str] = (),
     split_prompt: bool = True,
 ) -> ConnectionTarget:
-    """Apply CLI precedence: explicit stdio > explicit remote > local model."""
+    """Apply CLI precedence: explicit stdio > local model."""
     cwd_override = getattr(args, "cwd", None)
-    explicit_remote = any(
-        getattr(args, name, None) for name in ("server", "url", "profile", "agent", "token")
-    )
     local_requested = bool(getattr(args, "local", False) or getattr(args, "local_config", None))
-    if local_requested or not (getattr(args, "stdio", False) or explicit_remote):
-        if local_requested and (getattr(args, "stdio", False) or explicit_remote):
+    stdio_requested = bool(getattr(args, "stdio", False))
+    profile_name = getattr(args, "profile", None)
+    if local_requested or not (stdio_requested or profile_name):
+        if local_requested and (stdio_requested or profile_name):
             raise HrnsClientError(
                 "--local/--local-config cannot be combined with another connection target."
             )
@@ -601,13 +450,12 @@ async def _resolve_target(
             )
         return local_target(getattr(args, "local_config", None), cwd_override)
     command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
-    if getattr(args, "stdio", False):
+    if stdio_requested:
         profile = _stdio_profile("cli", command, cwd_override)
         return ConnectionTarget(
             name="cli",
             kind="local",
             profile=profile,
-            agent=None,
             cwd=local_cwd(profile, cwd_override),
         )
     if command:
@@ -615,27 +463,16 @@ async def _resolve_target(
     profile = _profile_from_args(profiles, args)
     if profile is None:
         raise HrnsClientError(
-            "No connection target. Use `--stdio -- CMD`, `--server PROFILE --agent AGENT`, or configure a local model."
+            "No connection target. Use `--stdio -- CMD` or configure a local model."
         )
-    if profile.transport == "stdio":
-        if not profile.command:
-            raise HrnsClientError(f"Profile '{profile.name}' has no command.")
-        return ConnectionTarget(
-            name=profile.name,
-            kind="local",
-            profile=profile,
-            agent=None,
-            cwd=local_cwd(profile, cwd_override),
-        )
-    agent = await resolve_agent(profile, getattr(args, "agent", None))
-    # Fix the client I/O root to the local process directory by default. The remote
-    # host resolves an existing session's server workspace authoritatively during load.
-    cwd = (
-        str(Path.cwd())
-        if getattr(args, "session", None) and cwd_override is None
-        else default_remote_cwd(agent, cwd_override)
+    if not profile.command:
+        raise HrnsClientError(f"Profile '{profile.name}' has no command.")
+    return ConnectionTarget(
+        name=profile.name,
+        kind="local",
+        profile=profile,
+        cwd=local_cwd(profile, cwd_override),
     )
-    return ConnectionTarget(name=profile.name, kind="remote", profile=profile, agent=agent, cwd=cwd)
 
 
 def _answers(args: argparse.Namespace) -> dict[str, Any]:
@@ -652,27 +489,14 @@ def _answers(args: argparse.Namespace) -> dict[str, Any]:
     return answers
 
 
-async def _resolve_catalog_profile(args: argparse.Namespace) -> tuple[Profile, Any]:
-    profiles = _profiles(args)
-    profile = _profile_from_args(profiles, args)
-    if profile is None:
-        raise HrnsClientError("Pass --server PROFILE (or --url URL) to reach a catalog.")
-    if profile.transport != "server":
-        raise HrnsClientError(f"Profile '{profile.name}' is not a server profile.")
-    return profile, catalog_for(profile)
-
-
-# ----------------------------------------------------------------- commands
-
-
 async def _command_run(args: argparse.Namespace) -> int:
     profiles = _profiles(args)
     if args.stdio:
         command, prompt_words = _split_stdio_remainder(args.remainder)
         target_remainder: list[str] = ["--", *command]
     else:
-        # Local-model and remote targets take the remainder as the prompt; only
-        # an explicit stdio launch has a command that needs separating.
+        # Local-model targets take the remainder as the prompt; only an explicit
+        # stdio launch has a command that needs separating.
         prompt_words = list(args.remainder)
         if prompt_words and prompt_words[0] == "--":
             prompt_words.pop(0)
@@ -710,64 +534,6 @@ async def _command_run(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
-async def _command_agents(args: argparse.Namespace) -> int:
-    _profile, catalog = await _resolve_catalog_profile(args)
-    async with catalog:
-        if args.agents_command == "show":
-            deployment = await catalog.get_agent(args.agent)
-            if args.json:
-                print(json.dumps(deployment.raw, ensure_ascii=False, indent=2))
-            else:
-                _print_agent_detail(deployment)
-            return EXIT_OK
-        items: list[AgentDeployment] = []
-        cursor = args.cursor
-        pages = 0
-        while True:
-            page = await catalog.list_agents(cursor=cursor, limit=max(1, min(100, args.limit)))
-            items.extend(page.items)
-            cursor = page.next_cursor
-            pages += 1
-            if not cursor or not args.all or pages >= 20:
-                break
-        if args.json:
-            print(
-                json.dumps(
-                    {"items": [item.raw for item in items], "nextCursor": cursor},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        else:
-            _print_agent_table(items)
-        return EXIT_OK
-
-
-def _bridge_remote_cwd(profile: Profile, override: str | None) -> str | None:
-    """Explicit --remote-cwd wins; otherwise use the saved profile setting."""
-    return override or profile.remote_cwd or None
-
-
-async def _command_bridge(args: argparse.Namespace) -> int:
-    profiles = _profiles(args)
-    profile = _profile_from_args(profiles, args)
-    if profile is None:
-        raise HrnsClientError("Pass --server PROFILE (or --url URL) to bridge to a hosted agent.")
-    if profile.transport != "server":
-        raise HrnsClientError(f"Profile '{profile.name}' is not a server profile.")
-    agent = await resolve_agent(profile, args.agent)
-    catalog = catalog_for(profile)
-    from .bridge import BridgeSession, run_bridge
-
-    session = BridgeSession(
-        url=catalog.websocket_url(agent.agent_id),
-        token_ref=profile.token,
-        remote_cwd=_bridge_remote_cwd(profile, args.remote_cwd),
-        agent_id=agent.agent_id,
-    )
-    return await run_bridge(session)
-
-
 def _command_profiles(args: argparse.Namespace) -> int:
     profiles = _profiles(args)
     if args.profiles_command == "list":
@@ -776,13 +542,7 @@ def _command_profiles(args: argparse.Namespace) -> int:
             return EXIT_OK
         for name in sorted(profiles.profiles):
             profile = profiles.profiles[name]
-            marker = "*" if profile.default_for_server else " "
-            details = (
-                profile.url + f" · {profile.agent}"
-                if profile.is_remote
-                else profile.describe_location()
-            )
-            print(f"{marker} {name:20} {profile.transport:7} {details}")
+            print(f"  {name:20} {profile.transport:7} {profile.describe_location()}")
         if profiles.sources:
             print(f"\nLoaded from: {', '.join(str(path) for path in profiles.sources)}")
         return EXIT_OK
@@ -792,20 +552,10 @@ def _command_profiles(args: argparse.Namespace) -> int:
     if args.profiles_command == "add":
         if not profiles.sources:
             profiles.sources.append(default_profiles_path())
-        if args.stdio:
-            command, _ = _split_stdio_remainder(args.remainder)
-            profile = _stdio_profile(args.name, command, args.cwd)
-        elif args.server:
-            profile = Profile(
-                name=args.name,
-                transport="server",
-                url=args.server,
-                agent=args.agent or "",
-                token=args.token or "",
-                remote_cwd=args.remote_cwd or "",
-            )
-        else:
-            raise HrnsClientError("`profiles add` needs --stdio (with `-- CMD`) or --server URL.")
+        if not args.stdio:
+            raise HrnsClientError("`profiles add` needs --stdio (with `-- CMD`).")
+        command, _ = _split_stdio_remainder(args.remainder)
+        profile = _stdio_profile(args.name, command, args.cwd)
         profiles.upsert(profile, set_default=args.default)
         path = profiles.save(profiles.sources[0])
         print(f"Saved profile '{profile.name}' to {path}")
@@ -853,8 +603,7 @@ def _command_connect(args: argparse.Namespace) -> int:
     preselect: ConnectionTarget | None = None
     status_message: str | None = None
     explicit = any(
-        getattr(args, name, None)
-        for name in ("stdio", "server", "url", "profile", "agent", "token", "local_config")
+        getattr(args, name, None) for name in ("stdio", "profile", "local_config")
     ) or getattr(args, "local", False)
     try:
         preselect = asyncio.run(
@@ -876,35 +625,6 @@ def _command_connect(args: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------- output
-
-
-def _print_agent_table(items: list[AgentDeployment]) -> None:
-    if not items:
-        print("No accessible agent deployments.")
-        return
-    id_width = max(len(item.agent_id) for item in items)
-    print(f"{'ID':<{id_width}}  {'NAME':<28}  {'VERSION':<10}  WORKDIR")
-    for item in items:
-        name = (item.name + (" *" if item.recommended else ""))[:28]
-        cwd = item.default_working_directory or (item.workspaces[0] if item.workspaces else "")
-        print(f"{item.agent_id:<{id_width}}  {name:<28}  {item.version:<10}  {cwd}")
-
-
-def _print_agent_detail(item: AgentDeployment) -> None:
-    print(f"{item.label} ({item.agent_id})")
-    if item.version:
-        print(f"version: {item.version}")
-    if item.recommended:
-        print("recommended: yes")
-    if item.description:
-        print(f"\n{item.description}")
-    if item.default_working_directory:
-        print(f"\ndefault workspace: {item.default_working_directory}")
-    for workspace in item.workspaces:
-        print(f"workspace: {workspace}")
-
-
-# ----------------------------------------------------------------------- mcp
 
 
 def _mcp_config(args: argparse.Namespace) -> tuple[LocalSettings, Path]:

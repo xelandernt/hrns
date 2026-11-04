@@ -32,7 +32,6 @@ from ..local import (
     effort_label,
     save_custom_model,
 )
-from ..panels import SidePanel
 from ..providers import ProvidersDialog, ProvidersResult
 from ..state import config_option_value, effort_option, model_option, option_values
 
@@ -50,14 +49,17 @@ class ModelWorkflow:
 
     def step_standard_option(self, option_id: str, direction: int) -> None:
         screen = self.screen
-        panel = screen.query_one("#side-panel", SidePanel).capabilities
-        option = panel.option(option_id) or {}
+        option = next(
+            (item for item in screen.session.config_options if item.get("id") == option_id), {}
+        )
         if option.get("type") == "boolean":
             screen._change_standard_option(option_id)
             return
         choices = option_values(option)
         if not choices:
-            panel.show_message(f"{option.get('name', option_id)} has no selectable values.")
+            screen._notice_soon(
+                f"{option.get('name', option_id)} has no selectable values.", "warning"
+            )
             return
         values = [choice["value"] for choice in choices]
         current = option.get("currentValue")
@@ -67,22 +69,25 @@ class ModelWorkflow:
 
     async def change_standard_option(self, option_id: str) -> None:
         screen = self.screen
-        panel = screen.query_one("#side-panel", SidePanel).capabilities
-        option = panel.option(option_id) or {}
+        option = next(
+            (item for item in screen.session.config_options if item.get("id") == option_id), {}
+        )
         if option.get("type") == "boolean":
             try:
                 options = await screen.session.set_config_option(
                     option_id, not bool(option.get("currentValue"))
                 )
             except HrnsClientError as exc:
-                panel.show_message(exc.message)
+                await screen._notice(exc.message, "error")
                 return
-            panel.set_standard_options(list(options))
+            screen.session.remember(tuple(options))
             screen.chrome.update_chrome()
             return
         choices = option_values(option)
         if not choices:
-            panel.show_message(f"{option.get('name', option_id)} has no selectable values.")
+            await screen._notice(
+                f"{option.get('name', option_id)} has no selectable values.", "warning"
+            )
             return
         current = option.get("currentValue")
 
@@ -102,13 +107,12 @@ class ModelWorkflow:
 
     async def set_standard_value(self, option_id: str, value: str) -> None:
         screen = self.screen
-        panel = screen.query_one("#side-panel", SidePanel).capabilities
         try:
             options = await screen.session.set_config_option(option_id, value)
         except HrnsClientError as exc:
-            panel.show_message(exc.message)
+            await screen._notice(exc.message, "error")
             return
-        panel.set_standard_options(list(options))
+        screen.session.remember(tuple(options))
         screen.chrome.update_chrome()
 
     # ------------------------------------------------------------- local model

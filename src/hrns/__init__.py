@@ -1,13 +1,10 @@
-"""hrns: programmable Pydantic AI agents with an ACP terminal and hosting.
+"""hrns: one Pydantic AI agent, exposed over ACP and AG-UI.
 
-The distribution exposes independent subpackages:
+The distribution exposes three subpackages:
 
-- ``hrns.protocol``: versioned contracts and transport framing.
-- ``hrns.config``: shared local settings.
-- ``hrns.runtime``: native agent definitions, sessions, and ACP hosting.
-- ``hrns.client``: Textual terminal, headless runner, and stdio bridge.
-- ``hrns.server``: authenticated deployment catalog and worker hosting.
+- ``hrns.app``: the agent composition and the ACP/AG-UI/FastAPI adapters.
+- ``hrns.client``: the Textual terminal and standard ACP client.
+- ``hrns.config``: local provider/model settings.
 
-Importing ``hrns`` does not import any subpackage, so the client and server
-keep their independent dependency boundaries.
+Importing ``hrns`` does not import any subpackage.
 """

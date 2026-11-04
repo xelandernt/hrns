@@ -1,37 +1,21 @@
-"""Embed an agent with a custom capability in an existing FastAPI application.
+"""Mount ACP and AG-UI on one FastAPI app.
 
-Run from the checkout (requires OPENAI_API_KEY, or set EXAMPLE_MODEL=test)::
+Run with:
 
-    uv run uvicorn examples.fastapi_app:app --host 127.0.0.1 --port 8080 --ws-max-size 16777216
-    uv run hrns connect --url http://127.0.0.1:8080 --agent example.house_style
+    HRNS_MODEL=openai:gpt-6.1-sol uvicorn examples.fastapi_app:app --reload
 """
 
-import os
+from __future__ import annotations
 
 from fastapi import FastAPI
-from pydantic_ai.capabilities import AbstractCapability
 
-from hrns.runtime import AgentDefinition, SQLiteSessionStore
-from hrns.server import AgentServer
+from hrns.app.agent import build_agent
+from hrns.app.fastapi import mount_acp, mount_agui
 
+app = FastAPI(title="hrns example")
 
-class HouseStyle(AbstractCapability[None]):
-    id = "example.house_style"
-    description = "Adds concise writing instructions."
+# One fresh ACP adapter per WebSocket connection.
+mount_acp(app, lambda: build_agent(), path="/acp")
 
-    def get_instructions(self) -> str:
-        return "Keep answers concise and use plain language."
-
-
-app = FastAPI()
-agents = AgentServer(store=SQLiteSessionStore("./sessions.sqlite3"))
-agents.add_agent(
-    AgentDefinition(
-        agent_id="example.house_style",
-        name="House style agent",
-        definition_version="1.0.0",
-        model=os.environ.get("EXAMPLE_MODEL", "openai:gpt-5-mini"),
-        fixed_capabilities=[HouseStyle()],
-    )
-)
-agents.mount(app)
+# One AG-UI run per POST.
+mount_agui(app, build_agent(), path="/agui")

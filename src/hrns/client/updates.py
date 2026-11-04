@@ -20,8 +20,6 @@ from acp.schema import (
     UserMessageChunk,
 )
 
-from hrns.protocol import SessionUpdatePosition, maybe_session_update_position
-
 from .bus import EventBus
 from .events import (
     AgentTextChunk,
@@ -42,7 +40,6 @@ def tool_event(
     update: Any,
     *,
     is_new: bool,
-    position: SessionUpdatePosition | None,
 ) -> ToolEvent:
     content: list[dict[str, Any]] = []
     for block in getattr(update, "content", None) or []:
@@ -72,13 +69,11 @@ def tool_event(
         raw_input=_raw_arguments(getattr(update, "raw_input", None)),
         raw_output=getattr(update, "raw_output", None),
         meta=dict(getattr(update, "field_meta", None) or {}),
-        position=position,
     )
 
 
 def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
     raw_meta = dict(getattr(update, "field_meta", None) or {})
-    position = maybe_session_update_position(update)
     if isinstance(update, UserMessageChunk):
         # User updates carry replayed prompts and steering delivered into live history.
         text = text_of(update.content) or ""
@@ -88,7 +83,6 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
                     session_id=session_id,
                     text=text,
                     message_id=getattr(update, "message_id", None),
-                    position=position,
                 )
             )
         return
@@ -101,7 +95,6 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
                     text=text,
                     message_id=getattr(update, "message_id", None),
                     meta=raw_meta,
-                    position=position,
                 )
             )
         return
@@ -115,41 +108,40 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
                     message_id=getattr(update, "message_id", None),
                     thought=True,
                     meta=raw_meta,
-                    position=position,
                 )
             )
         return
     if isinstance(update, ToolCallStart):
-        bus.publish(tool_event(session_id, update, is_new=True, position=position))
+        bus.publish(tool_event(session_id, update, is_new=True))
         return
     if isinstance(update, ToolCallProgress):
-        bus.publish(tool_event(session_id, update, is_new=False, position=position))
+        bus.publish(tool_event(session_id, update, is_new=False))
         return
     if isinstance(update, AgentPlanUpdate):
         entries = tuple((entry.content, entry.priority, entry.status) for entry in update.entries)
-        bus.publish(PlanChanged(session_id=session_id, entries=entries, position=position))
+        bus.publish(PlanChanged(session_id=session_id, entries=entries))
         return
     if isinstance(update, AgentPlanContentUpdate):
         plan = update.plan
         if getattr(plan, "type", "") == "items":
             entries = tuple((entry.content, entry.priority, entry.status) for entry in plan.entries)
-            bus.publish(PlanChanged(session_id=session_id, entries=entries, position=position))
+            bus.publish(PlanChanged(session_id=session_id, entries=entries))
         elif getattr(plan, "type", "") == "markdown":
             content = str(getattr(plan, "content", ""))
             entries = tuple(
                 (line.strip(), "medium", "pending") for line in content.splitlines() if line.strip()
             )
-            bus.publish(PlanChanged(session_id=session_id, entries=entries, position=position))
+            bus.publish(PlanChanged(session_id=session_id, entries=entries))
         return
     if isinstance(update, AgentPlanRemovedUpdate):
-        bus.publish(PlanChanged(session_id=session_id, cleared=True, position=position))
+        bus.publish(PlanChanged(session_id=session_id, cleared=True))
         return
     if isinstance(update, AvailableCommandsUpdate):
         commands = tuple(
             command.model_dump(mode="json", by_alias=True, exclude_none=True)
             for command in update.available_commands
         )
-        bus.publish(CommandsUpdated(session_id=session_id, commands=commands, position=position))
+        bus.publish(CommandsUpdated(session_id=session_id, commands=commands))
         return
     if isinstance(update, CurrentModeUpdate):
         bus.publish(
@@ -157,7 +149,6 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
                 session_id=session_id,
                 current_mode_id=update.current_mode_id,
                 available_modes=(),
-                position=position,
             )
         )
         return
@@ -166,33 +157,24 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
             option.model_dump(mode="json", by_alias=True, exclude_none=True)
             for option in update.config_options
         )
-        bus.publish(ConfigOptionsUpdated(session_id=session_id, options=options, position=position))
+        bus.publish(ConfigOptionsUpdated(session_id=session_id, options=options))
         return
     if isinstance(update, SessionInfoUpdate):
-        bus.publish(
-            SessionInfoChanged(session_id=session_id, title=update.title, position=position)
-        )
-        hrns_meta = raw_meta.get("hrns", {})
-        if isinstance(hrns_meta, dict):
-            usage = hrns_meta.get("sessionUsage")
-            if isinstance(usage, dict):
-                bus.publish(UsageUpdated(session_id=session_id, summary=usage, position=position))
+        bus.publish(SessionInfoChanged(session_id=session_id, title=update.title))
         return
     if isinstance(update, UsageUpdate):
-        hrns_meta = raw_meta.get("hrns", {})
-        detail = hrns_meta.get("contextUsage") if isinstance(hrns_meta, dict) else None
         summary: dict[str, Any] = {
             "scope": "context",
             "used": update.used,
             "size": update.size,
-            "detail": detail if isinstance(detail, dict) else {},
+            "detail": {},
         }
         if update.cost is not None:
             summary["cost"] = {
                 "amount": update.cost.amount,
                 "currency": update.cost.currency,
             }
-        bus.publish(UsageUpdated(session_id=session_id, summary=summary, position=position))
+        bus.publish(UsageUpdated(session_id=session_id, summary=summary))
         return
     # Unknown future update kinds degrade to a readable activity event.
     bus.publish(
@@ -201,6 +183,5 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
             text=f"[activity: {getattr(update, 'session_update', 'update')}]",
             thought=True,
             meta=raw_meta,
-            position=position,
         )
     )

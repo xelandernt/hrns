@@ -22,14 +22,11 @@ from ...events import (
     AgentTextChunk,
     CommandsUpdated,
     ConfigOptionsUpdated,
-    ConfigurationChanged,
     ConnectionEvent,
     ModesUpdated,
     PlanChanged,
-    PluginCommandsListed,
     SessionInfoChanged,
     ToolEvent,
-    ToolPresentationUpdated,
     TurnCompleted,
     TurnStarted,
     UsageUpdated,
@@ -75,15 +72,6 @@ from ..panels import (
     SidePanel,
     SidePanelCloseRequested,
 )
-from ..panels.capability import (
-    BindingEditRequested,
-    BindingToggleRequested,
-    CapabilityAddRequested,
-    CapabilityRefreshRequested,
-    ConfigOptionRequested,
-    ConfigOptionStepRequested,
-)
-from ..panels.mcp import McpRefreshRequested
 from ..panels.session import (
     SessionCloseRequested,
     SessionDeleteRequested,
@@ -101,7 +89,6 @@ from ..state import (
 from ..status import StatusBar
 from ..transcript import TranscriptPane
 from .actions import ChatActions
-from .capabilities import CapabilityWorkflow
 from .chrome import ChromeWorkflow
 from .connection import ReconnectWorkflow
 
@@ -113,7 +100,6 @@ class ChatScreen(_HrnsScreen):
 
     BINDINGS = [
         Binding("f1", "help", "Help", show=False),
-        Binding("f2", "show_capabilities", "Plugins", show=False),
         Binding("f3", "show_sessions", "Sessions", show=False),
         Binding("f4", "show_activity", "Activity", show=False),
         Binding("ctrl+t", "focus_transcript", "Transcript", show=False),
@@ -196,7 +182,6 @@ class ChatScreen(_HrnsScreen):
         self.prompts = PromptWorkflow(self)
         self.sessions = SessionWorkflow(self)
         self.models = ModelWorkflow(self)
-        self.capabilities = CapabilityWorkflow(self)
 
     # --------------------------------------------------------------- structure
 
@@ -288,12 +273,7 @@ class ChatScreen(_HrnsScreen):
 
     @work(exit_on_error=False, group="panels", exclusive=True)
     async def _refresh_panels(self) -> None:
-        await self.capabilities.refresh()
         await self.sessions.refresh()
-
-    @work(exit_on_error=False, group="panels", exclusive=True)
-    async def refresh_capabilities(self) -> None:
-        await self.capabilities.refresh()
 
     @work(exit_on_error=False, group="panels", exclusive=True)
     async def refresh_sessions(self) -> None:
@@ -333,10 +313,6 @@ class ChatScreen(_HrnsScreen):
                 self._activity = "working"
             self.chrome.refresh_status()
             return
-        if isinstance(event, ToolPresentationUpdated):
-            for snapshot in event.snapshots:
-                await pane.apply_presentation(snapshot)
-            return
         if isinstance(event, TurnStarted):
             self._turns_started += 1
             self._set_busy(True)
@@ -375,9 +351,6 @@ class ChatScreen(_HrnsScreen):
             self.query_one("#side-panel", SidePanel).activity.set_commands(event.commands)
             self.prompts.sync_command_suggestions()
             return
-        if isinstance(event, PluginCommandsListed):
-            self.capabilities.set_plugin_commands(event.commands, revision=event.selected_revision)
-            return
         if isinstance(event, PlanChanged):
             panel = self.query_one("#side-panel", SidePanel)
             panel.todos.set_plan(event.entries, cleared=event.cleared)
@@ -394,16 +367,6 @@ class ChatScreen(_HrnsScreen):
         if isinstance(event, ConfigOptionsUpdated):
             self.session.remember(event.options)
             self.chrome.update_chrome()
-            panel = self.query_one("#side-panel", SidePanel).capabilities
-            if self.client.extension.enabled:
-                if self._replay_target is None:
-                    panel.show_message("Agent published updated standard options.")
-            elif not panel.extension_mode:
-                panel.set_standard_options(list(event.options))
-            else:
-                # The negotiated extension owns this panel; a standard option
-                # update must not silently replace its richer state.
-                panel.show_message("Agent published updated standard options.")
             return
         if isinstance(event, ModesUpdated):
             self.session.current_mode_id = event.current_mode_id
@@ -430,12 +393,6 @@ class ChatScreen(_HrnsScreen):
             self._usage = event.summary
             self.query_one("#side-panel", SidePanel).activity.set_usage(event.summary)
             self.chrome.update_chrome()
-            return
-        if isinstance(event, ConfigurationChanged):
-            try:
-                self.capabilities.apply_snapshot(event.snapshot)
-            except Exception as exc:
-                await self._notice(f"configuration update was malformed: {exc}", "error")
             return
         if isinstance(event, ConnectionEvent) and event.state == "lost":
             self.prompts.recover_steering()
@@ -596,21 +553,12 @@ class ChatScreen(_HrnsScreen):
     async def send_next_queued(self) -> None:
         await self.prompts.send_next_queued()
 
-    @work(exit_on_error=False, group="capability", exclusive=True)
-    async def _choose_plugin_to_add(self) -> None:
-        await self.capabilities.choose_plugin_to_add()
-
     @work(exit_on_error=False, group="command", exclusive=True)
     async def _dispatch_local_command(self, name: str) -> None:
         await self.commands.run_local_command(name)
 
-    @work(exit_on_error=False, group="command", exclusive=True)
-    async def _dispatch_plugin_command(self, binding_id: str, command_name: str) -> None:
-        await self.commands.run_plugin_command(binding_id, command_name, "")
-
-    @work(exit_on_error=False, group="capability", exclusive=True)
-    async def _plugin_add_form_worker(self, plugin_id: str) -> None:
-        await self.capabilities.plugin_add_form(plugin_id)
+    def _dispatch_plugin_command(self, binding_id: str, command_name: str) -> None:
+        self._notice_soon("Plugin commands are not available in standard ACP.", "warning")
 
     @work(exit_on_error=False, group="session", exclusive=True)
     async def _rename_session_worker(self, title: str) -> None:
@@ -657,51 +605,6 @@ class ChatScreen(_HrnsScreen):
 
     async def _handle_command(self, text: str) -> None:
         await self.commands.handle_command(text)
-
-    def on_capability_refresh_requested(self, event: CapabilityRefreshRequested) -> None:
-        self.refresh_capabilities()
-
-    def on_mcp_refresh_requested(self, event: McpRefreshRequested) -> None:
-        event.stop()
-        self._refresh_mcp()
-
-    def on_capability_add_requested(self, event: CapabilityAddRequested) -> None:
-        self._choose_plugin_to_add()
-
-    def on_binding_toggle_requested(self, event: BindingToggleRequested) -> None:
-        self._toggle_binding(event.binding_id, event.enabled)
-
-    def on_binding_edit_requested(self, event: BindingEditRequested) -> None:
-        self.capabilities.edit_binding(event.binding_id)
-
-    def on_config_option_requested(self, event: ConfigOptionRequested) -> None:
-        self._change_standard_option(event.option_id)
-
-    def on_config_option_step_requested(self, event: ConfigOptionStepRequested) -> None:
-        self.models.step_standard_option(event.option_id, event.direction)
-
-    @work(exit_on_error=False, group="capability", exclusive=True)
-    async def _toggle_binding(self, binding_id: str, enabled: bool) -> None:
-        await self.capabilities.toggle_binding(binding_id, enabled)
-
-    @work(exit_on_error=False, group="mcp", exclusive=True)
-    async def _refresh_mcp(self) -> None:
-        await self.capabilities.refresh_mcp()
-
-    @work(exit_on_error=False, group="capability", exclusive=True)
-    async def _add_capability(
-        self,
-        plugin_id: str,
-        binding_id: str,
-        enabled: bool,
-        config: dict[str, Any],
-        change_mode: str = "next_turn",
-    ) -> None:
-        await self.capabilities.add_capability(plugin_id, binding_id, enabled, config, change_mode)
-
-    @work(exit_on_error=False, group="capability", exclusive=True)
-    async def _apply_binding_config(self, binding_id: str, values: dict[str, Any]) -> None:
-        await self.capabilities.apply_binding_config(binding_id, values)
 
     @work(exit_on_error=False, group="capability", exclusive=True)
     async def _change_standard_option(self, option_id: str) -> None:
@@ -774,14 +677,8 @@ class ChatScreen(_HrnsScreen):
         event.stop()
         self.chrome.resize_sidebar(event.delta, persist=event.final)
 
-    def action_show_capabilities(self) -> None:
-        self.actions.show_capabilities()
-
     def action_show_todos(self) -> None:
         self.actions.show_todos()
-
-    def action_show_mcp(self) -> None:
-        self.actions.show_mcp()
 
     def action_show_sessions(self) -> None:
         self.actions.show_sessions()

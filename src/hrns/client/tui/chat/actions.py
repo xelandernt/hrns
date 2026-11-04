@@ -29,16 +29,8 @@ class ChatActions:
     def __init__(self, screen: ChatScreen) -> None:
         self.screen = screen
 
-    def show_capabilities(self) -> None:
-        self.show_panel("capabilities")
-
     def show_todos(self) -> None:
         self.show_panel("todos")
-
-    def show_mcp(self) -> None:
-        screen = self.screen
-        self.show_panel("mcp")
-        screen._refresh_mcp()
 
     def show_sessions(self) -> None:
         screen = self.screen

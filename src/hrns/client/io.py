@@ -26,9 +26,6 @@ from acp.schema import (
     WaitForTerminalExitResponse,
 )
 
-from hrns.protocol import FS_READ_TEXT_FILE, FS_WRITE_TEXT_FILE, TERMINAL
-from hrns.protocol.paths import read_only_path
-
 if os.name == "posix":
     from os import getpgid, killpg
     from signal import SIGKILL
@@ -43,6 +40,26 @@ __all__ = [
     "SERVED_CLIENT_CAPABILITIES",
     "parse_client_io",
 ]
+
+FS_READ_TEXT_FILE = "fs/read_text_file"
+FS_WRITE_TEXT_FILE = "fs/write_text_file"
+TERMINAL = "terminal"
+
+_READ_ONLY_DIRS = frozenset({".git", ".hrns", ".pydantic-ai-harness"})
+
+
+def read_only_path(relative: str) -> bool:
+    """Whether a workspace-relative path is protected from client writes."""
+    path = Path(relative)
+    if any(part in _READ_ONLY_DIRS for part in path.parts):
+        return True
+    name = path.name
+    return (
+        name.startswith(".env")
+        or name.lower().startswith("secrets")
+        or name.endswith((".pem", ".key"))
+    )
+
 
 ClientIoMode = Literal["off", "read", "all"]
 """What this client offers agents: nothing, filesystem reads, or everything it can serve."""
