@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...attachments import attachment_summary, build_prompt_blocks, validate_attachment
-from ...errors import ExtensionUnavailable, HrnsClientError
+from ...errors import HrnsClientError
 from ..commands import LOCAL_COMMANDS, command_suggestion_text
 from ..completion import FileIndex, index_workspace, matching_skills
 from ..composer import AttachmentBar, CommandSuggestions, Composer, PromptQueue
@@ -422,30 +421,8 @@ class PromptWorkflow:
         screen.query_one("#composer", Composer).prompt_history = history
 
     async def steer(self, text: str) -> bool:
-        """Deliver a follow-up into the running turn instead of waiting for it to end.
-
-        The host injects it before its next model request, so the agent can act on it
-        after the tool call it is currently running. Peers without the extension, or a
-        turn that just finished, fall back to the local queue.
-        """
-        screen = self.screen
-        if not screen.client.extension.supports("_hrns/session/steer"):
-            return False
-        pending = self._steering.setdefault(screen.session.session_id, [])
-        pending.append(text)
-        self.refresh_queue()
-        try:
-            accepted = await screen.session.steer(text)
-        except HrnsClientError:
-            accepted = False
-        if not accepted:
-            # Delivery or turn completion can arrive before the RPC response.
-            if text not in pending:
-                return True
-            pending.remove(text)
-            self.refresh_queue()
-            return False
-        return True
+        """Standard ACP has no steering; the caller queues the message locally."""
+        return False
 
     def steering_delivered(self, text: str) -> None:
         pending = self._steering.get(self.screen.session.session_id, [])
@@ -550,72 +527,16 @@ class PromptWorkflow:
     # ---------------------------------------------------------------- skills
 
     async def show_skills(self, query: str = "") -> None:
-        screen = self.screen
-        await self.refresh_skills()
-        available = [skill for skill in screen._skills if bool(skill.get("user_invocable", True))]
-        if not available:
-            await screen._notice(
-                "No skills discovered. Add skill packages under `.agents/skills`, or enable "
-                "the skills plugin in /plugins and set its directories.",
-                "info",
-            )
-            return
-        composer = screen.query_one("#composer", Composer)
-        composer.load_text(f"${query.strip().replace(' ', '-')}")
-        composer.focus()
-        self.sync_skill_suggestions()
+        await self.screen._notice("Skills are not available in standard ACP.", "info")
 
     async def refresh_skills(self) -> None:
-        """Fetch the runtime's skill catalog for the `$` picker; discovery is host-side."""
-        screen = self.screen
-        if screen._skills_loading:
-            return
-        screen._skills_loading = True
-        try:
-            binding_id = await self.skills_binding_id()
-            screen._skills = (
-                [] if binding_id is None else await self.fetch_skill_catalog(binding_id)
-            )
-            self.sync_mention_catalog()
-        finally:
-            screen._skills_loading = False
+        self.screen._skills = []
 
     async def skills_binding_id(self) -> str | None:
-        screen = self.screen
-        for binding in screen._bindings_raw:
-            plugin_id = str(binding.get("pluginId") or binding.get("plugin_id") or "")
-            binding_id = str(binding.get("bindingId") or binding.get("binding_id") or "")
-            if plugin_id == "hrns.skills" and binding_id and binding.get("enabled", True):
-                return binding_id
-        # `capabilities/list` may not be negotiated; the catalog command name is unique.
-        for command in screen._plugin_commands:
-            name = str(command.get("commandName") or command.get("command_name") or "")
-            binding_id = str(command.get("bindingId") or command.get("binding_id") or "")
-            if name == "catalog" and binding_id:
-                return binding_id
         return None
 
     async def fetch_skill_catalog(self, binding_id: str) -> list[dict[str, Any]]:
-        screen = self.screen
-        if not screen.client.extension.supports("_hrns/commands/invoke"):
-            return []
-        if screen.commands.find_plugin_command(f"{binding_id}:catalog") is None:
-            return []
-        try:
-            response = await screen.session.invoke_command(
-                binding_id,
-                "catalog",
-                expected_revision=screen._plugin_revision,
-                request_id=f"ui-{uuid.uuid4().hex}",
-            )
-        except (ExtensionUnavailable, HrnsClientError):
-            return []
-        presentation = response.result.presentation
-        data = presentation.data if presentation is not None else {}
-        skills = data.get("skills") if isinstance(data, dict) else None
-        if not isinstance(skills, list):
-            return []
-        return [skill for skill in skills if isinstance(skill, dict)]
+        return []
 
     async def stage_attachment(self, argument: str) -> bool:
         """Stage or clear local files for the next prompt (explicit user action only)."""

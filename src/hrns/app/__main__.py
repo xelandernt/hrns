@@ -1,0 +1,40 @@
+"""Run the Pydantic AI agent over ACP stdio or FastAPI."""
+
+from __future__ import annotations
+
+import argparse
+
+from .acp import run_acp_stdio
+from .agent import build_agent
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="hrns-app")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    acp = sub.add_parser("acp", help="Serve ACP over stdio.")
+    acp.add_argument("--model", help="Pydantic AI model id; defaults to HRNS_MODEL.")
+    acp.add_argument("--cwd", default=".", help="Workspace root.")
+
+    serve = sub.add_parser("serve", help="Serve ACP WebSocket and AG-UI over FastAPI.")
+    serve.add_argument("--model", help="Pydantic AI model id; defaults to HRNS_MODEL.")
+    serve.add_argument("--cwd", default=".", help="Workspace root.")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+
+    args = parser.parse_args()
+    agent = build_agent(args.model, cwd=args.cwd)
+
+    if args.command == "acp":
+        run_acp_stdio(agent)
+        return
+
+    import uvicorn
+
+    from .fastapi import create_app
+
+    uvicorn.run(create_app(agent), host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

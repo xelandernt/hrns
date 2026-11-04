@@ -31,21 +31,6 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from hrns.protocol import (
-    FS_READ_TEXT_FILE,
-    FS_WRITE_TEXT_FILE,
-    TERMINAL,
-    CommandInvokeResponse,
-    ConfigurationSnapshot,
-    QueueSnapshot,
-    QueueUpdate,
-    SessionUpdateLedger,
-    SessionUpdateProtocolError,
-    ToolPresentationSnapshot,
-    maybe_session_update_position,
-    order_session_updates,
-)
-
 from .bus import EventBus
 from .connection import ConnectionLifecycle
 from .constants import (
@@ -53,7 +38,6 @@ from .constants import (
     CONNECT_TIMEOUT,
 )
 from .errors import (
-    ExtensionUnavailable,
     HrnsClientError,
     InteractionRejected,
     InteractionRequired,
@@ -63,23 +47,15 @@ from .errors import (
 from .events import (
     SessionsListed,
 )
-from .extension import (
-    CapabilityListResult,
-    CommandListResult,
-    HrnsExtension,
-    PluginListResult,
-    advertisement_meta,
-    strip_prefix,
+from .interactions import InteractionPolicy, RequireInteractions
+from .io import (
+    FS_READ_TEXT_FILE,
+    FS_WRITE_TEXT_FILE,
+    TERMINAL,
+    ClientIo,
+    ClientIoMode,
+    ClientIoPolicy,
 )
-from .extensions_api import ExtensionsApi
-from .interactions import (
-    AskUserResponse,
-    InteractionPolicy,
-    RequireInteractions,
-    ask_user_payload,
-    parse_ask_user_request,
-)
-from .io import ClientIo, ClientIoMode, ClientIoPolicy
 from .payloads import elicitation_record, normalize_permission
 from .session import SessionLifecycle, SessionProxy
 from .transport import AgentTransport, ConnectionBundle
@@ -118,7 +94,6 @@ class HrnsAcpClient:
 
         self.bus = EventBus()
         self.initialized: Any = None
-        self.extension = HrnsExtension()
         self.capabilities: ClientCapabilities = self._build_capabilities()
         self.agent_name = CLIENT_NAME
         self.agent_version = ""
@@ -126,16 +101,9 @@ class HrnsAcpClient:
         self.auth_methods: list[Any] = []
 
         self._inflight_updates = 0
-        self._session_update_ledgers: dict[str, SessionUpdateLedger[Any]] = {}
         self._session_load_buffers: dict[str, list[Any]] = {}
         self.sessions = SessionLifecycle(self)
         self.turns = TurnService(self)
-        self.extensions = ExtensionsApi(
-            request=self._ext_request,
-            check_local_add=self.sessions.check_local_add,
-            bus=self.bus,
-            answer_questions=self._answer_questions,
-        )
         self.connection_lifecycle = ConnectionLifecycle(self, transport_factory, connect_timeout)
         self._pending_interaction_error: HrnsClientError | None = None
 
@@ -157,10 +125,6 @@ class HrnsAcpClient:
             plan=PlanCapabilities(),
             elicitation=ElicitationCapabilities(form={}, url={}),
         )
-
-    def _initialize_meta(self) -> dict[str, Any]:
-        meta = advertisement_meta(advertise=self.advertise_extension)
-        return meta
 
     @property
     def bundle(self) -> ConnectionBundle:
@@ -196,12 +160,10 @@ class HrnsAcpClient:
         cwd: str,
         *,
         additional_directories: list[str] | None = None,
-        initial_configuration: list[dict[str, Any]] | None = None,
     ) -> SessionProxy:
         return await self.sessions.new_session(
             cwd,
             additional_directories=additional_directories,
-            initial_configuration=initial_configuration,
         )
 
     async def load_session(
@@ -271,135 +233,6 @@ class HrnsAcpClient:
     ) -> tuple[dict[str, Any], ...]:
         return await self.turns.set_config_option(session_id, config_id, value)
 
-    # --------------------------------------------------------------- extension
-
-    async def _ext_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        if not self.extension.supports(method):
-            raise ExtensionUnavailable(method)
-        try:
-            result = await self.connection.ext_method(strip_prefix(method), params)
-        except RequestError as exc:
-            if exc.code == -32601:
-                raise ExtensionUnavailable(method) from exc
-            raise HrnsClientError(describe_rpc_error(method, exc)) from exc
-        if not isinstance(result, dict):
-            raise ProtocolError(f"{method} returned an unexpected response type")
-        return result
-
-    async def hrns_capabilities(
-        self, session_id: str, *, cursor: str | None = None, limit: int | None = None
-    ) -> CapabilityListResult:
-        return await self.extensions.capabilities(session_id, cursor=cursor, limit=limit)
-
-    async def hrns_plugins(
-        self, *, cursor: str | None = None, limit: int | None = None
-    ) -> PluginListResult:
-        return await self.extensions.plugins(cursor=cursor, limit=limit)
-
-    async def hrns_configuration(self, session_id: str) -> ConfigurationSnapshot:
-        return await self.extensions.configuration(session_id)
-
-    async def hrns_update_configuration(
-        self,
-        session_id: str,
-        changes: list[dict[str, Any]] | dict[str, Any],
-        *,
-        expected_revision: int | None = None,
-        request_id: str | None = None,
-    ) -> ConfigurationSnapshot:
-        return await self.extensions.update_configuration(
-            session_id,
-            changes,
-            expected_revision=expected_revision,
-            request_id=request_id,
-        )
-
-    async def hrns_commands(
-        self, session_id: str, *, cursor: str | None = None, limit: int | None = None
-    ) -> CommandListResult:
-        return await self.extensions.commands(session_id, cursor=cursor, limit=limit)
-
-    async def hrns_queue(self, session_id: str) -> QueueSnapshot:
-        return await self.extensions.queue(session_id)
-
-    async def hrns_edit_queue_prompt(
-        self,
-        session_id: str,
-        prompt_id: str,
-        prompt: list[Any],
-        *,
-        expected_revision: int,
-        mutation_id: str | None = None,
-    ) -> QueueUpdate:
-        return await self.extensions.edit_queue_prompt(
-            session_id,
-            prompt_id,
-            prompt,
-            expected_revision=expected_revision,
-            mutation_id=mutation_id,
-        )
-
-    async def hrns_remove_queue_prompt(
-        self,
-        session_id: str,
-        prompt_id: str,
-        *,
-        expected_revision: int,
-        mutation_id: str | None = None,
-    ) -> QueueUpdate:
-        return await self.extensions.remove_queue_prompt(
-            session_id,
-            prompt_id,
-            expected_revision=expected_revision,
-            mutation_id=mutation_id,
-        )
-
-    async def hrns_retry_queue_prompt(
-        self,
-        session_id: str,
-        prompt_id: str,
-        *,
-        mutation_id: str | None = None,
-    ) -> QueueUpdate:
-        return await self.extensions.retry_queue_prompt(
-            session_id,
-            prompt_id,
-            mutation_id=mutation_id,
-        )
-
-    async def hrns_steer(self, session_id: str, text: str) -> bool:
-        """Inject a follow-up into the turn that is currently running."""
-        return await self.extensions.steer(session_id, text)
-
-    async def hrns_invoke_command(
-        self,
-        session_id: str,
-        binding_id: str,
-        command_name: str,
-        *,
-        text: str | None = None,
-        arguments: dict[str, Any] | None = None,
-        expected_revision: int | None = None,
-        request_id: str | None = None,
-    ) -> CommandInvokeResponse:
-        return await self.extensions.invoke_command(
-            session_id,
-            binding_id,
-            command_name,
-            text=text,
-            arguments=arguments,
-            expected_revision=expected_revision,
-            request_id=request_id,
-        )
-
-    async def hrns_cancel_command(self, session_id: str, request_id: str) -> dict[str, Any]:
-        return await self.extensions.cancel_command(session_id, request_id)
-
-    async def hrns_presentations(
-        self, session_id: str, tool_call_ids: list[str]
-    ) -> tuple[ToolPresentationSnapshot, ...]:
-        return await self.extensions.presentations(session_id, tool_call_ids)
-
     async def _raw_request(self, method: str, params: dict[str, Any]) -> Any:
         """Send one request through the SDK connection's public JSON-RPC layer."""
         conn = getattr(self.bundle.conn, "_conn", None)
@@ -429,16 +262,6 @@ class HrnsAcpClient:
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self._inflight_updates += 1
         try:
-            if maybe_session_update_position(update) is not None:
-                ledger = self._session_update_ledgers.setdefault(
-                    session_id,
-                    SessionUpdateLedger(),
-                )
-                try:
-                    if not ledger.accept(update):
-                        return
-                except SessionUpdateProtocolError as exc:
-                    raise ProtocolError(str(exc)) from exc
             buffer = self._session_load_buffers.get(session_id)
             if buffer is not None:
                 buffer.append(update)
@@ -448,26 +271,16 @@ class HrnsAcpClient:
             self._inflight_updates -= 1
 
     def reset_session_updates(self, session_id: str) -> None:
-        """Start a fresh authoritative load for one session."""
-        self._session_update_ledgers.pop(session_id, None)
+        """Start a fresh load for one session."""
+        self._session_load_buffers.pop(session_id, None)
 
     def begin_session_load(self, session_id: str) -> None:
-        """Buffer replay/live overlap until the load response establishes completion."""
-        self.reset_session_updates(session_id)
+        """Buffer replay/live overlap until the load response completes."""
         self._session_load_buffers[session_id] = []
 
     def complete_session_load(self, session_id: str) -> None:
-        """Publish one authoritative, deduplicated replay in server revision order."""
-        buffered = self._session_load_buffers.pop(session_id, [])
-        positioned = [
-            update for update in buffered if maybe_session_update_position(update) is not None
-        ]
-        unpositioned = [
-            update for update in buffered if maybe_session_update_position(update) is None
-        ]
-        for update in order_session_updates(positioned):
-            dispatch_update(self.bus, session_id, update)
-        for update in unpositioned:
+        """Publish the buffered replay in arrival order."""
+        for update in self._session_load_buffers.pop(session_id, []):
             dispatch_update(self.bus, session_id, update)
 
     def abort_session_load(self, session_id: str) -> None:
@@ -510,15 +323,6 @@ class HrnsAcpClient:
 
     async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         return None
-
-    async def _answer_questions(self, params: dict[str, Any]) -> dict[str, Any]:
-        request = parse_ask_user_request(params)
-        try:
-            response = await self.policy.answer_questions(request)
-        except (InteractionRequired, InteractionRejected) as exc:
-            self._pending_interaction_error = exc
-            return ask_user_payload(AskUserResponse(cancelled=True))
-        return ask_user_payload(response)
 
     async def read_text_file(
         self,
@@ -567,7 +371,7 @@ class HrnsAcpClient:
         return None
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> Any:
-        return await self.extensions.handle_ext_method(method, params)
+        raise RequestError.method_not_found(method)
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        await self.extensions.handle_notification(method, params)
+        return None

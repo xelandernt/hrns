@@ -7,27 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
 
-from hrns.protocol import (
-    CommandInvokeResponse,
-    ConfigurationSnapshot,
-    QueueSnapshot,
-    QueueUpdate,
-    ToolPresentationSnapshot,
-)
-
 from .errors import HrnsClientError, ProtocolError, describe_rpc_error
-from .events import (
-    CapabilitiesListed,
-    PluginCommandsListed,
-    PluginListed,
-    SessionsListed,
-)
-from .extension import (
-    CapabilityListResult,
-    CommandListResult,
-    PluginListResult,
-    validate_changes,
-)
+from .events import SessionsListed
 from .payloads import absolute_path
 
 if TYPE_CHECKING:
@@ -83,162 +64,11 @@ class SessionProxy:
         await self.client.set_mode(self.session_id, mode_id)
         self.current_mode_id = mode_id
 
-    async def rename(self, title: str) -> str:
-        """Set a persistent manual name for this session."""
-        from hrns.protocol.models import SessionTitleUpdate
-
-        request = SessionTitleUpdate(session_id=self.session_id, title=title)
-        result = await self.client._ext_request("_hrns/session/rename", request.to_wire())
-        return SessionTitleUpdate.model_validate(result).title
-
-    async def steer(self, text: str) -> bool:
-        """Deliver a follow-up into the running turn; false when it has finished."""
-        return await self.client.hrns_steer(self.session_id, text)
-
-    async def configuration(self) -> ConfigurationSnapshot:
-        snapshot = await self.client.hrns_configuration(self.session_id)
-        return snapshot
-
-    async def update_configuration(
-        self,
-        changes: list[dict[str, Any]] | dict[str, Any],
-        *,
-        expected_revision: int | None = None,
-        request_id: str | None = None,
-    ) -> ConfigurationSnapshot:
-        snapshot = await self.client.hrns_update_configuration(
-            self.session_id,
-            changes,
-            expected_revision=expected_revision,
-            request_id=request_id,
-        )
-        return snapshot
-
-    async def list_capabilities(
-        self, *, cursor: str | None = None, limit: int | None = None
-    ) -> CapabilityListResult:
-        result = await self.client.hrns_capabilities(self.session_id, cursor=cursor, limit=limit)
-        self.client.bus.publish(
-            CapabilitiesListed(
-                session_id=self.session_id,
-                bindings=tuple(
-                    binding.model_dump(mode="json", by_alias=True) for binding in result.bindings
-                ),
-                selected_revision=result.selected_revision,
-                policy_revision=result.policy_revision,
-                next_cursor=result.next_cursor,
-            )
-        )
-        return result
-
-    async def list_plugins(
-        self, *, cursor: str | None = None, limit: int | None = None
-    ) -> PluginListResult:
-        result = await self.client.hrns_plugins(cursor=cursor, limit=limit)
-        self.client.bus.publish(
-            PluginListed(plugins=result.plugins, next_cursor=result.next_cursor)
-        )
-        return result
-
-    async def list_commands(self, *, cursor: str | None = None) -> CommandListResult:
-        result = await self.client.hrns_commands(self.session_id, cursor=cursor)
-        self.client.bus.publish(
-            PluginCommandsListed(
-                session_id=self.session_id,
-                commands=tuple(result.commands),
-                selected_revision=result.selected_revision,
-                supported_operations=tuple(result.supported_operations),
-            )
-        )
-        return result
-
-    async def queue(self) -> QueueSnapshot:
-        return await self.client.hrns_queue(self.session_id)
-
-    async def edit_queued_prompt(
-        self,
-        prompt_id: str,
-        prompt: list[Any],
-        *,
-        expected_revision: int,
-        mutation_id: str | None = None,
-    ) -> QueueUpdate:
-        return await self.client.hrns_edit_queue_prompt(
-            self.session_id,
-            prompt_id,
-            prompt,
-            expected_revision=expected_revision,
-            mutation_id=mutation_id,
-        )
-
-    async def remove_queued_prompt(
-        self,
-        prompt_id: str,
-        *,
-        expected_revision: int,
-        mutation_id: str | None = None,
-    ) -> QueueUpdate:
-        return await self.client.hrns_remove_queue_prompt(
-            self.session_id,
-            prompt_id,
-            expected_revision=expected_revision,
-            mutation_id=mutation_id,
-        )
-
-    async def retry_queued_prompt(
-        self,
-        prompt_id: str,
-        *,
-        mutation_id: str | None = None,
-    ) -> QueueUpdate:
-        return await self.client.hrns_retry_queue_prompt(
-            self.session_id,
-            prompt_id,
-            mutation_id=mutation_id,
-        )
-
-    async def invoke_command(
-        self,
-        binding_id: str,
-        command_name: str,
-        *,
-        text: str | None = None,
-        arguments: dict[str, Any] | None = None,
-        expected_revision: int | None = None,
-        request_id: str | None = None,
-    ) -> CommandInvokeResponse:
-        return await self.client.hrns_invoke_command(
-            self.session_id,
-            binding_id,
-            command_name,
-            text=text,
-            arguments=arguments,
-            expected_revision=expected_revision,
-            request_id=request_id,
-        )
-
-    async def cancel_command(self, request_id: str) -> dict[str, Any]:
-        return await self.client.hrns_cancel_command(self.session_id, request_id)
-
-    async def presentations(self, tool_call_ids: list[str]) -> tuple[ToolPresentationSnapshot, ...]:
-        return await self.client.hrns_presentations(self.session_id, tool_call_ids)
-
     async def close(self) -> None:
         await self.client.close_session(self.session_id)
 
     async def delete(self) -> None:
         await self.client.delete_session(self.session_id)
-
-
-def _deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
-    """Merge metadata dictionaries without losing sibling keys."""
-    result = dict(base)
-    for key, value in extra.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
 
 
 class SessionLifecycle:
@@ -275,49 +105,20 @@ class SessionLifecycle:
                 "start the session inside its workspace instead."
             )
 
-    def check_local_add(self, changes: list[Any]) -> None:
-        client = self.client
-        if not any(getattr(change, "type", None) == "add" for change in changes):
-            return
-        if not client.extension.local_binding_creation:
-            raise HrnsClientError(
-                "The host did not advertise local binding creation; 'add' changes are "
-                "unavailable. Enable an existing offered binding instead."
-            )
-
     async def new_session(
         self,
         cwd: str,
         *,
         additional_directories: list[str] | None = None,
-        initial_configuration: list[dict[str, Any]] | None = None,
     ) -> SessionProxy:
         client = self.client
         absolute_path(cwd, label="working directory")
         self.check_additional_directories(additional_directories)
-        meta: dict[str, Any] = {}
-        if initial_configuration:
-            try:
-                validated = validate_changes(initial_configuration)
-            except ValueError as exc:
-                raise HrnsClientError(f"Invalid initial configuration: {exc}") from exc
-            self.check_local_add(validated)
-            meta = {
-                "hrns": {
-                    "initialConfiguration": [
-                        change.model_dump(mode="json", by_alias=True, exclude_none=True)
-                        for change in validated
-                    ]
-                }
-            }
-        if client.session_new_meta:
-            meta = _deep_merge(meta, client.session_new_meta)
         try:
             response = await client.connection.new_session(
                 cwd=cwd,
                 additional_directories=additional_directories,
                 mcp_servers=[],
-                **(meta or {}),
             )
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/new", exc)) from exc

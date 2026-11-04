@@ -152,7 +152,7 @@ class AskUserQuestion:
 
 @dataclass(frozen=True, slots=True)
 class AskUserRequest:
-    """A normalized ``_hrns/ask_user`` request from the agent."""
+    """A normalized structured question request."""
 
     request_id: str
     questions: tuple[AskUserQuestion, ...] = ()
@@ -193,7 +193,7 @@ def _text(value: Any, what: str) -> str:
 
 
 def parse_ask_user_request(params: Mapping[str, Any]) -> AskUserRequest:
-    """Parse the payload of an agent-initiated ``_hrns/ask_user`` request."""
+    """Parse the payload of an structured question request."""
     payload = _mapping(params, "ask-user parameters")
     raw_questions = payload.get("questions")
     if not isinstance(raw_questions, list) or not raw_questions:

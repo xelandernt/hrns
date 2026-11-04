@@ -1,23 +1,36 @@
 # hrns
 
-Define an agent once. Run it in Python, open it in a terminal, or host it remotely.
+Define one Pydantic AI agent and expose it over both ACP and AG-UI.
 
-hrns combines native Pydantic AI capabilities with policy-controlled sessions,
-an independent ACP terminal, and authenticated remote hosting.
+```python
+from hrns.app import build_agent
 
-## Get started
+agent = build_agent("anthropic:claude-sonnet-5-5")
+```
 
-- [Configure a local agent](LOCAL.md) and connect it to your model.
-- [Use the terminal or Python client](CLIENT_API.md).
-- [Define agents and plugins](RUNTIME_API.md).
-- [Host agents in FastAPI](SERVER.md) or [use the ACP host](ACP.md).
+The backend is deliberately small:
 
-## Understand the system
+- `hrns.app.agent` builds the `Agent` from Pydantic AI capabilities.
+- `hrns.app.acp` wraps it with the Pydantic AI Harness ACP adapter.
+- `hrns.app.agui` wraps it with Pydantic AI's AG-UI adapter.
+- `hrns.app.fastapi` mounts either adapter on FastAPI.
 
-- [Architecture](ARCHITECTURE.md) and [shared contracts](CONTRACTS.md)
-- [Extension protocol](PROTOCOL.md) and [extension authoring](EXTENSIONS.md)
-- [Security model](SECURITY.md) and [verification boundaries](VERIFICATION.md)
+There is no custom session server, plugin registry, policy catalog, wire protocol,
+or extension surface. ACP session persistence and AG-UI thread handling belong to
+the adapters and the application that hosts them. The terminal client speaks
+standard ACP only.
 
-The **API reference** section is generated from the Python source and docstrings.
-For AI tools, the build also provides an [llms.txt index](llms.txt) and
-[combined documentation](llms-full.txt).
+## Run ACP over stdio
+
+```sh
+HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app acp
+```
+
+## Run ACP WebSocket and AG-UI over FastAPI
+
+```sh
+HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app serve --port 8000
+```
+
+- `WS /acp` — ACP over WebSocket
+- `POST /agui` — AG-UI over HTTP/SSE
