@@ -105,15 +105,16 @@ class ModelWorkflow:
             apply,
         )
 
-    async def set_standard_value(self, option_id: str, value: str) -> None:
+    async def set_standard_value(self, option_id: str, value: str) -> bool:
         screen = self.screen
         try:
             options = await screen.session.set_config_option(option_id, value)
         except HrnsClientError as exc:
             await screen._notice(exc.message, "error")
-            return
+            return False
         screen.session.remember(tuple(options))
         screen.chrome.update_chrome()
+        return True
 
     # ------------------------------------------------------------- local model
 
@@ -129,7 +130,7 @@ class ModelWorkflow:
         return LocalSettings(config_file=config) if config else LocalSettings()
 
     async def show_models(self) -> None:
-        """Every configured provider's models, in one list."""
+        """Local provider models, or the remote agent's advertised models."""
         screen = self.screen
         if screen.session.client is not screen.client:
             await screen._notice(
@@ -156,6 +157,146 @@ class ModelWorkflow:
             ModelPickerDialog(settings),
             lambda result: self.models_picked(settings, result),
         )
+
+    async def set_model(self, target: str) -> None:
+        """Set a model directly, without opening the picker or a dialog."""
+        target = target.strip()
+        if not target:
+            await self.show_models()
+            return
+        screen = self.screen
+        if screen.session.client is not screen.client:
+            await screen._notice(
+                "This session is not attached to the reconnected client. Start a new session first.",
+                "warning",
+            )
+            return
+        if screen.target.kind == "local" and is_local_hrns(screen.target.profile):
+            try:
+                settings = self.local_settings()
+            except (ValueError, OSError) as exc:
+                await screen._notice(f"Local settings are unavailable: {exc}", "error")
+                return
+            if not settings.providers:
+                await screen._notice(
+                    "No local providers are configured yet. Add one with /providers.",
+                    "warning",
+                )
+                return
+            try:
+                provider, model = self._resolve_local_model(settings, target)
+            except HrnsClientError as exc:
+                await screen._notice(exc.message, "error")
+                return
+            await self.save_model_selection(settings, provider, model, None, touch_thinking=False)
+            return
+        await self._set_agent_model(target)
+
+    @staticmethod
+    def _resolve_local_model(settings: LocalSettings, target: str) -> tuple[str, str]:
+        """Resolve ``model`` or ``provider:model`` against the local configuration."""
+        provider, separator, model = target.partition(":")
+        if separator:
+            provider = provider.strip()
+            model = model.strip()
+            if not provider or not model:
+                raise HrnsClientError("Use provider:model, for example openai:gpt-5.")
+            if provider not in settings.providers:
+                available = ", ".join(sorted(settings.providers)) or "none"
+                raise HrnsClientError(
+                    f"Unknown local provider '{provider}'. Configured providers: {available}."
+                )
+            return provider, model
+        folded = target.casefold()
+        current = settings.provider
+        if current:
+            for known in settings.models_for(current):
+                if known.casefold() == folded:
+                    return current, known
+        matches = [
+            (name, known)
+            for name in settings.providers
+            for known in settings.models_for(name)
+            if known.casefold() == folded
+        ]
+        unique = list(dict.fromkeys(matches))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            choices = ", ".join(f"{name}:{known}" for name, known in unique)
+            raise HrnsClientError(f"Model '{target}' is ambiguous; use one of: {choices}.")
+        if current:
+            return current, target
+        if len(settings.providers) == 1:
+            return next(iter(settings.providers)), target
+        available = ", ".join(sorted(settings.providers)) or "none"
+        raise HrnsClientError(
+            f"No local provider is selected. Use provider:model. Configured providers: {available}."
+        )
+
+    async def _set_agent_model(self, target: str) -> None:
+        """Set a remote agent's advertised model option, or its mode as a fallback."""
+        screen = self.screen
+        option = model_option(screen.session.config_options)
+        if option is not None:
+            values = option_values(option)
+            if values:
+                try:
+                    value = self._match_choice(values, target, "model")
+                except HrnsClientError as exc:
+                    await screen._notice(exc.message, "error")
+                    return
+                option_id = str(option.get("id") or "model")
+                if await self.set_standard_value(option_id, value):
+                    await screen._notice(f"Model: {value}", "success")
+                return
+        modes = (screen.session.modes or {}).get("availableModes") or []
+        if modes:
+            choices = [
+                {
+                    "value": str(mode.get("id", "")),
+                    "name": str(mode.get("name", "")),
+                    "description": str(mode.get("description") or ""),
+                }
+                for mode in modes
+            ]
+            try:
+                value = self._match_choice(choices, target, "mode")
+            except HrnsClientError as exc:
+                await screen._notice(exc.message, "error")
+                return
+            await self.set_mode(value)
+            return
+        await screen._notice(
+            "This agent advertises neither a model config option nor session modes.", "warning"
+        )
+
+    @staticmethod
+    def _match_choice(choices: list[dict[str, str]], target: str, label: str) -> str:
+        """Match a value or display name, allowing the model part of ``provider:model``."""
+        folded = target.casefold()
+
+        def unique(values: list[str]) -> str | None:
+            deduped = list(dict.fromkeys(values))
+            return deduped[0] if len(deduped) == 1 else None
+
+        for values in (
+            [item["value"] for item in choices if item["value"] == target],
+            [item["value"] for item in choices if item["name"].casefold() == folded],
+            [item["value"] for item in choices if item["value"].casefold() == folded],
+            [
+                item["value"]
+                for item in choices
+                if item["value"].rpartition(":")[2].casefold() == folded
+            ],
+        ):
+            match = unique(values)
+            if match is not None:
+                return match
+        available = ", ".join(item["value"] for item in choices[:10])
+        if len(choices) > 10:
+            available += ", …"
+        raise HrnsClientError(f"Unknown {label} '{target}'. Available: {available}.")
 
     def models_picked(
         self, settings: LocalSettings, result: ModelPick | CustomModelRequest | None
@@ -433,6 +574,7 @@ class ModelWorkflow:
         await screen._reconnect()
 
     async def show_model_dialog(self) -> None:
+        """Show only the model ids the remote agent advertised over ACP."""
         screen = self.screen
         if screen.session.client is not screen.client:
             await screen._notice(
@@ -441,58 +583,30 @@ class ModelWorkflow:
             )
             return
         option = model_option(screen.session.config_options)
-        if option:
-            values = option_values(option)
-            if values:
-
-                def apply(value: str | None) -> None:
-                    if value is not None:
-                        screen._set_standard_value(option.get("id"), value)
-
-                reasoning = effort_option(screen.session.config_options)
-                subtitle = "Model selection is a standard ACP session config option."
-                if reasoning:
-                    subtitle = (
-                        "Model selection is a standard ACP session config option. "
-                        f"Current effort: {config_option_value(reasoning)}."
-                    )
-                screen.app.push_screen(
-                    ChoiceDialog(
-                        "Model",
-                        subtitle,
-                        values,
-                        current=str(option.get("currentValue")),
-                    ),
-                    lambda value: apply(value),
-                )
-                return
-        modes = (screen.session.modes or {}).get("availableModes") or []
-        if modes:
-            choices = [
-                {
-                    "value": str(mode.get("id", "")),
-                    "name": str(mode.get("name", "")),
-                    "description": str(mode.get("description") or ""),
-                }
-                for mode in modes
-            ]
-
-            def apply_mode(value: str | None) -> None:
-                if value:
-                    screen._set_mode(value)
-
-            screen.app.push_screen(
-                ChoiceDialog(
-                    "Mode",
-                    "The agent advertises session modes instead of a model option.",
-                    choices,
-                    current=screen.session.current_mode_id,
-                ),
-                lambda value: apply_mode(value),
-            )
+        values = option_values(option) if option is not None else []
+        if not values:
+            await screen._notice("This agent does not advertise any models.", "warning")
             return
-        await screen._notice(
-            "This agent advertises neither a model config option nor session modes.", "warning"
+
+        def apply(value: str | None) -> None:
+            if value is not None and option is not None:
+                screen._set_standard_value(option.get("id"), value)
+
+        reasoning = effort_option(screen.session.config_options)
+        subtitle = "Model selection is a standard ACP session config option."
+        if reasoning:
+            subtitle = (
+                "Model selection is a standard ACP session config option. "
+                f"Current effort: {config_option_value(reasoning)}."
+            )
+        screen.app.push_screen(
+            ChoiceDialog(
+                "Model",
+                subtitle,
+                values,
+                current=str(option.get("currentValue")) if option is not None else None,
+            ),
+            apply,
         )
 
     async def set_mode(self, mode_id: str) -> None:

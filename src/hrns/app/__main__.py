@@ -18,7 +18,7 @@ def main() -> None:
     acp.add_argument("--model", help="Pydantic AI model id; defaults to HRNS_MODEL.")
     acp.add_argument("--cwd", default=".", help="Workspace root.")
 
-    serve = sub.add_parser("serve", help="Serve ACP WebSocket and AG-UI over FastAPI.")
+    serve = sub.add_parser("serve", help="Serve ACP over WebSocket and FastAPI.")
     serve.add_argument("--model", help="Pydantic AI model id; defaults to HRNS_MODEL.")
     serve.add_argument("--cwd", default=".", help="Workspace root.")
     serve.add_argument("--host", default="127.0.0.1")

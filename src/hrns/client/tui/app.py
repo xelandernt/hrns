@@ -793,6 +793,24 @@ class HrnsApp(App[int]):
         # pop_screen halfway and leaves the app without a working focus chain.
         self.run_worker(self._leave_chat(), group="connect", exclusive=True)
 
+    async def switch_agent(self, screen: ChatScreen, target: ConnectionTarget) -> None:
+        """Leave the current conversation and connect to *target* directly."""
+        if screen.busy:
+            await screen._notice("Stop the running turn before switching agents.", "warning")
+            return
+        self.run_worker(self._switch_to(target), group="connect", exclusive=True)
+
+    async def _switch_to(self, target: ConnectionTarget) -> None:
+        await self.disconnect_current()
+        with contextlib.suppress(Exception):
+            await self.pop_screen()
+        try:
+            await self.connect_target(target)
+        except HrnsClientError as exc:
+            self.notify(f"Connection failed: {exc.message}", severity="error")
+        except Exception as exc:  # transport/protocol surprises must stay recoverable
+            self.notify(f"Connection failed: {exc}", severity="error")
+
     async def _leave_chat(self) -> None:
         await self.disconnect_current()
         with contextlib.suppress(Exception):

@@ -1,4 +1,4 @@
-"""Mount ACP and AG-UI on one FastAPI application."""
+"""Mount ACP on a FastAPI application."""
 
 from __future__ import annotations
 
@@ -9,21 +9,19 @@ from contextlib import asynccontextmanager, suppress
 from typing import TypeAlias, TypeVar
 
 import acp
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic_ai.agent import AbstractAgent
-from starlette.requests import Request
-from starlette.responses import Response
+from pydantic_ai.models import Model
 
-from .acp import PydanticAIACPAgent, create_acp_agent
+from .acp import ACPModels, PydanticAIACPAgent, SessionStore, create_acp_agent
 from .agent import build_agent
-from .agui import PydanticAIAGUIAgent
 
 __all__ = [
     "AgentFactory",
     "Authenticator",
+    "SessionStoreFactory",
     "create_app",
     "mount_acp",
-    "mount_agui",
 ]
 
 Principal = TypeVar("Principal")
@@ -36,11 +34,18 @@ The factory always takes exactly one argument: the authenticated principal, or
 ``None`` when no authenticator is configured.
 """
 
-Authenticator: TypeAlias = Callable[[WebSocket | Request], Awaitable[Principal | None]]
-"""Resolve the principal for an incoming connection or request.
+Authenticator: TypeAlias = Callable[[WebSocket], Awaitable[Principal | None]]
+"""Resolve the principal for an incoming connection.
 
 Return the principal to admit it, or ``None`` to reject it. Raise to report a
 server-side failure; the exception is never turned into an accepted connection.
+"""
+
+SessionStoreFactory: TypeAlias = Callable[[Principal | None], SessionStore]
+"""Choose the ACP session store for one connection.
+
+Return the store that belongs to the principal. Sessions saved in one store are
+invisible to every other principal.
 """
 
 
@@ -126,7 +131,7 @@ async def _serve_acp(
 
 
 async def _authorize(
-    connection: WebSocket | Request,
+    connection: WebSocket,
     authenticate: Authenticator[Principal] | None,
 ) -> tuple[bool, Principal | None]:
     """Run the authenticator and report whether the peer may proceed."""
@@ -142,12 +147,23 @@ def mount_acp(
     *,
     path: str = "/acp",
     authenticate: Authenticator[Principal] | None = None,
+    session_store_factory: SessionStoreFactory[Principal] | None = None,
+    models: ACPModels | None = None,
+    model_resolver: Callable[[str], Model | str] | None = None,
 ) -> None:
     """Expose an ACP agent over a WebSocket endpoint.
 
     Authentication runs before the WebSocket is accepted. A rejected peer gets
     close code ``1008`` and its factory is never called. Each accepted WebSocket
-    gets its own adapter and session namespace.
+    gets its own adapter.
+
+    Pass ``session_store_factory`` to keep sessions per principal: the store it
+    returns for one connection is the only store that connection can load from.
+    Without it, every connection starts with a fresh in-memory store.
+
+    Pass ``models`` (model ids, or ``"all"``) to advertise a switcher through
+    ACP's ``model`` session config option. The first entry is each session's
+    default. Without ``models`` clients cannot change the agent's model over ACP.
     """
 
     @app.websocket(path)
@@ -161,30 +177,14 @@ def mount_acp(
         if not admitted:
             await websocket.close(code=1008)
             return
-        await _serve_acp(websocket, create_acp_agent(agent_factory(principal)))
-
-
-def mount_agui(
-    app: FastAPI,
-    agent_factory: AgentFactory[Principal],
-    *,
-    path: str = "/agui",
-    authenticate: Authenticator[Principal] | None = None,
-) -> None:
-    """Expose an agent over an AG-UI POST endpoint.
-
-    Authentication runs before the agent is built. A rejected request gets
-    ``401`` and its factory is never called. Each accepted request builds one
-    agent and dispatches one AG-UI run.
-    """
-
-    @app.post(path)
-    async def agui_endpoint(request: Request) -> Response:
-        admitted, principal = await _authorize(request, authenticate)
-        if not admitted:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        adapter = PydanticAIAGUIAgent(agent_factory(principal))
-        return await adapter.dispatch_request(request)
+        store = session_store_factory(principal) if session_store_factory is not None else None
+        adapter = create_acp_agent(
+            agent_factory(principal),
+            session_store=store,
+            models=models,
+            model_resolver=model_resolver,
+        )
+        await _serve_acp(websocket, adapter)
 
 
 def _default_agent_factory(_principal: object) -> AbstractAgent[None, str]:
@@ -195,15 +195,26 @@ def create_app(
     agent_factory: AgentFactory[Principal] | None = None,
     *,
     authenticate: Authenticator[Principal] | None = None,
+    session_store_factory: SessionStoreFactory[Principal] | None = None,
+    models: ACPModels | None = None,
+    model_resolver: Callable[[str], Model | str] | None = None,
 ) -> FastAPI:
-    """Create the FastAPI app with both protocol adapters mounted.
+    """Create the FastAPI app with the ACP adapter mounted.
 
     Without an ``agent_factory`` the packaged :func:`build_agent` default is
     used. Without an ``authenticate`` callback every peer is admitted and the
-    factory receives ``None`` as its principal.
+    factory receives ``None`` as its principal. ``session_store_factory`` is
+    forwarded to the ACP mount. ``models`` and ``model_resolver`` advertise
+    ACP model switching.
     """
     app = FastAPI(title="hrns")
     factory: AgentFactory[Principal] = agent_factory or _default_agent_factory
-    mount_acp(app, factory, authenticate=authenticate)
-    mount_agui(app, factory, authenticate=authenticate)
+    mount_acp(
+        app,
+        factory,
+        authenticate=authenticate,
+        session_store_factory=session_store_factory,
+        models=models,
+        model_resolver=model_resolver,
+    )
     return app
