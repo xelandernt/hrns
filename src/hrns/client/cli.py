@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any, Literal
 
 from cyclopts import App, CycloptsError, Parameter
@@ -71,8 +71,8 @@ ClientIoOption = Annotated[
 ]
 
 
-def _namespace(**values: object) -> argparse.Namespace:
-    return argparse.Namespace(**values)
+def _namespace(**values: object) -> SimpleNamespace:
+    return SimpleNamespace(**values)
 
 
 def _profile_values(profiles: list[str] | None) -> list[str]:
@@ -411,11 +411,11 @@ def build_parser() -> App:
 # ------------------------------------------------------------------ helpers
 
 
-def _profiles(args: argparse.Namespace) -> Profiles:
+def _profiles(args: SimpleNamespace) -> Profiles:
     return Profiles.load(extra_files=[Path(item) for item in getattr(args, "profiles", []) or []])
 
 
-def _profile_from_args(profiles: Profiles, args: argparse.Namespace) -> Profile | None:
+def _profile_from_args(profiles: Profiles, args: SimpleNamespace) -> Profile | None:
     """Pick the saved profile named by --profile, or the default."""
     name = getattr(args, "profile", None)
     if name:
@@ -460,7 +460,7 @@ def _stdio_profile(name: str, command: list[str], cwd: str | None) -> Profile:
 
 async def _resolve_target(
     profiles: Profiles,
-    args: argparse.Namespace,
+    args: SimpleNamespace,
     *,
     remainder: Sequence[str] = (),
     split_prompt: bool = True,
@@ -546,7 +546,7 @@ def _remote_target(profile: Profile, cwd_override: str | None = None) -> Connect
     )
 
 
-def _answers(args: argparse.Namespace) -> dict[str, Any]:
+def _answers(args: SimpleNamespace) -> dict[str, Any]:
     answers: dict[str, Any] = {}
     for item in getattr(args, "answer", []) or []:
         if "=" not in item:
@@ -560,7 +560,7 @@ def _answers(args: argparse.Namespace) -> dict[str, Any]:
     return answers
 
 
-async def _command_run(args: argparse.Namespace) -> int:
+async def _command_run(args: SimpleNamespace) -> int:
     profiles = _profiles(args)
     if args.stdio:
         command, prompt_words = _split_stdio_remainder(args.remainder)
@@ -606,7 +606,7 @@ async def _command_run(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
-def _command_profiles(args: argparse.Namespace) -> int:
+def _command_profiles(args: SimpleNamespace) -> int:
     profiles = _profiles(args)
     if args.profiles_command == "list":
         if not profiles.profiles:
@@ -654,7 +654,7 @@ def _command_profiles(args: argparse.Namespace) -> int:
     return EXIT_USAGE
 
 
-async def _command_login(args: argparse.Namespace) -> int:
+async def _command_login(args: SimpleNamespace) -> int:
     target = login_target(args.provider, args.local_config)
     print(f"Signing in to {target.provider} (account {target.account})", flush=True)
 
@@ -680,7 +680,7 @@ async def _command_login(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _command_connect(args: argparse.Namespace) -> int:
+def _command_connect(args: SimpleNamespace) -> int:
     from .tui.app import run_terminal
 
     profiles = _profiles(args)
@@ -711,7 +711,7 @@ def _command_connect(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------- output
 
 
-def _mcp_config(args: argparse.Namespace) -> tuple[LocalSettings, Path]:
+def _mcp_config(args: SimpleNamespace) -> tuple[LocalSettings, Path]:
     """Load the local settings that own MCP servers, allowing a new file to be created."""
     explicit = getattr(args, "local_config", None)
     if explicit is not None:
@@ -734,7 +734,7 @@ def _mcp_pairs(values: Sequence[str], flag: str) -> dict[str, str]:
     return pairs
 
 
-def _mcp_server(name: str, args: argparse.Namespace) -> McpServerSettings:
+def _mcp_server(name: str, args: SimpleNamespace) -> McpServerSettings:
     if not MCP_NAME_PATTERN.fullmatch(name):
         raise HrnsClientError(
             f"Invalid MCP server name '{name}': use letters, digits, '_' or '-' "
@@ -807,7 +807,7 @@ def _mcp_server_or_error(settings: LocalSettings, name: str) -> McpServerSetting
         raise HrnsClientError(f"No MCP server named '{name}'. Configured: {known}.") from None
 
 
-def _mcp_list(args: argparse.Namespace) -> int:
+def _mcp_list(args: SimpleNamespace) -> int:
     settings, path = _mcp_config(args)
     servers = settings.mcp.servers
     if args.json:
@@ -846,7 +846,7 @@ def _mcp_list(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _mcp_get(args: argparse.Namespace) -> int:
+def _mcp_get(args: SimpleNamespace) -> int:
     settings, path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     if args.json:
@@ -874,7 +874,7 @@ def _mcp_get(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-async def _mcp_auth(args: argparse.Namespace) -> int:
+async def _mcp_auth(args: SimpleNamespace) -> int:
     settings, _path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     if not server.is_http:
@@ -896,7 +896,7 @@ async def _mcp_auth(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-async def _mcp_logout(args: argparse.Namespace) -> int:
+async def _mcp_logout(args: SimpleNamespace) -> int:
     settings, _path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     store = build_token_store(settings.mcp.token_store, settings.mcp.token_store_path)
@@ -908,7 +908,7 @@ async def _mcp_logout(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _mcp_add(args: argparse.Namespace) -> int:
+def _mcp_add(args: SimpleNamespace) -> int:
     settings, path = _mcp_config(args)
     if args.name in settings.mcp.servers and not args.force:
         raise HrnsClientError(
@@ -923,7 +923,7 @@ def _mcp_add(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _mcp_remove(args: argparse.Namespace) -> int:
+def _mcp_remove(args: SimpleNamespace) -> int:
     settings, path = _mcp_config(args)
     _mcp_server_or_error(settings, args.name)
     del settings.mcp.servers[args.name]
@@ -932,7 +932,7 @@ def _mcp_remove(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _mcp_set_enabled(args: argparse.Namespace, enabled: bool) -> int:
+def _mcp_set_enabled(args: SimpleNamespace, enabled: bool) -> int:
     settings, path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     server.enabled = enabled
