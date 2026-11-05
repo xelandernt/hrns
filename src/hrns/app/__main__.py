@@ -2,42 +2,51 @@
 
 from __future__ import annotations
 
-import argparse
+from typing import Annotated
 
+from cyclopts import App, Parameter
 from pydantic_ai.agent import AbstractAgent
 
 from .acp import run_acp_stdio
 from .agent import build_agent
 
+model_option = Parameter(help="Pydantic AI model id; defaults to HRNS_MODEL.")
+cwd_option = Parameter(help="Workspace root.")
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="hrns-app")
-    sub = parser.add_subparsers(dest="command", required=True)
+app = App(name="hrns-app", help="Run the Pydantic AI coding agent over ACP.")
 
-    acp = sub.add_parser("acp", help="Serve ACP over stdio.")
-    acp.add_argument("--model", help="Pydantic AI model id; defaults to HRNS_MODEL.")
-    acp.add_argument("--cwd", default=".", help="Workspace root.")
 
-    serve = sub.add_parser("serve", help="Serve ACP over WebSocket and FastAPI.")
-    serve.add_argument("--model", help="Pydantic AI model id; defaults to HRNS_MODEL.")
-    serve.add_argument("--cwd", default=".", help="Workspace root.")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8000)
+@app.command
+def acp(
+    *,
+    model: Annotated[str | None, model_option] = None,
+    cwd: Annotated[str, cwd_option] = ".",
+) -> None:
+    """Serve ACP over stdio."""
+    run_acp_stdio(build_agent(model, cwd=cwd))
 
-    args = parser.parse_args()
 
-    if args.command == "acp":
-        run_acp_stdio(build_agent(args.model, cwd=args.cwd))
-        return
-
+@app.command
+def serve(
+    *,
+    model: Annotated[str | None, model_option] = None,
+    cwd: Annotated[str, cwd_option] = ".",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> None:
+    """Serve ACP over WebSocket and FastAPI."""
     import uvicorn
 
     from .fastapi import create_app
 
     def agent_factory(_principal: object) -> AbstractAgent[None, str]:
-        return build_agent(args.model, cwd=args.cwd)
+        return build_agent(model, cwd=cwd)
 
-    uvicorn.run(create_app(agent_factory), host=args.host, port=args.port)
+    uvicorn.run(create_app(agent_factory), host=host, port=port)
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":

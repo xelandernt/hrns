@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Annotated
 
+from cyclopts import App, Parameter
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import Model, infer_model, known_model_names
 from pydantic_ai.providers import infer_provider_class
@@ -83,37 +84,36 @@ def _print_catalog(settings: LocalSettings) -> None:
     print(json.dumps({"providers": providers}, indent=2))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="hrns-local")
-    parser.add_argument("--config", type=Path, help="Path to hrns.local.toml.")
-    parser.add_argument(
-        "--env-only",
-        action="store_true",
-        help="Ignore the local config file and use environment variables only.",
-    )
-    parser.add_argument("--catalog", action="store_true", help="Print the provider/model catalog.")
-    parser.add_argument("--login", nargs="?", const="", help="Account login (not supported).")
-    parser.add_argument("--cwd", default=".", help="Workspace root.")
-    args = parser.parse_args()
-
+def run(
+    *,
+    config: Annotated[Path | None, Parameter(help="Path to hrns.local.toml.")] = None,
+    env_only: Annotated[
+        bool,
+        Parameter(help="Ignore the local config file and use environment variables only."),
+    ] = False,
+    catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
+    login: Annotated[bool, Parameter(help="Account login (not supported).")] = False,
+    cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+) -> None:
+    """Launch the configured local model as an ACP stdio server."""
     settings = (
         LocalSettings(config_file=None)
-        if args.env_only
-        else LocalSettings(config_file=args.config)
-        if args.config is not None
+        if env_only
+        else LocalSettings(config_file=config)
+        if config is not None
         else LocalSettings()
     )
 
-    if args.catalog:
+    if catalog:
         _print_catalog(settings)
         return
-    if args.login is not None:
+    if login:
         raise SystemExit("Account login is not supported by the minimal backend.")
 
     model = configured_model(settings)
     agent = build_agent(
         model,
-        cwd=args.cwd,
+        cwd=cwd,
         model_settings=ModelSettings(**settings.model_settings),
     )
     # Advertise every configured model and resolve the client's choice through
@@ -126,6 +126,17 @@ def main() -> None:
         models=models,
         model_resolver=lambda target: configured_model(settings, target),
     )
+
+
+app = App(
+    name="hrns-local",
+    help="Launch the configured local model as an ACP stdio server.",
+    default_command=run,
+)
+
+
+def main() -> None:
+    app()
 
 
 if __name__ == "__main__":

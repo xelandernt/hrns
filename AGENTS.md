@@ -28,3 +28,6 @@ These documentations should be consulted if relevant:
 - https://github.com/anomalyco/opencode
 - https://github.com/openai/codex
 
+## Architecture
+
+Store architecture and decision in `ARCHITECTURE.md`.
