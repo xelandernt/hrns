@@ -63,10 +63,21 @@ class ConnectionLifecycle:
         self._closing = False
         transport = self._transport_factory()
         self._transport = transport
+        # One budget for the whole handshake: open *and* ACP initialize. Otherwise a
+        # server that accepts the socket but never speaks ACP costs two full timeouts.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.connect_timeout
+
+        def remaining() -> float:
+            left = deadline - loop.time()
+            if left <= 0:
+                raise asyncio.TimeoutError
+            return left
+
         try:
             bundle = await asyncio.wait_for(
                 transport.open(client, on_loss=self._on_transport_loss),
-                timeout=self.connect_timeout,
+                timeout=remaining(),
             )
         except asyncio.TimeoutError as exc:
             self._publish_connection("error", f"Timed out connecting to {transport.describe()}")
@@ -88,12 +99,21 @@ class ConnectionLifecycle:
                         name=CLIENT_NAME, title=CLIENT_TITLE, version=CLIENT_VERSION
                     ),
                 ),
-                timeout=self.connect_timeout,
+                timeout=remaining(),
             )
         except RequestError as exc:
             await self._abort(bundle)
             self._publish_connection("error", f"Agent rejected initialize: {exc}")
             raise ProtocolError(f"The agent rejected ACP initialize: {exc}") from exc
+        except asyncio.TimeoutError as exc:
+            await self._abort(bundle)
+            detail = (
+                f"{transport.describe()} accepted the connection but did not answer ACP "
+                f"initialize within {self.connect_timeout:g}s. Check that the URL points "
+                "at an ACP endpoint, not a generic WebSocket server."
+            )
+            self._publish_connection("error", detail)
+            raise TransportError(detail) from exc
         except (ConnectionError, asyncio.IncompleteReadError) as exc:
             tail = await self._bundle_stderr_tail()
             await self._abort(bundle)

@@ -10,6 +10,7 @@ own projects and are not repeated here.
 | [Coder](#coder)                                         | `hrns.capabilities.Coder`                | The harness coder, plus the `apply_changes` batch tool        |
 | [`apply_changes`](#apply_changes)                       | `hrns.capabilities.changes.ApplyChanges` | One approved batch of many writes and edits                   |
 | [Todo](#todo)                                           | `hrns.capabilities.Todo`                 | `read_todos` / `write_todos`, and a typed `TodoUpdated` event |
+| [Ask user](#ask-user)                                   | `hrns.capabilities.AskUser`              | `ask_user_question`, rendered as an ACP form elicitation       |
 | [Approval](#approval)                                   | `hrns.app.approvals.require_approval`    | Marks every non-read-only tool `unapproved`                   |
 | [Where the rest comes from](#where-the-rest-comes-from) | `hrns.app.agent.build_agent`             | The default composition of all of the above                   |
 
@@ -154,6 +155,42 @@ State is a `TodoStore`. A standalone run gets a fresh one each turn unless you p
 `store=`; the ACP adapter binds its own per-session store, so todos survive prompts and
 `session/load`, and each ACP session gets ACP plan updates instead of shared state.
 
+## Ask user
+
+`hrns.capabilities.AskUser` subclasses the harness capability and changes one
+default: the tool is deferred instead of answered in-process. That is the only mode
+that works when the human sits behind a protocol.
+
+```python
+from hrns.capabilities import AskUser
+
+agent = Agent("anthropic:claude-sonnet-5-5", capabilities=[AskUser()])
+```
+
+`ask_user_question` takes one to ten questions. Each has a short `header` (the tab
+label, unique within one call), the `question` text, two to six `options`, and a
+`multi_select` flag. The harness validates the shape, including printable strings
+and unique option labels.
+
+Deferred mode means the tool raises `CallDeferred`, and `PydanticAIACPAgent`
+answers the deferred call by sending `elicitation/create` when the client advertises
+form elicitation. One question becomes one form property, plus a companion text
+field for a typed answer. The schema is standard ACP; a single `hrns.ask_user` key
+in `_meta` marks it so the hrns TUI renders tabs and a custom-answer field, while
+any other client still gets a usable form.
+
+The model receives `{header: [labels...]}` — a one-item list holding the custom
+answer when the human typed one. A decline, a cancel, an empty form, or a client
+without form support all return a plain string telling the model to proceed with a
+reasonable choice and say which one it made. None of them is a tool error.
+
+`ask_user_question` is read-only: the question is the interaction, so it is never
+wrapped in a second permission prompt.
+
+Pass `answerer=...` only for a run with a local human, such as a CLI or a test.
+Doing that while mounted over ACP would answer on the server and the client would
+never see the question.
+
 ## Approval
 
 ```python
@@ -170,7 +207,9 @@ client sees.
 The default read-only set is:
 
 ```python
-READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "grep", "read_todos", "write_todos"})
+READ_ONLY_TOOLS = frozenset(
+    {"read_file", "list_files", "grep", "read_todos", "write_todos", "ask_user_question"}
+)
 ```
 
 Pass your own set to change it — this is how you allow additional tools without a prompt:
@@ -184,7 +223,8 @@ every tool unapproved-free, which is only appropriate for a sandboxed deployment
 
 ## Where the rest comes from
 
-`build_agent` composes, in order: `LocalWorkspace(cwd)`, `Coder()`, `Todo()`, and
-`require_approval()` (unless `approval=False`). `LocalWorkspace` roots the tools at `cwd`;
-`Coder` contributes the harness capabilities plus `apply_changes`. Adding another
-capability is a list entry in `hrns/app/agent.py` — there is no registry to update.
+`build_agent` composes, in order: `LocalWorkspace(cwd)`, `Coder()`, `Todo()`,
+`AskUser()`, and `require_approval()` (unless `approval=False`).
+`LocalWorkspace` roots the tools at `cwd`; `Coder` contributes the harness capabilities
+plus `apply_changes`. Adding another capability is a list entry in `hrns/app/agent.py` —
+there is no registry to update.

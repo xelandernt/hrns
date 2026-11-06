@@ -195,3 +195,37 @@ the example's `InMemorySessionStore` is process-local.
 policy permits both todo tools because they only change planning state. Agents
 without the capability receive no todo tools. The client displays the list;
 the agent controls it.
+
+## Ask user
+
+`hrns.capabilities.AskUser` wraps the harness capability and adds one default: the
+tool is `ask_user_question` and every call is deferred. It takes one to ten
+questions, each with a short header, the question text, two to six options, and a
+`multi_select` flag. The harness owns the schema and validation; this repository
+owns the transport.
+
+`build_agent` uses `AskUser()`; the subclass defaults `answerer=None`, so every call
+is deferred: the tool raises `CallDeferred` and the run ends with
+`DeferredToolRequests.calls`.
+`PydanticAIACPAgent._resolve_calls` handles that batch in the same turn loop it
+already uses for approvals. For an `ask_user_question` call it rebuilds the request
+with `AskUserRequest.from_tool_call`, sends ACP form elicitation
+(`elicitation/create`) only when the client advertised `elicitation.form`, and feeds
+the answer back through `DeferredToolResults.calls`. `ask_user_result` validates the
+response against the request, so a client cannot answer a question that was not
+asked or pick a label that was not offered.
+
+One question maps to one form property: a single-select is a string with `oneOf`,
+a multi-select is an array with titled items, and a typed answer is a companion
+string field (`q0_text`). The schema is standard ACP; the only addition is the
+`hrns.ask_user` key in `_meta`, a marker that tells the hrns client to render its
+tabbed `AskUserBar`. A client that ignores it still sees a usable form, and the
+questions themselves are recovered from the titles, descriptions and option lists
+in the schema. `ASK_USER_META` and the `qN`/`qN_text` field names live in
+`hrns.shared` because both the adapter and the client must agree on them; the
+capability itself is not reimplemented here.
+
+A decline, a cancel, an empty form, or a client without form support returns a
+plain string telling the model to proceed and state its assumption. None of them is
+a tool error. `ask_user_question` is in `READ_ONLY_TOOLS`: the question is the
+interaction, not a side effect, so it is never wrapped in a permission prompt.

@@ -35,7 +35,7 @@ from hrns.app.acp import (
     ResolvedModel,
 )
 from hrns.app.fastapi import mount_acp
-from hrns.capabilities import Todo
+from hrns.capabilities import AskUser, Todo
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
@@ -114,8 +114,9 @@ async def authenticate(connection: WebSocket) -> str | None:
 
 def agent_factory(principal: str | None) -> AbstractAgent[None, str]:
     # Use ``principal`` to bind identity into the agent's tools or deps.
-    # Todo emits native ACP plan updates for the client's Todos panel.
-    return Agent(capabilities=[Todo()])
+    # Todo emits native ACP plan updates for the client's Todos panel; AskUser
+    # travels as a form elicitation whenever the client advertises one.
+    return Agent(capabilities=[Todo(), AskUser()])
 
 
 # ACP session stores keyed by principal. A user reconnecting with the same

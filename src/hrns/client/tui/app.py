@@ -15,7 +15,7 @@ from textual.theme import Theme
 from hrns.config import HrnsConfig, TuiSettings
 
 from ..client import HrnsAcpClient, SessionProxy
-from ..errors import HrnsClientError, InteractionRequired
+from ..errors import HrnsClientError, InteractionRequired, TransportError
 from ..interactions import (
     AskUserRequest,
     AskUserResponse,
@@ -730,7 +730,15 @@ class HrnsApp(App[int]):
                 session = SessionProxy(client, self.initial_session, target.cwd)
                 initial_load = True
             else:
-                session = await client.new_session(target.cwd)
+                try:
+                    session = await asyncio.wait_for(
+                        client.new_session(target.cwd), timeout=client.connect_timeout
+                    )
+                except TimeoutError as exc:
+                    raise TransportError(
+                        f"{target.location_text()} did not answer session/new within "
+                        f"{client.connect_timeout:g}s."
+                    ) from exc
             self.session = session
             self.config.remember_connection(self.config.connection_identity(target.profile))
             screen = ChatScreen(

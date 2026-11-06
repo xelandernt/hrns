@@ -8,7 +8,7 @@ import ipaddress
 import os
 import socket
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -20,7 +20,13 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI, W
 
 from hrns.config.credentials import keyring_secret
 
-from .constants import MAX_MESSAGE_BYTES, WS_PING_INTERVAL, WS_PING_TIMEOUT, WS_WRITE_LIMIT
+from .constants import (
+    MAX_MESSAGE_BYTES,
+    WS_CLOSE_TIMEOUT,
+    WS_PING_INTERVAL,
+    WS_PING_TIMEOUT,
+    WS_WRITE_LIMIT,
+)
 from .errors import ProtocolError, SecretMissing, TransportError
 
 __all__ = [
@@ -85,7 +91,7 @@ class ConnectionBundle:
         writer: asyncio.StreamWriter,
         handle: Any,
         conn: ClientSideConnection,
-        reader_handle: Any = None,
+        reader_handle: Awaitable[Any] | Callable[[], Awaitable[Any]] | None = None,
         closer: Callable[[], Any] | None = None,
         name: str = "agent",
     ) -> None:
@@ -99,19 +105,34 @@ class ConnectionBundle:
         self.closed = False
 
     async def close(self) -> None:
+        """Tear the connection down, even when the calling task is being cancelled.
+
+        Cleanup runs in its own task: a cancelled connect or a cancelled reconnect worker
+        must not leave the reader or the websocket bridge half-closed. A leftover coroutine
+        object is also how the terminal ends up printing "coroutine ... was never awaited".
+        """
         if self.closed:
             return
         self.closed = True
-        with contextlib.suppress(Exception):
+        cleanup = asyncio.ensure_future(self._cleanup())
+        # Shielded so a cancelled caller cannot abort teardown. The cancellation still
+        # propagates from this await; `cleanup` keeps running to completion.
+        await asyncio.shield(cleanup)
+
+    async def _cleanup(self) -> None:
+        with contextlib.suppress(Exception, asyncio.CancelledError):
             await self.conn.close()
         if self._closer is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 result = self._closer()
                 if asyncio.iscoroutine(result):
                     await result
-        if self.reader_handle is not None:
-            with contextlib.suppress(Exception):
-                await self.reader_handle
+        handle = self.reader_handle
+        if handle is not None:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                if callable(handle):
+                    handle = handle()
+                await handle
 
 
 class AgentTransport(Protocol):
@@ -347,6 +368,7 @@ class WebSocketAgentTransport(AgentTransport):
                     max_size=MAX_MESSAGE_BYTES,
                     ping_interval=WS_PING_INTERVAL,
                     ping_timeout=WS_PING_TIMEOUT,
+                    close_timeout=WS_CLOSE_TIMEOUT,
                     write_limit=WS_WRITE_LIMIT,
                     additional_headers=self._auth_headers(),
                     open_timeout=self.connect_timeout,
@@ -466,7 +488,7 @@ class WebSocketAgentTransport(AgentTransport):
             writer=local_writer,
             handle=ws,
             conn=conn,
-            reader_handle=closed.wait(),
+            reader_handle=closed.wait,
             closer=close_transport,
             name=self.name,
         )

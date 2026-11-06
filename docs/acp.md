@@ -94,7 +94,8 @@ methods it may send, and when.
 | `fs/write_text_file` | Same, when the client also advertises `fs.writeTextFile`; otherwise writes fall back to a local `FileSystem` bounded by the session `cwd` |
 | `terminal/create`, `terminal/wait_for_exit`, `terminal/output`, `terminal/kill`, `terminal/release` | Only when the agent uses `AcpTerminalToolset` / `acp_terminal`, and the client advertises terminal support |
 | `mcp/connect`, `mcp/message`, `mcp/disconnect` | Never; there is no MCP-over-ACP binding |
-| `elicitation/create`, `elicitation/complete` | Never |
+| `elicitation/create` | When the model calls `ask_user_question` and the client advertised `elicitation.form`; one form per call, session-scoped to the tool call |
+| `elicitation/complete` | Never; `ask_user_question` elicitation is answered synchronously |
 
 The ACP-backed filesystem and terminal are opt-in through `session_config` on
 `PydanticAIACPAgent`; the default `build_agent` uses the harness `FileSystem` and `Shell`
@@ -126,8 +127,10 @@ escapes as an internal error, so raise those two for anything a client can fix.
 
 ## Known gaps
 
-- No MCP-over-ACP, next-edit suggestions, session fork/resume, session modes, or
-  elicitation. None of them are advertised.
+- No MCP-over-ACP, next-edit suggestions, session fork/resume, or session modes. None of
+  them are advertised.
+- Form elicitation is used only for `ask_user_question`. URL elicitation is never sent, and
+  a client without form support gets a plain "proceed without an answer" result.
 - One connection per adapter. `session/list` and `session/delete` work for stores that
   support them, but there is no multi-client fan-out above the adapter.
 - Provider configuration is process-scoped and in memory. It is never persisted with a
