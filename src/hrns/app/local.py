@@ -9,53 +9,119 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.models import Model, infer_model, known_model_names
+from pydantic_ai.models import infer_model, known_model_names
 from pydantic_ai.providers import infer_provider_class
-from pydantic_ai.settings import ModelSettings
+from pydantic_ai.settings import ModelSettings, merge_model_settings
 
 from hrns.config import LocalSettings
 
-from .acp import run_acp_stdio
+from .acp import (
+    ModelChoice,
+    ProviderConfig,
+    ProviderDescriptor,
+    ProviderModelResolver,
+    ProviderRoute,
+    ResolvedModel,
+    run_acp_stdio,
+)
 from .agent import build_agent
 
-__all__ = ["configured_model", "main"]
+__all__ = ["LocalModelResolver", "main"]
 
 
-def configured_model(settings: LocalSettings, model_id: str | None = None) -> Model:
-    """Build the Pydantic AI model for one ``entry:model`` selection."""
-    settings.require_model()
-    selected = model_id or settings.active_target()
-    name, _, model_name = selected.partition(":")
-    entry = settings.providers.get(name)
-    if entry is None:
-        raise ValueError(f"Provider {name!r} is not configured.")
-    if not model_name:
-        raise ValueError(f"Model id {selected!r} must read entry:model.")
+class LocalModelResolver(ProviderModelResolver):
+    """The local configuration, exposed as the models and providers ACP can use.
 
-    provider = entry.provider_id(name)
-    options = dict(entry.options)
-    if entry.base_url:
-        options["base_url"] = entry.base_url
-    key = settings.resolved_api_key(name)
-    if key is not None:
-        options["api_key"] = key
+    One provider per configured entry, named after the entry, because ACP model ids read
+    ``entry:model``. Each entry supports exactly the Pydantic AI provider it is configured
+    for, so a client can move its routing to its own gateway but cannot change which
+    protocol the entry speaks. The entry this deployment starts with is ``required``:
+    disabling it would leave the default session without a model.
+    """
 
-    pydantic_id = f"{provider}:{model_name}"
-    try:
-        if not options:
-            return infer_model(pydantic_id)
-        return infer_model(
-            pydantic_id,
-            provider_factory=lambda _name: infer_provider_class(provider)(**options),
+    def __init__(self, settings: LocalSettings) -> None:
+        active = settings.provider if settings.provider in settings.providers else None
+        super().__init__(
+            [
+                ProviderDescriptor(
+                    provider_id=name,
+                    supported=(entry.provider_id(name),),
+                    required=name == active,
+                    current=ProviderRoute(
+                        api_type=entry.provider_id(name), base_url=entry.base_url
+                    ),
+                )
+                for name, entry in settings.providers.items()
+            ]
         )
-    except ImportError as exc:
-        raise ValueError(
-            f"Install the Pydantic AI provider extra for {provider!r} in this environment."
-        ) from exc
-    except (ValueError, TypeError, UserError) as exc:
-        raise ValueError(
-            f"Cannot configure {name!r} ({provider}) with model {model_name!r}."
-        ) from exc
+        self.settings = settings
+
+    def list_models(self) -> Sequence[ModelChoice]:
+        """Every ``entry:model`` target, with the active one first as the default."""
+        targets = list(self.settings.model_targets(_known_models()))
+        active = self.settings.active_target()
+        ordered = [active, *(target for target in targets if target != active)]
+        choices: list[ModelChoice] = []
+        for target in ordered:
+            name, separator, model_name = target.partition(":")
+            if not separator or not model_name or name not in self.settings.providers:
+                continue
+            choices.append(ModelChoice(model_id=target, provider_id=name))
+        return choices
+
+    def build_model(self, model_id: str, config: ProviderConfig | None) -> ResolvedModel:
+        """Build one ``entry:model`` selection through the entry's provider.
+
+        The client's routing takes precedence over the entry's own ``base_url``: the base
+        URL goes to the provider, while the headers ride along as ``extra_headers`` model
+        settings because pydantic-ai applies request headers per run.
+        """
+        settings = self.settings
+        name, _, model_name = model_id.partition(":")
+        entry = settings.providers.get(name)
+        if entry is None:
+            raise ValueError(f"Provider {name!r} is not configured.")
+        if not model_name:
+            raise ValueError(f"Model id {model_id!r} must read entry:model.")
+
+        if config is None:
+            provider = entry.provider_id(name)
+            base_url = entry.base_url
+            headers: dict[str, str] = {}
+        else:
+            provider = config.route.api_type
+            base_url = config.route.base_url
+            headers = dict(config.headers)
+
+        options = dict(entry.options)
+        if base_url:
+            options["base_url"] = base_url
+        key = settings.resolved_api_key(name)
+        if key is not None:
+            options["api_key"] = key
+
+        pydantic_id = f"{provider}:{model_name}"
+        try:
+            model = (
+                infer_model(pydantic_id)
+                if not options
+                else infer_model(
+                    pydantic_id,
+                    provider_factory=lambda _name: infer_provider_class(provider)(**options),
+                )
+            )
+        except ImportError as exc:
+            raise ValueError(
+                f"Install the Pydantic AI provider extra for {provider!r} in this environment."
+            ) from exc
+        except (ValueError, TypeError, UserError) as exc:
+            raise ValueError(
+                f"Cannot configure {name!r} ({provider}) with model {model_name!r}."
+            ) from exc
+        return ResolvedModel(
+            model=model,
+            settings=ModelSettings(extra_headers=headers) if headers else None,
+        )
 
 
 def _known_models() -> Mapping[str, Sequence[str]]:
@@ -110,22 +176,21 @@ def run(
     if login:
         raise SystemExit("Account login is not supported by the minimal backend.")
 
-    model = configured_model(settings)
+    resolver = LocalModelResolver(settings)
+    models = resolver.list_models()
+    if not models:
+        raise SystemExit("No models are configured. Add a provider and model first.")
+    resolved = resolver.resolve(models[0].model_id)
     agent = build_agent(
-        model,
+        resolved.model,
         cwd=cwd,
-        model_settings=ModelSettings(**settings.model_settings),
+        model_settings=merge_model_settings(
+            ModelSettings(**settings.model_settings), resolved.settings
+        ),
     )
-    # Advertise every configured model and resolve the client's choice through
-    # this entry's provider configuration. The active model stays the default.
-    targets = list(settings.model_targets(_known_models()))
-    active = settings.active_target()
-    models = [active, *(target for target in targets if target != active)]
-    run_acp_stdio(
-        agent,
-        models=models,
-        model_resolver=lambda target: configured_model(settings, target),
-    )
+    # Advertise every configured model and resolve the client's choice through this
+    # entry's provider configuration. The active model stays the default.
+    run_acp_stdio(agent, model_resolver=resolver)
 
 
 app = App(

@@ -376,27 +376,46 @@ def config_option_value(option: dict[str, Any]) -> str:
     return str(current if current is not None else "—")
 
 
+def value_provider(item: dict[str, Any]) -> str:
+    """The provider a select value is tagged with in ``_meta.providerId``, if any."""
+    meta = item.get("_meta")
+    if not isinstance(meta, dict):
+        return ""
+    provider = meta.get("providerId")
+    return provider if isinstance(provider, str) else ""
+
+
+def _value_row(item: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    name = str(item.get("name", item.get("value", "")))
+    return {
+        "value": str(item.get("value", "")),
+        "name": f"{prefix}{name}",
+        "description": str(item.get("description") or ""),
+        "provider": value_provider(item),
+    }
+
+
 def option_values(option: dict[str, Any]) -> list[dict[str, str]]:
     values: list[dict[str, str]] = []
     for item in option.get("options") or []:
-        if isinstance(item, dict):
-            values.append(
-                {
-                    "value": str(item.get("value", "")),
-                    "name": str(item.get("name", item.get("value", ""))),
-                    "description": str(item.get("description") or ""),
-                }
-            )
+        if not isinstance(item, dict):
+            continue
+        nested = item.get("options")
+        if isinstance(nested, list):
+            # A grouped select: the group's own label prefixes each of its values.
+            prefix = f"{item.get('name', '')} / " if item.get("name") else ""
+            values.extend(_value_row(child, prefix) for child in nested if isinstance(child, dict))
+            continue
+        values.append(_value_row(item))
     for group in option.get("groups") or []:
-        for item in group.get("options") or []:
-            if isinstance(item, dict):
-                values.append(
-                    {
-                        "value": str(item.get("value", "")),
-                        "name": f"{group.get('name', '')} / {item.get('name', item.get('value', ''))}",
-                        "description": str(item.get("description") or ""),
-                    }
-                )
+        if not isinstance(group, dict):
+            continue
+        prefix = f"{group.get('name', '')} / " if group.get("name") else ""
+        values.extend(
+            _value_row(item, prefix)
+            for item in group.get("options") or []
+            if isinstance(item, dict)
+        )
     return values
 
 

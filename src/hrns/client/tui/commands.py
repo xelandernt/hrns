@@ -42,7 +42,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
     ),
     LocalCommand(
         "providers",
-        "Add, edit or delete local providers, their endpoints and keys",
+        "Edit local providers, or change the connected agent's provider routing",
     ),
     LocalCommand(
         "models",

@@ -97,7 +97,7 @@ class AgentTransport(Protocol):
     async def close(self) -> None: ...
 
 
-class StdioAgentTransport:
+class StdioAgentTransport(AgentTransport):
     """Launch an independently installed ACP agent over direct argv stdio."""
 
     def __init__(
@@ -264,7 +264,7 @@ def _is_loopback_host(host: str) -> bool:
     return address.is_loopback
 
 
-class WebSocketAgentTransport:
+class WebSocketAgentTransport(AgentTransport):
     """ACP over a WebSocket endpoint, one JSON-RPC message per text frame.
 
     The ACP SDK expects newline-framed asyncio streams, so a socketpair bridges

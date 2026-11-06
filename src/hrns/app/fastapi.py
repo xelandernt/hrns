@@ -11,9 +11,8 @@ from typing import TypeAlias, TypeVar
 import acp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.models import Model
 
-from .acp import ACPModels, PydanticAIACPAgent, SessionStore, create_acp_agent
+from .acp import ModelResolver, PydanticAIACPAgent, SessionStore, create_acp_agent
 from .agent import build_agent
 
 __all__ = [
@@ -148,8 +147,7 @@ def mount_acp(
     path: str = "/acp",
     authenticate: Authenticator[Principal] | None = None,
     session_store_factory: SessionStoreFactory[Principal] | None = None,
-    models: ACPModels | None = None,
-    model_resolver: Callable[[str], Model | str] | None = None,
+    model_resolver: ModelResolver | None = None,
 ) -> None:
     """Expose an ACP agent over a WebSocket endpoint.
 
@@ -161,9 +159,10 @@ def mount_acp(
     returns for one connection is the only store that connection can load from.
     Without it, every connection starts with a fresh in-memory store.
 
-    Pass ``models`` (model ids, or ``"all"``) to advertise a switcher through
-    ACP's ``model`` session config option. The first entry is each session's
-    default. Without ``models`` clients cannot change the agent's model over ACP.
+    Pass ``model_resolver`` to advertise ACP's ``model`` session config option and
+    the ``providers/*`` methods. It supplies the advertised models, resolves a
+    selection, and owns the provider routing a client may change; one resolver is
+    shared by every connection.
     """
 
     @app.websocket(path)
@@ -181,7 +180,6 @@ def mount_acp(
         adapter = create_acp_agent(
             agent_factory(principal),
             session_store=store,
-            models=models,
             model_resolver=model_resolver,
         )
         await _serve_acp(websocket, adapter)
@@ -196,16 +194,15 @@ def create_app(
     *,
     authenticate: Authenticator[Principal] | None = None,
     session_store_factory: SessionStoreFactory[Principal] | None = None,
-    models: ACPModels | None = None,
-    model_resolver: Callable[[str], Model | str] | None = None,
+    model_resolver: ModelResolver | None = None,
 ) -> FastAPI:
     """Create the FastAPI app with the ACP adapter mounted.
 
     Without an ``agent_factory`` the packaged :func:`build_agent` default is
     used. Without an ``authenticate`` callback every peer is admitted and the
-    factory receives ``None`` as its principal. ``session_store_factory`` is
-    forwarded to the ACP mount. ``models`` and ``model_resolver`` advertise
-    ACP model switching.
+    factory receives ``None`` as its principal. ``session_store_factory`` and
+    ``model_resolver`` are forwarded to the ACP mount, which uses the resolver for
+    model switching and provider configuration.
     """
     app = FastAPI(title="hrns")
     factory: AgentFactory[Principal] = agent_factory or _default_agent_factory
@@ -214,7 +211,6 @@ def create_app(
         factory,
         authenticate=authenticate,
         session_store_factory=session_store_factory,
-        models=models,
         model_resolver=model_resolver,
     )
     return app

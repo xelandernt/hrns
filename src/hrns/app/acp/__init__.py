@@ -8,6 +8,7 @@ ACP 1.x directly.
 from . import updates
 from .adapter import PydanticAIACPAgent
 from .content import PromptContentBlock, prompt_blocks_to_user_content
+from .models import ModelChoice, ModelResolver, ProviderModelResolver, ResolvedModel
 from .permission import (
     PermissionPolicy,
     ToolCallPermission,
@@ -21,8 +22,16 @@ from .presentation import (
     chain_presenters,
     default_coding_presenter,
 )
+from .providers import (
+    InMemoryProviderRegistry,
+    ProviderConfig,
+    ProviderDescriptor,
+    ProviderDisabled,
+    ProviderRegistry,
+    ProviderRoute,
+)
 from .serialize import bounded_jsonable, chunk_text, jsonable
-from .server import ACPModels, create_acp_agent, run_acp_stdio
+from .server import create_acp_agent, run_acp_stdio
 from .session import (
     AcpSession,
     AcpSessionConfig,
@@ -49,20 +58,29 @@ from .toolsets import (
 )
 
 __all__ = [
-    "ACPModels",
     "AcpFileSystemToolset",
     "AcpSession",
     "AcpSessionConfig",
     "AcpTerminalToolset",
     "DeletableSessionStore",
     "DocumentState",
+    "InMemoryProviderRegistry",
     "InMemorySessionStore",
     "ListableSessionStore",
     "McpServer",
     "McpServers",
+    "ModelChoice",
+    "ModelResolver",
     "PermissionPolicy",
     "PromptContentBlock",
+    "ProviderConfig",
+    "ProviderDescriptor",
+    "ProviderDisabled",
+    "ProviderModelResolver",
+    "ProviderRegistry",
+    "ProviderRoute",
     "PydanticAIACPAgent",
+    "ResolvedModel",
     "SessionConfigFunc",
     "SessionStore",
     "SessionSummary",

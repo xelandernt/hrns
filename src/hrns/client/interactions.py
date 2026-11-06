@@ -257,7 +257,7 @@ class InteractionPolicy(Protocol):
     async def answer_questions(self, request: AskUserRequest) -> AskUserResponse: ...
 
 
-class RequireInteractions:
+class RequireInteractions(InteractionPolicy):
     """Default: refuse to make a decision the user asked to be present for."""
 
     async def choose_permission(self, request: PermissionRequest) -> PermissionDecision:
@@ -274,7 +274,7 @@ class RequireInteractions:
         )
 
 
-class HeadlessInteractions:
+class HeadlessInteractions(InteractionPolicy):
     """Explicit non-interactive behavior for scripted runs.
 
     ``policy="required"`` is the default and equals :class:`RequireInteractions`.

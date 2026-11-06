@@ -91,7 +91,7 @@ def _cursor_offset(cursor: str | None) -> int:
     return offset
 
 
-class InMemorySessionStore:
+class InMemorySessionStore(ListableSessionStore, DeletableSessionStore):
     """Process-local store that also supports ``session/list`` and ``session/delete``."""
 
     def __init__(self) -> None:

@@ -156,7 +156,7 @@ class CommandWorkflow:
             else:
                 await screen.models.show_models()
         elif name == "providers":
-            screen.models.open_providers()
+            await screen.models.show_providers()
         elif name == "effort":
             await screen.models.show_effort()
         elif name == "permissions":

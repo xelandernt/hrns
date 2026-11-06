@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from acp import RequestError
+
 from hrns.config import (
     EFFORT_DEFAULT,
     LocalSettings,
@@ -12,7 +14,7 @@ from hrns.config import (
     with_thinking,
 )
 
-from ...errors import HrnsClientError
+from ...errors import HrnsClientError, describe_rpc_error
 from ...local import (
     is_local_hrns,
     local_credential_available,
@@ -20,6 +22,7 @@ from ...local import (
     local_target,
     local_thinking_support,
 )
+from ..agent_providers import AgentProviderRequest, AgentProvidersDialog, models_by_provider
 from ..choice_keys import stepped_value
 from ..dialogs import ChoiceDialog
 from ..local import (
@@ -317,6 +320,87 @@ class ModelWorkflow:
             return
         screen.app.push_screen(ProvidersDialog(current), self.providers_saved)
 
+    async def show_providers(self) -> None:
+        """Local provider entries, or the connected agent's provider routing.
+
+        ``hrns-local`` reads its entries from the config file, so editing that file is the
+        operation that matters for a local connection. Any other agent that advertises the
+        ``providers`` capability gets its own in-memory routing editor instead.
+        """
+        screen = self.screen
+        if screen.session.client is not screen.client:
+            await screen._notice(
+                "This session is not attached to the reconnected client. Start a new session first.",
+                "warning",
+            )
+            return
+        if screen.target.kind == "local" and is_local_hrns(screen.target.profile):
+            self.open_providers()
+            return
+        if not self.agent_supports_providers():
+            await screen._notice(
+                "This agent does not accept provider configuration; it does not advertise "
+                "the ACP providers capability.",
+                "warning",
+            )
+            return
+        await self.open_agent_providers()
+
+    def agent_supports_providers(self) -> bool:
+        """Whether the connected agent advertises ``agentCapabilities.providers``."""
+        capabilities = getattr(self.screen.client.initialized, "agent_capabilities", None)
+        return getattr(capabilities, "providers", None) is not None
+
+    async def open_agent_providers(self) -> None:
+        """List the agent's providers and offer to route or disable one."""
+        screen = self.screen
+        try:
+            listing = await screen.client.connection.list_providers()
+        except RequestError as exc:
+            await screen._notice(describe_rpc_error("providers/list", exc), "error")
+            return
+        except HrnsClientError as exc:
+            await screen._notice(exc.message, "error")
+            return
+        screen.app.push_screen(
+            AgentProvidersDialog(
+                list(listing.providers),
+                models=models_by_provider(screen.session.config_options),
+            ),
+            self.agent_providers_closed,
+        )
+
+    def agent_providers_closed(self, request: AgentProviderRequest | None) -> None:
+        """Apply the choice the table returned, then show the agent's new state."""
+        if request is None:
+            return
+        self.screen.run_worker(
+            self.apply_agent_provider(request),
+            group="providers",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def apply_agent_provider(self, request: AgentProviderRequest) -> None:
+        screen = self.screen
+        try:
+            if request.kind == "disable":
+                await screen.client.connection.disable_provider(request.provider_id)
+            else:
+                await screen.client.connection.set_provider(
+                    request.provider_id,
+                    request.api_type,
+                    request.base_url,
+                    request.headers or None,
+                )
+        except RequestError as exc:
+            method = f"providers/{request.kind}"
+            await screen._notice(describe_rpc_error(method, exc), "error")
+        except HrnsClientError as exc:
+            await screen._notice(exc.message, "error")
+            return
+        await self.open_agent_providers()
+
     def providers_saved(self, result: Any) -> None:
         screen = self.screen
         if not isinstance(result, ProvidersResult):
@@ -587,6 +671,7 @@ class ModelWorkflow:
         if not values:
             await screen._notice("This agent does not advertise any models.", "warning")
             return
+        choices = [{**value, "name": model_label(value)} for value in values]
 
         def apply(value: str | None) -> None:
             if value is not None and option is not None:
@@ -603,7 +688,7 @@ class ModelWorkflow:
             ChoiceDialog(
                 "Model",
                 subtitle,
-                values,
+                choices,
                 current=str(option.get("currentValue")) if option is not None else None,
             ),
             apply,
@@ -618,3 +703,17 @@ class ModelWorkflow:
             return
         screen.chrome.update_chrome()
         await screen._notice(f"Mode set to {mode_id}.", "success")
+
+
+def model_label(value: dict[str, str]) -> str:
+    """A model's display name, with the provider it is tagged with.
+
+    The agent tags each value with ``_meta.providerId``; when the name already reads
+    ``provider:model`` the tag adds nothing, so it is only appended for ids that do not
+    carry the provider.
+    """
+    name = value["name"]
+    provider = value.get("provider") or ""
+    if not provider or name.startswith(f"{provider}:"):
+        return name
+    return f"{name} — {provider}"
