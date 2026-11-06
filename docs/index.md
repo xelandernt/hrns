@@ -18,6 +18,16 @@ There is no custom session server, plugin registry, policy catalog, wire protoco
 or extension surface. ACP session persistence belongs to the adapter and the
 application that hosts it. The terminal client speaks standard ACP only.
 
+## Reference
+
+- [Capabilities](capabilities.md) — what this repository adds on top of Pydantic AI and
+  the harness: the `Coder` and its `apply_changes` batch tool, `Todo`, and the approval
+  policy.
+- [ACP support](acp.md) — the ACP method inventory: supported, conditional on wiring, or
+  refused, plus what the adapter advertises and which client methods it calls.
+- [`mount_acp`](mount-acp.md) — every argument of the FastAPI mount, with isolated
+  examples, and how `ModelResolver` and `ProviderModelResolver` differ.
+
 ## Run ACP over stdio
 
 ```sh
