@@ -2,8 +2,8 @@
 
 **One Pydantic AI agent. One protocol adapter. No custom backend.**
 
-hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**
-(`pydantic-ai-harness`), for terminals and editors.
+hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**,
+for terminals and editors.
 
 ## Install
 
@@ -11,7 +11,8 @@ hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**
 uv sync --extra app
 ```
 
-ACP support comes from `pydantic-ai-harness[acp]`.
+ACP support is implemented in `hrns.app.acp`; `pydantic-ai-harness` supplies the
+coding capabilities.
 
 ## Define the agent
 
@@ -38,9 +39,9 @@ binding, policy catalog, manifest, or configuration service.
 ## ACP over stdio
 
 ```python
-from pydantic_ai_harness.experimental.acp import InMemorySessionStore, run_acp_stdio_sync
+from hrns.app.acp import InMemorySessionStore, run_acp_stdio
 
-run_acp_stdio_sync(build_agent(), session_store=InMemorySessionStore())
+run_acp_stdio(build_agent(), session_store=InMemorySessionStore())
 ```
 
 Or use the packaged entrypoint:
@@ -59,10 +60,10 @@ app = FastAPI()
 mount_acp(app, lambda _principal: build_agent(), path="/acp")
 ```
 
-Each WebSocket gets its own `PydanticAIACPAgent`. The upstream adapter is
-stdio-oriented and single-connection, so the FastAPI mount bridges each WebSocket
-text frame to the adapter's newline-delimited JSON stream. Shared multi-viewer
-ACP sessions still need a fan-out layer above it.
+Each WebSocket gets its own `PydanticAIACPAgent`. The adapter is stdio-oriented
+and single-connection, so the FastAPI mount bridges each WebSocket text frame to
+the adapter's newline-delimited JSON stream. Shared multi-viewer ACP sessions
+still need a fan-out layer above it.
 
 ### ACP model switching
 
@@ -174,11 +175,12 @@ app = create_app(
 `InMemorySessionStore` is process-local. Use a shared durable implementation for
 multiple workers or restarts.
 
-`InMemorySessionStore` also implements `session/list`: clients can list sessions,
-filter by `cwd`, and page with the returned cursor. A title is the first user text
-in the session transcript, and `updatedAt` advances whenever a turn is committed.
-A durable store gets the same support by implementing `ListableSessionStore`
-(`save`, `load`, `remember`, and `list_sessions`) from `hrns.app.acp`.
+`InMemorySessionStore` also implements `session/list` and `session/delete`: clients can
+list sessions, filter by `cwd`, page with the returned cursor, and delete sessions.
+A title is the first user text in the session transcript, and `updatedAt` advances
+whenever a turn is committed. A durable store opts into the same support by
+implementing `ListableSessionStore` (`save`, `load`, `remember`, and `list_sessions`)
+and `DeletableSessionStore` (`delete`) from `hrns.app.acp`.
 
 ## Adapter API
 
@@ -215,8 +217,8 @@ client speaks standard ACP only.
 ## Limitations
 
 - The ACP adapter has one connection per adapter. `session/list` works for listable
-  stores (including `InMemorySessionStore`); `session/delete` and multi-viewer fan-out
-  are not implemented.
+  stores (including `InMemorySessionStore`), and `session/delete` works when the store
+  also implements `DeletableSessionStore`; multi-viewer fan-out is not implemented.
 - `build_agent` adds a small approval capability by default: reads run freely, writes and
   shell calls are marked `unapproved` so ACP can request permission. Pass
   `approval=False` to disable it.

@@ -41,7 +41,6 @@ from .errors import (
     HrnsClientError,
     InteractionRejected,
     InteractionRequired,
-    ProtocolError,
     describe_rpc_error,
 )
 from .events import (
@@ -232,13 +231,6 @@ class HrnsAcpClient:
         self, session_id: str, config_id: str, value: str | bool
     ) -> tuple[dict[str, Any], ...]:
         return await self.turns.set_config_option(session_id, config_id, value)
-
-    async def _raw_request(self, method: str, params: dict[str, Any]) -> Any:
-        """Send one request through the SDK connection's public JSON-RPC layer."""
-        conn = getattr(self.bundle.conn, "_conn", None)
-        if conn is None or not hasattr(conn, "send_request"):
-            raise ProtocolError(f"The installed ACP SDK cannot send '{method}' requests.")
-        return await conn.send_request(method, params)
 
     async def drain_events(self, *, timeout: float = 1.0) -> None:
         """Let notification handlers and event consumers catch up with a prompt response."""
