@@ -6,9 +6,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from hrns.config import Profile
+
 from .constants import CONNECT_TIMEOUT
 from .errors import HrnsClientError
-from .profiles import Profile
 from .transport import (
     AgentTransport,
     StdioAgentTransport,

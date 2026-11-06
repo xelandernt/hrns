@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from hrns.config import LocalSettings, keyring_account
+from hrns.config import HrnsConfig, keyring_account
 
 from .errors import HrnsClientError
 from .local import local_executable
@@ -64,7 +64,7 @@ def login_target(provider: str | None = None, config: Path | None = None) -> Log
     provider id (``github-copilot``) when no entry uses that name yet.
     """
     try:
-        settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
+        settings = HrnsConfig(config_file=config) if config is not None else HrnsConfig()
     except (ValueError, OSError) as exc:
         raise HrnsClientError(str(exc)) from exc
     selected = (provider or settings.provider).strip()

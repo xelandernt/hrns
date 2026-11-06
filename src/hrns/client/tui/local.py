@@ -21,7 +21,7 @@ from hrns.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
     THINKING_LEVELS,
-    LocalSettings,
+    HrnsConfig,
     ProviderEntry,
 )
 
@@ -119,9 +119,7 @@ def effort_choices(provider_id: str, model: str) -> list[dict[str, str]]:
     ]
 
 
-def save_custom_model(
-    settings: LocalSettings, provider: str, model: str
-) -> tuple[Path, LocalSettings]:
+def save_custom_model(settings: HrnsConfig, provider: str, model: str) -> tuple[Path, HrnsConfig]:
     """Remember a model id for one provider entry and return the saved settings."""
     entry = settings.require_entry(provider)
     updated = ProviderEntry(
@@ -146,7 +144,7 @@ class ModelPickerDialog(_DialogBase):
         Binding("a", "add_model", "Add custom model", show=False),
     ]
 
-    def __init__(self, settings: LocalSettings, *, subtitle: str = "") -> None:
+    def __init__(self, settings: HrnsConfig, *, subtitle: str = "") -> None:
         super().__init__("Models", subtitle or "The selection applies to the next message.")
         self.settings = settings
         self.catalog = local_model_catalog()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+import os
 import socket
 import sys
 from collections.abc import Callable, Mapping
@@ -17,9 +18,10 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI, WebSocketException
 
+from hrns.config.credentials import keyring_secret
+
 from .constants import MAX_MESSAGE_BYTES, WS_PING_INTERVAL, WS_PING_TIMEOUT, WS_WRITE_LIMIT
-from .errors import ProtocolError, TransportError
-from .profiles import secret_value
+from .errors import ProtocolError, SecretMissing, TransportError
 
 __all__ = [
     "AgentTransport",
@@ -31,6 +33,35 @@ __all__ = [
 
 StderrHandler = Callable[[str], None]
 LossHandler = Callable[[str, BaseException | None], None]
+
+
+def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | None:
+    """Resolve ``env:`` and ``keyring:`` references; literals pass through unchanged."""
+    if not reference:
+        return None
+    if reference.startswith("env:"):
+        name = reference[4:]
+        if not name:
+            raise SecretMissing(reference, "no environment variable named")
+        value = (env if env is not None else os.environ).get(name)
+        if value is None:
+            raise SecretMissing(reference, f"environment variable '{name}' is not set")
+        return value
+    if reference.startswith("keyring:"):
+        remainder = reference[len("keyring:") :]
+        if not remainder:
+            raise SecretMissing(reference, "no service named")
+        service, _, username = remainder.partition("/")
+        if username == "":
+            username = "default"
+        try:
+            value = keyring_secret(service, username)
+        except Exception as exc:
+            raise SecretMissing(reference, f"keyring lookup failed ({exc})") from exc
+        if value is None:
+            raise SecretMissing(reference, f"keyring has no entry '{service}' for '{username}'")
+        return value
+    return reference
 
 
 def _default_stderr(line: str) -> None:

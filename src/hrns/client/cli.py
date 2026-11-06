@@ -12,7 +12,14 @@ from typing import Annotated, Any, Literal
 
 from cyclopts import App, CycloptsError, Parameter
 
-from ..config import LocalSettings, McpOAuthConfig, McpServerSettings, default_local_config_path
+from ..config import (
+    LOCAL_CONNECTION,
+    HrnsConfig,
+    McpOAuthConfig,
+    McpServerSettings,
+    Profile,
+    default_config_path,
+)
 from ..config.mcp import (
     MCP_NAME_PATTERN,
     build_client,
@@ -23,7 +30,6 @@ from ..config.mcp import (
 )
 from ._version import __version__
 from .client import HrnsAcpClient
-from .constants import LOCAL_CONNECTION
 from .errors import HrnsClientError, InteractionRequired
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
@@ -31,7 +37,6 @@ from .io import parse_client_io
 from .launch import ConnectionTarget, local_cwd, profile_target, transport_for
 from .local import local_target
 from .login import DeviceAuthorization, login, login_target
-from .profiles import Profile, Profiles, default_profiles_path
 from .transport import check_websocket_url
 
 __all__ = ["main", "build_parser"]
@@ -40,13 +45,15 @@ __all__ = ["main", "build_parser"]
 # --------------------------------------------------------------------- parser
 
 
-ProfilesOption = Annotated[
-    list[str] | None,
+ConfigOption = Annotated[
+    Path | None,
     Parameter(
-        name="--profiles",
+        name=["--config", "--config-file"],
         metavar="PATH",
-        negative_iterable=(),
-        help="Load an explicit profile TOML file (repeatable). Also HRNS_PROFILES.",
+        help=(
+            "Read one configuration file instead of merging the user and project "
+            "documents. Also HRNS_LOCAL_CONFIG_FILE."
+        ),
     ),
 ]
 RepeatedStringOption = Annotated[list[str] | None, Parameter(negative_iterable=())]
@@ -76,26 +83,20 @@ def _namespace(**values: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def _profile_values(profiles: list[str] | None) -> list[str]:
-    return profiles or []
-
-
 def _target_options(
     *,
-    profiles: ProfilesOption = None,
+    config: ConfigOption = None,
     stdio: bool = False,
     local: bool = False,
-    local_config: Path | None = None,
     profile: str | None = None,
     cwd: str | None = None,
     server: str | None = None,
     token: str | None = None,
 ) -> dict[str, object]:
     return {
-        "profiles": _profile_values(profiles),
+        "config": config,
         "stdio": stdio,
         "local": local,
-        "local_config": local_config,
         "profile": profile,
         "cwd": cwd,
         "server": server,
@@ -105,10 +106,9 @@ def _target_options(
 
 def _connect_command(
     *remainder: str,
-    profiles: ProfilesOption = None,
+    config: ConfigOption = None,
     stdio: bool = False,
     local: bool = False,
-    local_config: Path | None = None,
     profile: str | None = None,
     cwd: str | None = None,
     server: str | None = None,
@@ -118,10 +118,9 @@ def _connect_command(
 ) -> int:
     args = _namespace(
         **_target_options(
-            profiles=profiles,
+            config=config,
             stdio=stdio,
             local=local,
-            local_config=local_config,
             profile=profile,
             cwd=cwd,
             server=server,
@@ -136,10 +135,9 @@ def _connect_command(
 
 def _run_command(
     *remainder: str,
-    profiles: ProfilesOption = None,
+    config: ConfigOption = None,
     stdio: bool = False,
     local: bool = False,
-    local_config: Path | None = None,
     profile: str | None = None,
     cwd: str | None = None,
     server: str | None = None,
@@ -157,10 +155,9 @@ def _run_command(
         raise CycloptsError("--allow-all cannot be combined with --deny-all.")
     args = _namespace(
         **_target_options(
-            profiles=profiles,
+            config=config,
             stdio=stdio,
             local=local,
-            local_config=local_config,
             profile=profile,
             cwd=cwd,
             server=server,
@@ -180,22 +177,18 @@ def _run_command(
     return asyncio.run(_command_run(args))
 
 
-def _profiles_list_command(*, profiles: ProfilesOption = None) -> int:
-    return _command_profiles(
-        _namespace(profiles=_profile_values(profiles), profiles_command="list")
-    )
+def _profiles_list_command(*, config: ConfigOption = None) -> int:
+    return _command_profiles(_namespace(config=config, profiles_command="list"))
 
 
-def _profiles_path_command(*, profiles: ProfilesOption = None) -> int:
-    return _command_profiles(
-        _namespace(profiles=_profile_values(profiles), profiles_command="path")
-    )
+def _profiles_path_command(*, config: ConfigOption = None) -> int:
+    return _command_profiles(_namespace(config=config, profiles_command="path"))
 
 
 def _profiles_add_command(
     name: str,
     *remainder: str,
-    profiles: ProfilesOption = None,
+    config: ConfigOption = None,
     stdio: bool = False,
     server: str | None = None,
     token: str | None = None,
@@ -204,7 +197,7 @@ def _profiles_add_command(
 ) -> int:
     return _command_profiles(
         _namespace(
-            profiles=_profile_values(profiles),
+            config=config,
             profiles_command="add",
             name=name,
             remainder=list(remainder),
@@ -217,14 +210,12 @@ def _profiles_add_command(
     )
 
 
-def _profiles_remove_command(name: str, *, profiles: ProfilesOption = None) -> int:
-    return _command_profiles(
-        _namespace(profiles=_profile_values(profiles), profiles_command="remove", name=name)
-    )
+def _profiles_remove_command(name: str, *, config: ConfigOption = None) -> int:
+    return _command_profiles(_namespace(config=config, profiles_command="remove", name=name))
 
 
-def _login_command(provider: str | None = None, *, local_config: Path | None = None) -> int:
-    return asyncio.run(_command_login(_namespace(provider=provider, local_config=local_config)))
+def _login_command(provider: str | None = None, *, config: ConfigOption = None) -> int:
+    return asyncio.run(_command_login(_namespace(provider=provider, config=config)))
 
 
 def _clean_command(
@@ -242,7 +233,7 @@ def _clean_command(
 def _mcp_add_command(
     name: str,
     *command_words: str,
-    local_config: Path | None = None,
+    config: ConfigOption = None,
     stdio_command: Annotated[str | None, Parameter(name="--command", metavar="CMD")] = None,
     env: RepeatedStringOption = None,
     cwd: str | None = None,
@@ -262,7 +253,7 @@ def _mcp_add_command(
 ) -> int:
     return _mcp_add(
         _namespace(
-            local_config=local_config,
+            config=config,
             name=name,
             stdio_command=stdio_command,
             env=env or [],
@@ -285,32 +276,32 @@ def _mcp_add_command(
     )
 
 
-def _mcp_list_command(*, local_config: Path | None = None, json: bool = False) -> int:
-    return _mcp_list(_namespace(local_config=local_config, json=json))
+def _mcp_list_command(*, config: ConfigOption = None, json: bool = False) -> int:
+    return _mcp_list(_namespace(config=config, json=json))
 
 
-def _mcp_get_command(name: str, *, local_config: Path | None = None, json: bool = False) -> int:
-    return _mcp_get(_namespace(local_config=local_config, name=name, json=json))
+def _mcp_get_command(name: str, *, config: ConfigOption = None, json: bool = False) -> int:
+    return _mcp_get(_namespace(config=config, name=name, json=json))
 
 
-def _mcp_remove_command(name: str, *, local_config: Path | None = None) -> int:
-    return _mcp_remove(_namespace(local_config=local_config, name=name))
+def _mcp_remove_command(name: str, *, config: ConfigOption = None) -> int:
+    return _mcp_remove(_namespace(config=config, name=name))
 
 
-def _mcp_enable_command(name: str, *, local_config: Path | None = None) -> int:
-    return _mcp_set_enabled(_namespace(local_config=local_config, name=name), True)
+def _mcp_enable_command(name: str, *, config: ConfigOption = None) -> int:
+    return _mcp_set_enabled(_namespace(config=config, name=name), True)
 
 
-def _mcp_disable_command(name: str, *, local_config: Path | None = None) -> int:
-    return _mcp_set_enabled(_namespace(local_config=local_config, name=name), False)
+def _mcp_disable_command(name: str, *, config: ConfigOption = None) -> int:
+    return _mcp_set_enabled(_namespace(config=config, name=name), False)
 
 
-def _mcp_auth_command(name: str, *, local_config: Path | None = None) -> int:
-    return asyncio.run(_mcp_auth(_namespace(local_config=local_config, name=name)))
+def _mcp_auth_command(name: str, *, config: ConfigOption = None) -> int:
+    return asyncio.run(_mcp_auth(_namespace(config=config, name=name)))
 
 
-def _mcp_logout_command(name: str, *, local_config: Path | None = None) -> int:
-    return asyncio.run(_mcp_logout(_namespace(local_config=local_config, name=name)))
+def _mcp_logout_command(name: str, *, config: ConfigOption = None) -> int:
+    return asyncio.run(_mcp_logout(_namespace(config=config, name=name)))
 
 
 def _register_commands(app: App) -> None:
@@ -327,7 +318,7 @@ def _register_commands(app: App) -> None:
 
     profiles = App(name="profiles", help="Manage saved connection profiles")
     profiles.command(_profiles_list_command, name="list", help="List saved profiles")
-    profiles.command(_profiles_path_command, name="path", help="Print the user profile file path")
+    profiles.command(_profiles_path_command, name="path", help="Print the configuration file path")
     profiles.command(_profiles_add_command, name="add", help="Add or replace a profile")
     profiles.command(_profiles_remove_command, name="remove", help="Remove a saved profile")
     app.command(profiles)
@@ -361,33 +352,13 @@ def _register_commands(app: App) -> None:
     app.command(mcp)
 
 
-def _extract_global_profiles(argv: list[str]) -> list[str]:
-    """Move legacy global --profiles options into commands that consume them."""
-    values: list[str] = []
-    while argv and argv[0] == "--profiles":
-        argv.pop(0)
-        if not argv:
-            raise HrnsClientError("argument --profiles: expected one argument")
-        values.append(argv.pop(0))
-    if not values:
-        return argv
-
-    command = argv[0] if argv else "connect"
-    if command not in {"connect", "run", "profiles"}:
-        return argv
-    command_index = 1 if command == "profiles" and len(argv) > 1 else 0
-    options = [item for value in values for item in ("--profiles", value)]
-    argv[command_index + 1 : command_index + 1] = options
-    return argv
-
-
 #: Leading options that describe a connection, so `hrns --server …` opens the terminal.
 _CONNECT_DEFAULT_OPTIONS = frozenset(
     {
-        "--profiles",
+        "--config",
+        "--config-file",
         "--stdio",
         "--local",
-        "--local-config",
         "--profile",
         "--cwd",
         "--server",
@@ -412,24 +383,25 @@ def build_parser() -> App:
 # ------------------------------------------------------------------ helpers
 
 
-def _profiles(args: SimpleNamespace) -> Profiles:
-    return Profiles.load(extra_files=[Path(item) for item in getattr(args, "profiles", []) or []])
+def _config(args: SimpleNamespace) -> HrnsConfig:
+    """Read the configuration; no explicit file means the user and project merge."""
+    path = getattr(args, "config", None)
+    return HrnsConfig(config_file=path) if path is not None else HrnsConfig()
 
 
-def _profile_from_args(profiles: Profiles, args: SimpleNamespace) -> Profile | None:
+def _profile_from_args(config: HrnsConfig, args: SimpleNamespace) -> Profile | None:
     """Pick the saved profile named by --profile, or the default."""
     name = getattr(args, "profile", None)
     if name:
-        if name in profiles.profiles:
-            profile = profiles.get(name)
-            if getattr(args, "cwd", None):
-                profile.cwd = args.cwd
-            return profile
-        raise HrnsClientError(
-            f"No profile named '{name}'. Saved: {', '.join(profiles.names) or '(none)'}. "
-            "Run `hrns profiles list`."
-        )
-    return profiles.default_profile()
+        if name not in config.profile:
+            available = ", ".join(sorted(config.profile)) or "(none)"
+            raise HrnsClientError(
+                f"No profile named '{name}'. Saved: {available}. Run `hrns profiles list`."
+            )
+        profile = config.get_profile(name)
+        cwd = getattr(args, "cwd", None)
+        return profile.model_copy(update={"cwd": cwd}) if cwd else profile
+    return config.default_profile()
 
 
 def _split_stdio_remainder(
@@ -460,7 +432,7 @@ def _stdio_profile(name: str, command: list[str], cwd: str | None) -> Profile:
 
 
 async def _resolve_target(
-    profiles: Profiles,
+    config: HrnsConfig,
     args: SimpleNamespace,
     *,
     remainder: Sequence[str] = (),
@@ -468,16 +440,14 @@ async def _resolve_target(
 ) -> ConnectionTarget:
     """Apply CLI precedence: explicit server or stdio > local model."""
     cwd_override = getattr(args, "cwd", None)
-    local_requested = bool(getattr(args, "local", False) or getattr(args, "local_config", None))
+    local_requested = bool(getattr(args, "local", False))
     stdio_requested = bool(getattr(args, "stdio", False))
     profile_name = getattr(args, "profile", None)
     server_url = (getattr(args, "server", None) or "").strip()
     token = (getattr(args, "token", None) or "").strip()
     if server_url:
         if local_requested or stdio_requested or profile_name:
-            raise HrnsClientError(
-                "--server cannot be combined with --local/--local-config, --stdio or --profile."
-            )
+            raise HrnsClientError("--server cannot be combined with --local, --stdio or --profile.")
         command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
         if command:
             raise HrnsClientError(
@@ -493,9 +463,7 @@ async def _resolve_target(
         return profile_target(profile, cwd_override)
     if local_requested or not (stdio_requested or profile_name):
         if local_requested and (stdio_requested or profile_name):
-            raise HrnsClientError(
-                "--local/--local-config cannot be combined with another connection target."
-            )
+            raise HrnsClientError("--local cannot be combined with another connection target.")
         command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
         if command:
             if local_requested:
@@ -503,7 +471,7 @@ async def _resolve_target(
             raise HrnsClientError(
                 "A command was supplied without --stdio. Use `--stdio -- CMD ARGS`."
             )
-        return local_target(getattr(args, "local_config", None), cwd_override)
+        return local_target(getattr(args, "config", None), cwd_override)
     command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
     if stdio_requested:
         profile = _stdio_profile("cli", command, cwd_override)
@@ -515,31 +483,31 @@ async def _resolve_target(
         )
     if command:
         raise HrnsClientError("A command was supplied without --stdio. Use `--stdio -- CMD ARGS`.")
-    profile = _profile_from_args(profiles, args)
+    profile = _profile_from_args(config, args)
     if profile is None:
         raise HrnsClientError(
             "No connection target. Use `--server URL`, `--stdio -- CMD` or configure a local model."
         )
     if token:
-        profile.token = token
+        profile = profile.model_copy(update={"token": token})
     return profile_target(profile, cwd_override)
 
 
-def _remembered_target(profiles: Profiles, args: SimpleNamespace) -> ConnectionTarget | None:
+def _remembered_target(config: HrnsConfig, args: SimpleNamespace) -> ConnectionTarget | None:
     """The connection this terminal used last, when it can still be resolved.
 
     A remembered profile that is no longer saved is forgotten: keeping the name would
     make every launch fail into the picker instead of starting clean.
     """
-    identity = profiles.last_connection
+    identity = config.last_connection
     if not identity:
         return None
     cwd = getattr(args, "cwd", None)
     if identity == LOCAL_CONNECTION:
-        return local_target(None, cwd)
-    profile = profiles.profiles.get(identity)
+        return local_target(getattr(args, "config", None), cwd)
+    profile = config.profile.get(identity)
     if profile is None:
-        profiles.forget_connection()
+        config.forget_connection()
         raise HrnsClientError(
             f"The last connection '{identity}' is no longer saved. Choose a connection."
         )
@@ -561,7 +529,7 @@ def _answers(args: SimpleNamespace) -> dict[str, Any]:
 
 
 async def _command_run(args: SimpleNamespace) -> int:
-    profiles = _profiles(args)
+    config = _config(args)
     if args.stdio:
         command, prompt_words = _split_stdio_remainder(args.remainder)
         target_remainder: list[str] = ["--", *command]
@@ -579,7 +547,7 @@ async def _command_run(args: SimpleNamespace) -> int:
             '`hrns run --server wss://host/acp "your prompt"` or '
             '`hrns run --profile NAME "your prompt"`.'
         )
-    target = await _resolve_target(profiles, args, remainder=target_remainder)
+    target = await _resolve_target(config, args, remainder=target_remainder)
     policy_name = "allow" if args.allow_all else "deny" if args.deny_all else "required"
     policy = HeadlessInteractions(policy_name, answers=_answers(args))
     client_io = args.client_io or target.profile.client_io
@@ -607,23 +575,20 @@ async def _command_run(args: SimpleNamespace) -> int:
 
 
 def _command_profiles(args: SimpleNamespace) -> int:
-    profiles = _profiles(args)
+    config = _config(args)
     if args.profiles_command == "list":
-        if not profiles.profiles:
+        if not config.profile:
             print("No profiles saved. `hrns profiles add NAME --stdio -- CMD` creates one.")
             return EXIT_OK
-        for name in sorted(profiles.profiles):
-            profile = profiles.profiles[name]
+        for name in sorted(config.profile):
+            profile = config.profile[name]
             print(f"  {name:20} {profile.transport:7} {profile.describe_location()}")
-        if profiles.sources:
-            print(f"\nLoaded from: {', '.join(str(path) for path in profiles.sources)}")
+        print(f"\nConfig: {config.path}")
         return EXIT_OK
     if args.profiles_command == "path":
-        print(profiles.sources[0] if profiles.sources else default_profiles_path())
+        print(config.config_file or default_config_path())
         return EXIT_OK
     if args.profiles_command == "add":
-        if not profiles.sources:
-            profiles.sources.append(default_profiles_path())
         if args.server:
             if args.stdio:
                 raise HrnsClientError("`profiles add` takes --stdio or --server, not both.")
@@ -640,22 +605,26 @@ def _command_profiles(args: SimpleNamespace) -> int:
             profile = _stdio_profile(args.name, command, args.cwd)
         else:
             raise HrnsClientError("`profiles add` needs --stdio (with `-- CMD`) or --server URL.")
-        profiles.upsert(profile, set_default=args.default)
-        path = profiles.save(profiles.sources[0])
+        if args.default:
+            for existing in config.profile.values():
+                existing.default = False
+            profile.default = True
+        config.profile[profile.name] = profile
+        path = config.save()
         print(f"Saved profile '{profile.name}' to {path}")
         return EXIT_OK
     if args.profiles_command == "remove":
-        if args.name not in profiles.profiles:
+        if args.name not in config.profile:
             raise HrnsClientError(f"No profile named '{args.name}'.")
-        del profiles.profiles[args.name]
-        path = profiles.save()
+        del config.profile[args.name]
+        path = config.save()
         print(f"Removed '{args.name}' from {path}")
         return EXIT_OK
     return EXIT_USAGE
 
 
 async def _command_login(args: SimpleNamespace) -> int:
-    target = login_target(args.provider, args.local_config)
+    target = login_target(args.provider, args.config)
     print(f"Signing in to {target.provider} (account {target.account})", flush=True)
 
     def announce(authorization: DeviceAuthorization) -> None:
@@ -673,8 +642,8 @@ async def _command_login(args: SimpleNamespace) -> int:
     if not target.configured:
         print(
             f"Saved for {result.provider}, which is not the active provider yet. Set "
-            f'provider = "{result.provider}" in hrns.local.toml, or add and select it '
-            "with /providers in the terminal.",
+            f'provider = "{result.provider}" in {default_config_path()}, or add and select '
+            "it with /providers in the terminal.",
             flush=True,
         )
     return EXIT_OK
@@ -683,20 +652,20 @@ async def _command_login(args: SimpleNamespace) -> int:
 def _command_connect(args: SimpleNamespace) -> int:
     from .tui.app import run_terminal
 
-    profiles = _profiles(args)
+    config = _config(args)
     preselect: ConnectionTarget | None = None
     status_message: str | None = None
-    explicit = any(
-        getattr(args, name, None) for name in ("stdio", "profile", "local_config", "server")
-    ) or getattr(args, "local", False)
+    explicit = any(getattr(args, name, None) for name in ("stdio", "profile", "server")) or getattr(
+        args, "local", False
+    )
     command_words, _ = _split_stdio_remainder(args.remainder, split_prompt=False)
     try:
         if not explicit and not command_words:
             # A bare launch reopens the connection used last; the picker is the fallback.
-            preselect = _remembered_target(profiles, args)
+            preselect = _remembered_target(config, args)
         if preselect is None:
             preselect = asyncio.run(
-                _resolve_target(profiles, args, remainder=args.remainder, split_prompt=False)
+                _resolve_target(config, args, remainder=args.remainder, split_prompt=False)
             )
     except HrnsClientError as exc:
         # Local mode is the default. If it is not configured yet, show the picker
@@ -705,7 +674,7 @@ def _command_connect(args: SimpleNamespace) -> int:
             raise
         status_message = str(exc)
     return run_terminal(
-        profiles,
+        config,
         initial_target=preselect,
         initial_session=args.session,
         status_message=status_message,
@@ -716,17 +685,15 @@ def _command_connect(args: SimpleNamespace) -> int:
 # ------------------------------------------------------------------- output
 
 
-def _mcp_config(args: SimpleNamespace) -> tuple[LocalSettings, Path]:
-    """Load the local settings that own MCP servers, allowing a new file to be created."""
-    explicit = getattr(args, "local_config", None)
+def _mcp_config(args: SimpleNamespace) -> tuple[HrnsConfig, Path]:
+    """Load the configuration that owns MCP servers, allowing a new file to be created."""
+    explicit = getattr(args, "config", None)
     if explicit is not None:
         path = Path(explicit).expanduser().absolute()
-        settings = (
-            LocalSettings(config_file=path) if path.is_file() else LocalSettings(config_file=None)
-        )
+        settings = HrnsConfig(config_file=path) if path.is_file() else HrnsConfig(config_file=None)
         return settings, path
-    settings = LocalSettings()
-    return settings, Path(settings.config_file or default_local_config_path())
+    settings = HrnsConfig()
+    return settings, default_config_path()
 
 
 def _mcp_pairs(values: Sequence[str], flag: str) -> dict[str, str]:
@@ -804,7 +771,7 @@ def _mcp_server(name: str, args: SimpleNamespace) -> McpServerSettings:
     )
 
 
-def _mcp_server_or_error(settings: LocalSettings, name: str) -> McpServerSettings:
+def _mcp_server_or_error(settings: HrnsConfig, name: str) -> McpServerSettings:
     try:
         return settings.mcp.servers[name]
     except KeyError:
@@ -921,7 +888,7 @@ def _mcp_add(args: SimpleNamespace) -> int:
         )
     server = _mcp_server(args.name, args)
     settings.mcp.servers[args.name] = server
-    settings.save(path, exclude_defaults=True)
+    settings.save(path)
     print(f"Saved MCP server '{args.name}' ({server.transport}) to {path}")
     if server.is_http and server.oauth is not False:
         print(f"Authorize it with: hrns mcp auth {args.name}")
@@ -932,7 +899,7 @@ def _mcp_remove(args: SimpleNamespace) -> int:
     settings, path = _mcp_config(args)
     _mcp_server_or_error(settings, args.name)
     del settings.mcp.servers[args.name]
-    settings.save(path, exclude_defaults=True)
+    settings.save(path)
     print(f"Removed MCP server '{args.name}' from {path}")
     return EXIT_OK
 
@@ -941,7 +908,7 @@ def _mcp_set_enabled(args: SimpleNamespace, enabled: bool) -> int:
     settings, path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     server.enabled = enabled
-    settings.save(path, exclude_defaults=True)
+    settings.save(path)
     print(f"{'Enabled' if enabled else 'Disabled'} MCP server '{args.name}'.")
     return EXIT_OK
 
@@ -953,7 +920,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     tokens = list(sys.argv[1:] if argv is None else argv)
     try:
-        tokens = _extract_global_profiles(tokens)
         if not tokens or tokens[0] in _CONNECT_DEFAULT_OPTIONS:
             tokens = ["connect", *tokens]
         result = parser(

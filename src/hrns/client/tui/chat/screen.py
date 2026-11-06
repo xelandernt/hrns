@@ -14,7 +14,7 @@ from textual.containers import Horizontal
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from hrns.config import LocalSettings
+from hrns.config import HrnsConfig
 
 from ...client import HrnsAcpClient, SessionProxy
 from ...errors import HrnsClientError
@@ -45,6 +45,8 @@ from ..local import LocalModelResult
 
 if TYPE_CHECKING:
     pass
+
+from hrns.config import TuiSettings
 
 from ..approval import ApprovalBar, AskUserBar
 from ..chat.commands import CommandWorkflow
@@ -82,10 +84,7 @@ from ..panels.session import (
     SessionResumeRequested,
 )
 from ..screen_base import _HrnsScreen
-from ..state import (
-    Settings,
-    activity_label,
-)
+from ..state import activity_label
 from ..status import StatusBar
 from ..transcript import TranscriptPane
 from .actions import ChatActions
@@ -122,7 +121,7 @@ class ChatScreen(_HrnsScreen):
         client: HrnsAcpClient,
         session: SessionProxy,
         target: ConnectionTarget,
-        settings: Settings,
+        settings: TuiSettings,
         *,
         initial_session_id: str | None = None,
         initial_load: bool = False,
@@ -567,7 +566,7 @@ class ChatScreen(_HrnsScreen):
     @work(exit_on_error=False, group="model", exclusive=True)
     async def _save_model_selection_worker(
         self,
-        settings: LocalSettings,
+        settings: HrnsConfig,
         provider: str,
         model: str,
         effort: str | None,
@@ -579,7 +578,7 @@ class ChatScreen(_HrnsScreen):
         )
 
     @work(exit_on_error=False, group="model", exclusive=True)
-    async def _set_local_effort_worker(self, settings: LocalSettings, effort: str) -> None:
+    async def _set_local_effort_worker(self, settings: HrnsConfig, effort: str) -> None:
         await self.models.set_local_effort(settings, effort)
 
     @work(exit_on_error=False, group="model", exclusive=True)

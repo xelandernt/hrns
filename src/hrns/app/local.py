@@ -13,7 +13,7 @@ from pydantic_ai.models import infer_model, known_model_names
 from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.settings import ModelSettings, merge_model_settings
 
-from hrns.config import LocalSettings
+from hrns.config import HrnsConfig
 
 from .acp import (
     ModelChoice,
@@ -39,7 +39,7 @@ class LocalModelResolver(ProviderModelResolver):
     disabling it would leave the default session without a model.
     """
 
-    def __init__(self, settings: LocalSettings) -> None:
+    def __init__(self, settings: HrnsConfig) -> None:
         active = settings.provider if settings.provider in settings.providers else None
         super().__init__(
             [
@@ -133,7 +133,7 @@ def _known_models() -> Mapping[str, Sequence[str]]:
     return grouped
 
 
-def _print_catalog(settings: LocalSettings) -> None:
+def _print_catalog(settings: HrnsConfig) -> None:
     known = _known_models()
     providers = []
     for name, entry in settings.providers.items():
@@ -152,10 +152,10 @@ def _print_catalog(settings: LocalSettings) -> None:
 
 def run(
     *,
-    config: Annotated[Path | None, Parameter(help="Path to hrns.local.toml.")] = None,
+    config: Annotated[Path | None, Parameter(help="Path to the hrns configuration file.")] = None,
     env_only: Annotated[
         bool,
-        Parameter(help="Ignore the local config file and use environment variables only."),
+        Parameter(help="Ignore the configuration file and use environment variables only."),
     ] = False,
     catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
     login: Annotated[bool, Parameter(help="Account login (not supported).")] = False,
@@ -163,11 +163,11 @@ def run(
 ) -> None:
     """Launch the configured local model as an ACP stdio server."""
     settings = (
-        LocalSettings(config_file=None)
+        HrnsConfig(config_file=None)
         if env_only
-        else LocalSettings(config_file=config)
+        else HrnsConfig(config_file=config)
         if config is not None
-        else LocalSettings()
+        else HrnsConfig()
     )
 
     if catalog:

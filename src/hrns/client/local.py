@@ -9,12 +9,11 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hrns.config import LocalSettings
+from hrns.config import HrnsConfig, Profile, config_files
 from hrns.config.credentials import store_api_key, stored_api_key_ref
 
 from .errors import HrnsClientError
 from .launch import ConnectionTarget, local_cwd
-from .profiles import Profile
 
 __all__ = [
     "LocalCatalog",
@@ -162,9 +161,9 @@ def local_credential_available(provider: str, api_key_env: str = "") -> bool:
     return stored_api_key_ref(provider, api_key_env) is not None
 
 
-def _load_local(config: Path | None) -> LocalSettings:
+def _load_local(config: Path | None) -> HrnsConfig:
     try:
-        settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
+        settings = HrnsConfig(config_file=config) if config is not None else HrnsConfig()
         settings.require_model()
         settings.require_entry()
     except (ValueError, OSError) as exc:
@@ -172,18 +171,26 @@ def _load_local(config: Path | None) -> LocalSettings:
     return settings
 
 
-def _local_profile(settings: LocalSettings, cwd: str | None) -> Profile:
+def _local_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
     executable = local_executable()
     if executable is None:
         raise HrnsClientError(
             "Local mode requires the hrns-local command. Reinstall hrns so its "
             "console scripts are on PATH."
         )
-    path = settings.config_file.expanduser().absolute() if settings.config_file else None
+    # The runtime reads the same document this client just read. An explicitly selected
+    # file is passed through; otherwise the runtime discovers the user and project
+    # documents itself, so a merged view stays merged instead of being flattened.
+    if settings.config_file is not None:
+        args = ["--config", str(settings.config_file.expanduser().absolute())]
+    elif config_files():
+        args = []
+    else:
+        args = ["--env-only"]
     return Profile(
         name=f"{settings.provider}:{settings.model}",
         command=executable,
-        args=["--config", str(path)] if path and path.is_file() else ["--env-only"],
+        args=args,
         cwd=cwd or "",
         # Unlike generic ACP agents, the explicitly selected local runtime needs the
         # user's provider credentials/settings (AWS, Google, proxies, etc.). Keep
@@ -192,7 +199,7 @@ def _local_profile(settings: LocalSettings, cwd: str | None) -> Profile:
     )
 
 
-def _target(settings: LocalSettings, cwd: str | None) -> ConnectionTarget:
+def _target(settings: HrnsConfig, cwd: str | None) -> ConnectionTarget:
     profile = _local_profile(settings, cwd)
     return ConnectionTarget(
         name=profile.name,

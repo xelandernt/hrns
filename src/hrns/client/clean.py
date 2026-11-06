@@ -49,9 +49,9 @@ class ConfigArtifact:
 def _client_store_path() -> Path:
     """The local developer agent's session database."""
     try:
-        from hrns.config import LocalSettings
+        from hrns.config import HrnsConfig
 
-        return Path(LocalSettings().store).expanduser()
+        return Path(HrnsConfig().store).expanduser()
     except Exception:
         # A broken local config must not block cleanup; fall back to the default.
         from platformdirs import user_data_path
@@ -91,11 +91,11 @@ def session_artifacts() -> list[SessionArtifact]:
 
 def _config_candidates() -> list[tuple[str, Path]]:
     """The project file and the user file, in the order the runtime reads them."""
-    from platformdirs import user_config_path
+    from hrns.config import default_config_path, project_config_path
 
     return [
-        ("project config", Path.cwd() / "hrns.local.toml"),
-        ("user config", user_config_path("hrns") / "local.toml"),
+        ("project config", project_config_path()),
+        ("user config", default_config_path()),
     ]
 
 
@@ -103,7 +103,7 @@ def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
     """Provider entries in a config file, read without validating the hrns schema.
 
     A file written for an older hrns must still be deletable, so this reads the TOML
-    directly instead of through ``LocalSettings``.
+    directly instead of through ``HrnsConfig``.
     """
     try:
         with path.open("rb") as stream:

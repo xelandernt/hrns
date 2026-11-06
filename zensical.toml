@@ -8,6 +8,7 @@ docs_dir = "docs"
 site_dir = "site"
 nav = [
     { "Home" = "index.md" },
+    { "Configuration" = "configuration.md" },
     { "Capabilities" = "capabilities.md" },
     { "ACP support" = "acp.md" },
     { "mount_acp" = "mount-acp.md" },

@@ -13,13 +13,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, ListItem, ListView, Static
 
-from hrns.config import LocalSettings
+from hrns.config import LOCAL_CONNECTION, HrnsConfig, Profile, default_config_path
 
-from ..constants import LOCAL_CONNECTION
 from ..errors import HrnsClientError
 from ..launch import ConnectionTarget, profile_target, remote_target
 from ..local import local_detail, local_target
-from ..profiles import Profile, Profiles, default_profiles_path
 from .choice_keys import handle_choice_arrow
 from .dialogs import ChoiceDialog, FormDialog
 from .local import (
@@ -66,14 +64,14 @@ class ConnectScreen(_HrnsScreen):
 
     def __init__(
         self,
-        profiles: Profiles,
+        config: HrnsConfig,
         *,
         initial_target: ConnectionTarget | None = None,
         auto_connect: bool = False,
         status_message: str | None = None,
     ) -> None:
         super().__init__()
-        self.profiles = profiles
+        self.config = config
         self.initial_target = initial_target
         self.auto_connect = auto_connect
         self.status_message = status_message
@@ -134,7 +132,7 @@ class ConnectScreen(_HrnsScreen):
 
     def _render_entries(self) -> None:
         local_ok = True
-        detail = "Configured hrns.local.toml or HRNS_LOCAL_* environment"
+        detail = f"Configured {default_config_path()} or HRNS_LOCAL_* environment"
         try:
             detail = local_detail()
         except HrnsClientError as exc:
@@ -147,7 +145,7 @@ class ConnectScreen(_HrnsScreen):
                 detail=detail,
             )
         ]
-        for profile in sorted(self.profiles.profiles.values(), key=lambda item: item.name):
+        for profile in sorted(self.config.profile.values(), key=lambda item: item.name):
             if not (profile.command or (profile.is_remote and profile.url)):
                 continue
             transport = "remote" if profile.is_remote else "stdio"
@@ -205,7 +203,7 @@ class ConnectScreen(_HrnsScreen):
 
     def _remembered_index(self) -> int:
         """Where the cursor starts: the connection used last, else the top of the list."""
-        identity = self.profiles.last_connection
+        identity = self.config.last_connection
         if not identity:
             return 0
         for index, entry in enumerate(self._visible):
@@ -263,7 +261,7 @@ class ConnectScreen(_HrnsScreen):
 
     def action_configure_local(self) -> None:
         try:
-            settings = LocalSettings()
+            settings = HrnsConfig()
         except (ValueError, OSError) as exc:
             self._status.update(f"error · {exc}")
             return
@@ -273,7 +271,7 @@ class ConnectScreen(_HrnsScreen):
         if result is None:
             return
         try:
-            settings = LocalSettings()
+            settings = HrnsConfig()
         except (ValueError, OSError) as exc:
             self._status.update(f"error · {exc}")
             return
@@ -290,7 +288,7 @@ class ConnectScreen(_HrnsScreen):
         self._status.update(f"Local model: {settings.provider}:{settings.model}")
 
     def _local_model_picked(
-        self, settings: LocalSettings, result: ModelPick | CustomModelRequest | None
+        self, settings: HrnsConfig, result: ModelPick | CustomModelRequest | None
     ) -> None:
         if isinstance(result, ModelPick):
             self._save_local_model(settings, result.provider, result.model)
@@ -314,7 +312,7 @@ class ConnectScreen(_HrnsScreen):
             apply,
         )
 
-    def _add_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
+    def _add_local_model(self, settings: HrnsConfig, provider: str, model: str) -> None:
         try:
             _path, updated = save_custom_model(settings, provider, model)
         except (ValueError, OSError) as exc:
@@ -322,7 +320,7 @@ class ConnectScreen(_HrnsScreen):
             return
         self._save_local_model(updated, provider, model)
 
-    def _save_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
+    def _save_local_model(self, settings: HrnsConfig, provider: str, model: str) -> None:
         try:
             configured = settings.model_copy(update={"provider": provider, "model": model})
             path = configured.save(settings.config_file)
@@ -528,16 +526,14 @@ class ConnectScreen(_HrnsScreen):
         profile.env = dict(original.env)
         profile.auth_method = original.auth_method
         profile.client_io = original.client_io
-        profile.default_for_server = original.default_for_server
+        profile.default = original.default
         profile.notes = original.notes
 
     def _save_profile(self, profile: Profile, *, replacing: str | None = None) -> None:
         if replacing is not None and replacing != profile.name:
-            self.profiles.profiles.pop(replacing, None)
-        if not self.profiles.sources:
-            self.profiles.sources.append(default_profiles_path())
-        self.profiles.upsert(profile)
-        self.profiles.save(self.profiles.sources[0])
+            self.config.profile.pop(replacing, None)
+        self.config.profile[profile.name] = profile
+        self.config.save()
 
     def _connect_local(self) -> None:
         try:

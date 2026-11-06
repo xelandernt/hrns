@@ -12,6 +12,8 @@ from textual.app import App
 from textual.binding import Binding
 from textual.theme import Theme
 
+from hrns.config import HrnsConfig, TuiSettings
+
 from ..client import HrnsAcpClient, SessionProxy
 from ..errors import HrnsClientError, InteractionRequired
 from ..interactions import (
@@ -27,11 +29,9 @@ from ..interactions import (
 from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
 from ..local import local_model_catalog
-from ..profiles import Profiles
 from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
 from .dialogs import ElicitationDialog, PermissionDialog
-from .state import Settings
 
 __all__ = ["HrnsApp", "run_terminal"]
 
@@ -647,7 +647,7 @@ class HrnsApp(App[int]):
 
     def __init__(
         self,
-        profiles: Profiles,
+        config: HrnsConfig,
         *,
         initial_target: ConnectionTarget | None = None,
         initial_session: str | None = None,
@@ -655,12 +655,11 @@ class HrnsApp(App[int]):
         client_io: ClientIoMode | None = None,
     ) -> None:
         super().__init__()
-        self.profiles = profiles
+        self.config = config
         self.initial_target = initial_target
         self.initial_session = initial_session
         self.status_message = status_message
         self.client_io = client_io
-        self.settings = Settings.from_mapping(profiles.tui)
         self.client: HrnsAcpClient | None = None
         self.session: SessionProxy | None = None
         self.target: ConnectionTarget | None = None
@@ -671,7 +670,7 @@ class HrnsApp(App[int]):
 
     def on_mount(self) -> None:
         self.register_theme(HRNS_THEME)
-        theme = self.settings.theme if self.settings.theme else "hrns"
+        theme = self.config.tui.theme if self.config.tui.theme else "hrns"
         try:
             self.theme = theme
         except Exception:
@@ -679,7 +678,7 @@ class HrnsApp(App[int]):
         self._warm_local_catalog()
         self.push_screen(
             ConnectScreen(
-                self.profiles,
+                self.config,
                 initial_target=self.initial_target,
                 auto_connect=self.initial_target is not None,
                 status_message=self.status_message,
@@ -712,7 +711,7 @@ class HrnsApp(App[int]):
             return self.client_io
         if target.profile.client_io is not None:
             return target.profile.client_io
-        return self.settings.client_io
+        return self.config.tui.client_io
 
     async def connect_target(self, target: ConnectionTarget) -> ChatScreen:
         """Connect, open the initial session, and push the chat workspace."""
@@ -733,12 +732,12 @@ class HrnsApp(App[int]):
             else:
                 session = await client.new_session(target.cwd)
             self.session = session
-            self.profiles.remember_connection(self.profiles.connection_identity(target.profile))
+            self.config.remember_connection(self.config.connection_identity(target.profile))
             screen = ChatScreen(
                 client,
                 session,
                 target,
-                self.settings,
+                self.config.tui,
                 initial_session_id=self.initial_session if initial_load else None,
                 initial_load=initial_load,
             )
@@ -830,13 +829,13 @@ class HrnsApp(App[int]):
         The modal remains only as a fallback when another screen is on top, so a
         permission request can never be buried behind an unrelated dialog.
         """
-        decision = auto_permission(self.settings.permission_mode, request)
+        decision = auto_permission(self.config.tui.permission_mode, request)
         if decision is not None:
             return decision
 
         async with self._approval_lock:
             # The mode may have changed while this request waited for the lock.
-            decision = auto_permission(self.settings.permission_mode, request)
+            decision = auto_permission(self.config.tui.permission_mode, request)
             if decision is not None:
                 return decision
             if not self.screen_stack:
@@ -881,17 +880,14 @@ class HrnsApp(App[int]):
         except asyncio.CancelledError:
             return ElicitationAnswer(action="cancel")
 
-    def apply_settings(self, settings: Settings) -> None:
-        self.settings = settings
+    def apply_settings(self, settings: TuiSettings) -> None:
+        """Adopt terminal preferences and persist them in the document."""
+        self.config.tui = settings
         if settings.theme:
             with contextlib.suppress(Exception):
                 self.theme = settings.theme
-        self.profiles.tui = {
-            **(self.profiles.tui or {}),
-            **settings.to_mapping(),
-        }
         with contextlib.suppress(Exception):
-            self.profiles.save_tui()
+            self.config.save()
 
     # ----------------------------------------------------------------- quitting
 
@@ -911,7 +907,7 @@ class HrnsApp(App[int]):
 
 
 def run_terminal(
-    profiles: Profiles,
+    config: HrnsConfig,
     *,
     initial_target: ConnectionTarget | None = None,
     initial_session: str | None = None,
@@ -920,7 +916,7 @@ def run_terminal(
 ) -> int:
     """Run the terminal app to completion and always close the agent connection."""
     app = HrnsApp(
-        profiles,
+        config,
         initial_target=initial_target,
         initial_session=initial_session,
         status_message=status_message,

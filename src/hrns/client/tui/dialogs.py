@@ -13,6 +13,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
+from hrns.config import TuiSettings
+
 from ..interactions import (
     PERMISSION_MODES,
     ElicitationAnswer,
@@ -22,7 +24,7 @@ from ..interactions import (
 from ..io import parse_client_io
 from .choice_keys import handle_choice_arrow
 from .commands import LocalCommand, command_suggestion_text
-from .state import Settings, build_form_fields, coerce_value
+from .state import build_form_fields, coerce_value, parse_permission_mode
 
 __all__ = [
     "ChoiceDialog",
@@ -943,8 +945,8 @@ class SettingsDialog(_FormMixin, _DialogBase):
 
     accept_label = "apply"
 
-    def __init__(self, settings: Settings) -> None:
-        super().__init__("Settings", "These preferences live in the client profile file.")
+    def __init__(self, settings: TuiSettings) -> None:
+        super().__init__("Settings", "These preferences live in the configuration file.")
         self.settings = settings
         themes = ("hrns", "textual-dark", "textual-light", "ansi-dark", "ansi-light")
         permission_labels = {
@@ -1009,7 +1011,7 @@ class SettingsDialog(_FormMixin, _DialogBase):
         with Vertical(classes="dialog"):
             yield from self.dialog_header()
             yield Static(
-                "Saved to the global profile file.",
+                "Saved to the user configuration file.",
                 markup=False,
                 classes="dialog-help",
             )
@@ -1018,11 +1020,11 @@ class SettingsDialog(_FormMixin, _DialogBase):
     def action_accept_form(self) -> None:
         rows = self._rows_by_name
         self.dismiss(
-            Settings(
+            TuiSettings(
                 theme=str(rows["theme"].value()),
                 auto_expand_tools=bool(rows["expand"].value()),
                 show_thoughts=bool(rows["thoughts"].value()),
-                permission_mode=str(rows["permission"].value()),
+                permission_mode=parse_permission_mode(str(rows["permission"].value())),
                 client_io=parse_client_io(str(rows["client_io"].value())),
                 sidebar_width=self.settings.sidebar_width,
             )

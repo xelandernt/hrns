@@ -9,7 +9,8 @@ from acp import RequestError
 
 from hrns.config import (
     EFFORT_DEFAULT,
-    LocalSettings,
+    HrnsConfig,
+    is_local_hrns,
     thinking_from_settings,
     with_thinking,
 )
@@ -21,7 +22,6 @@ from ...local import (
     local_target,
     local_thinking_support,
 )
-from ...profiles import is_local_hrns
 from ..agent_providers import AgentProviderRequest, AgentProvidersDialog, models_by_provider
 from ..choice_keys import stepped_value
 from ..dialogs import ChoiceDialog
@@ -121,7 +121,7 @@ class ModelWorkflow:
 
     # ------------------------------------------------------------- local model
 
-    def local_settings(self) -> LocalSettings:
+    def local_settings(self) -> HrnsConfig:
         screen = self.screen
         target = screen.target
         args = (
@@ -130,7 +130,7 @@ class ModelWorkflow:
             else []
         )
         config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
-        return LocalSettings(config_file=config) if config else LocalSettings()
+        return HrnsConfig(config_file=config) if config else HrnsConfig()
 
     async def show_models(self) -> None:
         """Local provider models, or the remote agent's advertised models."""
@@ -196,7 +196,7 @@ class ModelWorkflow:
         await self._set_agent_model(target)
 
     @staticmethod
-    def _resolve_local_model(settings: LocalSettings, target: str) -> tuple[str, str]:
+    def _resolve_local_model(settings: HrnsConfig, target: str) -> tuple[str, str]:
         """Resolve ``model`` or ``provider:model`` against the local configuration."""
         provider, separator, model = target.partition(":")
         if separator:
@@ -302,7 +302,7 @@ class ModelWorkflow:
         raise HrnsClientError(f"Unknown {label} '{target}'. Available: {available}.")
 
     def models_picked(
-        self, settings: LocalSettings, result: ModelPick | CustomModelRequest | None
+        self, settings: HrnsConfig, result: ModelPick | CustomModelRequest | None
     ) -> None:
         """React to the model picker: switch model, or add a custom id first."""
         if isinstance(result, ModelPick):
@@ -310,7 +310,7 @@ class ModelWorkflow:
         elif isinstance(result, CustomModelRequest):
             self.add_custom_model(settings, result.provider, result.model)
 
-    def open_providers(self, settings: LocalSettings | None = None) -> None:
+    def open_providers(self, settings: HrnsConfig | None = None) -> None:
         """Open the provider table, reloading the settings when none were passed."""
         screen = self.screen
         try:
@@ -415,7 +415,7 @@ class ModelWorkflow:
         if result.changed:
             screen.app.notify(f"Providers saved to {result.path}")
 
-    def add_custom_model(self, settings: LocalSettings, provider: str, initial: str = "") -> None:
+    def add_custom_model(self, settings: HrnsConfig, provider: str, initial: str = "") -> None:
         """Remember an id the catalog does not list, then switch to it."""
         screen = self.screen
         provider_id = settings.provider_id(provider)
@@ -436,7 +436,7 @@ class ModelWorkflow:
 
         screen.app.push_screen(CustomModelDialog(provider, provider_id, initial), apply)
 
-    def select_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
+    def select_local_model(self, settings: HrnsConfig, provider: str, model: str) -> None:
         """Model choice first; prompt for effort when that model can reason.
 
         Canceling the effort step cancels the whole change, matching Codex.
@@ -469,7 +469,7 @@ class ModelWorkflow:
 
     def choose_effort(
         self,
-        settings: LocalSettings,
+        settings: HrnsConfig,
         provider: str,
         model: str,
         *,
@@ -488,7 +488,7 @@ class ModelWorkflow:
 
     async def save_model_selection(
         self,
-        settings: LocalSettings,
+        settings: HrnsConfig,
         provider: str,
         model: str,
         effort: str | None,
@@ -569,7 +569,7 @@ class ModelWorkflow:
             on_select=lambda effort: screen._set_local_effort_worker(settings, effort),
         )
 
-    async def set_local_effort(self, settings: LocalSettings, effort: str) -> None:
+    async def set_local_effort(self, settings: HrnsConfig, effort: str) -> None:
         screen = self.screen
         try:
             configured = with_thinking(settings, effort)
