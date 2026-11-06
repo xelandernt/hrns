@@ -37,6 +37,34 @@ capabilities (`Coder`, `FileSystem`), not for ACP. Remove the split once harness
 supports 1.x.
 
 The adapter implements the complete `acp.Agent` protocol. `session/list` and
-`session/delete` are backed by `ListableSessionStore`/`DeletableSessionStore`;
-provider configuration, MCP-over-ACP, and NES are explicitly unsupported and not
-advertised until their features exist (see `TODO.md`).
+`session/delete` are backed by `ListableSessionStore`/`DeletableSessionStore`, and
+`providers/*` plus the `model` config option are backed by a `ModelResolver` the caller
+supplies. MCP-over-ACP and NES are explicitly unsupported and not advertised until their
+features exist (see `TODO.md`).
+
+## ACP models and provider configuration
+
+One object answers everything ACP asks about models: `ModelResolver`
+(`src/hrns/app/acp/models.py`). ACP has no model methods — models are a session config
+option — and provider routing is three methods that reroute them, so the two live
+together. `list_models()` supplies the `model` option and the ids a client may select,
+`resolve()` turns a selection into a runnable model and the settings that choice needs,
+and `list_providers()`/`set_provider()`/`disable_provider()` back `providers/list`,
+`providers/set`, and `providers/disable`. `resolve` reads the same state `set_provider`
+writes; a resolver that did not would make a configured route a lie. `ResolvedModel`
+carries the model plus model settings because client-supplied headers reach a request as
+`extra_headers` rather than provider constructor arguments.
+
+The adapter advertises both the model option and the `providers` capability exactly when a
+resolver is supplied. `ProviderModelResolver` is the base a resolver subclasses: it owns
+the provider state (`InMemoryProviderRegistry`) and implements `resolve` so the model's own
+provider config is what builds it, leaving `list_models` and `build_model` to the subclass.
+`LocalModelResolver` in `hrns-local` seeds it from the TOML provider entries, derives model
+ids from `settings.model_targets()`, and raises `ProviderDisabled` instead of silently
+falling back to a configured endpoint.
+
+ACP's provider payload reports routing endpoints, not the models behind them, so the
+model→provider link travels separately: each `ModelChoice.provider_id` becomes
+`_meta.providerId` on the model option. `hrns-local` derives it from the `entry:model` id;
+the client's `/providers` table groups the option's values by that tag, and `/models`
+appends it to any model name that does not already read `provider:model`.

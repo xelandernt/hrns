@@ -24,7 +24,7 @@ class _WorkspaceFileWriter(Protocol):
     def write_file(self, path: str, content: str, *, workspace: Workspace) -> Awaitable[str]: ...
 
 
-class _FallbackFileWriter:
+class _FallbackFileWriter(_WorkspaceFileWriter):
     """Writes with the local ``FileSystem`` toolset, bounded by the session's ``cwd``."""
 
     def __init__(self, cwd: str) -> None:

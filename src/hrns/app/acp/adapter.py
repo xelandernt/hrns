@@ -13,7 +13,7 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from inspect import isawaitable
 from typing import Generic, Literal, cast
@@ -49,7 +49,6 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserContent,
 )
-from pydantic_ai.models import KnownModelName, Model, known_model_names
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
@@ -58,6 +57,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
+from .models import ModelChoice, ModelResolver, ResolvedModel
 from .permission import PermissionPolicy, ToolCallPermission, default_permission_scope
 from .presentation import (
     ToolCallContent,
@@ -66,6 +66,7 @@ from .presentation import (
     absolutize,
     default_coding_presenter,
 )
+from .providers import ProviderDisabled
 from .serialize import bounded_jsonable, chunk_text, jsonable
 from .session import (
     AcpSession,
@@ -89,10 +90,6 @@ DEFAULT_VERSION = "0.1.0"
 
 _logger = logging.getLogger(__name__)
 _MODEL_CONFIG_ID = "model"
-
-
-def _all_known_model_names() -> tuple[str, ...]:
-    return known_model_names()
 
 
 def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
@@ -197,7 +194,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
     ``session/list`` and ``session/delete`` are supported when the configured store
     implements :class:`ListableSessionStore` and :class:`DeletableSessionStore`.
-    Provider configuration, MCP-over-ACP, and NES are explicitly unsupported.
+    ``model_resolver`` ties the ``model`` session config option to the ``providers/*``
+    methods: it supplies the model list, resolves a selection for a run, and owns the
+    provider routing a client may change. Without it the adapter advertises neither.
+    MCP-over-ACP and NES are explicitly unsupported.
     """
 
     def __init__(
@@ -213,8 +213,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         mcp_capabilities: schema.McpCapabilities | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         session_store: SessionStore | None = None,
-        models: Sequence[KnownModelName | str] | Literal["all"] | None = None,
-        model_resolver: Callable[[str], Model | str] | None = None,
+        model_resolver: ModelResolver | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> None:
         self._agent = agent
@@ -231,9 +230,6 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
         self._tool_presenter = tool_presenter or default_coding_presenter
         self._session_store = session_store
-        self._models: tuple[str, ...] = (
-            _all_known_model_names() if models == "all" else tuple(models) if models else ()
-        )
         self._model_resolver = model_resolver
         self._usage_limits = (
             usage_limits if usage_limits is not None else UsageLimits(request_limit=None)
@@ -255,6 +251,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     def _deletable_store(self) -> DeletableSessionStore | None:
         store = self._session_store
         return store if isinstance(store, DeletableSessionStore) else None
+
+    def _model_choices(self) -> Sequence[ModelChoice]:
+        """The models advertised in the ``model`` config option, in priority order."""
+        resolver = self._model_resolver
+        return resolver.list_models() if resolver is not None else ()
 
     async def initialize(
         self,
@@ -280,6 +281,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 load_session=self._session_store is not None,
                 prompt_capabilities=self._prompt_capabilities,
                 mcp_capabilities=self._mcp_capabilities,
+                providers=(
+                    schema.ProvidersCapabilities() if self._model_resolver is not None else None
+                ),
                 session_capabilities=session_capabilities,
             ),
             agent_info=schema.Implementation(name=self._name, version=self._version),
@@ -295,7 +299,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         """Start a new session with an empty conversation history."""
         session_id = uuid4().hex
         config = await self._build_config(session_id, cwd, mcp_servers)
-        default_model = self._models[0] if self._models else None
+        choices = self._model_choices()
+        default_model = choices[0].model_id if choices else None
         state = SessionState(session_id=session_id, config=config, cwd=cwd, model=default_model)
         self._sessions[session_id] = state
         if (store := self._listable_store) is not None:
@@ -411,7 +416,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     def _model_option(
         self, current_model_id: str | None
     ) -> schema.SessionConfigOptionSelect | None:
-        if current_model_id is None or not self._models:
+        choices = self._model_choices()
+        if current_model_id is None or not choices:
             return None
         return schema.SessionConfigOptionSelect(
             id=_MODEL_CONFIG_ID,
@@ -419,7 +425,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             type="select",
             current_value=current_model_id,
             options=[
-                schema.SessionConfigSelectOption(value=model, name=model) for model in self._models
+                schema.SessionConfigSelectOption(
+                    value=choice.model_id,
+                    name=choice.name or choice.model_id,
+                    field_meta={"providerId": choice.provider_id},
+                )
+                for choice in choices
             ],
         )
 
@@ -565,6 +576,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         try:
             while True:
                 result = None
+                resolved_model = self._resolve_run_model(state.model)
                 with capture_run_messages() as captured:
                     async with self._agent.run_stream_events(
                         run_input,
@@ -575,7 +587,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                         capabilities=config.capabilities,
                         toolsets=config.toolsets,
                         workspace=config.workspace,
-                        model=self._resolve_run_model(state.model),
+                        model=resolved_model.model if resolved_model is not None else None,
+                        model_settings=(
+                            resolved_model.settings if resolved_model is not None else None
+                        ),
                         usage_limits=self._usage_limits,
                     ) as stream:
                         event: AgentStreamEvent | AgentRunResultEvent[object]
@@ -832,10 +847,18 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             return True
         return ToolDenied("Rejected by the client.")
 
-    def _resolve_run_model(self, model_id: str | None) -> Model | str | None:
-        if model_id is None or self._model_resolver is None:
-            return model_id
-        return self._model_resolver(model_id)
+    def _resolve_run_model(self, model_id: str | None) -> ResolvedModel | None:
+        if model_id is None:
+            return None
+        resolver = self._model_resolver
+        if resolver is None:
+            return ResolvedModel(model=model_id)
+        try:
+            return resolver.resolve(model_id)
+        except ProviderDisabled as exc:
+            raise acp.RequestError.invalid_params(
+                {"model_id": model_id, "reason": str(exc)}
+            ) from exc
 
     async def set_session_mode(
         self, session_id: str, mode_id: str, **kwargs: object
@@ -854,7 +877,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params(
                 {"config_id": config_id, "reason": "unknown config option"}
             )
-        if not isinstance(value, str) or value not in self._models:
+        if not isinstance(value, str) or value not in {
+            choice.model_id for choice in self._model_choices()
+        }:
             raise acp.RequestError.invalid_params(
                 {"model_id": value, "reason": "not an advertised model"}
             )
@@ -971,13 +996,34 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         document.focus = position
         document.visible_range = visible_range
 
-    # --- Explicitly unsupported ACP 1.x features ------------------------------------
-    # These capabilities are not advertised in ``initialize``. The SDK router still
-    # dispatches the methods, so answer with the rejection that matches the advertisement.
+    # --- Provider configuration (unstable ACP) --------------------------------------
+    # The adapter translates the protocol and validates nothing itself: the model
+    # resolver owns the state and the rules. A model is resolved per turn, so a new
+    # route applies from the next turn; the session's model id does not change.
 
     async def list_providers(self, **kwargs: object) -> schema.ListProvidersResponse:
-        """Unsupported: clients cannot configure this agent's LLM providers."""
-        raise acp.RequestError.method_not_found("providers/list")
+        """Report the providers a client may route and their current non-secret routing."""
+        resolver = self._model_resolver
+        if resolver is None:
+            raise acp.RequestError.method_not_found("providers/list")
+        return schema.ListProvidersResponse(
+            providers=[
+                schema.ProviderInfo(
+                    provider_id=provider.provider_id,
+                    supported=list(provider.supported),
+                    required=provider.required,
+                    current=(
+                        schema.ProviderCurrentConfig(
+                            api_type=provider.current.api_type,
+                            base_url=provider.current.base_url,
+                        )
+                        if provider.current is not None
+                        else None
+                    ),
+                )
+                for provider in resolver.list_providers()
+            ]
+        )
 
     async def set_provider(
         self,
@@ -987,14 +1033,36 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         headers: dict[str, str] | None = None,
         **kwargs: object,
     ) -> schema.SetProviderResponse:
-        """Unsupported: clients cannot configure this agent's LLM providers."""
-        raise acp.RequestError.method_not_found("providers/set")
+        """Replace one provider's routing with the client's own endpoint."""
+        resolver = self._model_resolver
+        if resolver is None:
+            raise acp.RequestError.method_not_found("providers/set")
+        try:
+            resolver.set_provider(provider_id, api_type, base_url, headers or {})
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params(
+                {"provider_id": provider_id, "reason": str(exc)}
+            ) from exc
+        return schema.SetProviderResponse()
 
     async def disable_provider(
         self, provider_id: str, **kwargs: object
     ) -> schema.DisableProviderResponse:
-        """Unsupported: clients cannot configure this agent's LLM providers."""
-        raise acp.RequestError.method_not_found("providers/disable")
+        """Stop routing through one provider, unless the resolver marks it required."""
+        resolver = self._model_resolver
+        if resolver is None:
+            raise acp.RequestError.method_not_found("providers/disable")
+        try:
+            resolver.disable_provider(provider_id)
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params(
+                {"provider_id": provider_id, "reason": str(exc)}
+            ) from exc
+        return schema.DisableProviderResponse()
+
+    # --- Explicitly unsupported ACP 1.x features ------------------------------------
+    # These capabilities are not advertised in ``initialize``. The SDK router still
+    # dispatches the methods, so answer with the rejection that matches the advertisement.
 
     async def mcp_message(
         self,

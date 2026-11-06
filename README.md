@@ -67,18 +67,31 @@ still need a fan-out layer above it.
 
 ### ACP model switching
 
-ACP exposes model selection as a standard session config option, but the adapter
-only advertises it when given a list. Pass `models`; the first id is each
-session's default. Use `model_resolver` when the advertised ids are not Pydantic
-AI model ids:
+ACP exposes model selection as a standard session config option, but the adapter only
+advertises it when given a `model_resolver`. The resolver returns the models to advertise;
+the first is each session's default:
 
 ```python
-mount_acp(
-    app,
-    lambda _principal: build_agent(),
-    models=["openai:gpt-5.1", "anthropic:claude-sonnet-4-5"],
-)
+from hrns.app.acp import ModelChoice, ProviderConfig, ProviderModelResolver, ResolvedModel
+
+
+class Models(ProviderModelResolver):
+    def list_models(self) -> list[ModelChoice]:
+        return [
+            ModelChoice(model_id="openai:gpt-5.1", provider_id="openai"),
+            ModelChoice(model_id="anthropic:claude-sonnet-4-5", provider_id="anthropic"),
+        ]
+
+    def build_model(self, model_id: str, config: ProviderConfig | None) -> ResolvedModel:
+        # A bare id lets Pydantic AI construct the model from its own provider defaults.
+        return ResolvedModel(model=model_id)
+
+
+mount_acp(app, lambda _principal: build_agent(), model_resolver=Models())
 ```
+
+The same resolver carries the provider configuration below, so a client-configured route
+is what the next `resolve` builds.
 
 The terminal client consumes that option for remote agents. In local mode,
 `/model provider:model` saves the choice and applies it live when the runtime
@@ -182,6 +195,89 @@ whenever a turn is committed. A durable store opts into the same support by
 implementing `ListableSessionStore` (`save`, `load`, `remember`, and `list_sessions`)
 and `DeletableSessionStore` (`delete`) from `hrns.app.acp`.
 
+### Client-managed providers
+
+A client can point the agent's LLM traffic at its own gateway with `providers/list`,
+`providers/set`, and `providers/disable`. The adapter advertises those methods only when
+you pass a `model_resolver`, and it does not own the routing: one `ModelResolver` supplies
+the models, resolves a selection for a run, and holds the provider state a client changes,
+so a configured route is what the next run uses.
+
+```python
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.settings import ModelSettings
+
+from hrns.app.acp import (
+    ModelChoice,
+    ProviderConfig,
+    ProviderDescriptor,
+    ProviderModelResolver,
+    ProviderRoute,
+    ResolvedModel,
+    create_acp_agent,
+)
+
+
+class AnthropicResolver(ProviderModelResolver):
+    def __init__(self) -> None:
+        super().__init__(
+            [
+                ProviderDescriptor(
+                    provider_id="main",
+                    supported=("anthropic",),
+                    required=True,
+                    current=ProviderRoute(
+                        api_type="anthropic", base_url="https://api.anthropic.com"
+                    ),
+                )
+            ]
+        )
+
+    def list_models(self) -> list[ModelChoice]:
+        return [ModelChoice(model_id="claude-sonnet-4-5", provider_id="main")]
+
+    def build_model(self, model_id: str, config: ProviderConfig | None) -> ResolvedModel:
+        base_url = (
+            config.route.base_url if config is not None else "https://api.anthropic.com"
+        )
+        return ResolvedModel(
+            model=AnthropicModel(model_id, provider=AnthropicProvider(base_url=base_url)),
+            settings=ModelSettings(extra_headers=dict(config.headers))
+            if config is not None
+            else None,
+        )
+
+
+adapter = create_acp_agent(agent, model_resolver=AnthropicResolver())
+```
+
+`ProviderModelResolver` implements `resolve` for you: it looks the model up in
+`list_models`, reads the config of **that model's** provider, and hands both to
+`build_model`. A model therefore cannot be built through a provider other than the one it
+is advertised with, and `current_config` raises `ProviderDisabled` before any model is
+built once a client disables it. A subclass only declares the catalog and how one model
+is constructed from its provider.
+
+`ModelChoice.provider_id` is reported as `_meta.providerId` on the model config option.
+That is how a client learns which provider serves which model: ACP's `providers/*` payload
+reports endpoints, not the models behind them. Leaving it `None` keeps the option
+untagged, and clients that ignore `_meta` still see a plain selector.
+
+Provider configuration is process-scoped and in memory; it is never written to disk or
+saved with a session. `providers/list` reports non-secret routing only, so headers a
+client sent are never echoed back. A model is resolved for every turn, so a new route
+applies from the next turn — in an existing session too; a turn already in flight keeps
+the endpoint it started with.
+
+The bundled terminal client drives this with `/providers` when the connected agent
+advertises the capability: pick a provider, press `s` to send `providers/set`, or `d` to
+send `providers/disable`. The table's `Models` column lists the models the agent tags with
+that provider id, and `/models` labels each choice the same way, so you can see which
+provider a model runs through before switching. For a local `hrns-local` connection
+`/providers` keeps opening the config-file editor instead, because that is where its
+provider entries come from.
+
 ## Adapter API
 
 ```python
@@ -207,6 +303,17 @@ not in the TOML file. After saving a provider without an active model, the model
 picker opens so a catalog or custom id can be selected. `/model provider:model` also
 sets it directly.
 
+`/providers` acts on whatever you are connected to. Over stdio to `hrns-local` it opens
+the entry editor above; connected to a remote agent that advertises provider
+configuration it lists that agent's providers and sends `providers/set` /
+`providers/disable` for you.
+
+`hrns-local` seeds its ACP provider registry from those TOML entries, so a client that
+speaks `providers/*` sees one provider per entry and can reroute it to its own gateway.
+The entry this deployment starts with is marked `required`, because disabling it would
+leave the default session without a model; the headers a client sends reach the request
+as `extra_headers` model settings.
+
 ## What was removed
 
 `hrns.runtime`, `hrns.server`, `hrns.protocol`, the plugin registry, policy catalog,
@@ -219,6 +326,10 @@ client speaks standard ACP only.
 - The ACP adapter has one connection per adapter. `session/list` works for listable
   stores (including `InMemorySessionStore`), and `session/delete` works when the store
   also implements `DeletableSessionStore`; multi-viewer fan-out is not implemented.
+- Provider configuration is in memory and applies from the next model resolution, which
+  is the next turn; a turn already in flight is unaffected. MCP-over-ACP
+  (`mcp/message`) and next edit suggestions (`nes/*`) remain unimplemented and are not
+  advertised.
 - `build_agent` adds a small approval capability by default: reads run freely, writes and
   shell calls are marked `unapproved` so ACP can request permission. Pass
   `approval=False` to disable it.
