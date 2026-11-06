@@ -16,6 +16,7 @@ from ..state import (
     format_context_detail,
     format_context_usage,
     format_cost,
+    format_usage_compact,
     model_option,
     permission_mode_label,
 )
@@ -126,13 +127,17 @@ class ChromeWorkflow:
         session = screen.session
         option = model_option(session.config_options) if session else None
         reasoning = effort_option(session.config_options) if session else None
+        # The gauge is the richer signal, but agents that report no window size leave it
+        # empty; the last turn's token counts are then the only usage worth showing.
+        context = format_context_usage(screen._context_usage)
         screen.query_one("#statusbar", StatusBar).show(
             connected=screen.connected,
             model=config_option_value(option) if option else "",
             effort=config_option_value(reasoning) if reasoning else "",
             mode=(session.current_mode_id or "") if session else "",
-            usage=format_context_usage(screen._context_usage),
-            cost=format_cost(screen._usage),
+            usage=context or format_usage_compact(screen._usage),
+            usage_label="ctx" if context else "",
+            cost=format_cost(screen._context_usage) or format_cost(screen._usage),
             usage_detail=format_context_detail(screen._context_usage, screen._usage),
             busy=screen.busy,
             activity=screen._activity,

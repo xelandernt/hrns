@@ -87,6 +87,7 @@ class StatusBar(Static):
         self._effort = ""
         self._mode = ""
         self._usage = ""
+        self._usage_label = "ctx"
         self._cost = ""
         self._permission = ""
         self._client_io = ""
@@ -105,6 +106,7 @@ class StatusBar(Static):
         effort: str = "",
         mode: str = "",
         usage: str = "",
+        usage_label: str = "ctx",
         cost: str = "",
         usage_detail: str = "",
         busy: bool = False,
@@ -119,6 +121,7 @@ class StatusBar(Static):
         self._effort = effort
         self._mode = mode
         self._usage = usage
+        self._usage_label = usage_label
         self._cost = cost
         self.tooltip = usage_detail or None
         self._permission = permission
@@ -222,7 +225,9 @@ class StatusBar(Static):
             else None
         )
         usage = (
-            Text(f"ctx {self._usage}", style=Style(color=palette.foreground))
+            Text(
+                f"{self._usage_label} {self._usage}".strip(), style=Style(color=palette.foreground)
+            )
             if self._usage
             else None
         )

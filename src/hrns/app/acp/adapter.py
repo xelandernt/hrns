@@ -15,6 +15,7 @@ import logging
 import re
 from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from inspect import isawaitable
 from typing import Generic, Literal, cast
 from uuid import uuid4
@@ -49,6 +50,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserContent,
 )
+from pydantic_ai.models import Model
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
@@ -155,6 +157,29 @@ def _to_acp_usage(usage: RunUsage) -> schema.Usage:
         total_tokens=usage.total_tokens,
         cached_read_tokens=usage.cache_read_tokens,
         cached_write_tokens=usage.cache_write_tokens,
+    )
+
+
+def _context_window(model: Model | str | None) -> int | None:
+    """The model's context window, when its profile knows one."""
+    if isinstance(model, Model):
+        window = model.profile.get("context_window")
+        return window if window else None
+    return None
+
+
+def _context_tokens(response: ModelResponse) -> int:
+    """Tokens the last request left in the context window.
+
+    Cache reads and writes are part of the prompt, and the response itself becomes
+    context for the next request, so all four counts belong in the gauge.
+    """
+    usage = response.usage
+    return (
+        usage.input_tokens
+        + usage.cache_read_tokens
+        + usage.cache_write_tokens
+        + usage.output_tokens
     )
 
 
@@ -578,6 +603,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         turn.updates.extend(updates.update_user_message(block) for block in prompt)
 
         captured: list[ModelMessage] = []
+        last_response: ModelResponse | None = None
         try:
             while True:
                 result = None
@@ -608,6 +634,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 assert result is not None, "run_stream_events always yields a final result event"
                 history = result.all_messages()
                 usage += result.usage
+                last_response = result.response
                 output = result.output
                 if isinstance(output, DeferredToolRequests):
                     if not output.approvals and not output.calls:  # pragma: no cover
@@ -637,6 +664,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             await self._fail_outstanding_tool_calls(turn)
             await self._persist_interrupted_todos(state, turn)
             raise
+
+        if usage.cost is not None:
+            state.cost = (state.cost or Decimal(0)) + usage.cost
+        await self._emit_usage(turn, state, response=last_response)
 
         state.history = history
         if self._session_store is not None:
@@ -671,6 +702,40 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
         turn.updates.append(update)
         await turn.conn.session_update(session_id=turn.session_id, update=update)
+
+    async def _emit_usage(
+        self,
+        turn: _TurnState,
+        state: SessionState[AgentDepsT],
+        *,
+        response: ModelResponse | None,
+    ) -> None:
+        """Publish the usage gauge clients render as context percentage and session cost.
+
+        ``PromptResponse.usage`` carries only per-turn token totals and has no room for
+        either figure, so an agent that stays silent here leaves the client's readout
+        blank. The gauge is deliberately not recorded in the transcript: replaying a
+        stale percentage into a freshly loaded session would be wrong.
+        """
+        if response is None:
+            return
+        resolved = self._resolve_run_model(state.model)
+        size = _context_window(resolved.model if resolved is not None else self._agent.model)
+        used = _context_tokens(response)
+        if size is None or used <= 0:
+            return
+        await turn.conn.session_update(
+            session_id=turn.session_id,
+            update=schema.UsageUpdate(
+                used=used,
+                size=size,
+                cost=(
+                    schema.Cost(amount=float(state.cost), currency="USD")
+                    if state.cost is not None
+                    else None
+                ),
+            ),
+        )
 
     async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
         for chunk in chunk_text(text):

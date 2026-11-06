@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Hashable, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Generic, Protocol, TypeAlias
 
 import anyio
@@ -142,3 +143,6 @@ class SessionState(Generic[AgentDepsT]):
     todos: TodoStore = field(default_factory=TodoStore)
     always_allow: set[Hashable] = field(default_factory=set[Hashable])
     always_reject: set[Hashable] = field(default_factory=set[Hashable])
+    # Session-cumulative spend in USD, as priced by genai-prices across turns. ``None``
+    # until a turn is priced, so "unpriced" stays distinct from a genuine zero.
+    cost: Decimal | None = None
