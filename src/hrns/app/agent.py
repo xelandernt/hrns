@@ -9,9 +9,8 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai_harness.coder import Coder
 
-from hrns.capabilities import Todo
+from hrns.capabilities import Coder, Todo
 
 from .approvals import require_approval
 
