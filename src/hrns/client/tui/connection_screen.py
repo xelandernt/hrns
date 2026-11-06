@@ -15,11 +15,11 @@ from textual.widgets import Input, ListItem, ListView, Static
 
 from hrns.config import LocalSettings
 
+from ..constants import LOCAL_CONNECTION
 from ..errors import HrnsClientError
-from ..launch import ConnectionTarget, local_cwd, remote_cwd, remote_target
+from ..launch import ConnectionTarget, profile_target, remote_target
 from ..local import local_detail, local_target
 from ..profiles import Profile, Profiles, default_profiles_path
-from ..transport import check_websocket_url
 from .choice_keys import handle_choice_arrow
 from .dialogs import ChoiceDialog, FormDialog
 from .local import (
@@ -199,8 +199,21 @@ class ConnectScreen(_HrnsScreen):
             label.append(entry.label)
             self._list.append(ListItem(Static(label, markup=False)))
         if self._visible:
-            self._list.index = 0
-            self._show_detail(self._visible[0])
+            index = self._remembered_index()
+            self._list.index = index
+            self._show_detail(self._visible[index])
+
+    def _remembered_index(self) -> int:
+        """Where the cursor starts: the connection used last, else the top of the list."""
+        identity = self.profiles.last_connection
+        if not identity:
+            return 0
+        for index, entry in enumerate(self._visible):
+            if identity == LOCAL_CONNECTION and entry.kind == "local":
+                return index
+            if entry.profile is not None and entry.profile.name == identity:
+                return index
+        return 0
 
     def _show_detail(self, entry: PickEntry) -> None:
         lines = [entry.label, entry.detail]
@@ -535,36 +548,12 @@ class ConnectScreen(_HrnsScreen):
         self._connect_worker(target)
 
     def _connect_profile(self, profile: Profile) -> None:
-        if profile.is_remote:
-            if not profile.url:
-                self._status.update(f"Profile '{profile.name}' has no server URL.")
-                return
-            try:
-                check_websocket_url(profile.url)
-                cwd = remote_cwd(profile)
-            except HrnsClientError as exc:
-                self._status.update(f"error · {exc.message}")
-                return
-            self._connect_worker(
-                ConnectionTarget(
-                    name=profile.name,
-                    kind="remote",
-                    profile=profile,
-                    cwd=cwd,
-                )
-            )
+        try:
+            target = profile_target(profile)
+        except HrnsClientError as exc:
+            self._status.update(f"error · {exc.message}")
             return
-        if not profile.command:
-            self._status.update(f"Profile '{profile.name}' has no command.")
-            return
-        self._connect_worker(
-            ConnectionTarget(
-                name=profile.name,
-                kind="local",
-                profile=profile,
-                cwd=local_cwd(profile),
-            )
-        )
+        self._connect_worker(target)
 
     @work(group="connect", exclusive=True)
     async def _connect_worker(self, target: ConnectionTarget) -> None:

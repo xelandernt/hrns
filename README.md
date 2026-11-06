@@ -120,7 +120,9 @@ hrns run --profile team "summarize this repo"
 ```
 
 In the TUI connection picker, `n` adds a remote or stdio target and `e` edits the
-selected saved profile, including renaming it.
+selected saved profile, including renaming it. A bare `hrns` reopens the connection you
+used last — the local model, or a saved profile by name — and only falls back to the
+picker, with the reason in its status line, when that connection is gone or unreachable.
 
 Prefer `env:` or `keyring:` references: literal tokens are stored in the profile file
 when a profile is saved.

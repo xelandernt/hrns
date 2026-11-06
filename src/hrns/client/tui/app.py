@@ -733,6 +733,7 @@ class HrnsApp(App[int]):
             else:
                 session = await client.new_session(target.cwd)
             self.session = session
+            self.profiles.remember_connection(self.profiles.connection_identity(target.profile))
             screen = ChatScreen(
                 client,
                 session,

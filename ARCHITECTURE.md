@@ -91,6 +91,42 @@ The gauge is sent straight to the connection rather than recorded in the session
 transcript: replaying a stale percentage into a loaded session would describe context
 that session does not have.
 
+## Connection identity in the TUI
+
+The bottom band names the far side of the connection so a remote session can never be
+mistaken for a local one. `ConnectionTarget.location()` reports the remote *workspace*
+under `cwd` and the endpoint under `server`, and the band's left context deliberately
+keeps showing the workspace: that is what makes a remote path legible as remote. The
+endpoint therefore lives in the pinned right cluster (`StatusBar.show(server=..., remote=...)`),
+where it cannot be displaced by the activity label mid-turn.
+
+The endpoint degrades rather than disappearing, in this order: full URL, scheme
+stripped, `host:port`, then dropped. Query strings and fragments are removed before any
+shortening so a token in the URL never reaches the screen. When the cluster still
+overflows, fields drop in `StatusBar._right`'s order, and the endpoint outlives
+everything but the model name. Local sessions put the profile name in the same slot, so
+the slot never implies a remote connection that is not there.
+
+## Reopening the last connection
+
+A bare `hrns` reconnects to the connection this terminal used last instead of always
+defaulting to the local model. The identity is one string in `profiles.toml`'s `[tui]`
+table, written through the same `Profiles.save_tui()` that persists theme and permission
+mode: `local` for the built-in runtime, a profile name for a saved stdio or remote target.
+An ad-hoc `--server`/`--stdio` command line is not remembered, because it belongs to no
+file and there would be nothing to reopen. The identity never carries a working directory:
+a reopened connection starts where the new launch stands, or where its profile says.
+
+Remembering happens once a session exists, so a connection that fails at `session/new`
+does not become the next launch's default. Resolution failures — an unconfigured local
+model, a deleted profile, a dead endpoint — drop into the picker with the reason in its
+status line rather than exiting, and a profile deleted from disk is forgotten outright so
+its name cannot fail on every launch. The picker's cursor starts on the remembered entry,
+which makes Enter a retry of the connection that just failed.
+
+`_remembered_target()` in `cli.py` owns the identity→target mapping and only the terminal
+uses it: `hrns run` takes its target from its own arguments every time.
+
 ## Todos
 
 `hrns.capabilities.Todo` is a standalone Pydantic AI capability with two tools:

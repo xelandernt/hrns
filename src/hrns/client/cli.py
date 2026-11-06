@@ -23,11 +23,12 @@ from ..config.mcp import (
 )
 from ._version import __version__
 from .client import HrnsAcpClient
+from .constants import LOCAL_CONNECTION
 from .errors import HrnsClientError, InteractionRequired
 from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
 from .interactions import HeadlessInteractions
 from .io import parse_client_io
-from .launch import ConnectionTarget, local_cwd, remote_cwd, transport_for
+from .launch import ConnectionTarget, local_cwd, profile_target, transport_for
 from .local import local_target
 from .login import DeviceAuthorization, login, login_target
 from .profiles import Profile, Profiles, default_profiles_path
@@ -489,7 +490,7 @@ async def _resolve_target(
             token=token,
             remote_cwd=cwd_override or "",
         )
-        return _remote_target(profile, cwd_override)
+        return profile_target(profile, cwd_override)
     if local_requested or not (stdio_requested or profile_name):
         if local_requested and (stdio_requested or profile_name):
             raise HrnsClientError(
@@ -521,29 +522,28 @@ async def _resolve_target(
         )
     if token:
         profile.token = token
-    if profile.is_remote:
-        return _remote_target(profile, cwd_override)
-    if not profile.command:
-        raise HrnsClientError(f"Profile '{profile.name}' has no command.")
-    return ConnectionTarget(
-        name=profile.name,
-        kind="local",
-        profile=profile,
-        cwd=local_cwd(profile, cwd_override),
-    )
+    return profile_target(profile, cwd_override)
 
 
-def _remote_target(profile: Profile, cwd_override: str | None = None) -> ConnectionTarget:
-    """A remote ACP target; the workspace path is the agent's, not this machine's."""
-    if not profile.url:
-        raise HrnsClientError(f"Profile '{profile.name}' has no server URL.")
-    check_websocket_url(profile.url)
-    return ConnectionTarget(
-        name=profile.name,
-        kind="remote",
-        profile=profile,
-        cwd=remote_cwd(profile, cwd_override),
-    )
+def _remembered_target(profiles: Profiles, args: SimpleNamespace) -> ConnectionTarget | None:
+    """The connection this terminal used last, when it can still be resolved.
+
+    A remembered profile that is no longer saved is forgotten: keeping the name would
+    make every launch fail into the picker instead of starting clean.
+    """
+    identity = profiles.last_connection
+    if not identity:
+        return None
+    cwd = getattr(args, "cwd", None)
+    if identity == LOCAL_CONNECTION:
+        return local_target(None, cwd)
+    profile = profiles.profiles.get(identity)
+    if profile is None:
+        profiles.forget_connection()
+        raise HrnsClientError(
+            f"The last connection '{identity}' is no longer saved. Choose a connection."
+        )
+    return profile_target(profile, cwd)
 
 
 def _answers(args: SimpleNamespace) -> dict[str, Any]:
@@ -634,7 +634,7 @@ def _command_profiles(args: SimpleNamespace) -> int:
                 token=args.token or "",
                 remote_cwd=args.cwd or "",
             )
-            _remote_target(profile)
+            profile_target(profile)
         elif args.stdio:
             command, _ = _split_stdio_remainder(args.remainder)
             profile = _stdio_profile(args.name, command, args.cwd)
@@ -689,10 +689,15 @@ def _command_connect(args: SimpleNamespace) -> int:
     explicit = any(
         getattr(args, name, None) for name in ("stdio", "profile", "local_config", "server")
     ) or getattr(args, "local", False)
+    command_words, _ = _split_stdio_remainder(args.remainder, split_prompt=False)
     try:
-        preselect = asyncio.run(
-            _resolve_target(profiles, args, remainder=args.remainder, split_prompt=False)
-        )
+        if not explicit and not command_words:
+            # A bare launch reopens the connection used last; the picker is the fallback.
+            preselect = _remembered_target(profiles, args)
+        if preselect is None:
+            preselect = asyncio.run(
+                _resolve_target(profiles, args, remainder=args.remainder, split_prompt=False)
+            )
     except HrnsClientError as exc:
         # Local mode is the default. If it is not configured yet, show the picker
         # with the local-model action selected instead of exiting.

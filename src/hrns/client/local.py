@@ -18,7 +18,6 @@ from .profiles import Profile
 
 __all__ = [
     "LocalCatalog",
-    "is_local_hrns",
     "local_credential_available",
     "local_detail",
     "local_executable",
@@ -63,15 +62,6 @@ def _sibling_script(name: str) -> str | None:
 def local_executable() -> str | None:
     """Path to the ``hrns-local`` console script, or ``None`` when it is not installed."""
     return shutil.which("hrns-local") or _sibling_script("hrns-local")
-
-
-def is_local_hrns(profile: Profile | None) -> bool:
-    """Whether a profile launches this installation's ``hrns-local`` runtime.
-
-    The command is stored as the resolved path, so compare the file name rather
-    than the profile text.
-    """
-    return profile is not None and Path(profile.command).name == "hrns-local"
 
 
 def _load_catalog() -> LocalCatalog:

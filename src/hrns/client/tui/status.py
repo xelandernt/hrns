@@ -67,6 +67,23 @@ def _clip(text: Text, width: int) -> Text:
     return head
 
 
+def _server_forms(url: str) -> list[str]:
+    """Progressively shorter renderings of a server URL, longest first.
+
+    Credentials never belong on screen, so a query or fragment goes before any
+    shortening. The host is the part that answers "which machine am I on", so it
+    is the last to survive; the scheme and then the path give way first.
+    """
+    trimmed = url.split("#", 1)[0].split("?", 1)[0]
+    _, scheme, rest = trimmed.partition("://")
+    bare = rest if scheme else trimmed
+    forms: list[str] = []
+    for form in (trimmed, bare, bare.split("/", 1)[0]):
+        if form and form not in forms:
+            forms.append(form)
+    return forms or ["…"]
+
+
 class StatusBar(Static):
     """One line of chrome: live activity on the left, agent state on the right.
 
@@ -89,6 +106,8 @@ class StatusBar(Static):
         self._usage = ""
         self._usage_label = "ctx"
         self._cost = ""
+        self._server = ""
+        self._remote = False
         self._permission = ""
         self._client_io = ""
         self._activity = ""
@@ -108,6 +127,8 @@ class StatusBar(Static):
         usage: str = "",
         usage_label: str = "ctx",
         cost: str = "",
+        server: str = "",
+        remote: bool = False,
         usage_detail: str = "",
         busy: bool = False,
         activity: str = "",
@@ -123,6 +144,8 @@ class StatusBar(Static):
         self._usage = usage
         self._usage_label = usage_label
         self._cost = cost
+        self._server = server
+        self._remote = remote
         self.tooltip = usage_detail or None
         self._permission = permission
         self._client_io = client_io
@@ -252,12 +275,12 @@ class StatusBar(Static):
             ("connection", connection),
         ]
 
-        def assemble() -> Text:
+        def assemble(server: Text | None) -> Text:
             identity = Text(" · ", style="dim").join(
                 [piece for _, piece in fields[:3] if piece is not None]
             )
             text = Text()
-            for piece in [identity, *(piece for _, piece in fields[3:])]:
+            for piece in [identity, server, *(piece for _, piece in fields[3:])]:
                 if piece is None or not piece.plain:
                     continue
                 if text.plain:
@@ -265,13 +288,42 @@ class StatusBar(Static):
                 text += piece
             return text
 
-        # Ambiguity is resolved by dropping the least load-bearing field first;
-        # the model name and the two usage figures are the last to go.
-        for name in ("client_io", "permission", "effort", "mode", "cost", "usage", "model"):
-            if len(assemble()) <= budget:
+        # Where the session lives degrades instead of vanishing: the scheme gives
+        # way first, then the path, and only a host that still cannot share the
+        # line is dropped. A local session names its profile in the same slot, so
+        # the band never implies a remote connection that is not there.
+        server: Text | None = None
+        if self._server:
+            forms = _server_forms(self._server) if self._remote else [self._server]
+            if self._remote:
+                style = Style(color=palette.accent or palette.foreground)
+            else:
+                style = Style(color=palette.muted or palette.foreground)
+            for form in forms:
+                server = Text(form, style=style)
+                if len(assemble(server)) <= budget:
+                    break
+
+        # Ambiguity is resolved by dropping the least load-bearing field first.
+        # The endpoint outlives everything but the model name: which machine the
+        # session is on is the reason this band carries a location at all.
+        for name in (
+            "client_io",
+            "permission",
+            "effort",
+            "mode",
+            "cost",
+            "usage",
+            "server",
+            "model",
+        ):
+            if len(assemble(server)) <= budget:
                 break
-            fields = [(label, None if label == name else piece) for label, piece in fields]
-        return _clip(assemble(), budget)
+            if name == "server":
+                server = None
+            else:
+                fields = [(label, None if label == name else piece) for label, piece in fields]
+        return _clip(assemble(server), budget)
 
     def _sweep(self, label: str) -> Text:
         palette = _palette(self)

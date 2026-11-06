@@ -19,6 +19,7 @@ from .transport import (
 __all__ = [
     "ConnectionTarget",
     "local_cwd",
+    "profile_target",
     "remote_cwd",
     "remote_target",
     "transport_for",
@@ -65,6 +66,32 @@ def remote_cwd(profile: Profile, override: str | None = None) -> str:
     if not Path(candidate).is_absolute():
         raise HrnsClientError(f"The remote working directory must be absolute: {candidate}")
     return candidate
+
+
+def profile_target(profile: Profile, cwd_override: str | None = None) -> ConnectionTarget:
+    """Resolve a saved profile into the connection it describes.
+
+    ``cwd_override`` is the CLI's ``--cwd``: a stdio agent starts there, while a
+    remote profile sends it as the workspace path instead of its own.
+    """
+    if profile.is_remote:
+        if not profile.url:
+            raise HrnsClientError(f"Profile '{profile.name}' has no server URL.")
+        check_websocket_url(profile.url)
+        return ConnectionTarget(
+            name=profile.name,
+            kind="remote",
+            profile=profile,
+            cwd=remote_cwd(profile, cwd_override),
+        )
+    if not profile.command:
+        raise HrnsClientError(f"Profile '{profile.name}' has no command.")
+    return ConnectionTarget(
+        name=profile.name,
+        kind="local",
+        profile=profile,
+        cwd=local_cwd(profile, cwd_override),
+    )
 
 
 def remote_target(

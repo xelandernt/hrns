@@ -16,12 +16,12 @@ from hrns.config import (
 
 from ...errors import HrnsClientError, describe_rpc_error
 from ...local import (
-    is_local_hrns,
     local_credential_available,
     local_model_catalog,
     local_target,
     local_thinking_support,
 )
+from ...profiles import is_local_hrns
 from ..agent_providers import AgentProviderRequest, AgentProvidersDialog, models_by_provider
 from ..choice_keys import stepped_value
 from ..dialogs import ChoiceDialog
