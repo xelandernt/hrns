@@ -68,3 +68,43 @@ model→provider link travels separately: each `ModelChoice.provider_id` becomes
 `_meta.providerId` on the model option. `hrns-local` derives it from the `entry:model` id;
 the client's `/providers` table groups the option's values by that tag, and `/models`
 appends it to any model name that does not already read `provider:model`.
+
+## Todos
+
+`hrns.capabilities.Todo` is a standalone Pydantic AI capability with two tools:
+`read_todos` reads the ordered list; `write_todos` replaces it completely (an empty
+list clears it). `TodoItem` has content, priority (`high`, `medium`, `low`), and
+status (`pending`, `in_progress`, `completed`). Items are immutable snapshots.
+Static instructions explain the workflow; there is no model-request reminder injection.
+
+```python
+from pydantic_ai import Agent
+from hrns.capabilities import Todo, TodoStore
+
+# Fresh state per standalone run:
+agent = Agent("provider:model", capabilities=[Todo()])
+
+# Explicitly share state across standalone runs in one conversation:
+store = TodoStore()
+conversation_agent = Agent("provider:model", capabilities=[Todo(store=store)])
+```
+
+Writes emit a typed `TodoUpdated` capability event through `RunContext.emit`.
+Consumers of `agent.run_stream_events()` can inspect `event.items` without ACP.
+The ACP adapter translates these events into standard `AgentPlanUpdate` full
+snapshots through its existing transcript/update path. The client already maps
+these notifications to `PlanChanged` and renders them in the Todos panel.
+
+The adapter binds a session-owned `TodoStore` during each run using task-local
+context, without mutating the shared agent. That binding takes precedence over
+an explicitly supplied standalone store. Nested runs use separate state. Each
+session retains todos across prompts; `StoredSession.todos` preserves them across
+load/reconnect when a session store is configured. Published changes from an
+interrupted turn are saved without committing its incomplete model history.
+Durability across process restarts depends on the chosen session-store backend;
+the example's `InMemorySessionStore` is process-local.
+
+`build_agent()` and `examples/fastapi_app.py` enable `Todo()`. The default approval
+policy permits both todo tools because they only change planning state. Agents
+without the capability receive no todo tools. The client displays the list;
+the agent controls it.

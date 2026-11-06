@@ -10,6 +10,8 @@ from typing import Protocol, runtime_checkable
 from acp import schema
 from pydantic_ai.messages import ModelMessage
 
+from hrns.capabilities import TodoItem
+
 from .session import SessionUpdate
 
 
@@ -20,6 +22,7 @@ class StoredSession:
     messages: list[ModelMessage] = field(default_factory=list[ModelMessage])
     updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
     model: str | None = None
+    todos: tuple[TodoItem, ...] = ()
 
 
 class SessionStore(Protocol):

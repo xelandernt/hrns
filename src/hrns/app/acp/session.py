@@ -15,6 +15,8 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
+from hrns.capabilities import TodoStore
+
 # A single MCP server configuration, in any of the transports ACP carries.
 McpServer: TypeAlias = (
     schema.HttpMcpServer | schema.SseMcpServer | schema.AcpMcpServer | schema.McpServerStdio
@@ -137,5 +139,6 @@ class SessionState(Generic[AgentDepsT]):
     lock: anyio.Lock = field(default_factory=lambda: anyio.Lock(fast_acquire=True))
     active_turn: asyncio.Task[schema.PromptResponse] | None = None
     cancel_requested: bool = False
+    todos: TodoStore = field(default_factory=TodoStore)
     always_allow: set[Hashable] = field(default_factory=set[Hashable])
     always_reject: set[Hashable] = field(default_factory=set[Hashable])

@@ -12,7 +12,7 @@ __all__ = ["READ_ONLY_TOOLS", "require_approval"]
 
 #: Tools that may run without asking. Everything else is marked ``unapproved``
 #: so the ACP adapter can turn it into a permission request.
-READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "grep"})
+READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "grep", "read_todos", "write_todos"})
 
 
 def require_approval(read_only: frozenset[str] = READ_ONLY_TOOLS) -> PrepareTools[None]:
