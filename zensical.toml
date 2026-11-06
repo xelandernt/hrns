@@ -6,4 +6,9 @@ repo_url = "https://github.com/xelandernt/hrns"
 edit_uri = "edit/main/docs/"
 docs_dir = "docs"
 site_dir = "site"
-nav = [{ Home = "index.md" }]
+nav = [
+    { "Home" = "index.md" },
+    { "Capabilities" = "capabilities.md" },
+    { "ACP support" = "acp.md" },
+    { "mount_acp" = "mount-acp.md" },
+]
