@@ -29,8 +29,8 @@ def create_acp_agent(
 
     Pass ``model_resolver`` to advertise ACP's ``model`` session config option and the
     ``providers/*`` methods. It supplies the advertised models, resolves a selection for
-    a run, and owns the provider routing a client may change, so a configured route is
-    what the next run uses.
+    a run, advertises any setting options a model accepts, and owns the provider routing
+    a client may change, so a configured route is what the next run uses.
     """
     return PydanticAIACPAgent(
         agent,

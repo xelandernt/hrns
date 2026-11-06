@@ -22,6 +22,8 @@ class StoredSession:
     messages: list[ModelMessage] = field(default_factory=list[ModelMessage])
     updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
     model: str | None = None
+    #: The session's setting selections; revalidated against the live options on load.
+    setting_selections: dict[str, str] = field(default_factory=dict[str, str])
     todos: tuple[TodoItem, ...] = ()
 
 

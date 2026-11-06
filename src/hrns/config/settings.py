@@ -37,11 +37,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettin
 
 from .mcp import McpSettings
 
-#: Unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
-THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
-
-#: The literal type of those levels, so settings can be assigned without narrowing.
+#: Unified pydantic-ai thinking levels, weakest first.
 EffortLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
+
+#: The unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
+THINKING_LEVELS: tuple[EffortLevel, ...] = ("minimal", "low", "medium", "high", "xhigh")
 
 #: TUI/ACP spelling for "do not set thinking; use the provider default".
 EFFORT_DEFAULT = "default"
@@ -164,6 +164,29 @@ class TuiSettings(BaseModel):
     last_connection: str = ""
 
 
+class ThinkingSettings(BaseModel):
+    """The reasoning efforts this deployment offers, and whether ``off`` is one.
+
+    This is a policy, not a capability probe: ``hrns-local`` intersects it with the
+    model's profile, so a level the model cannot use is not advertised even when listed
+    here. An empty ``levels`` removes the reasoning-effort option entirely.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    levels: tuple[EffortLevel, ...] = THINKING_LEVELS
+    allow_off: bool = Field(
+        default=True,
+        description="Offer 'off' for models that allow reasoning to be disabled.",
+    )
+
+    @field_validator("levels")
+    @classmethod
+    def validate_levels(cls, value: tuple[EffortLevel, ...]) -> tuple[EffortLevel, ...]:
+        """Keep the declared order and drop duplicates; clients show the list as given."""
+        return tuple(dict.fromkeys(value))
+
+
 class ProviderEntry(BaseModel):
     """One configured local provider: how to reach it and which models it offers."""
 
@@ -280,6 +303,10 @@ class HrnsConfig(BaseSettings):
     )
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     model_settings: dict[str, Any] = Field(default_factory=dict)
+    thinking: ThinkingSettings = Field(
+        default_factory=ThinkingSettings,
+        description="Reasoning-effort policy for ACP sessions.",
+    )
     mcp: McpSettings = Field(default_factory=McpSettings)
     store: Path = Field(default_factory=lambda: user_data_path("hrns") / "local-sessions.db")
 

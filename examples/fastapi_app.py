@@ -8,6 +8,11 @@ Sessions default to ``deepseek-flash`` and can switch to ``deepseek-pro`` over
 ACP. Provider keys stay server-side (read from ``DEEPSEEK_API_KEY``); the
 client never sends an API key with a prompt.
 
+Reasoning effort is a session config option too: the resolver advertises one
+``thought_level`` select and turns the client's choice into ``thinking`` model
+settings before every request, so it can change between turns — or mid-turn, on
+the model request that follows a tool call.
+
 The app also exposes one client-manageable provider, so a client can route these
 models through its own OpenAI-compatible gateway with ``providers/set`` (the
 terminal client's ``/providers``). That routing lives in this process only.
@@ -16,7 +21,7 @@ terminal client's ``/providers``). That routing lives in this process only.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from fastapi import FastAPI, WebSocket
 from pydantic_ai.agent import AbstractAgent, Agent
@@ -33,6 +38,8 @@ from hrns.app.acp import (
     ProviderModelResolver,
     ProviderRoute,
     ResolvedModel,
+    SettingChoice,
+    SettingOption,
 )
 from hrns.app.fastapi import mount_acp
 from hrns.capabilities import AskUser, Todo
@@ -49,6 +56,26 @@ _MODEL_NAMES = {
     "deepseek-pro": "deepseek-v4-pro",
 }
 
+# Reasoning-effort ladder the deployment offers. ACP advertises these as one
+# ``thought_level`` select; the client's choice reaches a request as the unified
+# ``thinking`` setting, which Pydantic AI maps to DeepSeek's reasoning effort. The
+# server owns this list: a client can only pick what is returned here.
+_EFFORTS: dict[str, ModelSettings] = {
+    "default": ModelSettings(),
+    "off": ModelSettings(thinking=False),
+    "low": ModelSettings(thinking="low"),
+    "medium": ModelSettings(thinking="medium"),
+    "high": ModelSettings(thinking="high"),
+}
+
+_EFFORT_COPY: dict[str, tuple[str, str]] = {
+    "default": ("Default", "Let DeepSeek choose its default reasoning effort."),
+    "off": ("Off", "Answer without reasoning; fastest and cheapest."),
+    "low": ("Low", "Light reasoning for straightforward edits."),
+    "medium": ("Medium", "Balanced reasoning for everyday work."),
+    "high": ("High", "Deeper reasoning for harder problems."),
+}
+
 # One provider covers every model above, because they share an endpoint. It speaks
 # the OpenAI protocol, so a client may point it at any OpenAI-compatible gateway.
 # ``required`` says this deployment cannot run without it.
@@ -59,7 +86,8 @@ class ExampleModelResolver(ProviderModelResolver):
     """The example's models, plus the one provider a client may reroute.
 
     One object answers everything ACP asks: which models to advertise, how a selection
-    resolves for a run, and which providers exist and what they currently point at.
+    resolves for a run, which settings a model offers and what they mean, and which
+    providers exist and what they currently point at.
     """
 
     def __init__(self) -> None:
@@ -99,6 +127,44 @@ class ExampleModelResolver(ProviderModelResolver):
             ),
             settings=ModelSettings(extra_headers=dict(config.headers)) if config.headers else None,
         )
+
+    def list_options(self, model_id: str) -> Sequence[SettingOption]:
+        """Advertise the deployment's effort ladder for every model it serves.
+
+        The list is the contract: a client may only select these values, which is how a
+        server keeps costlier or unsupported levels out without shipping a new client.
+        """
+        if model_id not in _MODEL_NAMES:
+            return ()
+        return [
+            SettingOption(
+                id="effort",
+                name="Reasoning Effort",
+                category="thought_level",
+                description="How much the model reasons before it answers.",
+                choices=[
+                    SettingChoice(
+                        value=value,
+                        name=name,
+                        description=description,
+                        is_default=value == "default",
+                    )
+                    for value, (name, description) in _EFFORT_COPY.items()
+                ],
+            )
+        ]
+
+    def resolve_settings(
+        self, model_id: str, setting_selections: Mapping[str, str]
+    ) -> ModelSettings:
+        """Turn the session's effort choice into a settings delta for each request."""
+        value = setting_selections.get("effort")
+        if value is None:
+            return ModelSettings()
+        settings = _EFFORTS.get(value)
+        if settings is None:
+            raise ValueError(f"Unknown reasoning effort: {value!r}")
+        return settings
 
 
 resolver = ExampleModelResolver()

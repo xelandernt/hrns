@@ -8,7 +8,14 @@ ACP 1.x directly.
 from . import updates
 from .adapter import PydanticAIACPAgent
 from .content import PromptContentBlock, prompt_blocks_to_user_content
-from .models import ModelChoice, ModelResolver, ProviderModelResolver, ResolvedModel
+from .models import (
+    ModelChoice,
+    ModelResolver,
+    ProviderModelResolver,
+    ResolvedModel,
+    SettingChoice,
+    SettingOption,
+)
 from .permission import (
     PermissionPolicy,
     ToolCallPermission,
@@ -85,6 +92,8 @@ __all__ = [
     "SessionStore",
     "SessionSummary",
     "SessionUpdate",
+    "SettingChoice",
+    "SettingOption",
     "StoredSession",
     "ToolCallContent",
     "ToolCallPermission",

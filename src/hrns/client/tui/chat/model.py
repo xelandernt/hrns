@@ -475,12 +475,14 @@ class ModelWorkflow:
         *,
         current: str | None,
         on_select: Any,
+        choices: list[dict[str, str]] | None = None,
     ) -> None:
+        """Offer the effort ladder; the server's ACP option wins over the local catalog."""
         self.screen.app.push_screen(
             ChoiceDialog(
                 "Reasoning effort",
                 f"{provider}:{model}. Applies to the next message.",
-                effort_choices(settings.provider_id(provider), model),
+                choices or effort_choices(settings.provider_id(provider), model),
                 current=current or EFFORT_DEFAULT,
             ),
             lambda value: on_select(value) if value else None,
@@ -566,6 +568,7 @@ class ModelWorkflow:
             settings.provider,
             settings.model,
             current=current,
+            choices=option_values(option) if option is not None else None,
             on_select=lambda effort: screen._set_local_effort_worker(settings, effort),
         )
 

@@ -137,6 +137,9 @@ class SessionState(Generic[AgentDepsT]):
     # The model the client selected via the ``model`` config option, or ``None`` to use the
     # agent's own model. Applied as a per-run override so the shared agent is never mutated.
     model: str | None = None
+    # The client's setting selections, keyed by option id. Applied as a per-request delta,
+    # so a change lands on the next model request in the same turn.
+    setting_selections: dict[str, str] = field(default_factory=dict[str, str])
     lock: anyio.Lock = field(default_factory=lambda: anyio.Lock(fast_acquire=True))
     active_turn: asyncio.Task[schema.PromptResponse] | None = None
     cancel_requested: bool = False
