@@ -69,6 +69,28 @@ model→provider link travels separately: each `ModelChoice.provider_id` becomes
 the client's `/providers` table groups the option's values by that tag, and `/models`
 appends it to any model name that does not already read `provider:model`.
 
+## Usage reporting
+
+Two channels carry usage, and they answer different questions. `PromptResponse.usage`
+is per-turn token totals — the protocol has no field there for a context percentage or a
+price, because `acp.schema.Usage` is tokens only. The context gauge is
+`session/update` `usage_update`, whose `used`/`size`/`cost` the client renders as
+"ctx 12k/200k (6%)" and the session's spend. An agent that sends only `PromptResponse`
+leaves the client's status band blank, which is why the adapter emits the gauge at the
+end of every prompt.
+
+`used` is the last request's input, cache-read, cache-write, and output tokens: cache
+tokens are part of the prompt, and the response becomes context for the next request.
+`size` comes from the resolved model's profile `context_window`; when the profile has
+none (arbitrary OpenAI-compatible endpoints usually do not), no gauge is sent rather than
+a bogus percentage, and the client falls back to the turn's token totals. `cost` is
+session-cumulative and priced by `genai-prices` through `RunUsage.cost`, so it is USD and
+absent for models pricing data does not know.
+
+The gauge is sent straight to the connection rather than recorded in the session
+transcript: replaying a stale percentage into a loaded session would describe context
+that session does not have.
+
 ## Todos
 
 `hrns.capabilities.Todo` is a standalone Pydantic AI capability with two tools:
