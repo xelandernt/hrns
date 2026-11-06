@@ -11,8 +11,11 @@ from pydantic_ai.tools import ToolDefinition
 __all__ = ["READ_ONLY_TOOLS", "require_approval"]
 
 #: Tools that may run without asking. Everything else is marked ``unapproved``
-#: so the ACP adapter can turn it into a permission request.
-READ_ONLY_TOOLS = frozenset({"read_file", "list_files", "grep", "read_todos", "write_todos"})
+#: so the ACP adapter can turn it into a permission request. ``ask_user_question``
+#: is read-only: the question itself is the interaction, not a side effect.
+READ_ONLY_TOOLS = frozenset(
+    {"read_file", "list_files", "grep", "read_todos", "write_todos", "ask_user_question"}
+)
 
 
 def require_approval(read_only: frozenset[str] = READ_ONLY_TOOLS) -> PrepareTools[None]:

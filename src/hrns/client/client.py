@@ -23,6 +23,8 @@ from acp.schema import (
     DeclineElicitationResponse,
     DeniedOutcome,
     ElicitationCapabilities,
+    ElicitationFormRequestMode,
+    ElicitationFormSessionMode,
     FileSystemCapabilities,
     PermissionOption,
     PlanCapabilities,
@@ -46,7 +48,7 @@ from .errors import (
 from .events import (
     SessionsListed,
 )
-from .interactions import InteractionPolicy, RequireInteractions
+from .interactions import AskUserRequest, InteractionPolicy, RequireInteractions
 from .io import (
     FS_READ_TEXT_FILE,
     FS_WRITE_TEXT_FILE,
@@ -55,7 +57,12 @@ from .io import (
     ClientIoMode,
     ClientIoPolicy,
 )
-from .payloads import elicitation_record, normalize_permission
+from .payloads import (
+    ask_user_content,
+    ask_user_request,
+    elicitation_record,
+    normalize_permission,
+)
 from .session import SessionLifecycle, SessionProxy
 from .transport import AgentTransport, ConnectionBundle
 from .turn import TurnService
@@ -301,6 +308,10 @@ class HrnsAcpClient:
         )
 
     async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
+        if isinstance(mode, (ElicitationFormSessionMode, ElicitationFormRequestMode)):
+            request = ask_user_request(mode)
+            if request is not None:
+                return await self._answer_questions(request)
         record = elicitation_record(message, mode)
         try:
             answer = await self.policy.answer_elicitation(record)
@@ -312,6 +323,18 @@ class HrnsAcpClient:
         if answer.action == "cancel":
             return CancelElicitationResponse(action="cancel")
         return DeclineElicitationResponse(action="decline")
+
+    async def _answer_questions(self, request: AskUserRequest) -> Any:
+        try:
+            response = await self.policy.answer_questions(request)
+        except (InteractionRequired, InteractionRejected) as exc:
+            self._pending_interaction_error = exc
+            return DeclineElicitationResponse(action="decline")
+        if response.cancelled:
+            return DeclineElicitationResponse(action="decline")
+        return AcceptElicitationResponse(
+            action="accept", content=ask_user_content(request, response) or None
+        )
 
     async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         return None

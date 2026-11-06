@@ -26,3 +26,6 @@ MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 WS_PING_INTERVAL = 30.0
 WS_PING_TIMEOUT = 30.0
 WS_WRITE_LIMIT = 1024 * 1024
+#: A peer that never acknowledges the close frame must not stall teardown; after a
+#: failed handshake this used to add the library's 10-second default to every retry.
+WS_CLOSE_TIMEOUT = 2.0

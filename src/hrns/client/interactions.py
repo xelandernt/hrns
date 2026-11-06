@@ -139,12 +139,18 @@ class AskUserOption:
 
 @dataclass(frozen=True, slots=True)
 class AskUserQuestion:
-    """One multiple-choice question the agent asks mid-run."""
+    """One multiple-choice question the agent asks mid-run.
+
+    ``choice_field`` and ``text_field`` are the form property names the agent
+    expects back, so an answer can be serialized without guessing.
+    """
 
     header: str
     question: str
     options: tuple[AskUserOption, ...] = ()
     multi_select: bool = False
+    choice_field: str = ""
+    text_field: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +372,6 @@ class HeadlessInteractions(InteractionPolicy):
             raise InteractionRejected(
                 "The agent asked a question that needs an answer for "
                 + ", ".join(missing)
-                + "; pass it with --answer HEADER=LABEL or disable the ask_user capability."
+                + "; pass it with --answer HEADER=LABEL or disable the ask_user_question capability."
             )
         return AskUserResponse(answers=tuple(answers))

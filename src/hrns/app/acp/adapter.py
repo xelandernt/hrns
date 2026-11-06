@@ -56,12 +56,20 @@ from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, AgentToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai_harness.ask_user import AskUserRequest as HarnessAskUserRequest
 
 from hrns.capabilities import TodoStore, TodoUpdated
 from hrns.capabilities.todo import _bind_todo_store
 
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
+from .elicitation import (
+    ASK_USER_UNAVAILABLE,
+    ask_user_message,
+    ask_user_response,
+    ask_user_tool_result,
+    build_ask_user_schema,
+)
 from .models import ModelChoice, ModelResolver, ResolvedModel
 from .permission import PermissionPolicy, ToolCallPermission, default_permission_scope
 from .presentation import (
@@ -95,6 +103,7 @@ DEFAULT_VERSION = "0.1.0"
 
 _logger = logging.getLogger(__name__)
 _MODEL_CONFIG_ID = "model"
+_ASK_USER_TOOL = "ask_user_question"
 
 
 def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
@@ -829,16 +838,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     async def _resolve_approvals(
         self, turn: _TurnState, state: SessionState[AgentDepsT], requests: DeferredToolRequests
     ) -> DeferredToolResults:
-        if requests.calls:
-            names = sorted({call.tool_name for call in requests.calls})
-            raise acp.RequestError.internal_error(
-                {
-                    "reason": "external tool execution is not supported by the ACP adapter",
-                    "tools": names,
-                }
-            )
-
         results = DeferredToolResults()
+        if requests.calls:
+            results.calls.update(await self._resolve_calls(turn, requests.calls))
         for call in requests.approvals:
             if (
                 turn.announced_status.get(call.tool_call_id) == "in_progress"
@@ -903,6 +905,48 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     name for name, tool in toolset.tools.items() if not tool.requires_approval
                 )
         return frozenset(names)
+
+    def _supports_form_elicitation(self) -> bool:
+        capabilities = self._client_capabilities
+        elicitation = capabilities.elicitation if capabilities is not None else None
+        return elicitation is not None and elicitation.form is not None
+
+    async def _resolve_calls(
+        self, turn: _TurnState, calls: Sequence[ToolCallPart]
+    ) -> dict[str, object]:
+        """Answer deferred tool calls the adapter knows how to service."""
+        resolved: dict[str, object] = {}
+        for call in calls:
+            if call.tool_name != _ASK_USER_TOOL:
+                raise acp.RequestError.internal_error(
+                    {
+                        "reason": "external tool execution is not supported by the ACP adapter",
+                        "tools": sorted({call.tool_name for call in calls}),
+                    }
+                )
+            resolved[call.tool_call_id] = await self._ask_user(turn, call)
+        return resolved
+
+    async def _ask_user(self, turn: _TurnState, call: ToolCallPart) -> object:
+        """Put one ``ask_user_question`` call to the client as a form elicitation."""
+        request = HarnessAskUserRequest.from_tool_call(call)
+        if not self._supports_form_elicitation():
+            return ASK_USER_UNAVAILABLE
+        await self._update_status(turn, call.tool_call_id, "pending")
+        try:
+            response = await turn.conn.create_elicitation(
+                message=ask_user_message(request.questions),
+                mode=schema.ElicitationFormSessionMode(
+                    session_id=turn.session_id,
+                    tool_call_id=call.tool_call_id,
+                    requested_schema=build_ask_user_schema(request.questions),
+                ),
+            )
+        except acp.RequestError as exc:
+            _logger.info("client rejected an ask-user elicitation: %s", exc)
+            await self._update_status(turn, call.tool_call_id, "in_progress")
+            return ASK_USER_UNAVAILABLE
+        return ask_user_tool_result(request, ask_user_response(response, request))
 
     async def _request_permission(
         self, turn: _TurnState, state: SessionState[AgentDepsT], call: ToolCallPart, scope: Hashable
