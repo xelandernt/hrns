@@ -16,17 +16,8 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from hrns.shared import ASK_USER_META
-
 from .errors import HrnsClientError
-from .interactions import (
-    AskUserOption,
-    AskUserQuestion,
-    AskUserRequest,
-    AskUserResponse,
-    ElicitationRequest,
-    PermissionRequest,
-)
+from .interactions import ElicitationRequest, PermissionRequest
 
 
 def _clip(text: str, limit: int = 2000) -> str:
@@ -143,109 +134,3 @@ def elicitation_record(
         request_id=getattr(mode, "request_id", None),
         elicitation_id=getattr(mode, "elicitation_id", None),
     )
-
-
-def _options(entries: object) -> list[AskUserOption]:
-    """Read a titled (``const``) or untitled (bare string) option list."""
-    if not isinstance(entries, list):
-        return []
-    options: list[AskUserOption] = []
-    for entry in entries:
-        if isinstance(entry, str):
-            label, description = entry, ""
-        elif isinstance(entry, dict):
-            raw = entry.get("const", entry.get("title"))
-            label = raw if isinstance(raw, str) else ""
-            raw_description = entry.get("description")
-            description = raw_description if isinstance(raw_description, str) else ""
-        else:
-            continue
-        if label:
-            options.append(AskUserOption(label=label, description=description))
-    return options
-
-
-def _question_from_property(
-    name: str, spec: dict[str, Any], properties: dict[str, Any]
-) -> AskUserQuestion | None:
-    multi_select = spec.get("type") == "array"
-    items = spec.get("items")
-    if multi_select:
-        options = _options(items.get("anyOf") if isinstance(items, dict) else None)
-        options = options or _options(items.get("enum") if isinstance(items, dict) else None)
-    else:
-        options = _options(spec.get("oneOf")) or _options(spec.get("enum"))
-    if not options:
-        return None
-
-    title = spec.get("title")
-    header = title if isinstance(title, str) and title.strip() else name
-    description = spec.get("description")
-    text = description if isinstance(description, str) and description.strip() else header
-    companion = f"{name}_text"
-    return AskUserQuestion(
-        header=header,
-        question=text,
-        options=tuple(options),
-        multi_select=multi_select,
-        choice_field=name,
-        text_field=companion if companion in properties else "",
-    )
-
-
-def _ask_user_questions(
-    schema: dict[str, Any],
-) -> list[AskUserQuestion]:
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return []
-    questions: list[AskUserQuestion] = []
-    for name, spec in properties.items():
-        if not isinstance(name, str) or not isinstance(spec, dict):
-            continue
-        question = _question_from_property(name, spec, properties)
-        if question is not None:
-            questions.append(question)
-    return questions
-
-
-def ask_user_request(
-    mode: ElicitationFormSessionMode | ElicitationFormRequestMode,
-) -> AskUserRequest | None:
-    """Recognize an ``ask_user_question`` elicitation and recover its questions.
-
-    The marker is the only thing the agent adds: titles, descriptions, options and
-    multi-select come from the standard form schema. ``None`` means the request is a
-    generic form and should go to the dialog.
-    """
-    if ASK_USER_META not in (mode.requested_schema.field_meta or {}):
-        return None
-    questions = _ask_user_questions(mode.requested_schema.model_dump(mode="json", by_alias=True))
-    if not questions:
-        return None
-    return AskUserRequest(
-        request_id="",
-        questions=tuple(questions),
-        session_id=getattr(mode, "session_id", None),
-    )
-
-
-def ask_user_content(request: AskUserRequest, response: AskUserResponse) -> dict[str, Any]:
-    """Serialize answers back into the form property names the agent expects."""
-    by_header = {question.header: question for question in request.questions}
-    content: dict[str, Any] = {}
-    for answer in response.answers:
-        question = by_header.get(answer.header)
-        if question is None:
-            continue
-        if answer.custom_answer:
-            if question.text_field:
-                content[question.text_field] = answer.custom_answer
-            continue
-        if not question.choice_field:
-            continue
-        if question.multi_select:
-            content[question.choice_field] = list(answer.selected)
-        elif answer.selected:
-            content[question.choice_field] = answer.selected[0]
-    return content

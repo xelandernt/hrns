@@ -217,13 +217,27 @@ asked or pick a label that was not offered.
 
 One question maps to one form property: a single-select is a string with `oneOf`,
 a multi-select is an array with titled items, and a typed answer is a companion
-string field (`q0_text`). The schema is standard ACP; the only addition is the
-`hrns.ask_user` key in `_meta`, a marker that tells the hrns client to render its
-tabbed `AskUserBar`. A client that ignores it still sees a usable form, and the
-questions themselves are recovered from the titles, descriptions and option lists
-in the schema. `ASK_USER_META` and the `qN`/`qN_text` field names live in
-`hrns.shared` because both the adapter and the client must agree on them; the
-capability itself is not reimplemented here.
+string field (`q0_text`). The schema is standard ACP: no marker and no vendor
+fields, so any client that implements form elicitation can render it. The
+`qN`/`qN_text` names are private to the adapter, which uses them to put the answer
+back together; a client only sees ordinary form properties.
+
+The TUI folds the `qN`/`qN_text` pair back into one question for display: each
+question is a vertical radio or checkbox list and the typed-answer input is its last
+row. The list receives focus as soon as the bar mounts, Up/Down move the option
+cursor, Space toggles a multi-select option, and Enter submits a single question.
+For a multi-select the custom field is an alternative, not an extra label: choosing
+or typing it clears the picked labels, because the ACP answer model forbids a custom
+answer and selections together. When there is more than one question, each is a tab
+and a final Confirm tab reviews the answers; Enter advances to the next question,
+Tab/Shift+Tab move forward and back, and only Enter on Confirm submits. The pairing
+is only a presentation concern; the adapter still receives ordinary `qN` and
+`qN_text` properties, so other clients may render the two fields separately.
+
+`UiInteractionPolicy` sends every form elicitation to the active `ChatScreen`, which
+mounts an `ElicitationBar` above the composer and removes it when the user accepts or
+declines. URL elicitations, and forms that arrive with no chat screen on top, still
+use the modal `ElicitationDialog`.
 
 A decline, a cancel, an empty form, or a client without form support returns a
 plain string telling the model to proceed and state its assumption. None of them is

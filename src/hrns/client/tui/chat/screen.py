@@ -33,8 +33,8 @@ from ...events import (
     UserMessageReplayed,
 )
 from ...interactions import (
-    AskUserRequest,
-    AskUserResponse,
+    ElicitationAnswer,
+    ElicitationRequest,
     PermissionDecision,
     PermissionRequest,
 )
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 from hrns.config import TuiSettings
 
-from ..approval import ApprovalBar, AskUserBar
+from ..approval import ApprovalBar
 from ..chat.commands import CommandWorkflow
 from ..chat.model import ModelWorkflow
 from ..chat.prompts import PromptWorkflow
@@ -59,11 +59,12 @@ from ..composer import (
     Composer,
     PromptQueue,
 )
+from ..dialogs import ElicitationBar
 from ..messages import (
     ApprovalDecided,
-    AskUserAnswered,
     AttachmentRemoved,
     CommandSuggestionKey,
+    ElicitationAnswered,
     OutputPending,
     QueueAction,
     Submitted,
@@ -111,7 +112,6 @@ class ChatScreen(_HrnsScreen):
         Binding("ctrl+n", "new_session", "New session", show=False),
         Binding("ctrl+r", "reconnect", "Reconnect", show=False),
         Binding("ctrl+enter", "submit_composer", "Send", show=False, priority=True),
-        Binding("ctrl+s", "submit_question", "Submit answer", show=False, priority=True),
         Binding("escape", "interrupt_or_focus", "Stop", show=False),
         Binding("ctrl+q", "quit_app", "Quit", show=False, priority=True),
     ]
@@ -162,7 +162,7 @@ class ChatScreen(_HrnsScreen):
         self._session_rows: list[dict[str, Any]] = []
         self._session_cursor: str | None = None
         self._approval_future: asyncio.Future[PermissionDecision] | None = None
-        self._answers_future: asyncio.Future[AskUserResponse] | None = None
+        self._elicitation_future: asyncio.Future[ElicitationAnswer] | None = None
         self._redirect_after_turn = False
         self._suggestion_items: list[dict[str, Any]] = []
         self._suggestion_index = 0
@@ -191,8 +191,8 @@ class ChatScreen(_HrnsScreen):
             yield SidePanel()
         yield Button("New output ↓ · Ctrl+End", id="new-output")
         yield PromptQueue(id="prompt-queue")
-        with Horizontal(id="ask-user-dock"):
-            yield AskUserBar(id="ask-user")
+        with Horizontal(id="question-dock"):
+            pass
         with Horizontal(id="approval-dock"):
             yield ApprovalBar(id="approval")
         with Horizontal(id="suggestions-dock"):
@@ -218,7 +218,7 @@ class ChatScreen(_HrnsScreen):
 
     def on_unmount(self) -> None:
         self._resolve_approval(None, focus=False)
-        self._resolve_questions(AskUserResponse(cancelled=True), focus=False)
+        self._settle_elicitation(ElicitationAnswer(action="cancel"))
         if self._consumer is not None:
             self._consumer.cancel()
             self._consumer = None
@@ -466,28 +466,46 @@ class ChatScreen(_HrnsScreen):
             self._redirect_after_turn = True
             self._cancel_turn()
 
-    # --------------------------------------------------------------- questions
+    # ------------------------------------------------------------- elicitation
 
-    async def request_questions(self, request: AskUserRequest) -> AskUserResponse:
-        if self._answers_future is not None:
-            self._resolve_questions(AskUserResponse(cancelled=True))
-        future: asyncio.Future[AskUserResponse] = asyncio.get_running_loop().create_future()
-        self._answers_future = future
-        self.query_one("#ask-user", AskUserBar).show(request)
-        return await future
+    async def request_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
+        dock = self.query_one("#question-dock", Horizontal)
+        if self._elicitation_future is not None:
+            self._settle_elicitation(ElicitationAnswer(action="cancel"))
+            with contextlib.suppress(Exception):
+                await dock.remove_children()
+        future: asyncio.Future[ElicitationAnswer] = asyncio.get_running_loop().create_future()
+        self._elicitation_future = future
+        bar = ElicitationBar(request)
+        await dock.mount(bar)
+        bar.focus_row(0)
+        try:
+            return await future
+        except asyncio.CancelledError:
+            self._settle_elicitation(ElicitationAnswer(action="cancel"))
+            with contextlib.suppress(Exception):
+                await dock.remove_children()
+            raise
 
-    def _resolve_questions(self, response: AskUserResponse, *, focus: bool = True) -> None:
-        future, self._answers_future = self._answers_future, None
+    def _settle_elicitation(self, answer: ElicitationAnswer) -> None:
+        future, self._elicitation_future = self._elicitation_future, None
         if future is not None and not future.done():
-            future.set_result(response)
+            future.set_result(answer)
+
+    async def on_elicitation_answered(self, event: ElicitationAnswered) -> None:
+        self._settle_elicitation(event.answer)
         with contextlib.suppress(Exception):
-            self.query_one("#ask-user", AskUserBar).hide()
-        if focus and self.is_mounted:
+            await self.query_one("#question-dock", Horizontal).remove_children()
+        if self.is_mounted:
             with contextlib.suppress(Exception):
                 self.query_one("#composer", Composer).focus()
 
-    def on_ask_user_answered(self, event: AskUserAnswered) -> None:
-        self._resolve_questions(event.response)
+    def _decline_elicitation(self) -> bool:
+        if self._elicitation_future is None:
+            return False
+        with contextlib.suppress(Exception):
+            self.query_one(ElicitationBar).action_decline()
+        return True
 
     def on_key(self, event: Any) -> None:
         """Left/Right change a focused choice control; approval shortcuts need focus."""
@@ -713,8 +731,7 @@ class ChatScreen(_HrnsScreen):
         self.actions.show_settings()
 
     def action_interrupt_or_focus(self) -> None:
-        if self._answers_future is not None:
-            self.query_one("#ask-user", AskUserBar).action_decline()
+        if self._decline_elicitation():
             return
         if self._approval_future is not None:
             # Esc is the Codex-style "no, and tell it what to do differently":
@@ -730,23 +747,15 @@ class ChatScreen(_HrnsScreen):
 
     def action_submit_composer(self) -> None:
         """Send whatever the composer holds, from any focused chat widget."""
-        if self._answers_future is not None:
-            self.query_one("#ask-user", AskUserBar).action_submit()
+        if self._elicitation_future is not None:
+            with contextlib.suppress(Exception):
+                self.query_one(ElicitationBar).action_accept_form()
             return
         composer = self.query_one("#composer", Composer)
         if not composer.text.strip():
             composer.focus()
             return
         composer.action_submit()
-
-    def action_submit_question(self) -> None:
-        """Submit a pending agent question; a no-op otherwise.
-
-        Ctrl+Enter and Ctrl+J need terminal support for modified keys, so
-        Ctrl+S is the reliable fallback for the question bar.
-        """
-        if self._answers_future is not None:
-            self.query_one("#ask-user", AskUserBar).action_submit()
 
     def action_focus_transcript(self) -> None:
         self.query_one("#transcript", TranscriptPane).focus()
