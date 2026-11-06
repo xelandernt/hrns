@@ -13,11 +13,11 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import Hashable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from inspect import isawaitable
-from typing import Generic, Literal, cast
+from typing import Generic, Literal, TypeAlias, cast
 from uuid import uuid4
 
 import acp
@@ -53,7 +53,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.settings import ModelSettings, merge_model_settings
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, AgentToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness.ask_user import AskUserRequest as HarnessAskUserRequest
@@ -70,7 +71,7 @@ from .elicitation import (
     ask_user_tool_result,
     build_ask_user_schema,
 )
-from .models import ModelChoice, ModelResolver, ResolvedModel
+from .models import ModelChoice, ModelResolver, ResolvedModel, SettingOption
 from .permission import PermissionPolicy, ToolCallPermission, default_permission_scope
 from .presentation import (
     ToolCallContent,
@@ -104,6 +105,11 @@ DEFAULT_VERSION = "0.1.0"
 _logger = logging.getLogger(__name__)
 _MODEL_CONFIG_ID = "model"
 _ASK_USER_TOOL = "ask_user_question"
+
+#: One complete ACP config-option list, as ``session/new`` and ``session/set_config_option`` return it.
+ConfigOptions: TypeAlias = list[
+    schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean
+]
 
 
 def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
@@ -231,9 +237,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
     ``session/list`` and ``session/delete`` are supported when the configured store
     implements :class:`ListableSessionStore` and :class:`DeletableSessionStore`.
-    ``model_resolver`` ties the ``model`` session config option to the ``providers/*``
-    methods: it supplies the model list, resolves a selection for a run, and owns the
-    provider routing a client may change. Without it the adapter advertises neither.
+    ``model_resolver`` ties the ``model`` and setting session config options to the
+    ``providers/*`` methods: it supplies the model list, resolves a selection for a run,
+    advertises the setting options a model accepts, turns a session's setting selections into
+    per-request settings, and owns the provider routing a client may change. Without it
+    the adapter advertises neither.
     MCP-over-ACP and NES are explicitly unsupported.
     """
 
@@ -344,7 +352,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             await store.remember(session_id, cwd=cwd)
         await self._persist(state)
         return schema.NewSessionResponse(
-            session_id=session_id, config_options=self._model_config_options(state.model)
+            session_id=session_id, config_options=self._config_options(state)
         )
 
     async def load_session(
@@ -381,14 +389,19 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             history=list(stored.messages),
             transcript=list(stored.updates),
             model=stored.model,
+            setting_selections=dict(stored.setting_selections),
             todos=TodoStore(items=stored.todos),
         )
         self._sessions[session_id] = state
         if (store := self._listable_store) is not None:
             await store.remember(session_id, cwd=cwd)
+        if self._reconcile_setting_selections(state):
+            # The stored model or a provider reroute removed a value; persist the clamp so
+            # a later load does not resurrect it.
+            await self._persist(state)
         for update in stored.updates:
             await self._conn.session_update(session_id=session_id, update=update)
-        return schema.LoadSessionResponse(config_options=self._model_config_options(state.model))
+        return schema.LoadSessionResponse(config_options=self._config_options(state))
 
     async def list_sessions(
         self,
@@ -443,6 +456,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     messages=list(state.history),
                     updates=list(state.transcript),
                     model=state.model,
+                    setting_selections=dict(state.setting_selections),
                     todos=state.todos.items,
                 ),
             )
@@ -473,11 +487,145 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             ],
         )
 
-    def _model_config_options(
-        self, current_model_id: str | None
-    ) -> list[schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean] | None:
-        option = self._model_option(current_model_id)
-        return None if option is None else [option]
+    def _config_options(self, state: SessionState[AgentDepsT]) -> ConfigOptions | None:
+        """The complete config-option state ACP returns after every change.
+
+        The model option comes first, then the resolver's setting options, so clients that
+        prioritize by array order surface the model selection most prominently.
+        """
+        options: ConfigOptions = []
+        model = self._model_option(state.model)
+        if model is not None:
+            options.append(model)
+        options.extend(self._setting_options(state))
+        return options or None
+
+    def _setting_options(
+        self, state: SessionState[AgentDepsT]
+    ) -> list[schema.SessionConfigOptionSelect]:
+        """The resolver's options for this session's model, with setting selections applied."""
+        resolver = self._model_resolver
+        if resolver is None or state.model is None:
+            return []
+        rendered: list[schema.SessionConfigOptionSelect] = []
+        for option in resolver.list_options(state.model):
+            values = {choice.value for choice in option.choices}
+            current = state.setting_selections.get(option.id, option.default)
+            if current not in values:
+                current = option.default
+            rendered.append(
+                schema.SessionConfigOptionSelect(
+                    id=option.id,
+                    name=option.name,
+                    description=option.description,
+                    category=option.category,
+                    current_value=current,
+                    options=[
+                        schema.SessionConfigSelectOption(
+                            value=choice.value,
+                            name=choice.name,
+                            description=choice.description,
+                            field_meta=dict(choice.meta) or None,
+                        )
+                        for choice in option.choices
+                    ],
+                    field_meta=dict(option.meta) or None,
+                )
+            )
+        return rendered
+
+    def _setting_option(
+        self, state: SessionState[AgentDepsT], config_id: str
+    ) -> SettingOption | None:
+        """The resolver option with this id, if the current model advertises it."""
+        resolver = self._model_resolver
+        if resolver is None or state.model is None:
+            return None
+        return next(
+            (option for option in resolver.list_options(state.model) if option.id == config_id),
+            None,
+        )
+
+    def _reconcile_setting_selections(self, state: SessionState[AgentDepsT]) -> bool:
+        """Drop setting selections the session's current model no longer offers.
+
+        A model switch or a provider reroute can remove a value. Dropping it makes the
+        option fall back to its default instead of sending a setting the resolver refuses.
+        """
+        resolver = self._model_resolver
+        if resolver is None or state.model is None:
+            return False
+        advertised = {
+            option.id: {choice.value for choice in option.choices}
+            for option in resolver.list_options(state.model)
+        }
+        changed = False
+        for config_id in list(state.setting_selections):
+            if state.setting_selections[config_id] not in advertised.get(config_id, set[str]()):
+                del state.setting_selections[config_id]
+                changed = True
+        return changed
+
+    def _resolver_settings(self, state: SessionState[AgentDepsT]) -> ModelSettings:
+        """The settings delta the session's setting selections currently imply."""
+        resolver = self._model_resolver
+        if resolver is None or state.model is None:
+            return ModelSettings()
+        return resolver.resolve_settings(state.model, dict(state.setting_selections))
+
+    def _run_settings(
+        self, state: SessionState[AgentDepsT], resolved: ResolvedModel | None
+    ) -> Callable[[RunContext[AgentDepsT]], ModelSettings]:
+        """Model settings resolved before every request, so a change lands mid-turn.
+
+        Pydantic AI resolves a callable ``model_settings`` layer once per model request.
+        Reading the session's live setting selections here is what makes ``session/set_config_option``
+        apply to the next request of a running turn instead of only the next turn; the
+        model's routing settings stay the base, so the client cannot drop them.
+        """
+        base = resolved.settings if resolved is not None else None
+
+        def settings(_run_context: RunContext[AgentDepsT]) -> ModelSettings:
+            return merge_model_settings(base, self._resolver_settings(state)) or ModelSettings()
+
+        return settings
+
+    def _options_snapshot(
+        self,
+    ) -> dict[
+        str,
+        ConfigOptions | None,
+    ]:
+        """The options each resident session advertises right now."""
+        return {
+            session_id: self._config_options(state) for session_id, state in self._sessions.items()
+        }
+
+    async def _push_option_changes(
+        self,
+        before: dict[
+            str,
+            ConfigOptions | None,
+        ],
+    ) -> None:
+        """Tell resident sessions when a provider routing change altered their options.
+
+        A provider reroute can change which settings a model offers without the client
+        changing anything, so the response to ``providers/set`` is not enough: sessions
+        whose options differ get a ``config_option_update`` with the complete new state.
+        """
+        conn = self._conn
+        for session_id, state in self._sessions.items():
+            if self._reconcile_setting_selections(state):
+                await self._persist(state)
+            after = self._config_options(state)
+            if after is None or after == before.get(session_id):
+                continue
+            if conn is not None:
+                await conn.session_update(
+                    session_id=session_id,
+                    update=schema.ConfigOptionUpdate(config_options=after),
+                )
 
     def session_history(self, session_id: str) -> list[ModelMessage] | None:
         """A snapshot of a resident session's committed model history."""
@@ -628,9 +776,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                         toolsets=config.toolsets,
                         workspace=config.workspace,
                         model=resolved_model.model if resolved_model is not None else None,
-                        model_settings=(
-                            resolved_model.settings if resolved_model is not None else None
-                        ),
+                        model_settings=self._run_settings(state, resolved_model),
                         usage_limits=self._usage_limits,
                     ) as stream:
                         event: AgentStreamEvent | AgentRunResultEvent[object]
@@ -1007,25 +1153,52 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object
     ) -> schema.SetSessionConfigOptionResponse | None:
-        """Switch the session's model through ACP's session config option surface."""
+        """Change the session's model or one of the resolver's settings.
+
+        The advertised options are the contract: a value outside them is rejected rather
+        than clamped. The response carries the complete option state because a model switch
+        can change which settings exist and which values they offer.
+        """
         state = self._sessions.get(session_id)
         if state is None:
             raise acp.RequestError.invalid_params({"session_id": session_id})
-        if config_id != _MODEL_CONFIG_ID:
+        if not isinstance(value, str):
             raise acp.RequestError.invalid_params(
-                {"config_id": config_id, "reason": "unknown config option"}
+                {"config_id": config_id, "reason": "only select options are supported"}
             )
-        if not isinstance(value, str) or value not in {
-            choice.model_id for choice in self._model_choices()
-        }:
-            raise acp.RequestError.invalid_params(
-                {"model_id": value, "reason": "not an advertised model"}
-            )
-        state.model = value
+        if config_id == _MODEL_CONFIG_ID:
+            if value not in {choice.model_id for choice in self._model_choices()}:
+                raise acp.RequestError.invalid_params(
+                    {"model_id": value, "reason": "not an advertised model"}
+                )
+            state.model = value
+            self._reconcile_setting_selections(state)
+        else:
+            option = self._setting_option(state, config_id)
+            model = state.model
+            if option is None or model is None:
+                raise acp.RequestError.invalid_params(
+                    {"config_id": config_id, "reason": "unknown config option"}
+                )
+            if value not in {choice.value for choice in option.choices}:
+                raise acp.RequestError.invalid_params(
+                    {"config_id": config_id, "reason": "not an advertised value"}
+                )
+            candidate = {**state.setting_selections, config_id: value}
+            resolver = self._model_resolver
+            assert resolver is not None  # _setting_option only returns options from it
+            try:
+                # Validate the whole selection map, not just this value: a resolver may
+                # reject a combination even when each value is individually advertised.
+                resolver.resolve_settings(model, candidate)
+            except ValueError as exc:
+                raise acp.RequestError.invalid_params(
+                    {"config_id": config_id, "reason": str(exc)}
+                ) from exc
+            state.setting_selections = candidate
         await self._persist(state)
-        options = self._model_config_options(state.model)
-        assert options is not None
-        return schema.SetSessionConfigOptionResponse(config_options=options)
+        options = self._config_options(state)
+        return schema.SetSessionConfigOptionResponse(config_options=options or [])
 
     async def fork_session(
         self,
@@ -1175,12 +1348,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         resolver = self._model_resolver
         if resolver is None:
             raise acp.RequestError.method_not_found("providers/set")
+        before = self._options_snapshot()
         try:
             resolver.set_provider(provider_id, api_type, base_url, headers or {})
         except ValueError as exc:
             raise acp.RequestError.invalid_params(
                 {"provider_id": provider_id, "reason": str(exc)}
             ) from exc
+        await self._push_option_changes(before)
         return schema.SetProviderResponse()
 
     async def disable_provider(
@@ -1190,12 +1365,14 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         resolver = self._model_resolver
         if resolver is None:
             raise acp.RequestError.method_not_found("providers/disable")
+        before = self._options_snapshot()
         try:
             resolver.disable_provider(provider_id)
         except ValueError as exc:
             raise acp.RequestError.invalid_params(
                 {"provider_id": provider_id, "reason": str(exc)}
             ) from exc
+        await self._push_option_changes(before)
         return schema.DisableProviderResponse()
 
     # --- Explicitly unsupported ACP 1.x features ------------------------------------

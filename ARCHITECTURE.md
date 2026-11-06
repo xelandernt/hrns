@@ -38,9 +38,9 @@ supports 1.x.
 
 The adapter implements the complete `acp.Agent` protocol. `session/list` and
 `session/delete` are backed by `ListableSessionStore`/`DeletableSessionStore`, and
-`providers/*` plus the `model` config option are backed by a `ModelResolver` the caller
-supplies. MCP-over-ACP and NES are explicitly unsupported and not advertised until their
-features exist (see `TODO.md`).
+`providers/*` plus the `model` and setting config options are backed by a `ModelResolver`
+the caller supplies. MCP-over-ACP and NES are explicitly unsupported and not advertised
+until their features exist (see `TODO.md`).
 
 ## ACP models and provider configuration
 
@@ -68,6 +68,31 @@ model→provider link travels separately: each `ModelChoice.provider_id` becomes
 `_meta.providerId` on the model option. `hrns-local` derives it from the `entry:model` id;
 the client's `/providers` table groups the option's values by that tag, and `/models`
 appends it to any model name that does not already read `provider:model`.
+
+## Session settings
+
+Settings are the same object's second surface, because they have the same owner as models
+and routing. `list_options(model_id)` advertises the non-model options a deployment allows
+for a model — the shipped effort ladder is a `thought_level` select built by
+`LocalModelResolver` — and `resolve_settings(model_id, setting_selections)` turns session
+selections into a `ModelSettings` **delta**. The adapter merges that delta over
+`ResolvedModel.settings` and the agent's own settings on every model request: passing a
+callable `model_settings` is what lets `session/set_config_option` land on the next request
+of a running turn, not only on the next turn. The delta shape also keeps the client out of
+credential-bearing keys such as `extra_headers`, which routing uses.
+
+Selections live in `SessionState.setting_selections`, are persisted in `StoredSession`, and
+are revalidated whenever the model or a provider route changes; a value that disappeared is
+dropped so the option falls back to its `default`. `providers/set` and `providers/disable`
+snapshot the options before mutating resolver state and send `config_option_update` to any
+resident session whose list changed, because nothing else tells such a client its choices
+shrank.
+
+`hrns-local` reads the policy from `[thinking]` (`levels`, `allow_off`) and intersects it
+with the model's profile via `infer_model_profile`, so a model that cannot reason gets no
+option and an always-on model does not offer `off`. `[model_settings].thinking` remains the
+agent-level baseline; the runtime refuses to start if it names a level the policy does not
+offer for the startup model, since no client could see or change it.
 
 ## Usage reporting
 

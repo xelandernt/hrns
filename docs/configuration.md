@@ -57,6 +57,10 @@ base_url = "http://127.0.0.1:11434/v1"
 [model_settings]
 thinking = "high"                      # forwarded to Pydantic AI ModelSettings
 
+[thinking]
+levels = ["low", "medium", "high"]     # which reasoning efforts sessions may select
+allow_off = false                      # do not offer "off" on models that can disable it
+
 [mcp]
 token_store = "file"
 
@@ -157,6 +161,33 @@ different endpoints and keys under one provider implementation.
 Forwarded as `ModelSettings` to every run. `thinking` is special: a level
 (`minimal`, `low`, `medium`, `high`, `xhigh`) enables reasoning, `false` disables it, and
 omitting it keeps the provider default. The TUI's `/effort` writes this key.
+
+This is the baseline every session starts from. A client that changes reasoning effort
+over ACP overrides it for its own session.
+
+### `[thinking]`
+
+The reasoning-effort policy `hrns-local` advertises to ACP clients. It is a server-side
+allowlist: the runtime intersects it with the model's own profile, so a level the model
+cannot use is never offered, and a value outside the list is rejected rather than clamped.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `levels` | list | all five levels | Values the `effort` option offers, in display order |
+| `allow_off` | bool | `true` | Offer `off` on models whose reasoning can be disabled |
+
+`default` is always offered and means "send no `thinking` setting". An empty `levels`
+removes the effort option entirely. Listing a value that is not one of `minimal`, `low`,
+`medium`, `high`, `xhigh` is a configuration error.
+
+```toml
+[thinking]
+levels = ["low", "medium", "high"]
+allow_off = false
+```
+
+If `[model_settings].thinking` names a level the policy does not offer for the startup
+model, `hrns-local` refuses to start rather than running with an effort no client can see.
 
 ### `[mcp]`
 

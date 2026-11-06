@@ -161,7 +161,8 @@ def mount_acp(
 
     Pass ``model_resolver`` to advertise ACP's ``model`` session config option and
     the ``providers/*`` methods. It supplies the advertised models, resolves a
-    selection, and owns the provider routing a client may change; one resolver is
+    selection, advertises the setting options each model accepts (reasoning effort,
+    for example), and owns the provider routing a client may change; one resolver is
     shared by every connection.
     """
 
@@ -202,7 +203,7 @@ def create_app(
     used. Without an ``authenticate`` callback every peer is admitted and the
     factory receives ``None`` as its principal. ``session_store_factory`` and
     ``model_resolver`` are forwarded to the ACP mount, which uses the resolver for
-    model switching and provider configuration.
+    model switching, session settings, and provider configuration.
     """
     app = FastAPI(title="hrns")
     factory: AgentFactory[Principal] = agent_factory or _default_agent_factory

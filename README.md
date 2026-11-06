@@ -267,6 +267,13 @@ That is how a client learns which provider serves which model: ACP's `providers/
 reports endpoints, not the models behind them. Leaving it `None` keeps the option
 untagged, and clients that ignore `_meta` still see a plain selector.
 
+Add `list_options` and `resolve_settings` to the same resolver to expose model settings
+such as reasoning effort. `list_options(model_id)` returns the values a client may pick
+(the shipped `hrns-local` builds this from `[thinking]`), and `resolve_settings` turns the
+session's choices into a `ModelSettings` delta applied before every model request — so an
+effort change made mid-turn lands on the next request. `ProviderModelResolver` defaults to
+no options, so a resolver that only does models needs no change.
+
 Provider configuration is process-scoped and in memory; it is never written to disk or
 saved with a session. `providers/list` reports non-secret routing only, so headers a
 client sent are never echoed back. A model is resolved for every turn, so a new route

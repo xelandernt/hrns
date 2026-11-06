@@ -142,25 +142,26 @@ One resolver is shared by every connection and for the life of the process: a ro
 client sets is the route the next connection sees. Configuration is in memory only, as
 ACP's provider RFD requires.
 
-Omitting it removes the `model` session config option and makes `providers/list`,
-`providers/set`, and `providers/disable` answer `method_not_found`; each session then uses
-the model the agent itself was built with.
+Omitting it removes the `model` and setting session config options and makes
+`providers/list`, `providers/set`, and `providers/disable` answer `method_not_found`; each
+session then uses the model the agent itself was built with.
 
 ## The resolver object
 
 There are two ways to implement it. Picking the wrong one is the most common mistake here.
 
-| Type                       | Kind       | You implement                | It provides                                                              |
-|----------------------------|------------|------------------------------|--------------------------------------------------------------------------|
-| `ModelResolver`            | `Protocol` | All five methods             | Nothing — the whole contract is yours                                    |
-| `ProviderModelResolver`    | `ABC`      | `list_models`, `build_model` | `resolve`, and the three provider methods via `InMemoryProviderRegistry` |
-| `InMemoryProviderRegistry` | Class      | —                            | Provider state, validation, `current_config`                             |
-| `ProviderRegistry`         | `Protocol` | —                            | The registry contract, if you replace the storage                        |
+| Type                       | Kind       | You implement                                          | It provides                                                              |
+|----------------------------|------------|--------------------------------------------------------|--------------------------------------------------------------------------|
+| `ModelResolver`            | `Protocol` | All seven methods                                      | Nothing — the whole contract is yours                                    |
+| `ProviderModelResolver`    | `ABC`      | `list_models`, `build_model` (optionally the settings methods) | `resolve`, empty `list_options`/`resolve_settings`, and the three provider methods via `InMemoryProviderRegistry` |
+| `InMemoryProviderRegistry` | Class      | —                                                      | Provider state, validation, `current_config`                             |
+| `ProviderRegistry`         | `Protocol` | —                                                      | The registry contract, if you replace the storage                        |
 
-- **`ModelResolver`** is the full contract: `list_models`, `resolve`, `list_providers`,
-  `set_provider`, `disable_provider`. Implement it directly only when provider routing
-  does not reduce to "each advertised model belongs to exactly one provider" — for
-  example, when a single model id may be served by several interchangeable gateways.
+- **`ModelResolver`** is the full contract: `list_models`, `resolve`, `list_options`,
+  `resolve_settings`, `list_providers`, `set_provider`, `disable_provider`. Implement it
+  directly only when provider routing does not reduce to "each advertised model belongs
+  to exactly one provider" — for example, when a single model id may be served by several
+  interchangeable gateways.
 - **`ProviderModelResolver`** is the normal choice. It combines `ModelResolver` with
   `InMemoryProviderRegistry` and implements `resolve` for you: look the model up in
   `list_models`, read the config of **that choice's** `provider_id`, and hand both to
@@ -177,6 +178,8 @@ The data classes are the vocabulary both share:
 | `ProviderConfig`     | `route`, `headers`                                | What a client configured for one provider; `headers` may hold secrets                         |
 | `ProviderRoute`      | `api_type`, `base_url`                            | The non-secret routing that is echoed back                                                    |
 | `ProviderDisabled`   | —                                                 | `ValueError` raised when a model resolves through a disabled provider                         |
+| `SettingOption`      | `id`, `name`, `choices`, `category`, `description`, `meta`; `default` is read from the flagged choice | One non-model session config option a client may change |
+| `SettingChoice`      | `value`, `name`, `description`, `is_default`, `meta` | One selectable value; exactly one choice per option is the default, and `meta` becomes the value's `_meta` |
 
 ### How a choice becomes a model
 
@@ -193,11 +196,70 @@ With `ProviderModelResolver`, one turn goes through these steps:
    `current_config(choice.provider_id)`. A disabled provider raises `ProviderDisabled`
    before any model is built.
 5. `build_model(model_id, config)` returns a `ResolvedModel`. `model` is passed to the run
-   as `model=`, and `settings` as `model_settings=`, which Pydantic AI merges over the
-   agent's own settings.
+   as `model=`, and `settings` becomes the base of a per-request `model_settings` callable
+   that merges the session's setting selections over it.
 
 Because step 4 repeats every turn, a new route applies from the next turn — in an existing
 session too. A turn already in flight keeps the endpoint it started with.
+
+### Session settings
+
+Reasoning effort is the motivating case: the adapter needs the values a client may pick
+and a way to turn a pick into `ModelSettings`. Those are `list_options` and
+`resolve_settings` on the same resolver.
+
+```python
+from collections.abc import Mapping, Sequence
+
+from pydantic_ai.settings import ModelSettings
+
+from hrns.app.acp import SettingChoice, SettingOption
+
+
+def list_options(self, model_id: str) -> Sequence[SettingOption]:
+    return [
+        SettingOption(
+            id="effort",
+            name="Reasoning Effort",
+            category="thought_level",          # ACP category; UX hint only
+            choices=[
+                SettingChoice(value="default", name="Default", is_default=True),
+                SettingChoice(value="off", name="Off"),
+                SettingChoice(value="low", name="Low"),
+                SettingChoice(value="high", name="High"),
+            ],
+        )
+    ]
+
+
+def resolve_settings(self, model_id: str, setting_selections: Mapping[str, str]) -> ModelSettings:
+    value = setting_selections.get("effort")
+    if value in (None, "default"):
+        return ModelSettings()
+    if value == "off":
+        return ModelSettings(thinking=False)
+    if value in {"low", "high"}:
+        return ModelSettings(thinking=value)
+    raise ValueError(f"Unknown reasoning effort: {value!r}")
+```
+
+Rules that make this safe:
+
+- **`list_options` is the contract.** A client may only select what it returns; the adapter
+  rejects anything else with `invalid_params`, and sends `config_option_update` when a
+  provider reroute changes the list.
+- **Exactly one choice is the default**, marked `is_default=True`. The default is an element
+  of `choices`, so an option can never name a value it does not offer; the adapter reads it
+  back through `SettingOption.default`.
+- **`resolve_settings` returns a delta**, merged over `ResolvedModel.settings` and the
+  agent's own settings. Never return `extra_headers` or another credential-bearing value:
+  the whole option list is public to the client.
+- **It runs before each model request**, so a change made while a turn is running lands on
+  the next request in the agent's tool loop. Keep it cheap — no model construction, no I/O.
+- **Raise `ValueError` for a selection you cannot apply.** The adapter also calls it at
+  `set_config_option` time, so a bad combination fails there instead of mid-turn.
+- **A model switch may remove options.** Selections are revalidated when the model or a
+  provider route changes, and a value that disappeared is dropped rather than replayed.
 
 ### Example: one provider, two models
 

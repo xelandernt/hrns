@@ -54,10 +54,10 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `providers/list` | request | **Conditional** | Requires `model_resolver` |
 | `providers/set` | request | **Conditional** | Requires `model_resolver`; a `ValueError` from the resolver becomes `invalid_params` |
 | `providers/disable` | request | **Conditional** | Same; a `required` provider cannot be disabled |
-| `session/new` | request | **Yes** | First advertised model is the session default; returns the `model` config option when a resolver is present |
+| `session/new` | request | **Yes** | First advertised model is the session default; returns the `model` and setting config options when a resolver is present |
 | `session/load` | request | **Conditional** | Requires a `session_store`; replays the stored transcript as `session/update` before responding |
 | `session/set_mode` | request | **No** | Modes are not implemented |
-| `session/set_config_option` | request | **Conditional** | Only the `model` option; the value must be an advertised model id |
+| `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
 | `session/prompt` | request | **Yes** | Runs one turn and streams `session/update`; `stop_reason` is the finish reason, or `cancelled` |
 | `session/cancel` | notification | **Yes** | Cancels the in-flight turn; the prompt returns `cancelled` |
 | `mcp/message` | request | **No** | No MCP-over-ACP binding |
@@ -101,17 +101,28 @@ The ACP-backed filesystem and terminal are opt-in through `session_config` on
 `PydanticAIACPAgent`; the default `build_agent` uses the harness `FileSystem` and `Shell`
 on the server side, so a plain mount never asks the client to touch files or run commands.
 
-## Session config: the `model` option
+## Session config: the `model` and setting options
 
-ACP has no model methods. Models are a session config option, and the adapter only
-advertises it when a [`ModelResolver`](mount-acp.md#the-resolver-object) is supplied:
+ACP has no model methods. Models are a session config option, and so are model settings
+such as reasoning effort; the adapter advertises both only when a
+[`ModelResolver`](mount-acp.md#the-resolver-object) is supplied:
 
 - `session/new` and `session/load` return `configOptions` containing a `model` select,
-  with each choice tagged `_meta.providerId`.
-- `session/set_config_option` accepts the id `model` and an advertised model id; anything
-  else is `invalid_params`. The selection is persisted with the session.
+  with each choice tagged `_meta.providerId`, followed by every
+  [`SettingOption`](mount-acp.md#session-settings) `list_options(model_id)` returns. The
+  effort option carries `category: "thought_level"`.
+- `session/set_config_option` accepts `model` and any advertised setting id; a value
+  outside the advertised choices is `invalid_params`. Selections are persisted with the
+  session and revalidated on `session/load`, so a value that a model switch or provider
+  reroute removed is dropped instead of replayed.
 - The model is resolved per turn, so a routing change from `providers/set` applies from
   the next turn; a turn already running keeps the endpoint it started with.
+- Setting selections are applied per **model request**, not per turn: `resolve_settings`
+  runs before each request in the agent's tool loop, so a change made during a turn lands
+  on the next request of that same turn. A request already in flight keeps its settings.
+- `providers/set` and `providers/disable` can change which settings a model offers. When
+  they do, resident sessions receive a `config_option_update` with the complete new state.
+
 
 ## Errors
 
