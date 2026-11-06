@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from ...interactions import PERMISSION_MODES
+from hrns.config import PERMISSION_MODES, TuiSettings
+
 from ..commands import LOCAL_COMMANDS, resolve_local_command
 from ..composer import Composer
 from ..dialogs import (
@@ -16,7 +16,6 @@ from ..dialogs import (
     TranscriptSearchDialog,
 )
 from ..panels import SidePanel
-from ..state import Settings
 from ..transcript import TranscriptPane
 
 if TYPE_CHECKING:
@@ -225,7 +224,7 @@ invents commands the agent did not advertise.
         def apply(mode: str | None) -> None:
             if mode not in PERMISSION_MODES:
                 return
-            screen.settings = replace(screen.settings, permission_mode=mode)
+            screen.settings = screen.settings.model_copy(update={"permission_mode": mode})
             screen.app.apply_settings(screen.settings)
             screen.chrome.apply_settings()
             screen._notice_soon(f"Approvals: {labels[mode]}.", "success")
@@ -243,7 +242,7 @@ invents commands the agent did not advertise.
     def show_settings(self) -> None:
         screen = self.screen
 
-        def apply(settings: Settings | None) -> None:
+        def apply(settings: TuiSettings | None) -> None:
             if settings is None:
                 return
             previous = screen.settings.client_io

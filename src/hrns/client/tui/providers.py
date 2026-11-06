@@ -19,7 +19,7 @@ from textual.widgets import DataTable, Static
 
 from hrns.config import (
     GITHUB_COPILOT_CLIENT_ID,
-    LocalSettings,
+    HrnsConfig,
     ProviderEntry,
     ProviderNameError,
     check_provider_name,
@@ -97,12 +97,12 @@ def provider_choices() -> list[tuple[str, str]]:
 
 
 def save_entries(
-    settings: LocalSettings,
+    settings: HrnsConfig,
     providers: dict[str, ProviderEntry],
     *,
     provider: str,
     model: str,
-) -> tuple[Path, LocalSettings]:
+) -> tuple[Path, HrnsConfig]:
     """Persist an edited provider table and return the path and reloaded settings."""
     configured = settings.model_copy(
         update={"providers": providers, "provider": provider, "model": model}
@@ -165,7 +165,7 @@ class ProviderFormDialog(FormDialog):
         Binding("ctrl+g", "sign_in", "Sign in", show=False, priority=True),
     ]
 
-    def __init__(self, settings: LocalSettings, *, current: str | None = None) -> None:
+    def __init__(self, settings: HrnsConfig, *, current: str | None = None) -> None:
         self.settings = settings
         self.current = current
         self.path: Path | None = None
@@ -238,7 +238,7 @@ class ProviderFormDialog(FormDialog):
         ]
         super().__init__(
             "Edit provider" if current else "Add provider",
-            f"Save to {settings.config_file}",
+            f"Save to {settings.path}",
             fields,
             accept_label="Save",
             explanation=self._explanation(),
@@ -384,8 +384,8 @@ class ProvidersDialog(_DialogBase):
         Binding("d", "delete", "Delete", show=False),
     ]
 
-    def __init__(self, settings: LocalSettings, *, subtitle: str = "") -> None:
-        super().__init__("Providers", subtitle or f"Saved to {settings.config_file}")
+    def __init__(self, settings: HrnsConfig, *, subtitle: str = "") -> None:
+        super().__init__("Providers", subtitle or f"Saved to {settings.path}")
         self.settings = settings
         self.path: Path | None = None
         self.changed = False
@@ -442,7 +442,7 @@ class ProvidersDialog(_DialogBase):
     def _reload(self, highlight: str | None = None) -> None:
         if self.path is not None:
             try:
-                self.settings = LocalSettings(config_file=self.path)
+                self.settings = HrnsConfig(config_file=self.path)
             except (ValueError, OSError) as exc:
                 self.show_error(str(exc))
                 return

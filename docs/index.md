@@ -20,6 +20,8 @@ application that hosts it. The terminal client speaks standard ACP only.
 
 ## Reference
 
+- [Configuration](configuration.md) — the one `config.toml` both the client and the local
+  runtime read: locations, precedence, and every field with an example.
 - [Capabilities](capabilities.md) — what this repository adds on top of Pydantic AI and
   the harness: the `Coder` and its `apply_changes` batch tool, `Todo`, and the approval
   policy.

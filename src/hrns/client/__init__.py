@@ -4,6 +4,8 @@ This module is independent of ``hrns.app``. It speaks standard ACP v1 over
 stdio or a WebSocket. The UI is Textual; the protocol layer is ``acp``.
 """
 
+from hrns.config import HrnsConfig, Profile, default_config_path
+
 from ._version import __version__
 from .client import HrnsAcpClient
 from .errors import (
@@ -49,10 +51,9 @@ from .interactions import (
     auto_permission,
     parse_ask_user_request,
 )
-from .profiles import Profile, Profiles, default_profiles_path, secret_value
 from .renderers import RendererRegistry, readable_text
 from .session import SessionProxy
-from .transport import StdioAgentTransport, WebSocketAgentTransport
+from .transport import StdioAgentTransport, WebSocketAgentTransport, secret_value
 
 __all__ = [
     "__version__",
@@ -80,8 +81,8 @@ __all__ = [
     "PermissionDecision",
     "PermissionRequest",
     "PlanChanged",
+    "HrnsConfig",
     "Profile",
-    "Profiles",
     "ProtocolError",
     "READ_ONLY_KINDS",
     "RendererRegistry",
@@ -100,7 +101,7 @@ __all__ = [
     "ask_user_payload",
     "auto_permission",
     "parse_ask_user_request",
-    "default_profiles_path",
+    "default_config_path",
     "readable_text",
     "secret_value",
 ]

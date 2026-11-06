@@ -9,13 +9,12 @@ from __future__ import annotations
 import difflib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from hrns.config import PermissionMode
+
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS
-from ..interactions import PERMISSION_MODES
-from ..io import ClientIoMode, parse_client_io
 
 __all__ = [
     "activity_label",
@@ -33,6 +32,7 @@ __all__ = [
     "merge_tool_event",
     "model_option",
     "option_values",
+    "parse_permission_mode",
     "permission_mode_label",
     "presentation_payload",
     "tool_args_preview",
@@ -48,6 +48,15 @@ TOOL_STATUS_LABELS = {
     "failed": "✕ failed",
     "": "○ queued",
 }
+
+
+def parse_permission_mode(value: str) -> PermissionMode:
+    """Parse an explicit mode, treating an unrecognized value as ``ask``."""
+    if value == "reads":
+        return "reads"
+    if value == "all":
+        return "all"
+    return "ask"
 
 
 def permission_mode_label(mode: str) -> str:
@@ -759,53 +768,3 @@ def coerce_value(field: dict[str, Any], raw: Any) -> Any:
     if raw is None:
         return ""
     return str(raw)
-
-
-@dataclass
-class Settings:
-    """Terminal preferences persisted beside profiles."""
-
-    theme: str = "hrns"
-    auto_expand_tools: bool = False
-    show_thoughts: bool = False
-    permission_mode: str = "ask"
-    client_io: ClientIoMode = "all"
-    sidebar_width: int = 52
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_mapping(cls, mapping: dict[str, Any] | None) -> Settings:
-        mapping = mapping or {}
-        mode = str(mapping.get("permissionMode", mapping.get("permission_mode", "ask")))
-        if mode not in PERMISSION_MODES:
-            mode = "ask"
-        raw_sidebar_width = mapping.get("sidebarWidth", mapping.get("sidebar_width", 52))
-        try:
-            sidebar_width = (
-                int(raw_sidebar_width) if not isinstance(raw_sidebar_width, bool) else 52
-            )
-        except (TypeError, ValueError):
-            sidebar_width = 52
-        sidebar_width = max(32, min(76, sidebar_width))
-        return cls(
-            theme=str(mapping.get("theme", "hrns")),
-            auto_expand_tools=bool(
-                mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))
-            ),
-            show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
-            permission_mode=mode,
-            client_io=parse_client_io(
-                str(mapping.get("clientIo", mapping.get("client_io", "all")))
-            ),
-            sidebar_width=sidebar_width,
-        )
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "theme": self.theme,
-            "auto_expand_tools": self.auto_expand_tools,
-            "show_thoughts": self.show_thoughts,
-            "permission_mode": self.permission_mode,
-            "client_io": self.client_io,
-            "sidebar_width": self.sidebar_width,
-        }

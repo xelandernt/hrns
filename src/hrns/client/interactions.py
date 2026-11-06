@@ -13,6 +13,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from hrns.config import PERMISSION_MODES
+
 from .errors import InteractionRejected, InteractionRequired
 
 __all__ = [
@@ -34,11 +36,6 @@ __all__ = [
     "auto_permission",
     "parse_ask_user_request",
 ]
-
-#: Interactive approval modes. ``ask`` surfaces every request, ``reads``
-#: auto-answers read-only tool kinds, and ``all`` auto-approves any call whose
-#: agent offered an allow option. None of these is a sandbox.
-PERMISSION_MODES = ("ask", "reads", "all")
 
 #: Tool kinds that cannot change the workspace or reach the network. ``fetch``
 #: is deliberately absent: it crosses the network boundary.

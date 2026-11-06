@@ -1,6 +1,6 @@
 """Change the connected agent's LLM provider routing through ACP's ``providers/*``.
 
-These entries live in the agent process, not in ``hrns.local.toml``: the agent keeps them
+These entries live in the agent process, not in the configuration document: the agent keeps them
 in memory, applies them to models it resolves afterwards, and never returns the headers a
 client sent. The form is therefore the only place a header value is visible once it is
 submitted, and the table can only show the routing the agent is willing to report.

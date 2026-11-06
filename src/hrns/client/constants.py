@@ -26,14 +26,3 @@ MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 WS_PING_INTERVAL = 30.0
 WS_PING_TIMEOUT = 30.0
 WS_WRITE_LIMIT = 1024 * 1024
-
-CONFIG_DIR_NAME = "hrns"
-CONFIG_FILE_NAME = "profiles.toml"
-PROJECT_CONFIG_NAME = "hrns.toml"
-CONFIG_ENV_OVERRIDE = "HRNS_PROFILES"
-
-#: Key in the profile file's ``[tui]`` table naming the connection to reopen.
-LAST_CONNECTION = "last_connection"
-
-#: Identity of the built-in local runtime; every other identity is a profile name.
-LOCAL_CONNECTION = "local"

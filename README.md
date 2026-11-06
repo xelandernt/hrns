@@ -96,7 +96,8 @@ is what the next `resolve` builds.
 The terminal client consumes that option for remote agents. In local mode,
 `/model provider:model` saves the choice and applies it live when the runtime
 advertises the id. Without an argument, `/model` still opens the picker.
-`hrns-local` advertises every model configured in `hrns.local.toml`.
+`hrns-local` advertises every model configured in the shared configuration document
+(`config.toml`; see [Configuration](docs/configuration.md)).
 
 The terminal client can connect to that endpoint directly:
 
@@ -295,9 +296,13 @@ define agent behavior.
 
 ## Local configuration
 
-`hrns-local` reads `hrns.local.toml` (or `HRNS_LOCAL_*` environment variables) and
-launches the ACP entrypoint with the configured provider and model. The existing
-terminal client still uses this entrypoint.
+The client and the local runtime read one document: `config.toml` in the platform
+config directory, with an optional `hrns.toml` in the working directory overriding it
+key by key. `HRNS_LOCAL_*` environment variables override both.
+[Configuration](docs/configuration.md) is the field reference and the location map.
+
+`hrns-local` launches the ACP entrypoint with the configured provider and model. The
+terminal client reuses that entrypoint, so it passes the same document to it.
 
 In the TUI connection picker, `l` opens provider management. Add or edit a provider
 to paste its API key into the password field; the key is stored in the OS keyring,

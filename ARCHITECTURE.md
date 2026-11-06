@@ -107,11 +107,40 @@ overflows, fields drop in `StatusBar._right`'s order, and the endpoint outlives
 everything but the model name. Local sessions put the profile name in the same slot, so
 the slot never implies a remote connection that is not there.
 
+## One configuration document
+
+`src/hrns/config/settings.py` holds `HrnsConfig`, the single pydantic-settings model both
+sides of the project read. The alternative — a client model for `profiles.toml` and a
+runtime model for `hrns.local.toml` — meant two schemas, two loaders, and two answers to
+"what is configured?"; a provider entry a client could not see, or a profile the runtime
+rejected as an unknown key. One document removes that class of bug: a profile and a
+provider are validated by the same `extra="forbid"` model, so a typo fails both programs
+with the file and field named.
+
+Sections carry ownership rather than a second file: `[profile.<name>]` and `[tui]` are the
+client's, `provider`/`model`/`[providers.<name>]`/`[model_settings]`/`[mcp]`/`store` are
+the runtime's. Neither side reads the other's sections, but both parse them, because a
+model with unknown keys is a typo detector.
+
+Precedence is expressed as pydantic-settings source order — init, environment, project
+document, user document, defaults — which deep-merges each source over the next, so a
+project `hrns.toml` overrides exactly the keys it names and leaves the rest of the user
+document intact. `--config PATH` (or `HRNS_LOCAL_CONFIG_FILE`) collapses that to a single
+file and is a contract: a selected file that does not exist is an error, not a silent fall
+back to defaults. The environment prefix stays `HRNS_LOCAL_`; `HRNS_MODEL` and `HRNS_STORE`
+belong to the ACP app and the FastAPI mount, and reading them here would make one variable
+mean two things.
+
+`Profile` and `TuiSettings` are plain models inside the same document, so `hrns` needs no
+facade: `HrnsConfig.profile` is the map the picker lists, `HrnsConfig.tui` is what the
+settings dialog edits, and `HrnsConfig.save()` writes the whole effective document to the
+user file (defaults omitted). Project documents are read, never written.
+
 ## Reopening the last connection
 
 A bare `hrns` reconnects to the connection this terminal used last instead of always
-defaulting to the local model. The identity is one string in `profiles.toml`'s `[tui]`
-table, written through the same `Profiles.save_tui()` that persists theme and permission
+defaulting to the local model. The identity is one string in the document's `[tui]`
+section, written by the same `HrnsConfig.save()` that persists theme and permission
 mode: `local` for the built-in runtime, a profile name for a saved stdio or remote target.
 An ad-hoc `--server`/`--stdio` command line is not remembered, because it belongs to no
 file and there would be nothing to reopen. The identity never carries a working directory:

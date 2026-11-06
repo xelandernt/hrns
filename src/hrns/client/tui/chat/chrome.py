@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ...constants import CLIENT_VERSION
@@ -85,7 +84,9 @@ class ChromeWorkflow:
         screen = self.screen
         if screen.settings.sidebar_width == screen._sidebar_width:
             return
-        screen.settings = replace(screen.settings, sidebar_width=screen._sidebar_width)
+        screen.settings = screen.settings.model_copy(
+            update={"sidebar_width": screen._sidebar_width}
+        )
         screen.app.apply_settings(screen.settings)
 
     def _clamp_sidebar_width(self, width: int) -> int:
