@@ -11,7 +11,7 @@ agent = build_agent("anthropic:claude-sonnet-5-5")
 The backend is deliberately small:
 
 - `hrns.app.agent` builds the `Agent` from Pydantic AI capabilities.
-- `hrns.app.acp` wraps it with the Pydantic AI Harness ACP adapter.
+- `hrns.app.acp` is this project's ACP adapter.
 - `hrns.app.fastapi` mounts the adapter on FastAPI.
 
 There is no custom session server, plugin registry, policy catalog, wire protocol,

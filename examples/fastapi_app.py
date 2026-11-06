@@ -25,10 +25,10 @@ from hrns.app.fastapi import mount_acp
 # DeepSeek provider reads ``DEEPSEEK_API_KEY`` from the environment.
 _MODELS = {
     "deepseek-flash": OpenAIChatModel(
-        "deepseek-flash", provider=DeepSeekProvider(api_key="sk-2fe24f1f4b3f420184e6faaa0930f3bf")
+        "deepseek-flash", provider=DeepSeekProvider(api_key="sk-ba08060cf24c4d1d8dfe1789b1328ad3")
     ),
     "deepseek-pro": OpenAIChatModel(
-        "deepseek-v4-pro", provider=DeepSeekProvider(api_key="sk-2fe24f1f4b3f420184e6faaa0930f3bf")
+        "deepseek-v4-pro", provider=DeepSeekProvider(api_key="sk-ba08060cf24c4d1d8dfe1789b1328ad3")
     ),
 }
 

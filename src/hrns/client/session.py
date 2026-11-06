@@ -224,10 +224,10 @@ class SessionLifecycle:
         client = self.client
         if not self.has_capability("delete"):
             raise ProtocolError("This agent does not advertise session/delete.")
-        # ACP SDK 0.11.1 exposes the request model but not a convenience method.
         try:
-            result = await client._raw_request("session/delete", {"sessionId": session_id})
+            await client.connection.delete_session(session_id=session_id)
         except RequestError as exc:
-            raise HrnsClientError(describe_rpc_error("session/delete", exc)) from exc
-        if result is not None and not isinstance(result, dict):
-            raise ProtocolError("session/delete returned an unexpected response")
+            # ACP says clients SHOULD treat -32002 as a successful delete: the session is
+            # already gone, which is the outcome the caller asked for.
+            if exc.code != -32002:
+                raise HrnsClientError(describe_rpc_error("session/delete", exc)) from exc
