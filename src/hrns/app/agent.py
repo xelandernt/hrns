@@ -11,6 +11,8 @@ from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness.coder import Coder
 
+from hrns.capabilities import Todo
+
 from .approvals import require_approval
 
 __all__ = ["build_agent"]
@@ -48,6 +50,7 @@ def build_agent(
         capabilities=[
             LocalWorkspace(cwd),
             coder or Coder(),
+            Todo(),
             *([require_approval()] if approval else []),
         ],
     )

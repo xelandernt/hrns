@@ -55,6 +55,9 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, AgentToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
+from hrns.capabilities import TodoStore, TodoUpdated
+from hrns.capabilities.todo import _bind_todo_store
+
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
 from .models import ModelChoice, ModelResolver, ResolvedModel
@@ -344,6 +347,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             history=list(stored.messages),
             transcript=list(stored.updates),
             model=stored.model,
+            todos=TodoStore(items=stored.todos),
         )
         self._sessions[session_id] = state
         if (store := self._listable_store) is not None:
@@ -405,6 +409,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     messages=list(state.history),
                     updates=list(state.transcript),
                     model=state.model,
+                    todos=state.todos.items,
                 ),
             )
         except Exception:
@@ -577,7 +582,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             while True:
                 result = None
                 resolved_model = self._resolve_run_model(state.model)
-                with capture_run_messages() as captured:
+                with _bind_todo_store(state.todos), capture_run_messages() as captured:
                     async with self._agent.run_stream_events(
                         run_input,
                         message_history=history,
@@ -617,6 +622,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         except (asyncio.CancelledError, _TurnCancelled):
             with anyio.CancelScope(shield=True):
                 await self._fail_outstanding_tool_calls(turn)
+                await self._persist_interrupted_todos(state, turn)
             raise
         except UsageLimitExceeded as exc:
             await self._fail_outstanding_tool_calls(turn, record=True)
@@ -629,6 +635,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             stop_reason = _usage_limit_stop_reason(exc)
         except Exception:
             await self._fail_outstanding_tool_calls(turn)
+            await self._persist_interrupted_todos(state, turn)
             raise
 
         state.history = history
@@ -643,6 +650,15 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 )
                 stop_reason = "cancelled"
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
+
+    async def _persist_interrupted_todos(
+        self, state: SessionState[AgentDepsT], turn: _TurnState
+    ) -> None:
+        """Retain published todo changes even when the turn does not commit history."""
+        plans = [update for update in turn.updates if isinstance(update, schema.AgentPlanUpdate)]
+        if self._session_store is not None and plans:
+            state.transcript.append(plans[-1])
+            await self._persist(state)
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState, *, record: bool = False) -> None:
         for tool_call_id in turn.started - turn.resulted:
@@ -680,7 +696,20 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         )
 
     async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
-        if isinstance(event, PartStartEvent):
+        if isinstance(event, TodoUpdated):
+            await self._send_update(
+                turn,
+                schema.AgentPlanUpdate(
+                    session_update="plan",
+                    entries=[
+                        schema.PlanEntry(
+                            content=item.content, priority=item.priority, status=item.status
+                        )
+                        for item in event.items
+                    ],
+                ),
+            )
+        elif isinstance(event, PartStartEvent):
             part = event.part
             if isinstance(part, TextPart) and part.content:
                 await self._emit_text(turn, part.content, thought=False)
