@@ -130,6 +130,7 @@ class ChromeWorkflow:
         # The gauge is the richer signal, but agents that report no window size leave it
         # empty; the last turn's token counts are then the only usage worth showing.
         context = format_context_usage(screen._context_usage)
+        server, remote = self.connection_endpoint()
         screen.query_one("#statusbar", StatusBar).show(
             connected=screen.connected,
             model=config_option_value(option) if option else "",
@@ -138,6 +139,8 @@ class ChromeWorkflow:
             usage=context or format_usage_compact(screen._usage),
             usage_label="ctx" if context else "",
             cost=format_cost(screen._context_usage) or format_cost(screen._usage),
+            server=server,
+            remote=remote,
             usage_detail=format_context_detail(screen._context_usage, screen._usage),
             busy=screen.busy,
             activity=screen._activity,
@@ -146,6 +149,13 @@ class ChromeWorkflow:
             hint=self.hint_text(),
             context=self.status_context(),
         )
+
+    def connection_endpoint(self) -> tuple[str, bool]:
+        """The far side of the connection: a URL when remote, else the profile name."""
+        target = self.screen.target
+        if target.kind == "remote":
+            return target.profile.url, True
+        return target.name, False
 
     def status_context(self) -> str:
         screen = self.screen

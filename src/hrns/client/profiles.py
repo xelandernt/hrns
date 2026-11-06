@@ -13,6 +13,7 @@ portable (``PATH`` is usually not a secret).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ from .constants import (
     CONFIG_DIR_NAME,
     CONFIG_ENV_OVERRIDE,
     CONFIG_FILE_NAME,
+    LAST_CONNECTION,
+    LOCAL_CONNECTION,
     PROJECT_CONFIG_NAME,
 )
 from .errors import SecretMissing
@@ -134,6 +137,15 @@ class Profile:
         )
 
 
+def is_local_hrns(profile: Profile | None) -> bool:
+    """Whether a profile launches this installation's ``hrns-local`` runtime.
+
+    The command is stored as the resolved path, so compare the file name rather
+    than the profile text.
+    """
+    return profile is not None and Path(profile.command).name == "hrns-local"
+
+
 def toml_from_profiles(profiles: dict[str, Profile], tui: dict[str, Any] | None = None) -> str:
     """Render profiles (and optional ``tui`` section) as TOML text.
 
@@ -197,6 +209,36 @@ class Profiles:
         if len(self.profiles) == 1:
             return next(iter(self.profiles.values()))
         return None
+
+    @property
+    def last_connection(self) -> str:
+        """Identity of the connection the terminal reopened last, if any."""
+        return str(self.tui.get(LAST_CONNECTION) or "")
+
+    def connection_identity(self, profile: Profile) -> str | None:
+        """How the terminal remembers a connection: a profile name or ``local``.
+
+        An ad-hoc profile assembled on the command line belongs to no file, so it is
+        not remembered at all; there would be nothing to reopen.
+        """
+        if profile.name in self.profiles:
+            return profile.name
+        return LOCAL_CONNECTION if is_local_hrns(profile) else None
+
+    def remember_connection(self, identity: str | None) -> None:
+        """Persist the connection to reopen next time; a preference never costs a session."""
+        if not identity or identity == self.last_connection:
+            return
+        self.tui = {**self.tui, LAST_CONNECTION: identity}
+        with contextlib.suppress(Exception):
+            self.save_tui()
+
+    def forget_connection(self) -> None:
+        """Drop the remembered connection, so a stale identity stops failing at launch."""
+        if self.tui.pop(LAST_CONNECTION, None) is None:
+            return
+        with contextlib.suppress(Exception):
+            self.save_tui()
 
     def save(self, path: Path | None = None) -> Path | None:
         """Persist *profiles and tui settings* atomically to ``path``."""
