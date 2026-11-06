@@ -167,17 +167,23 @@ from hrns.capabilities import AskUser
 agent = Agent("anthropic:claude-sonnet-5-5", capabilities=[AskUser()])
 ```
 
-`ask_user_question` takes one to ten questions. Each has a short `header` (the tab
-label, unique within one call), the `question` text, two to six `options`, and a
-`multi_select` flag. The harness validates the shape, including printable strings
-and unique option labels.
+`ask_user_question` takes one to ten questions. Each has a short `header`, the
+`question` text, two to six `options`, and a `multi_select` flag. The harness
+validates the shape, including printable strings and unique option labels.
 
 Deferred mode means the tool raises `CallDeferred`, and `PydanticAIACPAgent`
 answers the deferred call by sending `elicitation/create` when the client advertises
 form elicitation. One question becomes one form property, plus a companion text
-field for a typed answer. The schema is standard ACP; a single `hrns.ask_user` key
-in `_meta` marks it so the hrns TUI renders tabs and a custom-answer field, while
-any other client still gets a usable form.
+field for a typed answer. The schema is standard ACP — no marker, no vendor fields —
+so every client renders it with its ordinary elicitation UI. The hrns TUI shows the
+form in a dock above the composer rather than a modal dialog. It folds each choice
+field and its typed-answer companion into one vertical option list, with the custom
+answer as the last row; the first question is focused when the dock appears. For a
+multi-select the custom answer is an alternative: choosing or typing it clears the
+picked labels, because an ACP answer cannot combine a custom answer with selections.
+Multiple questions use tabs, plus a final Confirm tab that reviews the answers. Enter
+advances to the next question, Tab and Shift+Tab move between them, and Enter on
+Confirm submits.
 
 The model receives `{header: [labels...]}` — a one-item list holding the custom
 answer when the human typed one. A decline, a cancel, an empty form, or a client

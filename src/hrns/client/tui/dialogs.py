@@ -24,12 +24,14 @@ from ..interactions import (
 from ..io import parse_client_io
 from .choice_keys import handle_choice_arrow
 from .commands import LocalCommand, command_suggestion_text
+from .messages import ElicitationAnswered
 from .state import build_form_fields, coerce_value, parse_permission_mode
 
 __all__ = [
     "ChoiceDialog",
     "CommandPaletteDialog",
     "ConfirmDialog",
+    "ElicitationBar",
     "ElicitationDialog",
     "FormDialog",
     "HelpDialog",
@@ -39,9 +41,17 @@ __all__ = [
 ]
 
 
-def _step_focused_choice(screen: Any, event: Any) -> None:
-    """Left/Right change the focused choice control."""
-    if handle_choice_arrow(screen.focused, str(event.key)):
+def _step_focused_choice(host: Any, event: Any) -> None:
+    """Left/Right change the focused choice control.
+
+    ``host`` may be a screen (which exposes ``focused`` directly) or a widget
+    docked inside a screen (which must ask its app).
+    """
+    widget: Any = getattr(host, "focused", None)
+    if widget is None:
+        app: Any = getattr(host, "app", None)
+        widget = getattr(app, "focused", None)
+    if handle_choice_arrow(widget, str(event.key)):
         event.stop()
 
 
@@ -154,6 +164,15 @@ def _field_text(kind: str, value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _multi_values(value: Any) -> list[str]:
+    """Normalize a multi-select default into the picked labels."""
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
 class _FieldRow(Vertical):
     """One form block: indicator, label, an inline value, and optional suggestions.
 
@@ -176,17 +195,53 @@ class _FieldRow(Vertical):
         self._choices: list[tuple[str, str]] = [
             (str(value), str(label)) for value, label in (field.get("choices") or [])
         ]
+        self._descriptions: dict[str, str] = {
+            str(value): str(description)
+            for value, description in (field.get("choice_descriptions") or {}).items()
+        }
         default = field.get("default")
+        self._question = bool(field.get("question")) and self.kind in {"select", "multi"}
+        self._allow_custom = bool(field.get("allow_custom"))
+        self._custom_name = str(field.get("custom_name") or "")
+        self._custom_input: Input | None = None
+        self._custom_marker: Static | None = None
+        self._custom_label: Static | None = None
+        self._custom_row: Horizontal | None = None
+        self._custom_selected = False
         self._input: Input | None = None
         self._suggestions: OptionList | None = None
         self._badge: Static | None = None
         self._open = False
         self._silent: str | None = None
+        self._cursor = 0
+        self._multi: list[str] = []
         self.on_changed: Callable[[_FieldRow], None] | None = None
+        if self._question:
+            self.add_class("question-row")
+        if self._question and self._allow_custom:
+            custom_label = "Alternative answer" if self.kind == "multi" else "Other"
+            placeholder = (
+                "type an alternative answer" if self.kind == "multi" else "type your own answer"
+            )
+            self._custom_input = Input("", placeholder=placeholder, select_on_focus=False)
+            marker = "☐" if self.kind == "multi" else "○"
+            self._custom_marker = Static(marker, markup=False, classes="question-option-marker")
+            self._custom_label = Static(custom_label, markup=False, classes="question-option-label")
+            self._custom_row = Horizontal(
+                Static("  ", markup=False, classes="field-gutter"),
+                self._custom_marker,
+                self._custom_label,
+                self._custom_input,
+                classes="field-line question-custom-row",
+            )
         if self.kind == "boolean":
             self._flag = bool(default)
         elif self.kind == "select":
             self._selection = "" if default is None else str(default)
+            if self._question and not self._selection and self._choices:
+                self._selection = self._choices[0][0]
+        elif self.kind == "multi":
+            self._multi = _multi_values(default)
         elif self.kind == "combobox":
             self._input = Input(
                 _field_text(self.kind, default),
@@ -197,7 +252,7 @@ class _FieldRow(Vertical):
             self._badge = Static("custom", markup=False, classes="field-badge")
             self._badge.styles.display = "none"
         else:
-            placeholder = "comma-separated values" if self.kind in {"array", "multi"} else "(none)"
+            placeholder = "comma-separated values" if self.kind == "array" else "(none)"
             self._input = Input(
                 _field_text(self.kind, default),
                 password=self.kind == "password",
@@ -213,6 +268,19 @@ class _FieldRow(Vertical):
         self._view = Static(self._display(), markup=False, classes="field-value")
 
     def compose(self) -> ComposeResult:
+        if self._question:
+            yield Static(
+                self.title + (" *" if self.required else ""),
+                markup=False,
+                classes="question-field-title",
+            )
+            description = str(self.field.get("description") or "")
+            if description:
+                yield Static(description, markup=False, classes="question-field-text")
+            yield self._view
+            if self._custom_row is not None:
+                yield self._custom_row
+            return
         with Horizontal(classes="field-line"):
             yield Static("›", classes="field-gutter")
             yield Static(
@@ -269,7 +337,28 @@ class _FieldRow(Vertical):
         self._render_suggestions()
 
     def step_highlight(self, direction: int) -> bool:
-        """Move the suggestion highlight; report whether the key was consumed."""
+        """Move the suggestion or question highlight; report whether it was consumed."""
+        if self._question:
+            total = len(self._choices) + (1 if self._custom_input is not None else 0)
+            if total == 0:
+                return False
+            self._cursor = (self._cursor + direction) % total
+            if self._cursor < len(self._choices):
+                if self.kind == "select":
+                    self._selection = self._choices[self._cursor][0]
+                self._custom_selected = False
+            else:
+                if self.kind == "select":
+                    self._selection = ""
+                self._custom_selected = bool(
+                    self._custom_input is not None and self._custom_input.value.strip()
+                )
+                if self._custom_selected and self.kind == "multi":
+                    self._multi.clear()
+            self._focus_question_cursor()
+            self._refresh_view()
+            self._notify()
+            return True
         if self._suggestions is None or not self._open:
             return False
         if direction < 0:
@@ -277,6 +366,10 @@ class _FieldRow(Vertical):
         else:
             self._suggestions.action_cursor_down()
         return True
+
+    def _focus_question_cursor(self) -> None:
+        # The custom row is an option like any other. Enter opens its editor.
+        self.focus()
 
     def accept_suggestion(self) -> bool:
         """Commit the highlighted suggestion into the field."""
@@ -297,33 +390,115 @@ class _FieldRow(Vertical):
         self._close_suggestions()
         return True
 
-    def _display(self) -> str:
+    def _display(self) -> str | Text:
+        if self._question:
+            return self._display_question()
         if self.kind == "boolean":
             return "on" if self._flag else "off"
         if self.kind == "select":
-            for value, label in self._choices:
-                if value == self._selection:
-                    return label
-            return self._selection or "(unset)"
+            return self._display_select()
+        if self.kind == "multi":
+            return self._display_multi()
         return _field_text(self.kind, self._input.value if self._input else "")
+
+    def _display_question(self) -> Text:
+        """One option per line, with the cursor marking the active row."""
+        line = Text()
+        for index, (value, label) in enumerate(self._choices):
+            if index:
+                line.append("\n")
+            selected = value in self._multi if self.kind == "multi" else value == self._selection
+            marker = (
+                ("☑" if selected else "☐") if self.kind == "multi" else ("◉" if selected else "○")
+            )
+            row = Text()
+            row.append("› " if index == self._cursor else "  ")
+            row.append(f"{marker} {label}")
+            if index == self._cursor:
+                row.stylize("reverse")
+            description = self._descriptions.get(value)
+            if description:
+                row.append(f"\n    {description}", style="dim")
+            line.append(row)
+        return line
+
+    def _display_select(self) -> str | Text:
+        """Show the choices inline so the options are visible without stepping."""
+        current = next((label for value, label in self._choices if value == self._selection), None)
+        if not self._choices or len(self._choices) > 8:
+            return current or self._selection or "(unset)"
+        line = Text()
+        for index, (value, label) in enumerate(self._choices):
+            if index:
+                line.append("  ")
+            start = len(line)
+            selected = value == self._selection
+            line.append(f"{'◉' if selected else '○'} {label}")
+            if selected:
+                line.stylize("reverse", start)
+        return line
+
+    def _display_multi(self) -> Text:
+        if not self._choices:
+            return Text(", ".join(self._multi))
+        line = Text()
+        for index, (value, label) in enumerate(self._choices):
+            if index:
+                line.append("  ")
+            start = len(line)
+            selected = value in self._multi
+            line.append(f"{'☑' if selected else '☐'} {label}")
+            if index == self._cursor:
+                line.stylize("reverse", start)
+        return line
 
     def _refresh_view(self) -> None:
         if self._view.is_mounted:
             self._view.update(self._display())
+        if self._custom_marker is not None and self._custom_marker.is_mounted:
+            if self.kind == "multi":
+                self._custom_marker.update("☑" if self._custom_selected else "☐")
+            else:
+                self._custom_marker.update("◉" if self._custom_selected else "○")
+        if self._custom_row is not None and self._custom_row.is_mounted:
+            self._custom_row.set_class(self._cursor == len(self._choices), "question-cursor")
 
     def value(self) -> Any:
         if self.kind == "boolean":
             return self._flag
         if self.kind == "select":
             return self._selection
+        if self.kind == "multi":
+            return [value for value, _label in self._choices if value in self._multi]
         return self._input.value if self._input is not None else ""
+
+    def custom_value(self) -> str:
+        """The typed custom answer, or ``""`` when a listed option is selected."""
+        if self._custom_input is None or not self._custom_selected:
+            return ""
+        return self._custom_input.value.strip()
 
     def set_value(self, value: Any) -> None:
         before = self.value()
+        if self._question:
+            if self.kind == "multi":
+                self._multi = _multi_values(value)
+            else:
+                self._selection = "" if value is None else str(value)
+                values = [choice for choice, _label in self._choices]
+                if self._selection in values:
+                    self._cursor = values.index(self._selection)
+            self._custom_selected = False
+            self._refresh_view()
+            if self.value() != before:
+                self._notify()
+            return
         if self.kind == "boolean":
             self._flag = bool(value)
         elif self.kind == "select":
             self._selection = "" if value is None else str(value)
+        elif self.kind == "multi":
+            self._multi = _multi_values(value)
         elif self._input is not None:
             text = _field_text(self.kind, value)
             if self._input.value != text:
@@ -346,6 +521,12 @@ class _FieldRow(Vertical):
             if self._open:
                 self._render_suggestions()
             return
+        if self.kind == "multi":
+            allowed = {value for value, _label in self._choices}
+            self._multi = [value for value in self._multi if value in allowed]
+            self._cursor = min(self._cursor, max(0, len(self._choices) - 1))
+            self._refresh_view()
+            return
         if self._selection not in [value for value, _label in self._choices]:
             self._selection = ""
         self._refresh_view()
@@ -356,6 +537,20 @@ class _FieldRow(Vertical):
 
     def focus_target(self) -> Any:
         return self._input if self._input is not None else self
+
+    def question_cursor_on_custom(self) -> bool:
+        return self._question and self._cursor == len(self._choices)
+
+    def custom_editor_focused(self) -> bool:
+        return self._custom_input is not None and self._custom_input.has_focus
+
+    def focus_custom_editor(self) -> None:
+        if self._custom_input is None:
+            return
+        self._cursor = len(self._choices)
+        self._custom_input.focus()
+        self._refresh_view()
+        self._notify()
 
     def _step(self, direction: int) -> None:
         if not self._choices:
@@ -369,14 +564,35 @@ class _FieldRow(Vertical):
         self._refresh_view()
         self._notify()
 
+    def _move_cursor(self, direction: int) -> None:
+        if not self._choices:
+            return
+        self._cursor = (self._cursor + direction) % len(self._choices)
+        self._refresh_view()
+
+    def _toggle_cursor(self) -> None:
+        if not self._choices:
+            return
+        value = self._choices[self._cursor][0]
+        if value in self._multi:
+            self._multi.remove(value)
+        else:
+            self._multi.append(value)
+        self._refresh_view()
+        self._notify()
+
     def _notify(self) -> None:
         if self.on_changed is not None:
             self.on_changed(self)
 
     def _note_focus(self) -> None:
-        note = getattr(self.screen, "note_focused_row", None)
-        if note is not None:
-            note(self)
+        node: Any = self.parent
+        while node is not None:
+            note = getattr(node, "note_focused_row", None)
+            if note is not None:
+                note(self)
+                return
+            node = node.parent
 
     def on_focus(self, event: Any) -> None:
         self._note_focus()
@@ -385,6 +601,15 @@ class _FieldRow(Vertical):
 
     def on_descendant_focus(self, event: Any) -> None:
         self._note_focus()
+        if self._question and event.widget is self._custom_input:
+            self._cursor = len(self._choices)
+            self._custom_selected = bool(self._custom_input and self._custom_input.value.strip())
+            if self.kind == "select":
+                self._selection = ""
+            elif self._custom_selected:
+                self._multi.clear()
+            self._refresh_view()
+            self._notify()
         if self.kind == "combobox":
             self._show_suggestions()
 
@@ -394,6 +619,18 @@ class _FieldRow(Vertical):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
+        if self._question and event.input is self._custom_input:
+            self._cursor = len(self._choices)
+            self._custom_selected = bool(event.value.strip())
+            if self.kind == "select":
+                self._selection = ""
+            elif self._custom_selected:
+                # ACP models a custom answer as an alternative to picked labels,
+                # never as another label in the same multi-select.
+                self._multi.clear()
+            self._refresh_view()
+            self._notify()
+            return
         if self._silent is not None and event.value == self._silent:
             self._silent = None
             if self.kind == "combobox":
@@ -407,6 +644,45 @@ class _FieldRow(Vertical):
 
     def on_key(self, event: Any) -> None:
         key = str(event.key)
+        if self._question:
+            if not self.has_focus:
+                return
+            if key in {"left", "right"}:
+                self.step_highlight(1 if key == "right" else -1)
+                event.stop()
+                return
+            if self.kind == "multi" and key == "space":
+                if self._cursor < len(self._choices):
+                    value = self._choices[self._cursor][0]
+                    if value in self._multi:
+                        self._multi.remove(value)
+                    else:
+                        self._multi.append(value)
+                        self._custom_selected = False
+                    self._refresh_view()
+                    self._notify()
+                elif self._custom_input is not None:
+                    self._custom_selected = not self._custom_selected
+                    if self._custom_selected:
+                        self._multi.clear()
+                    self._refresh_view()
+                    self._notify()
+                event.stop()
+                return
+            if self._custom_input is not None and self._cursor == len(self._choices):
+                character = getattr(event, "character", "")
+                if (
+                    isinstance(character, str)
+                    and len(character) == 1
+                    and character.isprintable()
+                    and not character.isspace()
+                ):
+                    self._custom_input.focus()
+                    self._custom_input.value += character
+                    self._custom_input.cursor_position = len(self._custom_input.value)
+                    event.stop()
+                    return
+            return
         if self.kind == "boolean":
             if key == "space":
                 self._flag = not self._flag
@@ -421,6 +697,16 @@ class _FieldRow(Vertical):
             event.stop()
         elif self.kind == "select" and key in {"left", "right"}:
             self._step(1 if key == "right" else -1)
+            event.stop()
+        elif self.kind == "multi":
+            if key == "left":
+                self._move_cursor(-1)
+            elif key == "right":
+                self._move_cursor(1)
+            elif key == "space":
+                self._toggle_cursor()
+            else:
+                return
             event.stop()
 
 
@@ -456,7 +742,7 @@ class _FormMixin:
             self._on_change(row, self._rows_by_name)
 
     def form_hint(self) -> str:
-        return f"↑/↓ move · Tab next · ←/→ change · Enter {self.accept_label} · Esc cancel"
+        return f"↑/↓ rows · ←/→ choose · Space toggle · Enter {self.accept_label} · Esc cancel"
 
     def form_body(self) -> ComposeResult:
         """Rows, validation error, focused-field help, and the key hint."""
@@ -588,6 +874,12 @@ def _collect_fields(
     values: dict[str, Any] = {}
     for field in fields:
         row = rows[field["name"]]
+        custom = row.custom_value()
+        if custom:
+            custom_name = field.get("custom_name")
+            if isinstance(custom_name, str) and custom_name:
+                values[custom_name] = custom
+            continue
         try:
             value = coerce_value(field, row.value())
         except (TypeError, ValueError):
@@ -599,6 +891,238 @@ def _collect_fields(
         if value not in (None, ""):
             values[field["name"]] = value
     return values, None
+
+
+class _QuestionTabs(Horizontal):
+    """One tab per question, plus a final confirmation tab."""
+
+    def __init__(self, labels: list[str], active: int = 0) -> None:
+        super().__init__(classes="question-tabs")
+        self._labels = [Static(label, markup=False, classes="question-tab") for label in labels]
+        self._active = active
+
+    def compose(self) -> ComposeResult:
+        yield from self._labels
+
+    def set_active(self, index: int) -> None:
+        self._active = index
+        for position, label in enumerate(self._labels):
+            label.set_class(position == index, "active")
+
+
+class _QuestionReview(Static):
+    """Focusable summary shown by the confirmation tab."""
+
+    can_focus = True
+
+
+class ElicitationBar(_FormMixin, Vertical):
+    """Non-modal form dock above the composer, Codex-style.
+
+    One instance is mounted per request and removed when the user accepts or
+    declines. It renders the same rows as the modal dialog, so a standard ACP
+    form needs no special presentation marker. Multiple questions become tabs
+    with a final confirmation tab.
+    """
+
+    BINDINGS = [
+        Binding("escape", "decline", "Decline", show=False, priority=True),
+        *_FORM_BINDINGS,
+    ]
+
+    accept_label = "send"
+
+    def __init__(self, request: ElicitationRequest) -> None:
+        super().__init__(classes="question-bar")
+        self.request = request
+        self._error = Static("", markup=False, classes="dialog-error")
+        self._hint = Static("", markup=False, classes="dialog-hint")
+        self._fields = build_form_fields(request.schema)
+        self._setup_rows(self._fields)
+        self._question_fields = [field for field in self._fields if field.get("allow_custom")]
+        self._tabbed = len(self._question_fields) > 1
+        self._tab_index = 0
+        self._confirm_index = len(self._question_fields)
+        self._tabs = (
+            _QuestionTabs(
+                [
+                    f"{index + 1}. {field.get('title') or field['name']}"
+                    for index, field in enumerate(self._question_fields)
+                ]
+                + ["Confirm"],
+                0,
+            )
+            if self._tabbed
+            else None
+        )
+        self._review = _QuestionReview("", markup=False, classes="question-review")
+        self._review.display = False
+
+    def compose(self) -> ComposeResult:
+        if self.request.message and not self._message_in_question():
+            yield Static(self.request.message, markup=False, classes="question-title")
+        if self._tabs is not None:
+            yield self._tabs
+        yield from self.form_body()
+
+    def _message_in_question(self) -> bool:
+        """A single question already carries the message as its description."""
+        return (
+            len(self._fields) == 1
+            and str(self._fields[0].get("description") or "") == self.request.message
+        )
+
+    def form_body(self) -> ComposeResult:
+        """Rows, the confirmation summary, validation error, help, and hint."""
+        with VerticalScroll(classes="form-scroll"):
+            yield self._review
+            if not self._rows:
+                yield Static(
+                    "This schema has no editable fields.",
+                    markup=False,
+                    classes="dialog-help",
+                )
+            for row in self._rows:
+                yield row
+        yield self._error
+        yield self._help
+        self._hint.update(self.form_hint())
+        yield self._hint
+
+    def on_mount(self) -> None:
+        if self._tabbed:
+            self._show_tab(0)
+        else:
+            super().on_mount()
+
+    def show_error(self, message: str) -> None:
+        self._error.update(message)
+
+    def form_hint(self) -> str:
+        multi = self._active_question_is_multi()
+        toggle = "Space toggle · " if multi else ""
+        if not self._tabbed:
+            return f"↑/↓ choose · {toggle}Enter send · Esc decline"
+        if self._tab_index == self._confirm_index:
+            return "Shift+Tab previous question · Enter submit · Esc decline"
+        return (
+            "Tab next question · Shift+Tab previous · ↑/↓ choose · "
+            f"{toggle}Enter next · Esc decline"
+        )
+
+    def _active_question_is_multi(self) -> bool:
+        if not self._question_fields:
+            return False
+        index = self._tab_index
+        if self._tabbed and index >= self._confirm_index:
+            return False
+        if not self._tabbed and len(self._question_fields) != 1:
+            return False
+        return self._question_fields[index].get("kind") == "multi"
+
+    def action_focus_next(self) -> None:
+        if self._tabbed:
+            self._show_tab(self._tab_index + 1)
+            return
+        super().action_focus_next()
+
+    def action_focus_previous(self) -> None:
+        if self._tabbed:
+            self._show_tab(self._tab_index - 1)
+            return
+        super().action_focus_previous()
+
+    def action_enter_field(self) -> None:
+        """Enter opens a custom editor, advances, or submits from Confirm."""
+        if (
+            self._active is not None
+            and self._active.question_cursor_on_custom()
+            and not self._active.custom_editor_focused()
+        ):
+            self._active.focus_custom_editor()
+            return
+        if not self._tabbed:
+            super().action_enter_field()
+            return
+        if self._tab_index == self._confirm_index:
+            self.action_accept_form()
+            return
+        field = self._question_fields[self._tab_index]
+        if not self._question_answered(field):
+            self.show_error(f"Answer {field.get('title') or 'the question'} before continuing.")
+            return
+        self._show_tab(self._tab_index + 1)
+
+    def _show_tab(self, index: int) -> None:
+        if not self._tabbed:
+            return
+        index = max(0, min(index, self._confirm_index))
+        self._tab_index = index
+        if self._tabs is not None:
+            self._tabs.set_active(index)
+        for position, field in enumerate(self._question_fields):
+            self._rows_by_name[field["name"]].display = position == index
+        confirming = index == self._confirm_index
+        self._review.display = confirming
+        self._error.update("")
+        self._hint.update(self.form_hint())
+        if confirming:
+            self._review.update(self._review_text())
+            self._active = None
+            self._help.update("")
+            self._review.focus()
+            return
+        self._rows_by_name[self._question_fields[index]["name"]].focus_target().focus()
+
+    def _review_text(self) -> str:
+        lines: list[str] = ["Review your answers:"]
+        for index, field in enumerate(self._question_fields, start=1):
+            row = self._rows_by_name[field["name"]]
+            custom = row.custom_value()
+            value = row.value()
+            if custom:
+                answer = custom
+            elif isinstance(value, list):
+                answer = ", ".join(str(item) for item in value)
+            else:
+                answer = str(value or "")
+            lines.append(
+                f"{index}. {field.get('title') or field['name']}: {answer or '(unanswered)'}"
+            )
+        return "\n".join(lines)
+
+    def _question_answered(self, field: dict[str, Any]) -> bool:
+        row = self._rows_by_name[field["name"]]
+        value = row.value()
+        return bool(row.custom_value()) or not (value in (None, "") or value == [])
+
+    def _missing_question(self) -> int | None:
+        for index, field in enumerate(self._question_fields):
+            if not self._question_answered(field):
+                return index
+        return None
+
+    def action_accept_form(self) -> None:
+        missing = self._missing_question()
+        if missing is not None:
+            field = self._question_fields[missing]
+            title = field.get("title") or "question"
+            if self._tabbed:
+                self._show_tab(missing)
+            else:
+                self._rows_by_name[field["name"]].focus_target().focus()
+            self.show_error(f"Answer {title} before submitting.")
+            return
+        values, error = _collect_fields(self._fields, self._rows_by_name)
+        if error:
+            self.show_error(error)
+            return
+        self.post_message(
+            ElicitationAnswered(ElicitationAnswer(action="accept", content=values or {}))
+        )
+
+    def action_decline(self) -> None:
+        self.post_message(ElicitationAnswered(ElicitationAnswer(action="decline")))
 
 
 class ElicitationDialog(_FormMixin, _DialogBase):
@@ -619,7 +1143,7 @@ class ElicitationDialog(_FormMixin, _DialogBase):
         self._setup_rows(self._fields)
 
     def form_hint(self) -> str:
-        return "↑/↓ move · Tab next · ←/→ change · Enter accept · d decline · Esc cancel"
+        return "↑/↓ choose · Tab rows · Space toggle · Enter accept · d decline · Esc cancel"
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):

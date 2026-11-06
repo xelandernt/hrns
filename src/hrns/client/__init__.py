@@ -35,11 +35,6 @@ from .events import (
 from .interactions import (
     PERMISSION_MODES,
     READ_ONLY_KINDS,
-    AskUserAnswer,
-    AskUserOption,
-    AskUserQuestion,
-    AskUserRequest,
-    AskUserResponse,
     ElicitationAnswer,
     ElicitationRequest,
     HeadlessInteractions,
@@ -47,9 +42,7 @@ from .interactions import (
     PermissionDecision,
     PermissionRequest,
     RequireInteractions,
-    ask_user_payload,
     auto_permission,
-    parse_ask_user_request,
 )
 from .renderers import RendererRegistry, readable_text
 from .session import SessionProxy
@@ -58,11 +51,6 @@ from .transport import StdioAgentTransport, WebSocketAgentTransport, secret_valu
 __all__ = [
     "__version__",
     "AgentTextChunk",
-    "AskUserAnswer",
-    "AskUserOption",
-    "AskUserQuestion",
-    "AskUserRequest",
-    "AskUserResponse",
     "CommandsUpdated",
     "ConfigOptionsUpdated",
     "ConnectionEvent",
@@ -98,9 +86,7 @@ __all__ = [
     "UsageUpdated",
     "UserMessageReplayed",
     "WebSocketAgentTransport",
-    "ask_user_payload",
     "auto_permission",
-    "parse_ask_user_request",
     "default_config_path",
     "readable_text",
     "secret_value",

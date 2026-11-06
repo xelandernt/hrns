@@ -17,8 +17,6 @@ from hrns.config import HrnsConfig, TuiSettings
 from ..client import HrnsAcpClient, SessionProxy
 from ..errors import HrnsClientError, InteractionRequired, TransportError
 from ..interactions import (
-    AskUserRequest,
-    AskUserResponse,
     ElicitationAnswer,
     ElicitationRequest,
     InteractionPolicy,
@@ -67,13 +65,11 @@ class UiInteractionPolicy(InteractionPolicy):
         return await self.app.ask_permission(request)
 
     async def answer_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
+        if request.kind == "form":
+            for screen in reversed(self.app.screen_stack):
+                if isinstance(screen, ChatScreen):
+                    return await screen.request_elicitation(request)
         return await self.app.ask_elicitation(request)
-
-    async def answer_questions(self, request: AskUserRequest) -> AskUserResponse:
-        for screen in reversed(self.app.screen_stack):
-            if isinstance(screen, ChatScreen):
-                return await screen.request_questions(request)
-        return AskUserResponse(cancelled=True)
 
 
 class HrnsApp(App[int]):
@@ -307,44 +303,24 @@ class HrnsApp(App[int]):
 
     /* ----------------------------------------------------------- composer */
 
-    #ask-user-dock,
+    #question-dock,
     #approval-dock {
         height: auto;
         padding: 0 2;
         background: transparent;
     }
-    #ask-user {
+    .question-bar {
         height: auto;
         max-height: 18;
-        margin: 0;
         padding: 0 1;
         background: $surface;
         border: round $accent 75%;
     }
-    #ask-user .ask-tabs {
-        height: auto;
-        padding: 0 0 1 0;
-    }
-    #ask-user .ask-question {
+    .question-title {
         height: auto;
         padding-bottom: 1;
-    }
-    #ask-user #ask-options {
-        background: transparent;
-        height: auto;
-        max-height: 8;
-        scrollbar-size-vertical: 1;
-    }
-    #ask-user #ask-options:focus {
-        border: none;
-    }
-    #ask-user #ask-custom-input {
-        display: none;
-        margin-top: 1;
-    }
-    #ask-user .ask-hint {
-        height: auto;
-        color: $text-muted;
+        color: $text;
+        text-style: bold;
     }
     #approval {
         height: auto;
@@ -463,7 +439,7 @@ class HrnsApp(App[int]):
         color: $text-muted;
     }
     .narrow #composer-dock,
-    .narrow #ask-user-dock,
+    .narrow #question-dock,
     .narrow #approval-dock,
     .narrow #suggestions-dock { padding: 0 1; }
     .narrow .message-header { margin-top: 0; }
@@ -571,8 +547,64 @@ class HrnsApp(App[int]):
     .field-row {
         height: auto;
     }
-    .field-line {
+    .question-tabs {
         height: 1;
+    }
+    .question-tab {
+        width: auto;
+        max-width: 24;
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    .question-tab.active {
+        color: $text;
+        text-style: bold;
+        background: $accent 25%;
+    }
+    .question-review {
+        height: auto;
+        padding: 0 1 1 1;
+        color: $text;
+    }
+    .question-row {
+        padding: 0 1 1 1;
+    }
+    .question-field-title {
+        height: auto;
+        color: $text;
+        text-style: bold;
+    }
+    .question-field-text {
+        height: auto;
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+    .question-row .field-value {
+        height: auto;
+    }
+    .question-custom-row {
+        height: auto;
+        min-height: 1;
+        padding-left: 0;
+    }
+    .question-custom-row.question-cursor {
+        background: $accent 20%;
+    }
+    .question-option-marker {
+        width: 2;
+        color: $text;
+    }
+    .question-option-label {
+        width: auto;
+        padding-right: 1;
+        color: $text;
+    }
+    .field-line {
+        height: auto;
+        min-height: 1;
     }
     .field-row:focus,
     .field-row:focus-within {

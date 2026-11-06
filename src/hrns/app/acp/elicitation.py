@@ -1,10 +1,8 @@
 """Translate ``ask_user_question`` questions to and from ACP form elicitation.
 
 A question becomes one form property (a titled single-select or multi-select) plus a
-companion string for a typed answer. The titles, descriptions, options and
-multi-select flag are all standard form schema; the only addition is the
-:data:`hrns.shared.ASK_USER_META` marker, which tells a client that understands it to
-render tabs instead of a flat form.
+companion string for a typed answer. Everything is standard form schema: no marker,
+no vendor fields. A client renders it with its ordinary elicitation UI.
 """
 
 from __future__ import annotations
@@ -21,8 +19,6 @@ from pydantic_ai_harness.ask_user import (
     ask_user_result,
 )
 
-from hrns.shared import ASK_USER_META, choice_field, text_field
-
 __all__ = [
     "ASK_USER_UNAVAILABLE",
     "ask_user_message",
@@ -36,6 +32,14 @@ ASK_USER_UNAVAILABLE = (
     "The client cannot show questions to the user. Continue without the answer: make a "
     "reasonable choice and say which one you made."
 )
+
+
+def _choice_field(index: int) -> str:
+    return f"q{index}"
+
+
+def _text_field(index: int) -> str:
+    return f"q{index}_text"
 
 
 def _enum_options(question: Question) -> list[schema.EnumOption]:
@@ -56,8 +60,8 @@ def build_ask_user_schema(questions: Sequence[Question]) -> schema.ElicitationSc
     ] = {}
 
     for index, question in enumerate(questions):
-        choice = choice_field(index)
-        text = text_field(index)
+        choice = _choice_field(index)
+        text = _text_field(index)
 
         if question.multi_select:
             properties[choice] = schema.ElicitationMultiSelectPropertySchema(
@@ -80,7 +84,6 @@ def build_ask_user_schema(questions: Sequence[Question]) -> schema.ElicitationSc
         title="Questions from the agent",
         description="Answer each question; the agent is waiting for the result.",
         properties=properties,
-        field_meta={ASK_USER_META: {}},
     )
 
 
@@ -117,9 +120,9 @@ def ask_user_response(
     content = response.content or {}
     answers: list[AskUserAnswer] = []
     for index, question in enumerate(request.questions):
-        text = content.get(text_field(index))
+        text = content.get(_text_field(index))
         custom = text.strip() if isinstance(text, str) and text.strip() else None
-        selected = () if custom else _selected(content.get(choice_field(index)))
+        selected = () if custom else _selected(content.get(_choice_field(index)))
         if custom is None and not selected:
             continue
         answers.append(
