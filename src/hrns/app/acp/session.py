@@ -16,6 +16,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
+from hrns.acp_mcp import AcpChannel, McpOverAcpCaller
 from hrns.capabilities import TodoStore
 
 # A single MCP server configuration, in any of the transports ACP carries.
@@ -52,6 +53,8 @@ class AcpSession:
     client_capabilities: schema.ClientCapabilities | None
     client: Client
     session_id: str
+    mcp_caller: McpOverAcpCaller | None = None
+    mcp_channel: AcpChannel | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

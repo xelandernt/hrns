@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
+from acp import schema
 from cyclopts import App, Parameter
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import infer_model, infer_model_profile, known_model_names
@@ -25,6 +26,8 @@ from hrns.config import (
 )
 
 from .acp import (
+    AcpSession,
+    AcpSessionConfig,
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
@@ -34,6 +37,7 @@ from .acp import (
     ResolvedModel,
     SettingChoice,
     SettingOption,
+    acp_mcp_toolsets,
     run_acp_stdio,
 )
 from .agent import build_agent
@@ -314,6 +318,11 @@ def _check_configured_effort(
         )
 
 
+def _session_config(session: AcpSession) -> AcpSessionConfig[None]:
+    """Turn the client's MCP declarations into Pydantic AI toolsets."""
+    return AcpSessionConfig(deps=None, toolsets=acp_mcp_toolsets(session))
+
+
 def run(
     *,
     config: Annotated[Path | None, Parameter(help="Path to the hrns configuration file.")] = None,
@@ -355,7 +364,12 @@ def run(
     )
     # Advertise every configured model and resolve the client's choice through this
     # entry's provider configuration. The active model stays the default.
-    run_acp_stdio(agent, model_resolver=resolver)
+    run_acp_stdio(
+        agent,
+        model_resolver=resolver,
+        session_config=_session_config,
+        mcp_capabilities=schema.McpCapabilities(acp=True, http=True, sse=True),
+    )
 
 
 app = App(

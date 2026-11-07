@@ -118,7 +118,7 @@ class SessionLifecycle:
             response = await client.connection.new_session(
                 cwd=cwd,
                 additional_directories=additional_directories,
-                mcp_servers=[],
+                mcp_servers=list(client.mcp_servers),
             )
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/new", exc)) from exc
@@ -148,7 +148,7 @@ class SessionLifecycle:
             response = await client.connection.load_session(
                 cwd=cwd,
                 session_id=session_id,
-                mcp_servers=[],
+                mcp_servers=list(client.mcp_servers),
                 additional_directories=additional_directories,
             )
         except RequestError as exc:
@@ -179,7 +179,7 @@ class SessionLifecycle:
             response = await client.connection.resume_session(
                 session_id=session_id,
                 cwd=cwd,
-                mcp_servers=[],
+                mcp_servers=list(client.mcp_servers),
                 additional_directories=additional_directories,
             )
         except RequestError as exc:

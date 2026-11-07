@@ -27,6 +27,7 @@ from ..interactions import (
 from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
 from ..local import local_model_catalog
+from ..mcp_provider import ClientMcpProvider
 from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
 from .dialogs import ElicitationDialog, PermissionDialog
@@ -731,6 +732,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
+            mcp=ClientMcpProvider(self.config.mcp),
         )
 
     def client_io_mode(self, target: ConnectionTarget) -> ClientIoMode:
@@ -752,6 +754,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
+            mcp=ClientMcpProvider(self.config.mcp),
         )
         await client.connect()
         self.target = target

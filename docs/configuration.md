@@ -210,12 +210,18 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 | `url` | string | `""` | `http(s)` endpoint (HTTP only) |
 | `headers` | table of strings | `{}` | Request headers; `{env:NAME}` is expanded |
 | `enabled` | bool | `true` | Whether the server is loaded for new sessions |
+| `export` | bool | `false` | Offer this server to an ACP agent over MCP-over-ACP |
 | `defer_loading` | bool | `false` | Advertise the server's tools only after the model asks for them |
 | `description` | string | `""` | When the model should load a deferred server |
 | `include_tools` | list of strings | `[]` | Only these tools (mutually exclusive with `exclude_tools`) |
 | `exclude_tools` | list of strings | `[]` | All tools except these |
 | `timeout` | float | `10.0` | Seconds before a request to the server fails |
 | `oauth` | bool or table | `true` | `true` uses OAuth with dynamic registration; `false` never tries it; a table sets `client_id`, `client_secret`, `scopes`, and `callback_port` |
+
+`export = true` makes the client offer an enabled server to an agent that advertises
+`mcpCapabilities.acp`: it launches the stdio command or connects to the URL, then proxies
+the server over the ACP connection. Default `false` keeps the server configured for the
+local agent only.
 
 ## Secrets
 
@@ -265,7 +271,7 @@ points (`hrns.app serve`, the FastAPI mount) and are deliberately not read here.
 hrns profiles list                  # saved connections from the document
 hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN
 hrns profiles remove team
-hrns mcp add playwright -- npx -y @playwright/mcp@latest
+hrns mcp add playwright --export -- npx -y @playwright/mcp@latest
 hrns mcp list
 hrns login github-copilot
 ```

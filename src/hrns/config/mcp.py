@@ -66,6 +66,13 @@ class McpServerSettings(BaseModel):
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
+    export: bool = False
+    """Offer this server to ACP agents over MCP-over-ACP.
+
+    This is the client-side provider switch. ``False`` keeps the server
+    configured for the local agent only; ``True`` makes the client register it
+    on a connection that advertises ``mcpCapabilities.acp``.
+    """
     defer_loading: bool = False
     description: str = Field(
         default="", description="Describe when the model should load this MCP server."

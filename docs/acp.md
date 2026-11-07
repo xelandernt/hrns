@@ -38,7 +38,7 @@ call a refused method in the first place.
 | `sessionCapabilities.list` | the store implements `ListableSessionStore` | `InMemorySessionStore` does |
 | `sessionCapabilities.delete` | the store also implements `DeletableSessionStore` | `InMemorySessionStore` does |
 | `providers` | a `model_resolver` was passed | Enables the `model` config option and `providers/*` |
-| `mcpCapabilities` | never | `http`, `sse`, `acp` are all `false` |
+| `mcpCapabilities` | `mcp_capabilities` was passed | `hrns-local` advertises `acp`, `http`, and `sse` |
 | `promptCapabilities` | never | No image, audio, or embedded-context prompts |
 | `nesCapabilities` | never | No next-edit suggestions |
 | `auth` | never | No authentication methods |
@@ -60,7 +60,7 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
 | `session/prompt` | request | **Yes** | Runs one turn and streams `session/update`; `stop_reason` is the finish reason, or `cancelled` |
 | `session/cancel` | notification | **Yes** | Cancels the in-flight turn; the prompt returns `cancelled` |
-| `mcp/message` | request | **No** | No MCP-over-ACP binding |
+| `mcp/message` | request | **Conditional** | The SDK route is replaced by the stateless binding when a `session_config` is installed; it serves agent-as-provider/proxy requests. Client-provided servers are consumed through `McpOverAcpCaller`. |
 | `session/list` | request | **Conditional** | Requires a `ListableSessionStore`; supports `cwd` filter and cursor paging |
 | `session/delete` | request | **Conditional** | Requires a `DeletableSessionStore`; closes live state first |
 | `session/fork` | request | **No** | Not implemented |
@@ -81,6 +81,10 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 Document tracking exists so a future NES implementation has a correct view of the client's
 open files. Nothing else consumes it today, and unknown sessions are silently ignored.
 
+`mcp/message` is routed by `src/hrns/acp_mcp/router.py`, which replaces the Python SDK's
+stateful route when a `session_config` is installed. The adapter's `mcp_message` fallback
+still answers `method_not_found` on an unbound connection.
+
 ## Client methods the agent calls
 
 The adapter is a client of the editor/terminal on the other side. These are the client
@@ -93,13 +97,19 @@ methods it may send, and when.
 | `fs/read_text_file` | Only when the agent uses `AcpFileSystemToolset` / `acp_filesystem`, and the client advertises `fs.readTextFile` |
 | `fs/write_text_file` | Same, when the client also advertises `fs.writeTextFile`; otherwise writes fall back to a local `FileSystem` bounded by the session `cwd` |
 | `terminal/create`, `terminal/wait_for_exit`, `terminal/output`, `terminal/kill`, `terminal/release` | Only when the agent uses `AcpTerminalToolset` / `acp_terminal`, and the client advertises terminal support |
-| `mcp/connect`, `mcp/message`, `mcp/disconnect` | Never; there is no MCP-over-ACP binding |
+| `mcp/message` | When the adapter uses a client-provided (`type: "acp"`) server; the caller sends requests and receives request-scoped notifications. `mcp/connect` and `mcp/disconnect` are never sent: the binding is stateless. |
 | `elicitation/create` | When the model calls `ask_user_question` and the client advertised `elicitation.form`; one form per call, session-scoped to the tool call |
 | `elicitation/complete` | Never; `ask_user_question` elicitation is answered synchronously |
 
 The ACP-backed filesystem and terminal are opt-in through `session_config` on
 `PydanticAIACPAgent`; the default `build_agent` uses the harness `FileSystem` and `Shell`
 on the server side, so a plain mount never asks the client to touch files or run commands.
+
+`session_config` is also where MCP declarations become toolsets. `hrns-local` passes
+`acp_mcp_toolsets`, which turns `stdio`, `http`, and `sse` entries into ordinary
+`MCPToolset`s and turns `type: "acp"` entries into `AcpMcpClientTransport`s backed by the
+session's caller. The adapter advertises `mcpCapabilities` only when a `session_config` is
+present.
 
 ## Session config: the `model` and setting options
 
@@ -140,11 +150,17 @@ escapes as an internal error, so raise those two for anything a client can fix.
 
 ## Known gaps
 
-- No MCP-over-ACP, next-edit suggestions, session fork/resume, or session modes. None of
-  them are advertised.
+- MCP-over-ACP supports tools, resources, prompts, completions, progress, and
+  input-required results. Long-lived `subscriptions/listen` responses are not streamed
+  yet, and MRTR is passed through without an explicit retry policy.
+- Next-edit suggestions, session fork/resume, and session modes are not implemented.
+  None of them are advertised.
 - Form elicitation is used only for `ask_user_question`. URL elicitation is never sent, and
   a client without form support gets a plain "proceed without an answer" result.
 - One connection per adapter. `session/list` and `session/delete` work for stores that
   support them, but there is no multi-client fan-out above the adapter.
 - Provider configuration is process-scoped and in memory. It is never persisted with a
   session and never echoed back with secrets.
+
+The implementation notes and remaining MCP-over-ACP work are in
+[`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md).

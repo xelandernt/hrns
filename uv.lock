@@ -4,8 +4,8 @@ requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "python_full_version == '3.14.*' and sys_platform != 'emscripten'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
 ]
 
@@ -698,6 +698,7 @@ dependencies = [
     { name = "cyclopts" },
     { name = "fastmcp-slim", extra = ["client"] },
     { name = "keyring" },
+    { name = "mcp" },
     { name = "packaging" },
     { name = "platformdirs" },
     { name = "pydantic" },
@@ -748,6 +749,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'app'", specifier = ">=0.156,<1" },
     { name = "fastmcp-slim", extras = ["client"], specifier = ">=3.3,<5" },
     { name = "keyring", specifier = ">=25" },
+    { name = "mcp", specifier = ">=2.3,<3" },
     { name = "packaging", specifier = ">=24" },
     { name = "platformdirs", specifier = ">=4" },
     { name = "pydantic", specifier = ">=2.12,<3" },

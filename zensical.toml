@@ -11,5 +11,6 @@ nav = [
     { "Configuration" = "configuration.md" },
     { "Capabilities" = "capabilities.md" },
     { "ACP support" = "acp.md" },
+    { "MCP over ACP" = "mcp-over-acp-analysis.md" },
     { "mount_acp" = "mount-acp.md" },
 ]

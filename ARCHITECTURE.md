@@ -42,6 +42,46 @@ The adapter implements the complete `acp.Agent` protocol. `session/list` and
 the caller supplies. MCP-over-ACP and NES are explicitly unsupported and not advertised
 until their features exist (see `TODO.md`).
 
+## MCP over ACP
+
+`src/hrns/acp_mcp/` implements the stateless MCP-over-ACP binding for MCP
+2026-07-28. It targets the current ACP RFD, not the Python SDK's older
+`mcp/connect` / `connectionId` prototype: every `mcp/message` carries a
+`serverId` and a logical `requestId`, and each request carries its MCP version
+and client capabilities in inner `_meta`. The binding is standard ACP; no
+`_hrns/*` extension is used.
+
+The module has two roles. `McpOverAcpProvider` is the client side: it owns
+`serverId` registrations, validates envelopes and inner metadata, dispatches
+requests, tracks active IDs, maps inner MCP errors to the response carrier and
+binding failures to outer ACP errors, and forwards request-scoped
+notifications. `McpOverAcpCaller` is the agent side: it sends requests, adds
+the required per-request metadata, routes notifications by `(serverId,
+requestId)`, and turns cancellation into `$/cancel_request`.
+`from_mcp_server` adapts an official `mcp` SDK server (`MCPServer` or the
+low-level `Server`) through `mcp.server.runner.serve_one`, so the MCP SDK owns
+discovery, capability checks, tool/resource/prompt handlers, and
+input-required results.
+
+The Python SDK's generated schema still has the stateful prototype and
+validates `connectionId` before application handlers run. `router.py` is the
+narrow compatibility shim: it replaces the two `mcp/message` routes on the
+SDK's `MessageRouter` and sends raw stateless frames through the same
+connection. It is isolated so it can be removed when the Python SDK catches up
+with the RFD.
+
+On the client, `ClientMcpProvider` reads the `[mcp]` servers with
+`export = true`, launches the stdio command or connects to the HTTP/SSE URL,
+and serves the upstream session through `from_mcp_server`; the client includes
+the resulting declarations in `session/new`. On the agent, `acp_mcp_toolsets`
+turns every client declaration into an ordinary `MCPToolset`: standard
+stdio/HTTP/SSE entries connect directly, while `type: "acp"` entries use
+`AcpMcpClientTransport` over the session's caller. `hrns-local` installs that
+session config and advertises `mcpCapabilities.acp`.
+
+The feasibility analysis, work breakdown, and open decisions live in
+`docs/mcp-over-acp-analysis.md`; the remaining TODO items are in `TODO.md`.
+
 ## ACP models and provider configuration
 
 One object answers everything ACP asks about models: `ModelResolver`

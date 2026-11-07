@@ -244,6 +244,7 @@ def _mcp_add_command(
     oauth_callback_port: int | None = None,
     no_oauth: bool = False,
     defer: bool = False,
+    export: bool = False,
     description: str = "",
     include_tools: ToolOption = None,
     exclude_tools: ExcludeToolOption = None,
@@ -265,6 +266,7 @@ def _mcp_add_command(
             oauth_callback_port=oauth_callback_port,
             no_oauth=no_oauth,
             defer=defer,
+            export=export,
             description=description,
             include_tools=include_tools or [],
             exclude_tools=exclude_tools or [],
@@ -553,11 +555,14 @@ async def _command_run(args: SimpleNamespace) -> int:
     client_io = args.client_io or target.profile.client_io
     if client_io is None and args.session and args.cwd is None:
         client_io = "off"
+    from .mcp_provider import ClientMcpProvider
+
     client = HrnsAcpClient(
         lambda: transport_for(target),
         policy=policy,
         auth_method=target.profile.auth_method,
         client_io=parse_client_io(client_io or "all"),
+        mcp=ClientMcpProvider(config.mcp),
     )
     try:
         outcome = await run_headless(
@@ -762,6 +767,7 @@ def _mcp_server(name: str, args: SimpleNamespace) -> McpServerSettings:
         url=url,
         headers=_mcp_pairs(args.header, "--header"),
         enabled=not args.disabled,
+        export=getattr(args, "export", False),
         defer_loading=args.defer,
         description=args.description,
         include_tools=list(args.include_tools),
@@ -804,13 +810,16 @@ def _mcp_list(args: SimpleNamespace) -> int:
         print("Add one with: hrns mcp add NAME -- npx -y PACKAGE")
         return EXIT_OK
     name_width = max(len(name) for name in servers)
-    print(f"{'NAME':<{name_width}}  {'TRANSPORT':<9}  {'STATUS':<8}  MODE      TARGET")
+    print(
+        f"{'NAME':<{name_width}}  {'TRANSPORT':<9}  {'STATUS':<8}  {'MODE':<9}  {'ACP':<6}  TARGET"
+    )
     for name, server in sorted(servers.items()):
         status = "enabled" if server.enabled else "disabled"
         mode = "deferred" if server.defer_loading else "eager"
+        acp = "export" if server.export else "-"
         print(
-            f"{name:<{name_width}}  {server.transport:<9}  {status:<8}  {mode:<9} "
-            f"{server_target(server)}"
+            f"{name:<{name_width}}  {server.transport:<9}  {status:<8}  {mode:<9}  "
+            f"{acp:<6}  {server_target(server)}"
         )
     print(f"\nConfig: {path}")
     store = settings.mcp.token_store_path or str(default_token_store_path())
@@ -841,6 +850,7 @@ def _mcp_get(args: SimpleNamespace) -> int:
         print("exclude: " + ", ".join(server.exclude_tools))
     if server.is_http:
         print(f"oauth: {'disabled' if server.oauth is False else 'enabled'}")
+    print(f"export over ACP: {'yes' if server.export else 'no'}")
     print(f"timeout: {server.timeout:g}s")
     print(f"config: {path}")
     return EXIT_OK

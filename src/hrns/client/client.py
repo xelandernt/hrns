@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
 from acp.client.connection import ClientSideConnection
 from acp.schema import (
     AcceptElicitationResponse,
+    AcpMcpServer,
     AllowedOutcome,
     BooleanConfigOptionCapabilities,
     CancelElicitationResponse,
@@ -61,6 +62,9 @@ from .transport import AgentTransport, ConnectionBundle
 from .turn import TurnService
 from .updates import dispatch_update
 
+if TYPE_CHECKING:
+    from .mcp_provider import ClientMcpProvider
+
 __all__ = ["HrnsAcpClient", "DEFAULT_INTERACTION_POLICY"]
 
 DEFAULT_INTERACTION_POLICY: InteractionPolicy = RequireInteractions()
@@ -83,6 +87,7 @@ class HrnsAcpClient:
         connect_timeout: float = CONNECT_TIMEOUT,
         auth_method: str = "",
         client_io: ClientIoMode = "all",
+        mcp: ClientMcpProvider | None = None,
     ) -> None:
         self.policy: InteractionPolicy = policy or DEFAULT_INTERACTION_POLICY
         self.advertise_extension = advertise_extension
@@ -90,6 +95,7 @@ class HrnsAcpClient:
         self.connect_timeout = connect_timeout
         self.auth_method = auth_method.strip()
         self.io = ClientIo(ClientIoPolicy(mode=client_io))
+        self.mcp = mcp
 
         self.bus = EventBus()
         self.initialized: Any = None
@@ -137,14 +143,31 @@ class HrnsAcpClient:
     def connected(self) -> bool:
         return self.connection_lifecycle.connected
 
+    @property
+    def mcp_servers(self) -> tuple[AcpMcpServer, ...]:
+        """Declarations for the MCP servers this client offers over ACP."""
+        return self.mcp.declarations if self.mcp is not None else ()
+
     # --------------------------------------------------------------- lifecycle
 
     async def connect(self) -> Any:
-        return await self.connection_lifecycle.connect()
+        response = await self.connection_lifecycle.connect()
+        if self.mcp is not None:
+            try:
+                await self.mcp.start(self.connection, self.initialized)
+            except BaseException:
+                await self.connection_lifecycle.disconnect()
+                await self.io.close()
+                raise
+        return response
 
     async def disconnect(self) -> None:
-        await self.connection_lifecycle.disconnect()
-        await self.io.close()
+        try:
+            if self.mcp is not None:
+                await self.mcp.close()
+        finally:
+            await self.connection_lifecycle.disconnect()
+            await self.io.close()
 
     def has_session_capability(self, name: str) -> bool:
         """Ask whether the agent advertised a session lifecycle feature."""

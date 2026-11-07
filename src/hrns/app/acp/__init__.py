@@ -8,6 +8,7 @@ ACP 1.x directly.
 from . import updates
 from .adapter import PydanticAIACPAgent
 from .content import PromptContentBlock, prompt_blocks_to_user_content
+from .mcp import acp_mcp_toolsets
 from .models import (
     ModelChoice,
     ModelResolver,
@@ -101,6 +102,7 @@ __all__ = [
     "ToolCallPresenter",
     "absolutize",
     "acp_filesystem",
+    "acp_mcp_toolsets",
     "acp_terminal",
     "apply_content_changes",
     "bounded_jsonable",

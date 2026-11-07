@@ -59,6 +59,7 @@ from pydantic_ai.toolsets import AbstractToolset, AgentToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness.ask_user import AskUserRequest as HarnessAskUserRequest
 
+from hrns.acp_mcp import AcpChannel, McpCallerOptions, McpOverAcpCaller, bind_caller
 from hrns.capabilities import TodoStore, TodoUpdated
 from hrns.capabilities.todo import _bind_todo_store
 
@@ -241,8 +242,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     ``providers/*`` methods: it supplies the model list, resolves a selection for a run,
     advertises the setting options a model accepts, turns a session's setting selections into
     per-request settings, and owns the provider routing a client may change. Without it
-    the adapter advertises neither.
-    MCP-over-ACP and NES are explicitly unsupported.
+    the adapter advertises neither. MCP-over-ACP is handled by the stateless binding when
+    a ``session_config`` is supplied; NES is explicitly unsupported.
     """
 
     def __init__(
@@ -281,11 +282,18 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         )
         self._client_capabilities: schema.ClientCapabilities | None = None
         self._conn: Client | None = None
+        self._mcp_caller: McpOverAcpCaller | None = None
+        self._mcp_channel: AcpChannel | None = None
         self._sessions: dict[str, SessionState[AgentDepsT]] = {}
 
     def on_connect(self, conn: Client) -> None:
         """Capture the outbound connection used to stream updates and request permission."""
         self._conn = conn
+        if self._session_config is not None:
+            self._mcp_caller = McpOverAcpCaller(
+                McpCallerOptions(client_info={"name": self._name, "version": self._version})
+            )
+            self._mcp_channel = bind_caller(conn, self._mcp_caller)
 
     @property
     def _listable_store(self) -> ListableSessionStore | None:
@@ -658,6 +666,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             client_capabilities=self._client_capabilities,
             client=self._conn,
             session_id=session_id,
+            mcp_caller=self._mcp_caller,
+            mcp_channel=self._mcp_channel,
         )
         result = self._session_config(session)
         return await result if isawaitable(result) else result
@@ -1386,7 +1396,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         params: dict[str, object] | None = None,
         **kwargs: object,
     ) -> object:
-        """Unsupported: this adapter has no MCP-over-ACP binding."""
+        """Fallback for an unbound connection; the stateless route replaces this."""
         raise acp.RequestError.method_not_found("mcp/message")
 
     async def notify_mcp(
@@ -1396,7 +1406,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         params: dict[str, object] | None = None,
         **kwargs: object,
     ) -> None:
-        """Unsupported: MCP notifications are ignored."""
+        """Fallback for an unbound connection; the stateless route replaces this."""
         return None
 
     async def start_nes(

@@ -20,6 +20,7 @@ dependencies = [
     "keyring>=25",
     "fastmcp-slim[client]>=3.3,<5",
     "pydantic-ai-slim[mcp,openai]>=2.57.0,<3",
+    "mcp>=2.3,<3",
     "pydantic-ai-harness>=0.57.0,<2",
     "PyYAML>=6,<7",
     "packaging>=24",
