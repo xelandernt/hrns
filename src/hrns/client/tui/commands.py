@@ -49,7 +49,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
         "Select a model, or set one directly with /model [provider:]model",
         aliases=("model",),
     ),
-    LocalCommand("effort", "Set the local model's reasoning effort"),
+    LocalCommand("effort", "Show or change the session's reasoning effort"),
     LocalCommand("mcp", "Show MCP servers, tools and connection state"),
     LocalCommand(
         "todo",

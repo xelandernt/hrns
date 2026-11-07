@@ -431,11 +431,20 @@ def option_values(option: dict[str, Any]) -> list[dict[str, str]]:
 def effort_option(
     options: tuple[dict[str, Any], ...] | list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Find the local runtime's unified reasoning-effort option, if advertised."""
+    """Find the session's reasoning-effort option, if the agent advertises one.
+
+    ``effort`` is this project's id; ``thought_level`` is ACP's reserved category, so an
+    agent that names the selector differently still works.
+    """
+    by_category: dict[str, Any] | None = None
     for option in options:
-        if isinstance(option, dict) and option.get("id") == "effort":
+        if not isinstance(option, dict):
+            continue
+        if option.get("id") == "effort":
             return option
-    return None
+        if by_category is None and option.get("category") == "thought_level":
+            by_category = option
+    return by_category
 
 
 def model_option(

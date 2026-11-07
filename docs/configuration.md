@@ -160,7 +160,9 @@ different endpoints and keys under one provider implementation.
 
 Forwarded as `ModelSettings` to every run. `thinking` is special: a level
 (`minimal`, `low`, `medium`, `high`, `xhigh`) enables reasoning, `false` disables it, and
-omitting it keeps the provider default. The TUI's `/effort` writes this key.
+omitting it keeps the provider default. The TUI's `/effort` writes this key when connected
+to `hrns-local`; for any other agent it changes the session's `effort` config option
+instead, because only the server that owns this file can persist it.
 
 This is the baseline every session starts from. A client that changes reasoning effort
 over ACP overrides it for its own session.

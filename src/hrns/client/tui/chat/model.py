@@ -526,6 +526,14 @@ class ModelWorkflow:
         )
 
     async def show_effort(self) -> None:
+        """Offer the session's effort ladder, whichever transport the agent uses.
+
+        An agent that advertises an ``effort`` config option is authoritative: the server
+        decides which levels exist and applies the choice before each request. Only
+        ``hrns-local`` also remembers it in the config file, because that is where its
+        policy lives; every other target — including a remote ACP server — uses the plain
+        config-option path.
+        """
         screen = self.screen
         if screen.session.client is not screen.client:
             await screen._notice(
@@ -533,12 +541,20 @@ class ModelWorkflow:
                 "warning",
             )
             return
-        if screen.target.kind != "local" or not is_local_hrns(screen.target.profile):
+        if screen.target is not None and is_local_hrns(screen.target.profile):
+            await self._show_local_effort()
+            return
+        option = effort_option(screen.session.config_options)
+        if option is None:
             await screen._notice(
-                "Reasoning effort is only available for local models.",
-                "warning",
+                "This agent does not advertise a reasoning-effort option.", "warning"
             )
             return
+        await self.change_standard_option(str(option.get("id") or "effort"))
+
+    async def _show_local_effort(self) -> None:
+        """Persist the effort for the next ``hrns-local`` launch, then apply it here."""
+        screen = self.screen
         try:
             settings = self.local_settings()
         except (ValueError, OSError) as exc:
