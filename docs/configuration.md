@@ -211,6 +211,7 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 | `headers` | table of strings | `{}` | Request headers; `{env:NAME}` is expanded |
 | `enabled` | bool | `true` | Whether the server is loaded for new sessions |
 | `export` | bool | `false` | Offer this server to an ACP agent over MCP-over-ACP |
+| `always_allow` | bool | `false` | Skip the client consent prompt when exporting over ACP |
 | `defer_loading` | bool | `false` | Advertise the server's tools only after the model asks for them |
 | `description` | string | `""` | When the model should load a deferred server |
 | `include_tools` | list of strings | `[]` | Only these tools (mutually exclusive with `exclude_tools`) |
@@ -222,6 +223,13 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 `mcpCapabilities.acp`: it launches the stdio command or connects to the URL, then proxies
 the server over the ACP connection. Default `false` keeps the server configured for the
 local agent only.
+
+Exporting is still gated by the client's user. At session start an interactive client
+asks whether the agent may use the server: allow once, allow for this connection, always
+allow, or deny. A denied server is left out of the session declaration, and an
+unapproved server is never started. `always_allow = true` skips the prompt and
+persists the grant in this document; headless clients (`hrns run`) cannot ask, so
+they only export servers that are pre-approved this way.
 
 ## Secrets
 
@@ -272,6 +280,7 @@ hrns profiles list                  # saved connections from the document
 hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN
 hrns profiles remove team
 hrns mcp add playwright --export -- npx -y @playwright/mcp@latest
+hrns mcp add playwright --export --always-allow -- npx -y @playwright/mcp@latest
 hrns mcp list
 hrns login github-copilot
 ```

@@ -143,10 +143,14 @@ class HrnsAcpClient:
     def connected(self) -> bool:
         return self.connection_lifecycle.connected
 
-    @property
-    def mcp_servers(self) -> tuple[AcpMcpServer, ...]:
-        """Declarations for the MCP servers this client offers over ACP."""
-        return self.mcp.declarations if self.mcp is not None else ()
+    async def prepare_mcp(self) -> None:
+        """Resolve MCP export consent before a timed session call."""
+        if self.mcp is not None:
+            await self.mcp.prepare()
+
+    async def mcp_declarations(self) -> tuple[AcpMcpServer, ...]:
+        """Declarations for one session, asking consent for exported servers."""
+        return await self.mcp.declarations() if self.mcp is not None else ()
 
     # --------------------------------------------------------------- lifecycle
 

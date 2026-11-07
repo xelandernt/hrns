@@ -73,6 +73,14 @@ class McpServerSettings(BaseModel):
     configured for the local agent only; ``True`` makes the client register it
     on a connection that advertises ``mcpCapabilities.acp``.
     """
+    always_allow: bool = False
+    """Skip the client-side consent prompt when exporting over ACP.
+
+    The default (``False``) asks the client's user at session start. A
+    non-interactive client cannot ask, so it treats an unapproved server as
+    denied; set this to ``True`` to export it from ``hrns run`` or another
+    headless client.
+    """
     defer_loading: bool = False
     description: str = Field(
         default="", description="Describe when the model should load this MCP server."

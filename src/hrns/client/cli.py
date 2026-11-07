@@ -234,6 +234,7 @@ def _mcp_add_command(
     name: str,
     *command_words: str,
     config: ConfigOption = None,
+    url: str | None = None,
     stdio_command: Annotated[str | None, Parameter(name="--command", metavar="CMD")] = None,
     env: RepeatedStringOption = None,
     cwd: str | None = None,
@@ -245,6 +246,7 @@ def _mcp_add_command(
     no_oauth: bool = False,
     defer: bool = False,
     export: bool = False,
+    always_allow: bool = False,
     description: str = "",
     include_tools: ToolOption = None,
     exclude_tools: ExcludeToolOption = None,
@@ -256,6 +258,7 @@ def _mcp_add_command(
         _namespace(
             config=config,
             name=name,
+            url=url,
             stdio_command=stdio_command,
             env=env or [],
             cwd=cwd,
@@ -267,6 +270,7 @@ def _mcp_add_command(
             no_oauth=no_oauth,
             defer=defer,
             export=export,
+            always_allow=always_allow,
             description=description,
             include_tools=include_tools or [],
             exclude_tools=exclude_tools or [],
@@ -749,6 +753,8 @@ def _mcp_server(name: str, args: SimpleNamespace) -> McpServerSettings:
     )
     if args.no_oauth and oauth_flags:
         raise HrnsClientError("--no-oauth cannot be combined with OAuth client options.")
+    if args.always_allow and not args.export:
+        raise HrnsClientError("--always-allow only applies with --export.")
     if oauth_flags:
         oauth: McpOAuthConfig | bool = McpOAuthConfig(
             client_id=args.oauth_client_id or "",
@@ -768,6 +774,7 @@ def _mcp_server(name: str, args: SimpleNamespace) -> McpServerSettings:
         headers=_mcp_pairs(args.header, "--header"),
         enabled=not args.disabled,
         export=getattr(args, "export", False),
+        always_allow=getattr(args, "always_allow", False),
         defer_loading=args.defer,
         description=args.description,
         include_tools=list(args.include_tools),
@@ -816,7 +823,12 @@ def _mcp_list(args: SimpleNamespace) -> int:
     for name, server in sorted(servers.items()):
         status = "enabled" if server.enabled else "disabled"
         mode = "deferred" if server.defer_loading else "eager"
-        acp = "export" if server.export else "-"
+        if not server.export:
+            acp = "-"
+        elif server.always_allow:
+            acp = "always"
+        else:
+            acp = "export"
         print(
             f"{name:<{name_width}}  {server.transport:<9}  {status:<8}  {mode:<9}  "
             f"{acp:<6}  {server_target(server)}"
@@ -850,7 +862,11 @@ def _mcp_get(args: SimpleNamespace) -> int:
         print("exclude: " + ", ".join(server.exclude_tools))
     if server.is_http:
         print(f"oauth: {'disabled' if server.oauth is False else 'enabled'}")
-    print(f"export over ACP: {'yes' if server.export else 'no'}")
+    if server.export:
+        consent = "always allowed" if server.always_allow else "ask at session start"
+        print(f"export over ACP: yes ({consent})")
+    else:
+        print("export over ACP: no")
     print(f"timeout: {server.timeout:g}s")
     print(f"config: {path}")
     return EXIT_OK

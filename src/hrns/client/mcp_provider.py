@@ -10,8 +10,10 @@ fine while the ACP side is MCP 2026-07-28.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from acp.schema import AcpMcpServer
 from fastmcp import Client
@@ -53,7 +55,7 @@ from hrns.config.mcp import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ClientMcpProvider"]
+__all__ = ["ClientMcpProvider", "ConsentDecision"]
 
 
 @dataclass
@@ -62,44 +64,89 @@ class _Offering:
     stack: AsyncExitStack
 
 
+class ConsentDecision(StrEnum):
+    """What the client's user decided about exporting one server."""
+
+    ALLOW_ONCE = "once"
+    """Declare it for this session only."""
+    ALLOW_SESSION = "session"
+    """Declare it for every session until this connection closes."""
+    ALWAYS_ALLOW = "always"
+    """Declare it now and persist ``always_allow = true`` in the config."""
+    DENY = "deny"
+    """Do not declare it for this session."""
+
+
+ConsentHandler = Callable[[str, McpServerSettings], Awaitable[ConsentDecision]]
+"""Ask the client's user whether an exported server may be offered to the agent."""
+
+
 @dataclass
 class ClientMcpProvider:
     """Serve configured ``[mcp]`` servers to an ACP agent over ``mcp/message``."""
 
     settings: McpSettings
+    consent: ConsentHandler | None = None
+    """Session-start consent prompt; ``None`` denies servers not pre-approved."""
+
+    persist: Callable[[], object] | None = None
+    """Write the config document after an ``always allow`` decision."""
+
     _provider: McpOverAcpProvider = field(default_factory=McpOverAcpProvider)
     _channel: AcpChannel | None = None
+    _exported: dict[str, McpServerSettings] = field(default_factory=dict)
     _offerings: list[_Offering] = field(default_factory=list)
-    _declarations: list[AcpMcpServer] = field(default_factory=list)
+    _started: dict[str, McpServerRegistration] = field(default_factory=dict)
+    _granted: set[str] = field(default_factory=set)
+    _denied: set[str] = field(default_factory=set)
+    _prepared: tuple[AcpMcpServer, ...] | None = None
     _token_store: object | None = None
 
-    @property
-    def declarations(self) -> tuple[AcpMcpServer, ...]:
-        """The ACP declarations to include in ``session/new`` or ``session/load``."""
-        return tuple(self._declarations)
+    async def prepare(self) -> None:
+        """Resolve consent for the next session before it is timed out.
+
+        The TUI calls this before ``session/new`` so the user's thinking time is
+        not charged against the connection timeout.
+        """
+        self._prepared = await self._resolve()
+
+    async def declarations(self) -> tuple[AcpMcpServer, ...]:
+        """The ACP declarations for one session, asking consent for each server."""
+        prepared, self._prepared = self._prepared, None
+        if prepared is not None:
+            return prepared
+        return await self._resolve()
+
+    async def _resolve(self) -> tuple[AcpMcpServer, ...]:
+        declarations: list[AcpMcpServer] = []
+        for name, server in self._exported.items():
+            if not await self._approve(name, server):
+                continue
+            registration = self._started.get(name)
+            if registration is None:
+                await self._offer(name, server)
+                registration = self._started.get(name)
+            if registration is not None:
+                declarations.append(registration.declaration)
+        return tuple(declarations)
 
     async def start(self, connection: object, initialized: object) -> None:
-        """Bind the provider and start every exported server on this connection."""
+        """Bind the provider and start the servers that do not need consent."""
         await self.close()
         self._provider = McpOverAcpProvider()
         if not _agent_supports_acp(initialized):
             return
-        servers = [
-            (name, server)
+        self._exported = {
+            name: server
             for name, server in self.settings.servers.items()
             if server.enabled and server.export
-        ]
-        if not servers:
+        }
+        if not self._exported:
             return
         self._channel = bind_provider(connection, self._provider)
-        for name, server in servers:
-            try:
-                offering = await self._start_offering(name, server)
-            except Exception:
-                logger.warning("cannot export MCP server %r over ACP", name, exc_info=True)
-                continue
-            self._offerings.append(offering)
-            self._declarations.append(offering.registration.declaration)
+        for name, server in self._exported.items():
+            if server.always_allow:
+                await self._offer(name, server)
 
     async def close(self) -> None:
         """Cancel provider operations and stop every upstream connection."""
@@ -113,8 +160,54 @@ class ClientMcpProvider:
             except Exception:
                 logger.debug("closing MCP upstream failed", exc_info=True)
         self._offerings.clear()
-        self._declarations.clear()
+        self._started.clear()
+        self._granted.clear()
+        self._denied.clear()
+        self._prepared = None
+        self._exported.clear()
         self._channel = None
+
+    async def _approve(self, name: str, server: McpServerSettings) -> bool:
+        if server.always_allow or name in self._granted:
+            return True
+        if name in self._denied:
+            return False
+        if self.consent is None:
+            logger.warning(
+                "MCP server %r is exported but not approved; set "
+                "[mcp.servers.%s] always_allow = true to export it without a prompt",
+                name,
+                name,
+            )
+            self._denied.add(name)
+            return False
+        decision = await self.consent(name, server)
+        if decision is ConsentDecision.DENY:
+            logger.info("MCP server %r not exported: consent denied", name)
+            self._denied.add(name)
+            return False
+        if decision is ConsentDecision.ALLOW_SESSION:
+            self._granted.add(name)
+        elif decision is ConsentDecision.ALWAYS_ALLOW:
+            self._granted.add(name)
+            server.always_allow = True
+            if self.persist is not None:
+                try:
+                    self.persist()
+                except Exception:
+                    logger.warning(
+                        "could not save always_allow for MCP server %r", name, exc_info=True
+                    )
+        return True
+
+    async def _offer(self, name: str, server: McpServerSettings) -> None:
+        try:
+            offering = await self._start_offering(name, server)
+        except Exception:
+            logger.warning("cannot export MCP server %r over ACP", name, exc_info=True)
+            return
+        self._offerings.append(offering)
+        self._started[name] = offering.registration
 
     async def _start_offering(self, name: str, server: McpServerSettings) -> _Offering:
         stack = AsyncExitStack()

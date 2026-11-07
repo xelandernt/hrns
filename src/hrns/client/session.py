@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
+from acp.schema import AcpMcpServer, HttpMcpServer, McpServerStdio, SseMcpServer
 
 from .errors import HrnsClientError, ProtocolError, describe_rpc_error
 from .events import SessionsListed
@@ -13,6 +14,8 @@ from .payloads import absolute_path
 
 if TYPE_CHECKING:
     from .client import HrnsAcpClient
+
+McpServerDeclaration = AcpMcpServer | HttpMcpServer | McpServerStdio | SseMcpServer
 
 
 class SessionProxy:
@@ -114,11 +117,12 @@ class SessionLifecycle:
         client = self.client
         absolute_path(cwd, label="working directory")
         self.check_additional_directories(additional_directories)
+        mcp_servers: list[McpServerDeclaration] = list(await client.mcp_declarations())
         try:
             response = await client.connection.new_session(
                 cwd=cwd,
                 additional_directories=additional_directories,
-                mcp_servers=list(client.mcp_servers),
+                mcp_servers=mcp_servers,
             )
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/new", exc)) from exc
@@ -143,12 +147,13 @@ class SessionLifecycle:
             )
         if not replay:
             raise ProtocolError("session/load always replays history in ACP v1.")
+        mcp_servers: list[McpServerDeclaration] = list(await client.mcp_declarations())
         client.begin_session_load(session_id)
         try:
             response = await client.connection.load_session(
                 cwd=cwd,
                 session_id=session_id,
-                mcp_servers=list(client.mcp_servers),
+                mcp_servers=mcp_servers,
                 additional_directories=additional_directories,
             )
         except RequestError as exc:
@@ -175,11 +180,12 @@ class SessionLifecycle:
         self.check_additional_directories(additional_directories)
         if not self.has_capability("resume"):
             raise ProtocolError("This agent does not advertise session/resume; use session/load.")
+        mcp_servers: list[McpServerDeclaration] = list(await client.mcp_declarations())
         try:
             response = await client.connection.resume_session(
                 session_id=session_id,
                 cwd=cwd,
-                mcp_servers=list(client.mcp_servers),
+                mcp_servers=mcp_servers,
                 additional_directories=additional_directories,
             )
         except RequestError as exc:

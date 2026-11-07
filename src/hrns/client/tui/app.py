@@ -12,7 +12,8 @@ from textual.app import App
 from textual.binding import Binding
 from textual.theme import Theme
 
-from hrns.config import HrnsConfig, TuiSettings
+from hrns.config import HrnsConfig, McpServerSettings, TuiSettings
+from hrns.config.mcp import server_target
 
 from ..client import HrnsAcpClient, SessionProxy
 from ..errors import HrnsClientError, InteractionRequired, TransportError
@@ -27,10 +28,10 @@ from ..interactions import (
 from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
 from ..local import local_model_catalog
-from ..mcp_provider import ClientMcpProvider
+from ..mcp_provider import ClientMcpProvider, ConsentDecision
 from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
-from .dialogs import ElicitationDialog, PermissionDialog
+from .dialogs import ChoiceDialog, ElicitationDialog, PermissionDialog
 
 __all__ = ["HrnsApp", "run_terminal"]
 
@@ -723,6 +724,13 @@ class HrnsApp(App[int]):
         """Load the Pydantic AI provider/model catalog before the dialog opens."""
         local_model_catalog()
 
+    def _mcp_provider(self) -> ClientMcpProvider:
+        return ClientMcpProvider(
+            self.config.mcp,
+            consent=self.ask_mcp_consent,
+            persist=self.config.save,
+        )
+
     def make_client(self) -> HrnsAcpClient:
         if self.target is None:
             raise HrnsClientError("No connection target is selected.")
@@ -732,7 +740,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
-            mcp=ClientMcpProvider(self.config.mcp),
+            mcp=self._mcp_provider(),
         )
 
     def client_io_mode(self, target: ConnectionTarget) -> ClientIoMode:
@@ -754,7 +762,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
-            mcp=ClientMcpProvider(self.config.mcp),
+            mcp=self._mcp_provider(),
         )
         await client.connect()
         self.target = target
@@ -766,6 +774,9 @@ class HrnsApp(App[int]):
                 initial_load = True
             else:
                 try:
+                    # The user answers consent prompts, so keep their thinking time
+                    # out of the agent's session/new timeout.
+                    await client.prepare_mcp()
                     session = await asyncio.wait_for(
                         client.new_session(target.cwd), timeout=client.connect_timeout
                     )
@@ -922,6 +933,52 @@ class HrnsApp(App[int]):
             return await future
         except asyncio.CancelledError:
             return ElicitationAnswer(action="cancel")
+
+    async def ask_mcp_consent(self, name: str, server: McpServerSettings) -> ConsentDecision:
+        """Ask before an exported MCP server is offered to the agent."""
+        if not self.screen_stack:
+            return ConsentDecision.DENY
+        subtitle = f"{server_target(server)}\n\nThe agent will be able to call this server's tools."
+        choices = [
+            {
+                "value": ConsentDecision.ALLOW_ONCE.value,
+                "name": "Allow once",
+                "description": "Offer this server for this session only.",
+            },
+            {
+                "value": ConsentDecision.ALLOW_SESSION.value,
+                "name": "Allow for this connection",
+                "description": "Offer it to every session until you disconnect.",
+            },
+            {
+                "value": ConsentDecision.ALWAYS_ALLOW.value,
+                "name": "Always allow",
+                "description": "Offer it in future sessions too and save the setting.",
+            },
+            {
+                "value": ConsentDecision.DENY.value,
+                "name": "Deny",
+                "description": "Do not offer this server to the agent.",
+            },
+        ]
+        future: asyncio.Future[ConsentDecision] = asyncio.get_running_loop().create_future()
+
+        def done(result: str | None) -> None:
+            if future.done():
+                return
+            try:
+                future.set_result(ConsentDecision(result) if result else ConsentDecision.DENY)
+            except ValueError:
+                future.set_result(ConsentDecision.DENY)
+
+        try:
+            self.push_screen(ChoiceDialog(f"Allow MCP server '{name}'?", subtitle, choices), done)
+        except Exception:
+            return ConsentDecision.DENY
+        try:
+            return await future
+        except asyncio.CancelledError:
+            return ConsentDecision.DENY
 
     def apply_settings(self, settings: TuiSettings) -> None:
         """Adopt terminal preferences and persist them in the document."""

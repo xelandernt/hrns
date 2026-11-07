@@ -90,6 +90,16 @@ the negotiated revision is logged (legacy with a warning). Reverse requests
 bridged: they are not advertised, and the MCP SDK answers them with
 `INVALID_REQUEST` because MCP 2026-07-28 replaced them with MRTR.
 
+Export is also gated by the client's user, not only by configuration.
+`export = true` makes a server eligible; at session start the client asks whether
+the agent may use it (allow once, allow for the connection, always allow, deny)
+before the declaration goes into `session/new`, `session/load`, or
+`session/resume`. A denied server is left out of the declaration, and an
+unapproved server is never started. `always_allow = true` skips the prompt and
+is the only way a non-interactive client (`hrns run`) exports, because it cannot
+ask and therefore denies. The TUI renders the prompt through `ChoiceDialog`; the
+CLI leaves the consent handler unset.
+
 The feasibility analysis, work breakdown, and open decisions live in
 `docs/mcp-over-acp-analysis.md`; the remaining TODO items are in `TODO.md`.
 

@@ -7,8 +7,10 @@ Implementation status: the stateless binding primitives live in
 `from_mcp_server`, `AcpMcpClientTransport`, and the local Python SDK route
 shim). The client provider (`ClientMcpProvider`), the `[mcp].export` switch,
 the agent-side `acp_mcp_toolsets` helper, and `hrns-local` session wiring are
-in place. Long-lived subscriptions and an explicit MRTR retry policy remain;
-legacy upstreams are best-effort (section 3.4).
+in place. Export is gated by client consent at session start, with
+`always_allow` for pre-approved and headless use. Long-lived subscriptions and
+an explicit MRTR retry policy remain; legacy upstreams are best-effort
+(section 3.4).
 
 Scope: the **stateless** MCP-over-ACP binding for **MCP 2026-07-28**, implemented
 on both ends of this repository, with no `_hrns/*` protocol extensions. The
@@ -362,8 +364,9 @@ tests. The playwright-mcp stdio proxy is the next milestone.
    subscription support until it is tested.
 4. **Security and consent.** Exporting every configured MCP server to any
    connected agent gives that agent the client's local tools and credentials.
-   Default to opt-in export (`acp = true` per server), and decide whether
-   agent-initiated calls need a client-side approval prompt.
+   Export stays opt-in (`export = true` per server), and the client asks at
+   session start before declaring it; `always_allow` is the pre-approved
+   headless path. Per-call approval remains out of scope.
 5. **Tool naming.** Multiple servers can expose the same tool name. Decide
    between prefixing and rejecting collisions before the model sees them.
 6. **Protocol churn.** The binding is a draft RFD. Pin the MCP protocol
@@ -392,9 +395,11 @@ tests. The playwright-mcp stdio proxy is the next milestone.
 
 - **Export policy:** all enabled `[mcp]` servers, or only servers with an
   explicit `acp = true`? Recommendation: opt-in, default off.
-- **Consent:** should the client prompt before executing an agent-initiated
-  tool call, especially for file/shell/browser tools? The ACP permission flow
-  is agent-to-client; this would be a new client-side policy.
+- **Consent:** decided. The client gates export at session start (allow once,
+  allow for the connection, always allow, deny) instead of trusting the agent's
+  approval policy. `always_allow = true` persists the grant, and a
+  non-interactive client denies anything not pre-approved. Per-call approval is
+  still out of scope.
 - **Session scope:** declare every offering in every session, or let the user
   select which servers each session sees?
 - **Feature surface:** tools only for the MVP, or resources/prompts too?

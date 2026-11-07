@@ -52,6 +52,9 @@ Remaining:
       negotiates with `mode="auto"`, mirrors the upstream's advertised capabilities,
       and logs the negotiated revision. Reverse requests are not bridged and are not
       advertised. See `docs/mcp-over-acp-analysis.md`.
+- [x] Client-side consent: at session start the client asks before an exported server
+      is declared (allow once / this connection / always / deny). `always_allow = true`
+      persists the grant; non-interactive clients deny unless pre-approved.
 - [ ] `subscriptions/listen` streaming. The single-exchange `serve_one` path has no
       long-lived operation; subscriptions need a separate provider path,
       acknowledgement ordering, correlation, and cancellation.
@@ -64,10 +67,6 @@ Remaining:
 
 Open decisions:
 
-- [ ] Client-side consent for exported tools. `export = true` is the configuration
-      gate, and the agent's permission policy drives per-call approval; an agent
-      running with approval disabled can call the client's tools without a prompt.
-      Decide whether the provider needs its own per-call policy.
 - [ ] Surface provider startup or authentication failures in the TUI status instead
       of only logging and skipping the server.
 
