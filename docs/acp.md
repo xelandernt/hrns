@@ -153,6 +153,10 @@ escapes as an internal error, so raise those two for anything a client can fix.
 - MCP-over-ACP supports tools, resources, prompts, completions, progress, and
   input-required results. Long-lived `subscriptions/listen` responses are not streamed
   yet, and MRTR is passed through without an explicit retry policy.
+- Upstream MCP servers may speak a handshake-era revision. That path is best-effort: the
+  proxy mirrors the upstream's advertised capabilities and logs the negotiated revision,
+  and the server's own reverse requests (sampling, elicitation, roots) fail with
+  `INVALID_REQUEST` instead of being bridged.
 - Next-edit suggestions, session fork/resume, and session modes are not implemented.
   None of them are advertised.
 - Form elicitation is used only for `ask_user_question`. URL elicitation is never sent, and

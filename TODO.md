@@ -48,6 +48,10 @@ Reference: <https://agentclientprotocol.com/rfds/custom-llm-endpoint>
 
 Remaining:
 
+- [x] Legacy upstreams are best-effort, not a second supported binding: the proxy
+      negotiates with `mode="auto"`, mirrors the upstream's advertised capabilities,
+      and logs the negotiated revision. Reverse requests are not bridged and are not
+      advertised. See `docs/mcp-over-acp-analysis.md`.
 - [ ] `subscriptions/listen` streaming. The single-exchange `serve_one` path has no
       long-lived operation; subscriptions need a separate provider path,
       acknowledgement ordering, correlation, and cancellation.

@@ -36,6 +36,7 @@ from mcp_types import (
 )
 
 from hrns.acp_mcp import (
+    MCP_PROTOCOL_VERSION,
     AcpChannel,
     McpOverAcpProvider,
     McpServerOptions,
@@ -121,7 +122,8 @@ class ClientMcpProvider:
             store = self._store_for(server)
             upstream = build_client(server, store=store, interactive=False)
             await stack.enter_async_context(upstream)
-            adapter = from_mcp_server(lambda: _proxy_server(upstream))
+            _log_era(name, upstream)
+            adapter = from_mcp_server(lambda: _proxy_server(upstream, name))
             assert self._channel is not None
             registration = self._provider.register_server(
                 self._channel,
@@ -148,7 +150,33 @@ def _agent_supports_acp(initialized: object) -> bool:
     return bool(getattr(mcp, "acp", False))
 
 
-def _proxy_server(upstream: Client) -> LowLevelServer:
+def _log_era(name: str, upstream: Client) -> None:
+    """Report the upstream revision so a legacy server is visible, not silent."""
+    version = upstream.protocol_version
+    if version == MCP_PROTOCOL_VERSION:
+        logger.info("MCP server %r negotiated %s", name, version)
+        return
+    logger.warning(
+        "MCP server %r negotiated %s, not %s; exporting it best-effort. "
+        "Reverse requests (sampling, elicitation, roots) are not supported over "
+        "MCP-over-ACP and fail in the server.",
+        name,
+        version or "an unknown revision",
+        MCP_PROTOCOL_VERSION,
+    )
+
+
+def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
+    """Proxy the upstream, advertising only the capabilities it actually has."""
+    capabilities = upstream.server_capabilities
+    if capabilities is None:
+        raise RuntimeError(f"MCP client for {name!r} is not connected")
+
+    has_tools = capabilities.tools is not None
+    has_resources = capabilities.resources is not None
+    has_prompts = capabilities.prompts is not None
+    has_completions = capabilities.completions is not None
+
     async def on_list_tools(
         _ctx: ServerRequestContext[object, object], _params: object
     ) -> ListToolsResult:
@@ -207,15 +235,15 @@ def _proxy_server(upstream: Client) -> LowLevelServer:
         return CompleteResult(completion=completion)
 
     return LowLevelServer(
-        "hrns-mcp-proxy",
-        on_list_tools=on_list_tools,
-        on_call_tool=on_call_tool,
-        on_list_resources=on_list_resources,
-        on_read_resource=on_read_resource,
-        on_list_resource_templates=on_list_resource_templates,
-        on_list_prompts=on_list_prompts,
-        on_get_prompt=on_get_prompt,
-        on_completion=on_completion,
+        name,
+        on_list_tools=on_list_tools if has_tools else None,
+        on_call_tool=on_call_tool if has_tools else None,
+        on_list_resources=on_list_resources if has_resources else None,
+        on_read_resource=on_read_resource if has_resources else None,
+        on_list_resource_templates=(on_list_resource_templates if has_resources else None),
+        on_list_prompts=on_list_prompts if has_prompts else None,
+        on_get_prompt=on_get_prompt if has_prompts else None,
+        on_completion=on_completion if has_completions else None,
     )
 
 

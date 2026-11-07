@@ -79,6 +79,17 @@ stdio/HTTP/SSE entries connect directly, while `type: "acp"` entries use
 `AcpMcpClientTransport` over the session's caller. `hrns-local` installs that
 session config and advertises `mcpCapabilities.acp`.
 
+Upstream revision is best-effort, not a second supported binding.
+`build_client` connects with `mode="auto"`, so FastMCP probes
+`server/discover` and falls back to the `initialize` handshake; a
+handshake-era upstream keeps working for the methods the proxy translates.
+The proxy mirrors the upstream's advertised capabilities, so a server without
+resources, prompts, or completions is not advertised with them downstream, and
+the negotiated revision is logged (legacy with a warning). Reverse requests
+(`sampling/createMessage`, `elicitation/create`, `roots/list`) are not
+bridged: they are not advertised, and the MCP SDK answers them with
+`INVALID_REQUEST` because MCP 2026-07-28 replaced them with MRTR.
+
 The feasibility analysis, work breakdown, and open decisions live in
 `docs/mcp-over-acp-analysis.md`; the remaining TODO items are in `TODO.md`.
 

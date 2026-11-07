@@ -274,7 +274,14 @@ def build_client(
     from fastmcp import Client
 
     transport = build_transport(server, store=store, interactive=interactive)
-    return Client(transport, timeout=server.timeout, init_timeout=server.timeout)
+    return Client(
+        transport,
+        timeout=server.timeout,
+        init_timeout=server.timeout,
+        # Best-effort upstream: probe the modern revision, then fall back to the
+        # handshake era rather than rejecting a server outright.
+        mode="auto",
+    )
 
 
 async def has_tokens(server: McpServerSettings, store: Any) -> bool | None:

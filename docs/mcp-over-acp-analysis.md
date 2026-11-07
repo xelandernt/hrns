@@ -7,7 +7,8 @@ Implementation status: the stateless binding primitives live in
 `from_mcp_server`, `AcpMcpClientTransport`, and the local Python SDK route
 shim). The client provider (`ClientMcpProvider`), the `[mcp].export` switch,
 the agent-side `acp_mcp_toolsets` helper, and `hrns-local` session wiring are
-in place. Long-lived subscriptions and an explicit MRTR retry policy remain.
+in place. Long-lived subscriptions and an explicit MRTR retry policy remain;
+legacy upstreams are best-effort (section 3.4).
 
 Scope: the **stateless** MCP-over-ACP binding for **MCP 2026-07-28**, implemented
 on both ends of this repository, with no `_hrns/*` protocol extensions. The
@@ -239,6 +240,34 @@ The `mcp` Python SDK's dual-era support makes this tractable: the upstream
 client can negotiate legacy, while the downstream provider serves modern via
 `serve_one`.
 
+### 3.4 Legacy upstream policy
+
+Supporting legacy upstreams fully is not a translation problem, it is a new
+feature:
+
+- A handshake-era server's reverse requests (`sampling/createMessage`,
+  `elicitation/create`, `roots/list`) happen inside a live `call_tool()` await.
+  The downstream binding has no back-channel: it can only return
+  `input_required` and wait for a retry with a fresh `requestId`. Resuming would
+  mean either re-issuing the upstream call (repeating side effects) or
+  answering locally (a client-side model, client-side UI, or client-side
+  filesystem), which is a product and trust decision, not protocol work.
+- Legacy change notifications (`list_changed`, logging) map onto modern
+  `subscriptions/listen`, which the provider does not serve yet.
+
+The chosen policy is **best-effort, not supported**:
+
+- `build_client` uses `mode="auto"`, so a legacy server still negotiates and
+  works for the finite methods the proxy translates.
+- `_proxy_server` mirrors the upstream's `server_capabilities`, so
+  `server/discover` never advertises resources, prompts, or completions the
+  upstream does not have.
+- The negotiated revision is logged; a non-`2026-07-28` server logs a warning.
+- Reverse requests are not advertised, so a legacy server that needs one gets
+  the MCP SDK's `INVALID_REQUEST` ("Sampling not supported", "Elicitation not
+  supported", "List roots not supported") instead of a hang or a bridge.
+- `hrns mcp` keeps `mode="auto"` so a legacy server can still be inspected.
+
 ## 4. The Python SDK gap and the local workaround
 
 ### Option A: wait for upstream
@@ -324,8 +353,10 @@ tests. The playwright-mcp stdio proxy is the next milestone.
    `connection._conn._handler`. A minor SDK refactor breaks it. Mitigate with a
    single module, a startup assertion, and an upstream PR.
 2. **Legacy ↔ modern bridge.** Playwright and many current servers are
-   legacy-era. The proxy must terminate both sessions and translate; raw
-   tunneling will not work. This is the largest correctness risk.
+   legacy-era. The proxy terminates both sessions and translates at the method
+   level; raw tunneling will not work. Finite methods are best-effort, but
+   reverse requests are not bridged (section 3.4), so a legacy server that
+   needs sampling, elicitation, or roots fails at the call.
 3. **Stateless server lifecycle.** Per-request serving is straightforward;
    subscriptions and long-lived operations are not. Do not advertise
    subscription support until it is tested.
@@ -372,5 +403,7 @@ tests. The playwright-mcp stdio proxy is the next milestone.
 - **Fallback:** when the agent does not advertise `mcpCapabilities.acp`,
   should the client declare reachable stdio/HTTP servers directly, or remain
   silent?
-- **Protocol version:** pin to `2026-07-28`; reject other versions with the
-  inner `-32022` carrier as the RFD requires.
+- **Protocol version:** the downstream binding is pinned to `2026-07-28` and
+  rejects other versions with the inner `-32022` carrier as the RFD requires.
+  The upstream connection stays on `mode="auto"` and is best-effort, so a
+  legacy server is usable without becoming a supported binding (section 3.4).

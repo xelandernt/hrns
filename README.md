@@ -343,8 +343,10 @@ client speaks standard ACP only.
 - Provider configuration is in memory and applies from the next model resolution, which
   is the next turn; a turn already in flight is unaffected. MCP-over-ACP supports tools,
   resources, prompts, completions, progress, and input-required results; long-lived
-  subscriptions are not streamed yet. Next edit suggestions (`nes/*`) remain
-  unimplemented and are not advertised.
+  subscriptions are not streamed yet. Legacy (handshake-era) upstream MCP servers are
+  best-effort: the proxy mirrors their advertised capabilities and logs the negotiated
+  revision, but does not bridge reverse requests (sampling, elicitation, roots). Next
+  edit suggestions (`nes/*`) remain unimplemented and are not advertised.
 - `build_agent` adds a small approval capability by default: reads run freely, writes and
   shell calls are marked `unapproved` so ACP can request permission. Pass
   `approval=False` to disable it.
