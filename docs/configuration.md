@@ -276,7 +276,11 @@ points (`hrns.app serve`, the FastAPI mount) and are deliberately not read here.
 ## Managing the file from the CLI
 
 ```sh
-hrns profiles list                  # saved connections from the document
+hrns config                      # sources and the effective configuration
+hrns config path                 # source files, one per line
+hrns config get provider         # one dotted key, e.g. mcp.servers.playwright.url
+hrns config keys                 # keyring accounts and env sources, never values
+hrns profiles list               # saved connections from the document
 hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN
 hrns profiles remove team
 hrns mcp add playwright --export -- npx -y @playwright/mcp@latest
@@ -284,5 +288,11 @@ hrns mcp add playwright --export --always-allow -- npx -y @playwright/mcp@latest
 hrns mcp list
 hrns login github-copilot
 ```
+
+`hrns config` prints the merged document as TOML and marks each source as `project`,
+`user`, `selected`, or `environment`. `--json` prints the same data as JSON, `--all`
+includes defaults, and `--reveal` prints literal secrets that are otherwise shown as
+`***`. `hrns config keys` lists each provider's keyring service/account and environment
+variable name, plus whether a value is present; it never prints the value.
 
 `hrns clean --config` removes the document; `hrns clean` removes session history.
