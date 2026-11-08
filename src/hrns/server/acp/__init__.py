@@ -1,13 +1,9 @@
-"""Our own Agent Client Protocol adapter for Pydantic AI agents.
-
-The public surface mirrors what ``hrns.server`` previously imported from
-``pydantic_ai_harness.experimental.acp``, but the implementation lives here and targets
-ACP 1.x directly.
-"""
+"""Agent Client Protocol transport, registered sessions, and configuration types."""
 
 from . import updates
 from .adapter import PydanticAIACPAgent
 from .content import PromptContentBlock, prompt_blocks_to_user_content
+from .host import AcpServer, RegisteredAgent, Session, TurnHandle, TurnResult
 from .mcp import acp_mcp_toolsets
 from .models import (
     ModelChoice,
@@ -39,14 +35,17 @@ from .providers import (
     ProviderRoute,
 )
 from .serialize import bounded_jsonable, chunk_text, jsonable
-from .server import create_acp_agent, run_acp_stdio
+from .server import run_acp_stdio
 from .session import (
+    AcpAttachmentConfig,
     AcpSession,
     AcpSessionConfig,
+    AttachmentConfigFunc,
     DocumentState,
     McpServer,
     McpServers,
     SessionConfigFunc,
+    SessionContext,
     SessionUpdate,
     apply_content_changes,
 )
@@ -67,6 +66,7 @@ from .toolsets import (
 
 __all__ = [
     "AcpFileSystemToolset",
+    "AcpAttachmentConfig",
     "AcpSession",
     "AcpSessionConfig",
     "AcpTerminalToolset",
@@ -108,7 +108,13 @@ __all__ = [
     "bounded_jsonable",
     "chain_presenters",
     "chunk_text",
-    "create_acp_agent",
+    "AcpServer",
+    "RegisteredAgent",
+    "Session",
+    "TurnHandle",
+    "TurnResult",
+    "AttachmentConfigFunc",
+    "SessionContext",
     "default_coding_presenter",
     "default_permission_scope",
     "jsonable",

@@ -46,4 +46,4 @@ HRNS_MODEL=anthropic:claude-sonnet-5-5 hrns acp
 HRNS_MODEL=anthropic:claude-sonnet-5-5 hrns serve --port 8000
 ```
 
-- `WS /acp` — ACP over WebSocket
+- `WS /acp/agent` — ACP over WebSocket

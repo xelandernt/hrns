@@ -18,7 +18,7 @@ from ..shared.errors import (
     describe_rpc_error,
 )
 from .constants import MAX_MESSAGE_BYTES
-from .events import ConfigOptionsUpdated, TurnCompleted, TurnStarted
+from .events import ConfigOptionsUpdated, SessionExecutionState, TurnCompleted, TurnStarted
 from .skills import SKILL_META_KEY, SkillMention
 
 if TYPE_CHECKING:
@@ -60,6 +60,55 @@ class TurnService:
 
     def __init__(self, client: HrnsAcpClient) -> None:
         self.client = client
+        self._revisions: dict[str, int] = {}
+        self._active: dict[str, str | None] = {}
+
+    def reset(self) -> None:
+        self._revisions.clear()
+        self._active.clear()
+
+    def forget_session(self, session_id: str) -> None:
+        """A restored runtime may restart its revision sequence."""
+        self._revisions.pop(session_id, None)
+        self._active.pop(session_id, None)
+
+    def is_running(self, session_id: str) -> bool:
+        return self._active.get(session_id) is not None
+
+    @property
+    def server_lifecycle(self) -> bool:
+        meta = getattr(self.client.initialized, "field_meta", None)
+        return isinstance(meta, dict) and meta.get("hrns/session/state") is True
+
+    def apply_server_state(self, state: dict[str, object]) -> None:
+        session_id, revision = state.get("sessionId"), state.get("revision")
+        status, turn_id = state.get("status"), state.get("activeTurnId")
+        if not isinstance(session_id, str) or not isinstance(revision, int):
+            return
+        if status not in {"idle", "running", "waiting"}:
+            return
+        if turn_id is not None and not isinstance(turn_id, str):
+            return
+        if revision <= self._revisions.get(session_id, -1):
+            return
+        self._revisions[session_id] = revision
+        previous = self._active.get(session_id)
+        self._active[session_id] = turn_id
+        if turn_id is not None and turn_id != previous:
+            self.client.bus.publish(TurnStarted(session_id=session_id, prompt_text=""))
+        elif turn_id is None and previous is not None:
+            outcome = state.get("lastOutcome")
+            usage = state.get("lastUsage")
+            self.client.bus.publish(
+                TurnCompleted(
+                    session_id=session_id,
+                    stop_reason=outcome if isinstance(outcome, str) else "end_turn",
+                    usage=usage if isinstance(usage, dict) else None,
+                )
+            )
+        self.client.bus.publish(
+            SessionExecutionState(session_id=session_id, status=str(status), turn_id=turn_id)
+        )
 
     def check_prompt_capabilities(self, blocks: list[Any]) -> None:
         """Never send a content kind the agent did not advertise."""
@@ -128,7 +177,8 @@ class TurnService:
             if display_text is not None
             else (prompt if isinstance(prompt, str) else "")
         )
-        client.bus.publish(TurnStarted(session_id=session_id, prompt_text=hint))
+        if not self.server_lifecycle:
+            client.bus.publish(TurnStarted(session_id=session_id, prompt_text=hint))
         try:
             response = await client.connection.prompt(session_id=session_id, prompt=blocks)
         except RequestError as exc:
@@ -165,9 +215,10 @@ class TurnService:
             if response.usage
             else None
         )
-        client.bus.publish(
-            TurnCompleted(session_id=session_id, stop_reason=response.stop_reason, usage=usage)
-        )
+        if not self.server_lifecycle:
+            client.bus.publish(
+                TurnCompleted(session_id=session_id, stop_reason=response.stop_reason, usage=usage)
+            )
         return response
 
     async def cancel(self, session_id: str) -> None:

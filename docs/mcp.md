@@ -130,7 +130,8 @@ Upstream authentication stays on the client and never reaches the agent.
 
 ## The agent side
 
-`hrns agent` passes `acp_mcp_toolsets` as its `session_config`. The helper turns every
+`hrns agent` uses `acp_mcp_toolsets` in its `attachment_config`, returning
+`AcpAttachmentConfig`. The helper turns every
 declaration into a toolset:
 
 - `McpServerStdio`, `HttpMcpServer`, and `SseMcpServer` become ordinary `MCPToolset`s;

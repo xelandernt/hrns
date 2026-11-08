@@ -13,5 +13,6 @@ nav = [
     { "Skills" = "skills.md" },
     { "ACP support" = "acp.md" },
     { "MCP over ACP" = "mcp.md" },
-    { "mount_acp" = "mount-acp.md" },
+    { "Agent servers" = "mount-acp.md" },
+    { "AG-UI observation" = "ag_ui.md" },
 ]

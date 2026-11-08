@@ -85,7 +85,7 @@ last_connection = "builtin"
 
 [profile.team]
 transport = "server"
-url = "wss://agents.example.com/acp"
+url = "wss://agents.example.com/acp/agent"
 token = "env:TEAM_TOKEN"
 remote_cwd = "/workspace"
 default = true

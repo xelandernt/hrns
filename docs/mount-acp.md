@@ -1,150 +1,162 @@
-# `mount_acp`
+# Agent servers
 
-`mount_acp` exposes an ACP agent over a FastAPI WebSocket endpoint.
-
-```python
-from hrns.server.fastapi import mount_acp
-
-def mount_acp(
-    app: FastAPI,
-    agent_factory: AgentFactory[Principal],
-    *,
-    path: str = "/acp",
-    authenticate: Authenticator[Principal] | None = None,
-    session_store_factory: SessionStoreFactory[Principal] | None = None,
-    model_resolver: ModelResolver | None = None,
-) -> None
-```
-
-The three callable types are plain aliases:
+`AcpServer` owns agent registrations and live conversations. Register a factory once,
+then mount ACP independently of the optional [AG-UI observation routes](ag_ui.md).
+Factories run once per live session, including restoration after a process restart.
 
 ```python
-AgentFactory = Callable[[Principal | None], AbstractAgent[None, str]]
-Authenticator = Callable[[WebSocket], Awaitable[Principal | None]]
-SessionStoreFactory = Callable[[Principal | None], SessionStore]
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from hrns.server import AcpServer, build_agent
+
+server = AcpServer()
+coder = server.add_agent("coder", factory=lambda: build_agent(cwd="/srv/project"))
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with server:
+        yield
+
+app = FastAPI(lifespan=lifespan)
+server.mount_acp(app, prefix="/acp")
 ```
 
-`Principal` is whatever identity your `authenticate` callback returns; `None` means "no
-authenticator configured". Every argument after the factory is a keyword argument.
+Connect to `ws://127.0.0.1:8000/acp/coder`. Each connection speaks standard ACP
+JSON in WebSocket text frames. Register multiple agents under different safe IDs;
+only letters, digits, underscores, and hyphens are allowed, starting with a letter
+or digit. Duplicate IDs and registration after startup fail.
 
-## Arguments
+## Registration and configuration
 
-| Argument                | Default  | Role                                                      |
-|-------------------------|----------|-----------------------------------------------------------|
-| `app`                   | required | The FastAPI app to add a WebSocket route to               |
-| `agent_factory`         | required | Builds one agent per accepted connection                  |
-| `path`                  | `"/acp"` | WebSocket route path                                      |
-| `authenticate`          | `None`   | Admits or refuses the peer before the handshake completes |
-| `session_store_factory` | `None`   | Chooses the session store for one principal               |
-| `model_resolver`        | `None`   | Enables model switching and `providers/*`                 |
+`add_agent(agent_id, *, factory, deps=None, session_store=None, model_resolver=None,
+session_config=None, attachment_config=None, permission_policy=None,
+usage_limits=None, tool_presenter=None, mcp_capabilities=None)` returns a typed
+`RegisteredAgent`. The zero-argument factory returns a fresh Pydantic AI agent.
+Dependency and output types flow through the session and turn handles.
 
-### `app`
+`session_config` receives `SessionContext(agent_id, session_id, cwd)` and returns
+`AcpSessionConfig(deps=..., capabilities=..., toolsets=..., workspace=...)`.
+It runs once per live session, without a client, and may be async. The factory and
+server configuration determine the authoritative workspace and permissions.
 
-The route is registered when `mount_acp` is called, so call it before the server starts
-(module import is the normal place). Mount one handler per app: two mounts on the same
-path do not raise, the first one simply shadows the second.
+`attachment_config` receives `AcpSession` with the outbound client, negotiated
+capabilities, MCP declarations, caller/channel, session ID, and cwd. It returns
+`AcpAttachmentConfig(toolsets=...)`, and runs for every attachment. It cannot replace
+server dependencies or workspace. For client MCP, opt in explicitly:
 
 ```python
-app = FastAPI()
-mount_acp(app, agent_factory)                 # WS /acp
+from acp import schema
+from hrns.server.acp import AcpAttachmentConfig, AcpSession, acp_mcp_toolsets
+
+def client_tools(attachment: AcpSession) -> AcpAttachmentConfig[None]:
+    return AcpAttachmentConfig(toolsets=acp_mcp_toolsets(attachment))
+
+# Pass these when registering:
+# attachment_config=client_tools,
+# mcp_capabilities=schema.McpCapabilities(acp=True, http=True, sse=True)
 ```
 
-### `agent_factory`
+Client tools refresh at model-step boundaries through `DynamicToolset`. Dispatch
+checks the attachment generation, so a departed client's call is never silently
+routed to a replacement client. MCP binding/protocol/tool errors retain their native
+paths. A connection loss during dispatch reports an unknown execution outcome;
+side effects are never automatically replayed by the server.
 
-Called **once per accepted WebSocket**, after authentication, with the principal.
-Return a freshly built agent — do not share one between connections. The harness
-capabilities hold per-agent state, and the ACP adapter binds session state to the agent
-it wraps.
+## Programmatic sessions and turns
+
+Inside the server lifecycle:
 
 ```python
-def agent_factory(principal: str | None) -> AbstractAgent[None, str]:
-    return build_agent(cwd=f"/srv/workspaces/{principal or 'anonymous'}")
+session = await coder.new_session(cwd="/srv/project")
+turn = await session.submit("Investigate the failure")
+follow_up = await session.submit("Then inspect the migration")
+result = await turn.result()
+print(result.stop_reason, result.output)
+
+await session.cancel()
+queued = await session.pending_prompts()
+await session.resume_queue()
+await session.clear_queue()
 ```
 
-The return type is `AbstractAgent[None, str]`, i.e. a Pydantic AI agent with no
-dependencies and a string output. Use `principal` for anything that should differ per
-user: the workspace root, deps, read-only tools, or a model.
+`get_session(session_id)` reuses the live session or restores it from its registration's
+store. `history()` returns committed Pydantic AI model messages. `status()` reports
+revisioned running/waiting/idle state and the last outcome.
 
-### `path`
+Text and typed ACP prompt-content sequences are accepted. `submit` returns immediately
+with a `TurnHandle`; cancelling `result()`'s waiter does not cancel execution. Results
+carry the typed output, ACP stop reason, and usage. Runtime errors raise from `result()`;
+cancelled or discarded work returns a cancelled outcome.
+
+Python and ACP prompts share one FIFO, with one active turn. Follow-ups enter history
+only when started. Cancellation pauses the queue; errors also pause it. New submissions
+stay queued while paused. `pending_prompts`, `resume_queue`, and `clear_queue` are
+Python-only. Clear resolves pending handles as cancelled. There are no ACP queue
+extensions, and the terminal's local drafts/queue remain separate.
+
+## ACP attachment and lifecycle
+
+One ACP client may attach to a session. `session/new` creates and attaches;
+`session/load` reuses the live agent and replays completed plus active-turn ACP updates
+before responding. The current owner may reload the same session on its connection.
+Loading must use the session's stored cwd. Another attached client
+is rejected; there is no takeover.
+
+Disconnect removes attachment resources while accepted turns and queued work remain
+alive. A lost JSON-RPC prompt request is never automatically resubmitted. `session/close`
+explicitly cancels and closes the live session; its saved state can be loaded later.
+Server shutdown rejects new work, cancels/joins active execution, and resolves queued
+handles. Use one process/worker: running tasks, decisions, queues, and subscriptions are
+not durable or shared between workers.
+
+Permissions and questions wait when no ACP client is connected, then are issued after
+attachment replay. Disconnect retains the decision and invalidates old replies.
+A connected client lacking form elicitation gets the existing unavailable-question
+outcome. Server-side tools/workspace stay configured across attachments.
+
+The advertised `_hrns/session/state` notification and `hrns/session/state` load metadata
+synchronize server-started turns. They carry `sessionId`, `revision`, `status`,
+`activeTurnId`, `lastOutcome`, and `lastUsage`. The existing client handles these
+without duplicating lifecycle events for its own prompts. They provide no queue controls.
+
+## Admission and storage
+
+Both mounts accept `authenticate: Callable[[HTTPConnection], Awaitable[object | None]]`.
+It runs before admission; `None` rejects the connection. Use the same callback for
+ACP and AG-UI. Identities are admission results, not factory inputs or user partitions:
+all admitted users share the registration's server scope.
 
 ```python
-mount_acp(app, agent_factory, path="/agent/acp")
+from starlette.requests import HTTPConnection
+
+async def authenticate(connection: HTTPConnection) -> object | None:
+    return "admitted" if connection.headers.get("authorization") == "Bearer token" else None
+
+server.mount_acp(app, prefix="/private/acp", authenticate=authenticate)
 ```
 
-The endpoint speaks ACP over the WebSocket's **text** frames: one JSON message per frame,
-encoded as UTF-8, with no embedded newlines. The terminal client connects to it with
-`hrns connect --server ws://127.0.0.1:8000/acp`.
+Each registration has a separate `InMemorySessionStore` by default. A supplied store
+must be exclusively scoped to that agent. Reusing the same instance is rejected; a
+shared backend requires explicitly partitioned store instances. `StoredSession.cwd`
+is authoritative on restoration. `SessionStore` implements save/load;
+`ListableSessionStore` adds remember/list, and `DeletableSessionStore` adds delete.
+Durable storage restores committed state after restart, never live tasks or queued work.
 
-### `authenticate`
+Model resolvers and provider routing belong to a registration. Changes via `providers/*`
+notify all affected live sessions of that agent. Register a distinct resolver for each
+agent; reusing a resolver instance across registrations is rejected.
 
-Runs **before** `websocket.accept()`, so a rejected peer never completes the handshake.
+## Stdio
 
 ```python
-from fastapi import WebSocket
+from hrns.server import build_agent, run_acp_stdio
 
-async def authenticate(connection: WebSocket) -> str | None:
-    token = connection.headers.get("authorization", "")
-    return token.removeprefix("Bearer ") or None
-
-mount_acp(app, agent_factory, authenticate=authenticate)
+run_acp_stdio(lambda: build_agent(cwd="/srv/project"))
 ```
 
-Three outcomes:
-
-| Outcome             | Effect                                                                                    |
-|---------------------|-------------------------------------------------------------------------------------------|
-| Returns a principal | Connection is accepted; the principal reaches `agent_factory` and `session_store_factory` |
-| Returns `None`      | Connection is closed with code `1008`; the factory is never called                        |
-| Raises              | Connection is closed with code `1011` and the exception propagates                        |
-
-Omitting `authenticate` admits every peer and passes `None` as the principal.
-
-### `session_store_factory`
-
-Chooses the store for one principal. Sessions in one store are invisible to every other
-principal, so a reconnecting user can `session/load` their own work and only their own.
-
-```python
-from hrns.server.acp import InMemorySessionStore
-
-_stores: dict[str, InMemorySessionStore] = {}
-
-def session_store_for(principal: str | None) -> InMemorySessionStore:
-    return _stores.setdefault(principal or "anonymous", InMemorySessionStore())
-
-mount_acp(app, agent_factory, session_store_factory=session_store_for)
-```
-
-Omitting it gives every connection a fresh `InMemorySessionStore`: sessions work for the
-life of that connection, and `session/load` cannot reach a session from an earlier one.
-
-What a store enables depends on which interface it implements:
-
-| Interface               | Methods                       | Enables          |
-|-------------------------|-------------------------------|------------------|
-| `SessionStore`          | `save`, `load`                | `session/load`   |
-| `ListableSessionStore`  | `+ remember`, `list_sessions` | `session/list`   |
-| `DeletableSessionStore` | `+ delete`                    | `session/delete` |
-
-`InMemorySessionStore` implements all three. It is process-local: use a shared durable
-implementation when you run several workers or want sessions to survive a restart.
-
-### `model_resolver`
-
-Supplies the models a client may switch between, resolves one for each turn, and owns the
-provider routing a client changes through `providers/*`.
-
-```python
-mount_acp(app, agent_factory, model_resolver=MyResolver())
-```
-
-One resolver is shared by every connection and for the life of the process: a route one
-client sets is the route the next connection sees. Configuration is in memory only, as
-ACP's provider RFD requires.
-
-Omitting it removes the `model` and setting session config options and makes
-`providers/list`, `providers/set`, and `providers/disable` answer `method_not_found`; each
-session then uses the model the agent itself was built with.
+Stdio uses the same runtime and owns its lifecycle until the connection ends.
+`hrns acp` and `hrns agent` use this entry point; `hrns serve` registers `agent`
+and exposes `WS /acp/agent`.
 
 ## The resolver object
 
@@ -310,57 +322,3 @@ class GatewayResolver(ProviderModelResolver):
 ```
 
 The first entry in `list_models` is each session's default model.
-
-## All together
-
-The pieces only fit together in one place: the principal from `authenticate` reaches both
-the factory and the store factory, while the resolver is shared by every connection.
-
-```python
-from fastapi import FastAPI, WebSocket
-from pydantic_ai.agent import AbstractAgent
-
-from hrns.server import build_agent
-from hrns.server.acp import InMemorySessionStore
-from hrns.server.fastapi import mount_acp
-
-app = FastAPI()
-_stores: dict[str, InMemorySessionStore] = {}
-
-async def authenticate(connection: WebSocket) -> str | None:
-    token = connection.headers.get("authorization", "")
-    return token.removeprefix("Bearer ") or None
-
-def agent_factory(principal: str | None) -> AbstractAgent[None, str]:
-    return build_agent(cwd=f"/srv/workspaces/{principal or 'anonymous'}")
-
-def session_store_for(principal: str | None) -> InMemorySessionStore:
-    return _stores.setdefault(principal or "anonymous", InMemorySessionStore())
-
-mount_acp(
-    app,
-    agent_factory,
-    authenticate=authenticate,
-    session_store_factory=session_store_for,
-    model_resolver=GatewayResolver(api_key=...),
-)
-```
-
-A complete runnable version is in [`examples/fastapi_app.py`](https://github.com/xelandernt/hrns/blob/main/examples/fastapi_app.py).
-
-## Related entry points
-
-| Entry point | Use it when |
-| --- | --- |
-| `mount_acp(app, factory, ...)` | You already have a FastAPI app |
-| `create_app(factory, ...)` | You want the packaged app; it forwards `authenticate`, `session_store_factory`, and `model_resolver`, and mounts at the default path |
-| `create_acp_agent(agent, session_store=..., model_resolver=...)` | You are not on FastAPI and drive the adapter yourself |
-| `run_acp_stdio(agent, ...)` | You want ACP over stdio instead of WebSocket |
-
-`create_app` is the one-liner equivalent:
-
-```python
-from hrns.server.fastapi import create_app
-
-app = create_app(agent_factory, authenticate=authenticate)  # WS /acp
-```

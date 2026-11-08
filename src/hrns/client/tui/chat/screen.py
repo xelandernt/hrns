@@ -25,6 +25,7 @@ from ...events import (
     ConnectionEvent,
     ModesUpdated,
     PlanChanged,
+    SessionExecutionState,
     SessionInfoChanged,
     ToolEvent,
     TurnCompleted,
@@ -360,7 +361,13 @@ class ChatScreen(_HrnsScreen):
             self._turns_started += 1
             self._set_busy(True)
             return
+        if isinstance(event, SessionExecutionState):
+            self._set_busy(event.status in {"running", "waiting"})
+            self._activity = "waiting for input" if event.status == "waiting" else "working"
+            self.chrome.refresh_status()
+            return
         if isinstance(event, TurnCompleted):
+            self._set_busy(False)
             self.prompts.recover_steering()
             if event.stop_reason not in {"end_turn", ""}:
                 self._queue_paused = True
@@ -388,6 +395,7 @@ class ChatScreen(_HrnsScreen):
                     message += f" {event.detail}"
                 await self._notice(message, severity)
             self.chrome.update_chrome()
+            self.app.call_later(self.send_next_queued)
             return
         if isinstance(event, CommandsUpdated):
             self._commands = event.commands

@@ -26,8 +26,8 @@ from hrns.shared.config import (
 )
 
 from .acp import (
+    AcpAttachmentConfig,
     AcpSession,
-    AcpSessionConfig,
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
@@ -318,9 +318,9 @@ def _check_configured_effort(
         )
 
 
-def _session_config(session: AcpSession) -> AcpSessionConfig[None]:
+def _attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
     """Turn the client's MCP declarations into Pydantic AI toolsets."""
-    return AcpSessionConfig(deps=None, toolsets=acp_mcp_toolsets(session))
+    return AcpAttachmentConfig(toolsets=acp_mcp_toolsets(session))
 
 
 def run(
@@ -355,20 +355,19 @@ def run(
         raise SystemExit("No models are configured. Add a provider and model first.")
     _check_configured_effort(settings, models[0].model_id, resolver)
     resolved = resolver.resolve(models[0].model_id)
-    agent = build_agent(
-        resolved.model,
-        cwd=cwd,
-        skills=settings.skills,
-        model_settings=merge_model_settings(
-            ModelSettings(**settings.model_settings), resolved.settings
-        ),
-    )
     # Advertise every configured model and resolve the client's choice through this
     # entry's provider configuration. The active model stays the default.
     run_acp_stdio(
-        agent,
+        lambda: build_agent(
+            resolved.model,
+            cwd=cwd,
+            skills=settings.skills,
+            model_settings=merge_model_settings(
+                ModelSettings(**settings.model_settings), resolved.settings
+            ),
+        ),
         model_resolver=resolver,
-        session_config=_session_config,
+        attachment_config=_attachment_config,
         mcp_capabilities=schema.McpCapabilities(acp=True, http=True, sse=True),
     )
 

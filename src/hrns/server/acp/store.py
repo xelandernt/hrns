@@ -19,6 +19,7 @@ from .session import SessionUpdate
 class StoredSession:
     """A session's persisted state: the model's message history and client-visible transcript."""
 
+    cwd: str
     messages: list[ModelMessage] = field(default_factory=list[ModelMessage])
     updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
     model: str | None = None
@@ -110,7 +111,7 @@ class InMemorySessionStore(ListableSessionStore, DeletableSessionStore):
         previous = self._summaries.get(session_id)
         self._summaries[session_id] = SessionSummary(
             session_id=session_id,
-            cwd=previous.cwd if previous is not None else "",
+            cwd=session.cwd,
             title=_title_from_updates(session.updates)
             or (previous.title if previous is not None else None),
             updated_at=datetime.now(UTC),

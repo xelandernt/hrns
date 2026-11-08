@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os.path
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
 
 import anyio
 from acp import Client, schema
+from pydantic_ai import ModelRetry
 from pydantic_ai.capabilities import Toolset
 from pydantic_ai.tools import AgentDepsT, RunContext
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
+from pydantic_ai.toolsets.wrapper import WrapperToolset
 from pydantic_ai.workspaces import LocalWorkspaceBackend, Workspace
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 
@@ -187,3 +190,28 @@ def acp_terminal(session: AcpSession) -> Toolset[None] | None:
             client=session.client, session_id=session.session_id, cwd=session.cwd
         )
     )
+
+
+@dataclass
+class AttachmentToolset(WrapperToolset[AgentDepsT]):
+    """Refuse dispatch against resources from a departed ACP attachment."""
+
+    current: Callable[[], bool]
+
+    async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, object],
+        ctx: RunContext[AgentDepsT],
+        tool: ToolsetTool[AgentDepsT],
+    ) -> object:
+        if not self.current():
+            raise ModelRetry(
+                "The client that provided this tool disconnected; execution was not dispatched."
+            )
+        try:
+            return await self.wrapped.call_tool(name, tool_args, ctx, tool)
+        except (ConnectionError, EOFError) as exc:
+            raise ModelRetry(
+                "Client disconnected during tool execution; its outcome is unknown. Do not automatically retry side effects."
+            ) from exc

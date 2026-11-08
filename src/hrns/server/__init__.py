@@ -1,21 +1,28 @@
-"""Thin Pydantic AI application surface.
+"""Server-owned agent sessions with ACP steering and optional AG-UI observation."""
 
-The backend is deliberately small:
+from typing import TYPE_CHECKING
 
-- :mod:`hrns.server.agent` builds one Pydantic AI ``Agent`` from capabilities.
-- :mod:`hrns.server.acp` exposes that agent over ACP.
-- :mod:`hrns.server.fastapi` mounts ACP on a FastAPI app.
+if TYPE_CHECKING:
+    from .host import HrnsServer
 
-There is no session server, plugin registry, policy catalog, or custom protocol
-in this package. ACP sessions belong to the adapter.
-"""
-
-from .acp import PydanticAIACPAgent, create_acp_agent, run_acp_stdio
+from .acp import AcpServer, RegisteredAgent, Session, TurnHandle, TurnResult, run_acp_stdio
 from .agent import build_agent
 
 __all__ = [
-    "PydanticAIACPAgent",
+    "AcpServer",
+    "HrnsServer",
+    "RegisteredAgent",
+    "Session",
+    "TurnHandle",
+    "TurnResult",
     "build_agent",
-    "create_acp_agent",
     "run_acp_stdio",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "HrnsServer":
+        from .host import HrnsServer
+
+        return HrnsServer
+    raise AttributeError(name)

@@ -317,7 +317,10 @@ class HrnsAcpClient:
     def complete_session_load(self, session_id: str) -> None:
         """Publish the buffered replay in arrival order."""
         for update in self._session_load_buffers.pop(session_id, []):
-            dispatch_update(self.bus, session_id, update)
+            if isinstance(update, tuple) and update[0] == "hrns/session/state":
+                self.turns.apply_server_state(update[1])
+            else:
+                dispatch_update(self.bus, session_id, update)
 
     def abort_session_load(self, session_id: str) -> None:
         """Discard an incomplete replay; it is never authoritative client state."""
@@ -410,4 +413,9 @@ class HrnsAcpClient:
         raise RequestError.method_not_found(method)
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        return None
+        if method == "hrns/session/state":
+            session_id = params.get("sessionId")
+            if session_id in self._session_load_buffers:
+                self._session_load_buffers[session_id].append(("hrns/session/state", params))
+            else:
+                self.turns.apply_server_state(params)

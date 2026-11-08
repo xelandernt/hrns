@@ -186,6 +186,9 @@ class SessionLifecycle:
         if response is not None:
             session.skills = from_session_meta(response.field_meta)
             session.apply_state(response.modes, response.config_options)
+            state = (response.field_meta or {}).get("hrns/session/state")
+            if isinstance(state, dict):
+                client.turns.apply_server_state(state)
         return session
 
     async def resume_session(
@@ -246,6 +249,7 @@ class SessionLifecycle:
             await client.connection.close_session(session_id=session_id)
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/close", exc)) from exc
+        client.turns.forget_session(session_id)
 
     async def delete_session(self, session_id: str) -> None:
         client = self.client
@@ -258,3 +262,4 @@ class SessionLifecycle:
             # already gone, which is the outcome the caller asked for.
             if exc.code != -32002:
                 raise HrnsClientError(describe_rpc_error("session/delete", exc)) from exc
+        client.turns.forget_session(session_id)

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Hashable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Generic, Protocol, TypeAlias
 
-import anyio
 from acp import Client, schema
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
@@ -46,7 +44,7 @@ SessionUpdate: TypeAlias = (
 
 @dataclass(frozen=True, kw_only=True)
 class AcpSession:
-    """The setup an ACP client provides when it starts a session."""
+    """Connection-owned resources for one ACP attachment."""
 
     cwd: str
     mcp_servers: list[McpServer]
@@ -67,11 +65,35 @@ class AcpSessionConfig(Generic[AgentDepsT]):
     workspace: WorkspaceBackend | WorkspaceRef | None = None
 
 
-class SessionConfigFunc(Protocol[AgentDepsT]):
+@dataclass(frozen=True, kw_only=True)
+class AcpAttachmentConfig(Generic[AgentDepsT]):
+    """Only toolsets may be supplied by a client attachment."""
+
+    toolsets: Sequence[AbstractToolset[AgentDepsT]] = ()
+
+
+class AttachmentConfigFunc(Protocol[AgentDepsT]):
     """Factory mapping an ACP session's setup to its run configuration; may be sync or async."""
 
     def __call__(
         self, session: AcpSession, /
+    ) -> AcpAttachmentConfig[AgentDepsT] | Awaitable[AcpAttachmentConfig[AgentDepsT]]: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionContext:
+    """Authoritative server configuration, independent of an ACP connection."""
+
+    agent_id: str
+    session_id: str
+    cwd: str
+
+
+class SessionConfigFunc(Protocol[AgentDepsT]):
+    """Configure dependencies and workspace once, independently of a client."""
+
+    def __call__(
+        self, session: SessionContext, /
     ) -> AcpSessionConfig[AgentDepsT] | Awaitable[AcpSessionConfig[AgentDepsT]]: ...
 
 
@@ -129,7 +151,7 @@ def apply_content_changes(
 
 @dataclass(kw_only=True)
 class SessionState(Generic[AgentDepsT]):
-    """All per-session adapter state."""
+    """Conversation configuration, committed history, and attachment document state."""
 
     session_id: str
     config: AcpSessionConfig[AgentDepsT]
@@ -143,9 +165,6 @@ class SessionState(Generic[AgentDepsT]):
     # The client's setting selections, keyed by option id. Applied as a per-request delta,
     # so a change lands on the next model request in the same turn.
     setting_selections: dict[str, str] = field(default_factory=dict[str, str])
-    lock: anyio.Lock = field(default_factory=lambda: anyio.Lock(fast_acquire=True))
-    active_turn: asyncio.Task[schema.PromptResponse] | None = None
-    cancel_requested: bool = False
     todos: TodoStore = field(default_factory=TodoStore)
     # Skills a person invoked with ``$name`` in this session. Kept for the session's
     # lifetime so the instructions stay in force and the bundled-file gate stays open.

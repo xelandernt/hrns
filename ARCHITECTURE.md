@@ -44,8 +44,90 @@ supports 1.x.
 The adapter implements the complete `acp.Agent` protocol. `session/list` and
 `session/delete` are backed by `ListableSessionStore`/`DeletableSessionStore`, and
 `providers/*` plus the `model` and setting config options are backed by a `ModelResolver`
-the caller supplies. MCP-over-ACP and NES are explicitly unsupported and not advertised
-until their features exist (see `TODO.md`).
+the caller supplies. MCP-over-ACP is opt-in through attachment configuration; NES is unsupported.
+
+## Server-owned sessions
+
+`AcpServer` (`server/acp/host.py`) owns factory-only registrations. A factory runs
+once for each new/restored live session. `RegisteredAgent` provides typed session
+handles; each `Session` owns its agent runtime, shared FIFO, turn handles, history,
+configuration, and pending decisions. Registration freezes at startup. Explicit
+`async with server` owns shutdown: reject new work, cancel/join active work, resolve
+queued handles, close attachment delivery and observers.
+
+`SessionContext`/`AcpSessionConfig` configure server dependencies, capabilities,
+toolsets, and workspace once, without a client. `AcpSession`/`AcpAttachmentConfig`
+configure only connection-owned toolsets on each ACP attachment. The wire adapter
+in `acp/adapter.py` delegates to the session runtime in `acp/runtime.py`; stdio,
+network ACP, and programmatic submission use this same execution path.
+
+`server.mount_acp(app, prefix=...)` mounts `WS {prefix}/{agent_id}`. There is one
+active ACP attachment per session. Its owner may reload and replay on the same
+connection; another connection remains rejected. Reload serializes attachment setup
+and retires the old delivery task before replay, retaining the owner's connection generation
+and pending interaction requests while refreshing its declared toolsets. Load reuses a live session or restores it once
+under the registration lock, validates stored cwd, and installs a delivery
+queue before replaying completed/current-turn updates. No network I/O is performed
+under the registration lock. Disconnect removes the attachment, documents, and
+client toolsets; accepted work survives. Close explicitly cancels and closes the
+session. The default store is separate per registration; the same store instance
+cannot be registered twice. Shared persistence requires explicit agent partitions.
+
+Programmatic and ACP prompts share FIFO acceptance order. A prompt enters history
+only when started. Cancelling an awaiter never cancels execution. Cancel and runtime
+errors pause remaining work; Python inspection/resume/clear are the only queue
+management API. Accepted prompts survive disconnect, their JSON-RPC associations do
+not, and no reconnect resubmits them. TUI-local queues remain separate.
+
+`interactions.py` retains unanswered decisions while disconnected, reissues after
+attachment replay, and ignores responses from departed generations. A connected
+client without form support gets the existing unavailable-question result. Client
+toolsets are selected through upstream `DynamicToolset` at each model step;
+`AttachmentToolset` rejects dispatch against an old attachment. An uncertain lost
+result is reported rather than automatically replaying side effects. Provider
+resolver mutations apply to the registration and notify every affected live session.
+A resolver instance cannot be reused by two registrations.
+
+Initialize advertises `_meta["hrns/session/state"]`. Load metadata and the
+`_hrns/session/state` notification carry revision, active turn, running/waiting/idle,
+last outcome, and last usage. The existing client uses them for server-started turns
+and suppresses duplicate lifecycle events from its own prompt response. They do not
+expose queue management. Successful close/delete clears that session's client revision
+and active-turn caches, so restoring its saved state can begin a new revision sequence.
+
+## Read-only AG-UI
+
+`HrnsServer(AcpServer)` composes `server/ag_ui.py` observation with the native runtime.
+The base server has no AG-UI imports. The `ag-ui` extra installs Pydantic AI's public
+AG-UI APIs (minimum 2.57.0, exercised offline at that version).
+
+`mount_ag_ui` independently mounts GET snapshot and SSE routes under
+`{prefix}/{agent_id}/sessions/{session_id}`. They observe resident sessions and never
+start execution. HTTP and WebSocket admission use the same `HTTPConnection` callback
+contract; all admitted identities have equal server scope. Read-only semantics are
+application/OpenAPI metadata, not an invented AG-UI capability; mutations return 405.
+
+Each native run passes through one `AGUIEventStream` converter and encoder, with
+server-assigned conversation/native-run IDs. Its native events also feed ACP.
+Deferred decisions split a turn into native runs; session-level `STATE_SNAPSHOT`
+reports waiting without claiming application-turn completion. No request adapter or
+`RunAgentInput` is mounted.
+
+A join atomically captures an AG-UI message baseline plus the current-run converted
+prefix and installs its live queue on the event loop. History conversion uses
+`AGUIAdapter.dump_messages`; observer-only response-order/tool-call identity tables
+reconcile live IDs with dumped messages. Completed display history is cached. Native
+cancellation snapshots preserve partial display without committing it to model
+history or persistence. No custom partial-delta reducer is implemented.
+
+The current native-run encoded prefix grows with event volume and is released at
+completion. Subscriber queues hold 256 events; overflow closes the subscription for
+snapshot/replay reconnect instead of dropping deltas or blocking execution. ACP delivery uses a separate queue of transcript-update references. Idle SSE emits keep-alive comments.
+Server/session shutdown closes subscribers and pending deliveries.
+
+Deployment is one process/worker per runtime. Stores may recover committed state
+after restart; live tasks, queues, pending decisions, partial display history, and
+subscriptions are not durable. Cross-worker ownership/fan-out is outside this API.
 
 ## MCP over ACP
 
@@ -82,7 +164,7 @@ the resulting declarations in `session/new`. On the agent, `acp_mcp_toolsets`
 turns every client declaration into an ordinary `MCPToolset`: standard
 stdio/HTTP/SSE entries connect directly, while `type: "acp"` entries use
 `AcpMcpClientTransport` over the session's caller. `hrns agent` installs that
-session config and advertises `mcpCapabilities.acp`.
+attachment config and advertises `mcpCapabilities.acp`.
 
 Upstream revision is best-effort, not a second supported binding.
 `build_client` connects with `mode="auto"`, so FastMCP probes

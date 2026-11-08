@@ -27,17 +27,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI
 from pydantic_ai.agent import AbstractAgent, Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai_skills import Skill, SkillResource
+from starlette.requests import HTTPConnection
 
+from hrns.server import HrnsServer
 from hrns.server.acp import (
-    InMemorySessionStore,
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
@@ -48,7 +50,6 @@ from hrns.server.acp import (
     SettingOption,
 )
 from hrns.server.capabilities import AskUser, Skills, Todo
-from hrns.server.fastapi import mount_acp
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
@@ -234,7 +235,7 @@ _EXAMPLE_SKILLS = Skills(programmatic=(_RELEASE_NOTES, _INCIDENT_REVIEW))
 resolver = ExampleModelResolver()
 
 
-async def authenticate(connection: WebSocket) -> str | None:
+async def authenticate(connection: HTTPConnection) -> str | None:
     """Return the caller's identity, or ``None`` to refuse the connection."""
     token = connection.headers.get("authorization")
     if token == "Bearer example-token":
@@ -242,8 +243,7 @@ async def authenticate(connection: WebSocket) -> str | None:
     return None
 
 
-def agent_factory(principal: str | None) -> AbstractAgent[None, str]:
-    # Use ``principal`` to bind identity into the agent's tools or deps.
+def agent_factory() -> AbstractAgent[None, str]:
     # Todo emits native ACP plan updates for the client's Todos panel; AskUser
     # travels as a form elicitation whenever the client advertises one. Skills
     # advertises the two programmatic skills on ``session/new`` and expands a
@@ -251,31 +251,19 @@ def agent_factory(principal: str | None) -> AbstractAgent[None, str]:
     return Agent(capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS])
 
 
-# ACP session stores keyed by principal. A user reconnecting with the same
-# identity can load their own sessions; another user's store is never consulted.
-# This is process-local: use shared durable storage when running several workers.
-_session_stores: dict[str, InMemorySessionStore] = {}
+server = HrnsServer()
+coder = server.add_agent("coder", factory=agent_factory, model_resolver=resolver)
 
 
-def session_store_factory(principal: str | None) -> InMemorySessionStore:
-    key = principal or "anonymous"
-    return _session_stores.setdefault(key, InMemorySessionStore())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with server:
+        yield
 
 
-app = FastAPI(title="hrns example")
-
-# One fresh ACP adapter per authenticated WebSocket connection. Sessions are
-# saved into that principal's store, so ``session/load`` cannot cross users. The
-# provider registry is shared by every connection: a route one client sets is the
-# routing the next connection sees.
-mount_acp(
-    app,
-    agent_factory,
-    path="/acp",
-    authenticate=authenticate,
-    session_store_factory=session_store_factory,
-    model_resolver=resolver,
-)
+app = FastAPI(title="hrns example", lifespan=lifespan)
+server.mount_acp(app, prefix="/acp", authenticate=authenticate)
+server.mount_ag_ui(app, prefix="/ag-ui", authenticate=authenticate)
 
 
 if __name__ == "__main__":

@@ -841,7 +841,11 @@ class HrnsApp(App[int]):
         finally:
             if screen in self.screen_stack:
                 await screen._events.join()
-                screen._set_busy(False)
+                screen._set_busy(
+                    screen.client.turns.is_running(screen.session.session_id)
+                    if screen.client.turns.server_lifecycle
+                    else False
+                )
                 screen.prompts.refresh_queue()
                 self.call_later(screen.send_next_queued)
 

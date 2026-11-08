@@ -264,7 +264,7 @@ def _acp_command(
     from .server.acp import run_acp_stdio
     from .server.agent import build_agent
 
-    run_acp_stdio(build_agent(model, cwd=cwd))
+    run_acp_stdio(lambda: build_agent(model, cwd=cwd))
     return EXIT_OK
 
 
@@ -283,15 +283,25 @@ def _serve_command(
             "Serving over WebSocket needs the server extra. "
             "Install it with `pip install 'hrns[server]'`."
         )
+    from contextlib import asynccontextmanager
+
     import uvicorn
+    from fastapi import FastAPI
 
+    from .server import AcpServer
     from .server.agent import build_agent
-    from .server.fastapi import create_app
 
-    def agent_factory(_principal: object):
-        return build_agent(model, cwd=cwd)
+    server = AcpServer()
+    server.add_agent("agent", factory=lambda: build_agent(model, cwd=cwd))
 
-    uvicorn.run(create_app(agent_factory), host=host, port=port)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with server:
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+    server.mount_acp(app)
+    uvicorn.run(app, host=host, port=port)
     return EXIT_OK
 
 

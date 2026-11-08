@@ -127,6 +127,7 @@ class ConnectionLifecycle:
             raise
 
         client.initialized = response
+        client.turns.reset()
         if getattr(response, "protocol_version", PROTOCOL_VERSION) != PROTOCOL_VERSION:
             negotiated = response.protocol_version
             await self._abort(bundle)
