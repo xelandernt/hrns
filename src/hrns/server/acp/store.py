@@ -25,6 +25,8 @@ class StoredSession:
     #: The session's setting selections; revalidated against the live options on load.
     setting_selections: dict[str, str] = field(default_factory=dict[str, str])
     todos: tuple[TodoItem, ...] = ()
+    #: Skill ids a person invoked in this session, so ``session/load`` restores them.
+    skills: tuple[str, ...] = ()
 
 
 class SessionStore(Protocol):

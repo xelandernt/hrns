@@ -139,6 +139,15 @@ such as reasoning effort; the adapter advertises both only when a
 - `providers/set` and `providers/disable` can change which settings a model offers. When
   they do, resident sessions receive a `config_option_update` with the complete new state.
 
+## Skills in `_meta`
+
+There is no skills method or content block. When the agent has a
+[`Skills`](skills.md) capability, `session/new` and `session/load` return its catalog in
+the response `_meta` under `hrns/skills`, and `session/prompt` accepts a reference in a
+text block's `_meta` under the same key. Both are ordinary ACP `_meta` payloads, so a
+client that does not understand them ignores them and a client that does gets `$name`
+completion. The full payload shapes are on the [Skills](skills.md) page.
+
 
 ## Errors
 

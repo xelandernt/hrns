@@ -358,6 +358,7 @@ def run(
     agent = build_agent(
         resolved.model,
         cwd=cwd,
+        skills=settings.skills,
         model_settings=merge_model_settings(
             ModelSettings(**settings.model_settings), resolved.settings
         ),

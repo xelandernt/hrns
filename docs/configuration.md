@@ -61,6 +61,11 @@ thinking = "high"                      # forwarded to Pydantic AI ModelSettings
 levels = ["low", "medium", "high"]     # which reasoning efforts sessions may select
 allow_off = false                      # do not offer "off" on models that can disable it
 
+[skills]
+enabled = true
+paths = ["~/shared/skills"]            # extra libraries; defaults are .agents/skills
+exclude = ["experimental-release-notes"]
+
 [mcp]
 token_store = "file"
 
@@ -230,6 +235,30 @@ allow, or deny. A denied server is left out of the session declaration, and an
 unapproved server is never started. `always_allow = true` skips the prompt and
 persists the grant in this document; headless clients (`hrns run`) cannot ask, so
 they only export servers that are pre-approved this way.
+
+### `[skills]`
+
+Agent Skills, described in full on the [Skills](skills.md) page. The defaults need no
+configuration: `<workspace>/.agents/skills` and `~/.agents/skills` are read when they
+exist.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Expose skills to the agent and to `$name` invocation |
+| `paths` | list of paths | `[]` | Extra libraries, read before the defaults. Relative paths resolve against the working directory; `~` is expanded. A path that does not exist is an error |
+| `include` | list of strings | `[]` | Exact skill ids to expose; empty exposes every discovered skill |
+| `exclude` | list of strings | `[]` | Exact skill ids to hide; cannot be combined with `include` |
+
+```toml
+[skills]
+paths = ["~/shared/skills"]
+exclude = ["experimental-release-notes"]
+```
+
+Libraries are read in this order, highest precedence first: `paths` as written,
+`<workspace>/.agents/skills`, `~/.agents/skills`. A duplicate skill name keeps the first
+library's skill and bundled files. `enabled = false` removes the capability and the ACP
+catalog entirely.
 
 ## Secrets
 

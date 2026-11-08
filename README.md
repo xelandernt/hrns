@@ -38,6 +38,26 @@ def build_agent(model: str = "anthropic:claude-sonnet-5-5") -> Agent:
 Everything the agent does is a capability. There is no plugin registry,
 binding, policy catalog, manifest, or configuration service.
 
+## Skills
+
+The agent reads [Agent Skills](https://agentskills.io/specification) from
+`<workspace>/.agents/skills` and `~/.agents/skills` by default. A skill is a directory
+with a `SKILL.md`; the model sees its name and description, and loads the instructions
+only when it needs them. A person can list skills with `/skills` and invoke one with
+`$name`; the terminal sends the id, and the server expands it, so the body never
+travels over the wire.
+
+```toml
+[skills]
+paths = ["~/shared/skills"]            # libraries read before the defaults
+exclude = ["experimental-release-notes"]
+```
+
+`hrns.server.capabilities.Skills` wraps `pydantic_ai_skills.SkillsCapability`, and
+`build_agent` installs it by default. Skills defined in Python can ship with an app
+instead of on disk — see `examples/fastapi_app.py`. The full reference, including the
+ACP `_meta` payloads and the security notes, is in [docs/skills.md](docs/skills.md).
+
 ## ACP over stdio
 
 ```python

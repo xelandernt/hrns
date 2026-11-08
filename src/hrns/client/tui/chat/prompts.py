@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from ....shared.errors import HrnsClientError
 from ...attachments import attachment_summary, build_prompt_blocks, validate_attachment
+from ...skills import find_mentions
 from ..commands import LOCAL_COMMANDS, command_suggestion_text
 from ..completion import FileIndex, index_workspace, matching_skills
 from ..composer import AttachmentBar, CommandSuggestions, Composer, PromptQueue
@@ -54,9 +55,9 @@ class PromptWorkflow:
         with contextlib.suppress(Exception):
             screen.query_one("#composer", Composer).set_mention_catalog(
                 skills=[
-                    str(skill.get("name", ""))
+                    str(skill.get("id", ""))
                     for skill in screen._skills
-                    if bool(skill.get("user_invocable", True))
+                    if skill.get("id") and bool(skill.get("userInvocable", True))
                 ],
                 files=screen._workspace_files,
             )
@@ -72,18 +73,18 @@ class PromptWorkflow:
         items = [
             {
                 "kind": "skill",
-                "name": str(skill.get("name", "")),
+                "name": str(skill.get("id", "")),
                 "label": (
-                    f"${skill.get('name', '')}   {str(skill.get('description', ''))[:80]}"
+                    f"${skill.get('id', '')}   {str(skill.get('description', ''))[:80]}"
                 ).rstrip(),
                 "start": (row, match.start()),
                 "end": (row, column),
             }
             for skill in matching_skills(
-                (skill for skill in screen._skills if bool(skill.get("user_invocable", True))),
+                (skill for skill in screen._skills if bool(skill.get("userInvocable", True))),
                 match.group(1),
             )
-            if skill.get("name")
+            if skill.get("id")
         ]
         if not items:
             if match.group(1):
@@ -409,7 +410,7 @@ class PromptWorkflow:
             screen._attachments.clear()
             self.refresh_queue()
         screen._set_busy(True)
-        screen.app.start_turn(screen, text, blocks)
+        screen.app.start_turn(screen, text, blocks, find_mentions(text, screen._skills))
         return True
 
     def remember_prompt(self, text: str) -> None:
@@ -526,17 +527,38 @@ class PromptWorkflow:
 
     # ---------------------------------------------------------------- skills
 
+    def refresh_skills(self) -> None:
+        """Re-read the session's catalog after a new/loaded session and repaint ``$``."""
+        self.sync_mention_catalog()
+
     async def show_skills(self, query: str = "") -> None:
-        await self.screen._notice("Skills are not available in standard ACP.", "info")
-
-    async def refresh_skills(self) -> None:
-        self.screen._skills = []
-
-    async def skills_binding_id(self) -> str | None:
-        return None
-
-    async def fetch_skill_catalog(self, binding_id: str) -> list[dict[str, Any]]:
-        return []
+        """List the skills this session offers, or say why there are none."""
+        screen = self.screen
+        needle = query.strip().casefold()
+        skills = [
+            skill
+            for skill in screen._skills
+            if bool(skill.get("userInvocable", True))
+            and (
+                not needle
+                or needle in str(skill.get("id", "")).casefold()
+                or needle in str(skill.get("description", "")).casefold()
+            )
+        ]
+        if not skills:
+            message = (
+                f"No skill matches '{query.strip()}'."
+                if screen._skills
+                else "No skills are available. Add a skill under .agents/skills or "
+                "~/.agents/skills, then reload the session."
+            )
+            await screen._notice(message, "info")
+            return
+        lines = ["Skills — type $name to invoke one:"]
+        for skill in skills:
+            hidden = "" if bool(skill.get("modelInvocable", True)) else " · model-hidden"
+            lines.append(f"${skill.get('id', '')} — {skill.get('description', '')}{hidden}")
+        await screen._notice("\n".join(lines), "info")
 
     async def stage_attachment(self, argument: str) -> bool:
         """Stage or clear local files for the next prompt (explicit user action only)."""

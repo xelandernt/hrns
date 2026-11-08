@@ -59,7 +59,13 @@ from pydantic_ai.toolsets import AbstractToolset, AgentToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness.ask_user import AskUserRequest as HarnessAskUserRequest
 
-from hrns.server.capabilities import TodoStore, TodoUpdated
+from hrns.server.capabilities import (
+    SkillInfo,
+    TodoStore,
+    TodoUpdated,
+    bind_invoked_skills,
+    find_skills,
+)
 from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpCallerOptions, McpOverAcpCaller, bind_caller
 
@@ -107,10 +113,41 @@ _logger = logging.getLogger(__name__)
 _MODEL_CONFIG_ID = "model"
 _ASK_USER_TOOL = "ask_user_question"
 
+#: The ``session/new`` and ``session/load`` response ``_meta`` key carrying the skill catalog.
+SKILLS_META_KEY = "hrns/skills"
+
+#: Tool-call id prefix for the transcript marker of a skill the person invoked.
+_SKILL_TOOL_PREFIX = "hrns-skill:"
+
 #: One complete ACP config-option list, as ``session/new`` and ``session/set_config_option`` return it.
 ConfigOptions: TypeAlias = list[
     schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean
 ]
+
+
+def _skill_references(prompt: Sequence[PromptContentBlock]) -> tuple[str, ...]:
+    """Skill ids a client attached to the prompt blocks, in first-seen order.
+
+    A person's ``$skill`` reference travels in the text block's ``_meta`` under
+    :data:`SKILLS_META_KEY`: a list of ``{"id": ..., "mention": {...}}`` objects. The
+    mention is display information for the client; the server acts on the id and does
+    not read the prompt text.
+    """
+    ids: list[str] = []
+    for block in prompt:
+        meta = block.field_meta
+        if not meta:
+            continue
+        payload = meta.get(SKILLS_META_KEY)
+        if not isinstance(payload, list):
+            continue
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            skill_id = entry.get("id")
+            if isinstance(skill_id, str) and skill_id and skill_id not in ids:
+                ids.append(skill_id)
+    return tuple(ids)
 
 
 def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
@@ -280,6 +317,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         self._usage_limits = (
             usage_limits if usage_limits is not None else UsageLimits(request_limit=None)
         )
+        self._skills = find_skills(agent)
         self._client_capabilities: schema.ClientCapabilities | None = None
         self._conn: Client | None = None
         self._mcp_caller: McpOverAcpCaller | None = None
@@ -342,6 +380,56 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             agent_info=schema.Implementation(name=self._name, version=self._version),
         )
 
+    async def _skills_meta(self) -> dict[str, object] | None:
+        """The ``session/new``/``session/load`` ``_meta`` carrying the skill catalog."""
+        skills = self._skills
+        if skills is None:
+            return None
+        entries = [info.to_meta() for info in await skills.metadata()]
+        return {SKILLS_META_KEY: entries} if entries else None
+
+    async def _resolve_skills(self, prompt: Sequence[PromptContentBlock]) -> tuple[SkillInfo, ...]:
+        """Validate the skill references a prompt carries, or reject the prompt."""
+        ids = _skill_references(prompt)
+        if not ids:
+            return ()
+        skills = self._skills
+        if skills is None:
+            raise acp.RequestError.invalid_params({"reason": "this deployment exposes no skills"})
+        catalog = await skills.metadata()
+        by_id = {info.id: info for info in catalog}
+        resolved: list[SkillInfo] = []
+        for skill_id in ids:
+            info = by_id.get(skill_id)
+            if info is None:
+                available = ", ".join(by_id) or "none"
+                raise acp.RequestError.invalid_params(
+                    {
+                        "skill": skill_id,
+                        "reason": f"unknown skill; available: {available}",
+                    }
+                )
+            if not info.user_invocable:
+                raise acp.RequestError.invalid_params(
+                    {"skill": skill_id, "reason": "this skill is not user-invocable"}
+                )
+            resolved.append(info)
+        return tuple(resolved)
+
+    async def _announce_skills(self, turn: _TurnState, skills: Sequence[SkillInfo]) -> None:
+        """Show one completed tool call per skill the person invoked, as a transcript marker."""
+        for info in skills:
+            await self._send_update(
+                turn,
+                updates.start_tool_call(
+                    tool_call_id=f"{_SKILL_TOOL_PREFIX}{info.id}",
+                    title=f"Loaded skill: {info.name}",
+                    kind="other",
+                    status="completed",
+                    raw_input={"id": info.id},
+                ),
+            )
+
     async def new_session(
         self,
         cwd: str,
@@ -360,7 +448,9 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             await store.remember(session_id, cwd=cwd)
         await self._persist(state)
         return schema.NewSessionResponse(
-            session_id=session_id, config_options=self._config_options(state)
+            session_id=session_id,
+            config_options=self._config_options(state),
+            field_meta=await self._skills_meta(),
         )
 
     async def load_session(
@@ -399,6 +489,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             model=stored.model,
             setting_selections=dict(stored.setting_selections),
             todos=TodoStore(items=stored.todos),
+            invoked_skills=set(stored.skills),
         )
         self._sessions[session_id] = state
         if (store := self._listable_store) is not None:
@@ -409,7 +500,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             await self._persist(state)
         for update in stored.updates:
             await self._conn.session_update(session_id=session_id, update=update)
-        return schema.LoadSessionResponse(config_options=self._config_options(state))
+        return schema.LoadSessionResponse(
+            config_options=self._config_options(state),
+            field_meta=await self._skills_meta(),
+        )
 
     async def list_sessions(
         self,
@@ -466,6 +560,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     model=state.model,
                     setting_selections=dict(state.setting_selections),
                     todos=state.todos.items,
+                    skills=tuple(sorted(state.invoked_skills)),
                 ),
             )
         except Exception:
@@ -686,6 +781,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params({"session_id": session_id})
 
         user_content = prompt_blocks_to_user_content(prompt)
+        skills = await self._resolve_skills(prompt)
         async with state.lock:
             if self._sessions.get(session_id) is not state:
                 raise acp.RequestError.invalid_params(
@@ -695,7 +791,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     }
                 )
             state.cancel_requested = False
-            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content))
+            turn = asyncio.ensure_future(self._run_turn(state, prompt, user_content, skills))
             state.active_turn = turn
             try:
                 return await asyncio.shield(turn)
@@ -750,6 +846,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
+        skills: Sequence[SkillInfo] = (),
     ) -> schema.PromptResponse:
         conn = self._conn
         assert conn is not None
@@ -768,6 +865,24 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             known_non_approval_names=self._known_non_approval_names(config),
         )
         turn.updates.extend(updates.update_user_message(block) for block in prompt)
+        capability = self._skills
+        if skills and capability is not None:
+            # The person invoked these. The text joins the prompt as a block, the way
+            # OpenCode injects a skill, rather than a fabricated ``load_capability``
+            # turn: an assistant message with tool calls and no ``reasoning_content``
+            # is rejected by thinking-mode providers such as DeepSeek. The capability
+            # still marks these leaves always-on for the session, which opens the
+            # bundled-file gate and keeps them out of the model's deferred catalog.
+            state.invoked_skills.update(info.id for info in skills)
+            injected = [
+                f'<skill_content name="{info.id}">\n'
+                f"{await capability.instructions(info.id)}\n"
+                "</skill_content>"
+                for info in skills
+            ]
+            user_content = [*injected, *user_content]
+            run_input = user_content
+            await self._announce_skills(turn, skills)
 
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
@@ -775,7 +890,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             while True:
                 result = None
                 resolved_model = self._resolve_run_model(state.model)
-                with _bind_todo_store(state.todos), capture_run_messages() as captured:
+                with (
+                    _bind_todo_store(state.todos),
+                    bind_invoked_skills(state.invoked_skills),
+                    capture_run_messages() as captured,
+                ):
                     async with self._agent.run_stream_events(
                         run_input,
                         message_history=history,

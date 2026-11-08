@@ -34,6 +34,7 @@ from .events import (
     TurnCompleted,
 )
 from .session import SessionProxy
+from .skills import find_mentions
 
 __all__ = ["RunOutcome", "HeadlessRun", "run_headless"]
 
@@ -290,12 +291,14 @@ async def run_headless(
         runner.outcome.cwd = cwd
         runner.attach()
         attached = True
+        skills = find_mentions(prompt, session.skills)
         if timeout:
             await asyncio.wait_for(
-                session.prompt_blocks(blocks, display_text=prompt), timeout=timeout
+                session.prompt_blocks(blocks, display_text=prompt, skills=skills),
+                timeout=timeout,
             )
         else:
-            await session.prompt_blocks(blocks, display_text=prompt)
+            await session.prompt_blocks(blocks, display_text=prompt, skills=skills)
     except InteractionRequired as exc:
         runner.note_interaction(exc)
         error = exc

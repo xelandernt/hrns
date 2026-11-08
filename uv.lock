@@ -717,6 +717,7 @@ server = [
     { name = "fastmcp-slim", extra = ["client"] },
     { name = "mcp" },
     { name = "pydantic-ai-harness", extra = ["coder"] },
+    { name = "pydantic-ai-skills" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "mcp", "openai"] },
     { name = "starlette" },
     { name = "uvicorn" },
@@ -751,6 +752,7 @@ requires-dist = [
     { name = "platformdirs", specifier = ">=4" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pydantic-ai-harness", extras = ["coder"], marker = "extra == 'server'", specifier = ">=0.57.0,<2" },
+    { name = "pydantic-ai-skills", marker = "extra == 'server'", specifier = ">=2.1,<3" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "mcp", "openai"], marker = "extra == 'server'", specifier = ">=2.57.0,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
     { name = "pyyaml", marker = "extra == 'client'", specifier = ">=6,<7" },
@@ -1575,6 +1577,24 @@ wheels = [
 [package.optional-dependencies]
 coder = [
     { name = "ripgrep", marker = "sys_platform != 'android'" },
+]
+skills = [
+    { name = "pyyaml" },
+]
+
+[[package]]
+name = "pydantic-ai-skills"
+version = "2.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "pydantic-ai-harness", extra = ["skills"] },
+    { name = "pydantic-ai-slim" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ca/ba/2b87dc4cbee922611c6dedce259e0d5e28eae5073c7222f96b41c6402e90/pydantic_ai_skills-2.1.2.tar.gz", hash = "sha256:4690d86d09ded0da54ac630f8c3d1c70dff73a62651c649d67441cd53c66ae50", size = 9264373, upload-time = "2026-11-07T11:27:03.129Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/cb/0b10e9bd139acddc08c6a1c881d57d777a186506c4eb5acb9e2bfefe6872/pydantic_ai_skills-2.1.2-py3-none-any.whl", hash = "sha256:3ab9f02a56f33af9c238fc2b76dcbedf2a0fb386a356920f35e07d4a39a03f63", size = 74990, upload-time = "2026-11-07T11:27:01.33Z" },
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
@@ -11,6 +11,7 @@ from acp.schema import AcpMcpServer, HttpMcpServer, McpServerStdio, SseMcpServer
 from ..shared.errors import HrnsClientError, ProtocolError, describe_rpc_error
 from .events import SessionsListed
 from .payloads import absolute_path
+from .skills import SkillMention, from_session_meta
 
 if TYPE_CHECKING:
     from .client import HrnsAcpClient
@@ -28,6 +29,7 @@ class SessionProxy:
         # The agent may ask this client for file I/O and terminal commands from here on.
         client.io.remember(session_id, cwd)
         self.config_options: tuple[dict[str, Any], ...] = ()
+        self.skills: tuple[dict[str, object], ...] = ()
         self.modes: dict[str, Any] | None = None
         self.current_mode_id: str | None = None
         self._unsubscribe: list[Callable[[], None]] = []
@@ -47,11 +49,27 @@ class SessionProxy:
 
     # commands ---------------------------------------------------------------
 
-    async def prompt(self, text: str, *, display_text: str | None = None) -> Any:
-        return await self.client.prompt(self.session_id, text, display_text=display_text)
+    async def prompt(
+        self,
+        text: str,
+        *,
+        display_text: str | None = None,
+        skills: Sequence[SkillMention] = (),
+    ) -> Any:
+        return await self.client.prompt(
+            self.session_id, text, display_text=display_text, skills=skills
+        )
 
-    async def prompt_blocks(self, blocks: list[Any], *, display_text: str) -> Any:
-        return await self.client.prompt(self.session_id, blocks, display_text=display_text)
+    async def prompt_blocks(
+        self,
+        blocks: list[Any],
+        *,
+        display_text: str,
+        skills: Sequence[SkillMention] = (),
+    ) -> Any:
+        return await self.client.prompt(
+            self.session_id, blocks, display_text=display_text, skills=skills
+        )
 
     async def cancel(self) -> None:
         await self.client.cancel(self.session_id)
@@ -127,6 +145,7 @@ class SessionLifecycle:
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/new", exc)) from exc
         session = SessionProxy(client, response.session_id, cwd)
+        session.skills = from_session_meta(response.field_meta)
         session.apply_state(response.modes, response.config_options)
         return session
 
@@ -165,6 +184,7 @@ class SessionLifecycle:
         client.complete_session_load(session_id)
         session = SessionProxy(client, session_id, cwd)
         if response is not None:
+            session.skills = from_session_meta(response.field_meta)
             session.apply_state(response.modes, response.config_options)
         return session
 
@@ -191,6 +211,7 @@ class SessionLifecycle:
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/resume", exc)) from exc
         session = SessionProxy(client, session_id, cwd)
+        session.skills = from_session_meta(response.field_meta)
         session.apply_state(response.modes, response.config_options)
         return session
 

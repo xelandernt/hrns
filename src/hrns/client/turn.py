@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
@@ -18,12 +19,40 @@ from ..shared.errors import (
 )
 from .constants import MAX_MESSAGE_BYTES
 from .events import ConfigOptionsUpdated, TurnCompleted, TurnStarted
+from .skills import SKILL_META_KEY, SkillMention
 
 if TYPE_CHECKING:
     from .client import HrnsAcpClient
 
 #: Text content maximum when the caller has not pre-validated an attachment.
 _TOTAL_PROMPT_BYTES = MAX_MESSAGE_BYTES
+
+
+def _with_skill_meta(blocks: list[Any], skills: tuple[SkillMention, ...]) -> list[Any]:
+    """Attach the skill references to the prompt's first text block.
+
+    ACP reserves ``_meta`` for exactly this kind of out-of-band payload, and the block
+    is where it belongs: the text the person typed is unchanged, and the server reads
+    the ids rather than parsing the text.
+    """
+    if not skills:
+        return blocks
+    payload = [mention.to_meta() for mention in skills]
+    for index, block in enumerate(blocks):
+        kind = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+        if kind != "text":
+            continue
+        if isinstance(block, dict):
+            updated = dict(block)
+            meta = dict(updated.get("_meta") or {})
+            meta[SKILL_META_KEY] = payload
+            updated["_meta"] = meta
+        else:
+            meta = dict(block.field_meta or {})
+            meta[SKILL_META_KEY] = payload
+            updated = block.model_copy(update={"field_meta": meta})
+        return [*blocks[:index], updated, *blocks[index + 1 :]]
+    return blocks
 
 
 class TurnService:
@@ -60,12 +89,14 @@ class TurnService:
         prompt: str | list[Any],
         *,
         display_text: str | None = None,
+        skills: Sequence[SkillMention] = (),
     ) -> Any:
         client = self.client
         client._pending_interaction_error = None
         blocks = (
             prompt if isinstance(prompt, list) else [TextContentBlock(type="text", text=prompt)]
         )
+        blocks = _with_skill_meta(list(blocks), tuple(skills))
         self.check_prompt_capabilities(blocks)
         payloads: list[Any] = []
         for block in blocks:

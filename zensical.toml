@@ -10,6 +10,7 @@ nav = [
     { "Home" = "index.md" },
     { "Configuration" = "configuration.md" },
     { "Capabilities" = "capabilities.md" },
+    { "Skills" = "skills.md" },
     { "ACP support" = "acp.md" },
     { "MCP over ACP" = "mcp.md" },
     { "mount_acp" = "mount-acp.md" },

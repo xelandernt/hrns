@@ -187,6 +187,56 @@ class ThinkingSettings(BaseModel):
         return tuple(dict.fromkeys(value))
 
 
+class SkillsSettings(BaseModel):
+    """Agent Skills: where they come from and which ones this deployment exposes.
+
+    The defaults need no configuration: ``<cwd>/.agents/skills`` and
+    ``~/.agents/skills`` are read when they exist. ``paths`` adds libraries that win
+    over both, so a deployment can point at a shared directory; a path that does not
+    exist is a configuration error rather than a silent omission.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=True,
+        description="Expose Agent Skills to the agent and to host-side invocation.",
+    )
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Skill libraries to read before the default ones. Relative paths resolve "
+            "against the working directory; `~` is expanded."
+        ),
+    )
+    include: list[str] = Field(
+        default_factory=list,
+        description="Exact skill names to expose. Empty exposes every discovered skill.",
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        description="Exact skill names to hide. Cannot be used together with include.",
+    )
+
+    @field_validator("paths")
+    @classmethod
+    def validate_paths(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for item in value:
+            path = item.strip()
+            if not path:
+                raise ValueError("A skill library path cannot be empty.")
+            cleaned.append(path)
+        return list(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> SkillsSettings:
+        """`include` and `exclude` are alternatives, not layers; pick one."""
+        if self.include and self.exclude:
+            raise ValueError("skills: use include or exclude, not both.")
+        return self
+
+
 class ProviderEntry(BaseModel):
     """One configured provider: how to reach it and which models it offers."""
 
@@ -306,6 +356,10 @@ class HrnsConfig(BaseSettings):
         description="Reasoning-effort policy for ACP sessions.",
     )
     mcp: McpSettings = Field(default_factory=McpSettings)
+    skills: SkillsSettings = Field(
+        default_factory=SkillsSettings,
+        description="Agent Skills: discovery libraries and selection.",
+    )
     store: Path = Field(default_factory=lambda: user_data_path("hrns") / "local-sessions.db")
 
     @field_validator("providers")

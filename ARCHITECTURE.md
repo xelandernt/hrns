@@ -287,6 +287,62 @@ policy permits both todo tools because they only change planning state. Agents
 without the capability receive no todo tools. The client displays the list;
 the agent controls it.
 
+## Skills
+
+`hrns.server.capabilities.Skills` subclasses `pydantic_ai_skills.SkillsCapability`, the
+same way `Coder` subclasses the harness coder. Discovery and instruction rendering stay
+upstream: harness turns each `SKILL.md` into a deferred capability, and
+`pydantic-ai-skills` adds the bundled-file tools, `${SKILL_DIR}` resolution, and the
+programmatic-skill path. The subclass exists for three things upstream does not expose:
+
+1. **A host catalog outside a run.** `catalog()` calls harness's `Skills.load()`, which
+   is the documented way to read the same libraries a run would read, and `metadata()`
+   maps the result to `SkillInfo`. The adapter advertises that on `session/new`, so the
+   terminal can offer `$name` before any prompt exists.
+2. **User-invoked instructions.** `instructions()` renders the body with placeholders
+   resolved and the bundled-file inventory appended. It mirrors what
+   `SkillsCapability._rebuild_leaf` produces for the model's own `load_capability` call.
+3. **Project-wins duplicates.** `SkillsCapability` does not expose harness's
+   `duplicate_names`, and its default (`'error'`) turns a project skill overriding a
+   user-wide one into a failed run. `_build_harness_skills` is a near-copy of upstream's
+   private method that passes `duplicate_names='keep_first'`; `_adopt_first_package`
+   then re-indexes the bundled files so `read_skill_resource` reads the winning library.
+   Both are tied to the pinned `pydantic-ai-skills` minor and must be revisited on an
+   upgrade.
+
+**No extension methods.** Standard ACP has no skills concept, but it has `_meta` on every
+message, explicitly reserved for implementation-specific payloads. The catalog rides in
+the `session/new` and `session/load` response `_meta` (`hrns/skills`), and a prompt
+reference rides in the text block's `_meta` (`hrns/skills: [{id, mention}]`). An earlier
+design added an `_hrns/skills/list` method; it was dropped because the only thing it
+bought was live refresh, which a session snapshot does not need. The trade-off is that a
+skill added on disk appears after the client reopens or reloads the session.
+
+**User invocation is user content plus a capability state, not an assistant turn.** When
+`$name` resolves, the adapter prepends the rendered instructions to the run input as a
+`<skill_content name="…">` block and binds the session's invoked ids around the run.
+`Skills.for_run` rebuilds those leaves with `defer_loading=False`, so
+`active_capability_ids` includes them: the bundled-file `require_loaded` gate opens, and a
+skill the person already invoked leaves the model's deferred catalog. The invoked set
+lives on `SessionState` and is saved with the session, so `session/load` restores it.
+
+An earlier version appended a synthetic `load_capability` call/return pair, which also
+marks the skill loaded through `parse_loaded_capabilities`. That is not portable: it puts
+an assistant message with tool calls and no `reasoning_content` into the history, and
+DeepSeek's thinking mode rejects the next request with
+``The `reasoning_content` in the thinking mode must be passed back``. The user-content
+form is what OpenCode does and works across providers.
+
+The model-initiated path is unchanged: the deferred capability's catalog comes from
+Pydantic AI, `load_capability` loads it, and `run_skill_script` is not read-only, so
+`require_approval` turns each script run into a permission request. The adapter finds the
+capability by walking `Agent.root_capability`, so a custom `build_agent` composition gets
+the catalog by adding `Skills` — no adapter parameter to thread.
+
+The catalog is read once per process and cached; the libraries are resolved against the
+agent build's `cwd`, matching `SkillsCapability`, which resolves its own relative
+libraries at construction rather than per session.
+
 ## Ask user
 
 `hrns.server.capabilities.AskUser` wraps the harness capability and adds one default: the

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from textual import work
@@ -30,6 +31,7 @@ from ..launch import ConnectionTarget, transport_for
 from ..mcp_provider import ClientMcpProvider, ConsentDecision
 from ..runtime import agent_model_catalog
 from ..session import SessionProxy
+from ..skills import SkillMention
 from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
 from .dialogs import ChoiceDialog, ElicitationDialog, PermissionDialog
@@ -808,14 +810,18 @@ class HrnsApp(App[int]):
 
     @work(group="turn", exclusive=True)
     async def start_turn(
-        self, screen: ChatScreen, text: str, blocks: list[Any] | None = None
+        self,
+        screen: ChatScreen,
+        text: str,
+        blocks: list[Any] | None = None,
+        skills: Sequence[SkillMention] = (),
     ) -> None:
         """Run one prompt in an app-owned worker so panel switches do not cancel it."""
         try:
             if blocks is not None:
-                await screen.session.prompt_blocks(blocks, display_text=text)
+                await screen.session.prompt_blocks(blocks, display_text=text, skills=skills)
             else:
-                await screen.session.prompt(text)
+                await screen.session.prompt(text, skills=skills)
         except InteractionRequired as exc:
             screen._queue_paused = True
             if screen in self.screen_stack:

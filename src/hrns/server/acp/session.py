@@ -147,6 +147,9 @@ class SessionState(Generic[AgentDepsT]):
     active_turn: asyncio.Task[schema.PromptResponse] | None = None
     cancel_requested: bool = False
     todos: TodoStore = field(default_factory=TodoStore)
+    # Skills a person invoked with ``$name`` in this session. Kept for the session's
+    # lifetime so the instructions stay in force and the bundled-file gate stays open.
+    invoked_skills: set[str] = field(default_factory=set[str])
     always_allow: set[Hashable] = field(default_factory=set[Hashable])
     always_reject: set[Hashable] = field(default_factory=set[Hashable])
     # Session-cumulative spend in USD, as priced by genai-prices across turns. ``None``

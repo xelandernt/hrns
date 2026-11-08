@@ -16,6 +16,11 @@ the model request that follows a tool call.
 The app also exposes one client-manageable provider, so a client can route these
 models through its own OpenAI-compatible gateway with ``providers/set`` (the
 terminal client's ``/providers``). That routing lives in this process only.
+
+Two skills are defined in Python rather than on disk: a deployment can ship a fixed
+skill library with the app, and the client sees them in ``/skills`` exactly like
+discovered ones. The agent loads one itself with ``load_capability``, or a person
+writes ``$release-notes`` in the composer.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai_skills import Skill, SkillResource
 
 from hrns.server.acp import (
     InMemorySessionStore,
@@ -41,7 +47,7 @@ from hrns.server.acp import (
     SettingChoice,
     SettingOption,
 )
-from hrns.server.capabilities import AskUser, Todo
+from hrns.server.capabilities import AskUser, Skills, Todo
 from hrns.server.fastapi import mount_acp
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -169,6 +175,62 @@ class ExampleModelResolver(ProviderModelResolver):
         return settings
 
 
+#: Hard-coded skills, shipped with the app rather than discovered on disk. A deployment
+#: can bake its house workflows into the binary this way; the client can list and invoke
+#: them, and the model can load them through ``load_capability``.
+_RELEASE_NOTES = Skill(
+    name="release-notes",
+    description=(
+        "Write release notes from a list of merged changes, grouped by user impact and "
+        "using the team's house style."
+    ),
+    content="""# Release notes
+
+Turn the changes you are given into notes a customer can read.
+
+1. Group changes under **New**, **Improved**, and **Fixed**. Leave out a group with no entries.
+2. Write each line in the present tense, from the user's point of view: "Sessions survive a
+   reconnect", not "Fixed a bug in the reconnect handler".
+3. Name the affected surface (terminal, server, API) when a reader could not guess it.
+4. End with a one-sentence upgrade note if anything requires an action.
+
+Follow the style guide resource when a rule here is ambiguous.
+""",
+    resources=[
+        SkillResource(
+            name="style-guide",
+            content="""# Style guide
+
+- One sentence per change, at most 120 characters.
+- No internal ticket ids, branch names, or author names.
+- Prefer "you" over "the user".
+- Say what changed, not how it was implemented.
+""",
+        )
+    ],
+)
+
+_INCIDENT_REVIEW = Skill(
+    name="incident-review",
+    description=(
+        "Run a blameless incident review: build a timeline, separate trigger from cause, "
+        "and produce follow-up actions with owners."
+    ),
+    content="""# Incident review
+
+1. Build a timeline from the first signal to recovery, with timestamps and sources.
+2. Separate the **trigger** (what changed) from the **causes** (why the system allowed
+   it to matter). Name the missing safeguard, not the person.
+3. List what went well: detection, rollback, communication.
+4. Produce follow-up actions. Each one needs an owner, a due date, and a check that
+   proves it worked.
+5. State what would have caught this earlier, and whether it is worth the cost.
+""",
+)
+
+#: The capability the example ships: only the two programmatic skills, no disk discovery.
+_EXAMPLE_SKILLS = Skills(programmatic=(_RELEASE_NOTES, _INCIDENT_REVIEW))
+
 resolver = ExampleModelResolver()
 
 
@@ -183,8 +245,10 @@ async def authenticate(connection: WebSocket) -> str | None:
 def agent_factory(principal: str | None) -> AbstractAgent[None, str]:
     # Use ``principal`` to bind identity into the agent's tools or deps.
     # Todo emits native ACP plan updates for the client's Todos panel; AskUser
-    # travels as a form elicitation whenever the client advertises one.
-    return Agent(capabilities=[Todo(), AskUser()])
+    # travels as a form elicitation whenever the client advertises one. Skills
+    # advertises the two programmatic skills on ``session/new`` and expands a
+    # ``$release-notes`` reference without a model round trip.
+    return Agent(capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS])
 
 
 # ACP session stores keyed by principal. A user reconnecting with the same

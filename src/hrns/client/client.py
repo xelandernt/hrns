@@ -8,7 +8,7 @@ interaction policy boundary. No runtime or Pydantic AI imports live here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
@@ -58,6 +58,7 @@ from .io import (
 )
 from .payloads import elicitation_record, normalize_permission
 from .session import SessionLifecycle, SessionProxy
+from .skills import SkillMention
 from .transport import AgentTransport, ConnectionBundle
 from .turn import TurnService
 from .updates import dispatch_update
@@ -260,8 +261,9 @@ class HrnsAcpClient:
         prompt: str | list[Any],
         *,
         display_text: str | None = None,
+        skills: Sequence[SkillMention] = (),
     ) -> Any:
-        return await self.turns.prompt(session_id, prompt, display_text=display_text)
+        return await self.turns.prompt(session_id, prompt, display_text=display_text, skills=skills)
 
     async def cancel(self, session_id: str) -> None:
         await self.turns.cancel(session_id)

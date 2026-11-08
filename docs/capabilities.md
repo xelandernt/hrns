@@ -10,6 +10,7 @@ own projects and are not repeated here.
 | [Coder](#coder)                                         | `hrns.server.capabilities.Coder`                | The harness coder, plus the `apply_changes` batch tool        |
 | [`apply_changes`](#apply_changes)                       | `hrns.server.capabilities.changes.ApplyChanges` | One approved batch of many writes and edits                   |
 | [Todo](#todo)                                           | `hrns.server.capabilities.Todo`                 | `read_todos` / `write_todos`, and a typed `TodoUpdated` event |
+| [Skills](#skills)                                       | `hrns.server.capabilities.Skills`               | Agent Skills, a host catalog, and `$name` invocation           |
 | [Ask user](#ask-user)                                   | `hrns.server.capabilities.AskUser`              | `ask_user_question`, rendered as an ACP form elicitation       |
 | [Approval](#approval)                                   | `hrns.server.approvals.require_approval`    | Marks every non-read-only tool `unapproved`                   |
 | [Where the rest comes from](#where-the-rest-comes-from) | `hrns.server.agent.build_agent`             | The default composition of all of the above                   |
@@ -155,6 +156,37 @@ State is a `TodoStore`. A standalone run gets a fresh one each turn unless you p
 `store=`; the ACP adapter binds its own per-session store, so todos survive prompts and
 `session/load`, and each ACP session gets ACP plan updates instead of shared state.
 
+## Skills
+
+```python
+from pydantic_ai import Agent
+
+from hrns.server.capabilities import Skills
+
+agent = Agent(
+    "anthropic:claude-sonnet-5-5",
+    capabilities=[Skills((".agents/skills", "~/.agents/skills"))],
+)
+```
+
+`Skills` subclasses `pydantic_ai_skills.SkillsCapability`. Each discovered `SKILL.md`
+becomes a deferred capability the model loads with `load_capability`; the bundled-file
+tools (`read_skill_resource`, `run_skill_script`) come from the same package. The
+subclass adds what a protocol adapter needs:
+
+- `catalog()` / `metadata()` read the libraries outside a run, so an ACP adapter can
+  advertise skills on `session/new` without waiting for a prompt;
+- `instructions(id)` renders the text a person's `$skill` reference stands for, with
+  `${SKILL_DIR}` resolved and the bundled-file inventory appended;
+- libraries are ordered project-first and duplicate names keep the first, matching
+  "the nearest library wins" instead of failing the run.
+
+With no configuration, `build_agent` adds `Skills.default(cwd)`, which reads
+`<cwd>/.agents/skills` and `~/.agents/skills` when they exist. `[skills]` in the
+configuration document adds libraries, narrows the selection, or turns the capability
+off. Discovery, invocation, the ACP wire format, and the security notes are on the
+[Skills](skills.md) page.
+
 ## Ask user
 
 `hrns.server.capabilities.AskUser` subclasses the harness capability and changes one
@@ -214,9 +246,23 @@ The default read-only set is:
 
 ```python
 READ_ONLY_TOOLS = frozenset(
-    {"read_file", "list_files", "grep", "read_todos", "write_todos", "ask_user_question"}
+    {
+        "read_file",
+        "list_files",
+        "grep",
+        "read_todos",
+        "write_todos",
+        "ask_user_question",
+        "load_capability",
+        "search_tools",
+        "read_skill_resource",
+    }
 )
 ```
+
+`load_capability`, `search_tools`, and `read_skill_resource` read instructions or text,
+so they never prompt; `run_skill_script` is absent on purpose and is approved like
+`shell`.
 
 Pass your own set to change it — this is how you allow additional tools without a prompt:
 
@@ -230,7 +276,8 @@ every tool unapproved-free, which is only appropriate for a sandboxed deployment
 ## Where the rest comes from
 
 `build_agent` composes, in order: `LocalWorkspace(cwd)`, `Coder()`, `Todo()`,
-`AskUser()`, and `require_approval()` (unless `approval=False`).
-`LocalWorkspace` roots the tools at `cwd`; `Coder` contributes the harness capabilities
-plus `apply_changes`. Adding another capability is a list entry in `hrns/app/agent.py` —
-there is no registry to update.
+`AskUser()`, `Skills.from_settings(...)` (when a library exists), and
+`require_approval()` (unless `approval=False`). `LocalWorkspace` roots the tools at
+`cwd`; `Coder` contributes the harness capabilities plus `apply_changes`; `Skills`
+contributes the deferred skill catalog and its bundled-file tools. Adding another
+capability is a list entry in `hrns/server/agent.py` — there is no registry to update.

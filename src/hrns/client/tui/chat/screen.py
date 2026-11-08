@@ -174,8 +174,6 @@ class ChatScreen(_HrnsScreen):
         self._workspace_files: list[str] = []
         self._file_index = FileIndex(())
         self._workspace_root = Path.cwd()
-        self._skills: list[dict[str, Any]] = []
-        self._skills_loading = False
         if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
             self._workspace_root = Path(target.cwd).resolve()
         self.actions = ChatActions(self)
@@ -185,6 +183,15 @@ class ChatScreen(_HrnsScreen):
         self.prompts = PromptWorkflow(self)
         self.sessions = SessionWorkflow(self)
         self.models = ModelWorkflow(self)
+
+    @property
+    def _skills(self) -> list[dict[str, Any]]:
+        """The skill catalog the session advertised when it was created or loaded.
+
+        Read from the session rather than cached, so replacing the session on
+        ``session/load`` or reconnect automatically updates ``/skills`` and ``$``.
+        """
+        return [dict(item) for item in self.session.skills]
 
     # --------------------------------------------------------------- structure
 
@@ -235,6 +242,7 @@ class ChatScreen(_HrnsScreen):
         self.query_one(
             "#transcript", TranscriptPane
         ).view_context = self.commands.make_view_context(self.session)
+        self.prompts.refresh_skills()
 
     def _subscribe(self) -> None:
         if self._unsubscribe is not None:

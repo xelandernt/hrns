@@ -25,6 +25,18 @@ Reference: <https://agentclientprotocol.com/rfds/mcp-over-acp>
 Reference schema types: `StartNesRequest`, `SuggestNesRequest`, `CloseNesRequest`,
 `AcceptNesNotification`, `RejectNesNotification`, `NesEditSuggestionVariant`.
 
+## Skills
+
+- [ ] Remote registries. `pydantic-ai-skills` supports Git, S3, and HTTP catalogs;
+      `[skills]` exposes local libraries only. Wiring a registry needs a declared cache
+      location, refresh policy, and a trust decision the current document has no place for.
+- [ ] Live catalog refresh. The catalog is a `session/new` snapshot carried in `_meta`.
+      Refreshing it mid-session needs either a server push or an extension method; neither
+      is worth the surface until a client asks for it.
+- [ ] Sandboxed script execution. `run_skill_script` runs on the host behind the normal
+      approval policy. Passing a sandboxed executor is supported by `pydantic-ai-skills`
+      but is not configurable from `hrns` yet.
+
 ## Open questions
 
 - [ ] `hrns agent` marks the entry this deployment starts with as `required`, because
