@@ -63,7 +63,7 @@ from .turn import TurnService
 from .updates import dispatch_update
 
 if TYPE_CHECKING:
-    from .mcp_provider import ClientMcpProvider
+    from .mcp_provider import ClientMcpProvider, McpServerHealth
 
 __all__ = ["HrnsAcpClient", "DEFAULT_INTERACTION_POLICY"]
 
@@ -151,6 +151,21 @@ class HrnsAcpClient:
     async def mcp_declarations(self) -> tuple[AcpMcpServer, ...]:
         """Declarations for one session, asking consent for exported servers."""
         return await self.mcp.declarations() if self.mcp is not None else ()
+
+    @property
+    def mcp_health(self) -> tuple[McpServerHealth, ...]:
+        """A read-only snapshot of every configured MCP server."""
+        return self.mcp.health() if self.mcp is not None else ()
+
+    @property
+    def mcp_agent_supports_acp(self) -> bool:
+        """Whether the connected agent advertised MCP-over-ACP."""
+        return self.mcp.agent_supports_acp if self.mcp is not None else False
+
+    @property
+    def mcp_failures(self) -> tuple[McpServerHealth, ...]:
+        """MCP servers that failed to start or authenticate."""
+        return self.mcp.failures() if self.mcp is not None else ()
 
     # --------------------------------------------------------------- lifecycle
 

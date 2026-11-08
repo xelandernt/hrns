@@ -27,6 +27,8 @@ application that hosts it. The terminal client speaks standard ACP only.
   policy.
 - [ACP support](acp.md) — the ACP method inventory: supported, conditional on wiring, or
   refused, plus what the adapter advertises and which client methods it calls.
+- [MCP over ACP](mcp.md) — the stateless `mcp/message` binding: export and consent, what is
+  served, the agent side, and the `subscriptions/listen` gap.
 - [`mount_acp`](mount-acp.md) — every argument of the FastAPI mount, with isolated
   examples, and how `ModelResolver` and `ProviderModelResolver` differ.
 

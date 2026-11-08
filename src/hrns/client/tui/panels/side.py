@@ -9,6 +9,7 @@ from textual.widget import Widget
 from textual.widgets import TabbedContent, TabPane
 
 from .activity import ActivityPanel
+from .mcp import McpPanel
 from .session import SessionPanel
 from .todo import TodoPanel
 
@@ -86,7 +87,7 @@ class SidebarResizeHandle(Widget, can_focus=True):
 class SidePanel(TabbedContent):
     """Todos, sessions and activity in a responsive pane."""
 
-    PANE_ORDER: tuple[str, ...] = ("todos", "sessions", "activity")
+    PANE_ORDER: tuple[str, ...] = ("todos", "sessions", "activity", "mcp")
 
     BINDINGS = [
         Binding("tab", "next_pane", "Next panel", show=False),
@@ -99,6 +100,7 @@ class SidePanel(TabbedContent):
         self.todos = TodoPanel(id="todo-panel")
         self.sessions = SessionPanel(id="session-panel")
         self.activity = ActivityPanel(id="activity-panel")
+        self.mcp = McpPanel()
         # TabbedContent.compose() builds its private ContentTabs from this list.
         # Overriding compose() here would omit ContentTabs entirely.
         self._tab_content.extend(
@@ -106,6 +108,7 @@ class SidePanel(TabbedContent):
                 TabPane("Todos", self.todos, id="todos"),
                 TabPane("Sessions", self.sessions, id="sessions"),
                 TabPane("Activity", self.activity, id="activity"),
+                TabPane("MCP", self.mcp, id="mcp"),
             ]
         )
 
@@ -124,6 +127,8 @@ class SidePanel(TabbedContent):
             self.todos.focus()
         elif tab == "sessions":
             self.sessions._table.focus()
+        elif tab == "mcp":
+            self.mcp.focus()
         else:
             self.activity.focus()
 

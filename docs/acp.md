@@ -111,6 +111,10 @@ on the server side, so a plain mount never asks the client to touch files or run
 session's caller. The adapter advertises `mcpCapabilities` only when a `session_config` is
 present.
 
+In the terminal, `/mcp` opens the MCP side panel: it shows each configured server's
+transport, export state, target, negotiated protocol, and failure reason. Startup and
+authentication failures also appear as transcript notices and a status hint.
+
 ## Session config: the `model` and setting options
 
 ACP has no model methods. Models are a session config option, and so are model settings
@@ -151,12 +155,9 @@ escapes as an internal error, so raise those two for anything a client can fix.
 ## Known gaps
 
 - MCP-over-ACP supports tools, resources, prompts, completions, progress, and
-  input-required results. Long-lived `subscriptions/listen` responses are not streamed
-  yet, and MRTR is passed through without an explicit retry policy.
-- Upstream MCP servers may speak a handshake-era revision. That path is best-effort: the
-  proxy mirrors the upstream's advertised capabilities and logs the negotiated revision,
-  and the server's own reverse requests (sampling, elicitation, roots) fail with
-  `INVALID_REQUEST` instead of being bridged.
+  input-required results, but long-lived `subscriptions/listen` streams and an explicit
+  MRTR retry policy are not implemented. Legacy (handshake-era) upstreams are best-effort.
+  See [MCP over ACP](mcp.md) for the exact wire gap and what a client should expect.
 - Next-edit suggestions, session fork/resume, and session modes are not implemented.
   None of them are advertised.
 - Form elicitation is used only for `ask_user_question`. URL elicitation is never sent, and
@@ -166,5 +167,5 @@ escapes as an internal error, so raise those two for anything a client can fix.
 - Provider configuration is process-scoped and in memory. It is never persisted with a
   session and never echoed back with secrets.
 
-The implementation notes and remaining MCP-over-ACP work are in
-[`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md).
+The MCP-over-ACP binding is documented in [`mcp.md`](mcp.md); implementation notes and the
+remaining work breakdown are in [`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md).

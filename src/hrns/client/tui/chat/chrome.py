@@ -173,6 +173,8 @@ class ChromeWorkflow:
             return screen._hint_note
         if screen.busy:
             return "esc to stop"
+        if screen._mcp_status:
+            return screen._mcp_status
         return ""
 
     def reset_activity(self) -> None:

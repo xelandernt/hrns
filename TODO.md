@@ -45,6 +45,9 @@ Reference: <https://agentclientprotocol.com/rfds/custom-llm-endpoint>
       `MCPToolset`s and standard stdio/HTTP/SSE declarations into direct toolsets;
       `hrns-local` advertises `mcpCapabilities.acp/http/sse`.
 - [x] Config/CLI: `[mcp.servers.<name>].export` and `hrns mcp add --export`.
+- [x] Health view: `/mcp` opens the MCP side panel (per-server state, transport,
+      protocol, target, and failure reason), and startup/auth failures also appear
+      as transcript notices and a status hint.
 
 Remaining:
 
@@ -64,11 +67,6 @@ Remaining:
 - [ ] Decide whether the agent should ever be a provider. `bind_provider` works on
       an `AgentSideConnection`, but ACP has no standard agent-to-client declaration
       path; the current flow is client-provided only.
-
-Open decisions:
-
-- [ ] Surface provider startup or authentication failures in the TUI status instead
-      of only logging and skipping the server.
 
 Design notes and the remaining work breakdown are in
 `docs/mcp-over-acp-analysis.md`.

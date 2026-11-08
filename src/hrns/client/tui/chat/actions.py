@@ -260,6 +260,10 @@ invents commands the agent did not advertise.
             apply,
         )
 
+    def show_mcp(self) -> None:
+        self.show_panel("mcp")
+        self.screen._refresh_mcp_status()
+
     def find_transcript_action(self) -> None:
         screen = self.screen
         screen._find_transcript()

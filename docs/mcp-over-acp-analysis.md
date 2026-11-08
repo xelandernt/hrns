@@ -8,9 +8,10 @@ Implementation status: the stateless binding primitives live in
 shim). The client provider (`ClientMcpProvider`), the `[mcp].export` switch,
 the agent-side `acp_mcp_toolsets` helper, and `hrns-local` session wiring are
 in place. Export is gated by client consent at session start, with
-`always_allow` for pre-approved and headless use. Long-lived subscriptions and
-an explicit MRTR retry policy remain; legacy upstreams are best-effort
-(section 3.4).
+`always_allow` for pre-approved and headless use. Startup and authentication
+failures are surfaced in the `/mcp` side panel and as transcript notices and a
+status hint. Long-lived subscriptions and an explicit MRTR retry policy remain;
+legacy upstreams are best-effort (section 3.4).
 
 Scope: the **stateless** MCP-over-ACP binding for **MCP 2026-07-28**, implemented
 on both ends of this repository, with no `_hrns/*` protocol extensions. The

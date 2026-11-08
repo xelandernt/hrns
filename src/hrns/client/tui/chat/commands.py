@@ -150,6 +150,8 @@ class CommandWorkflow:
             await screen.prompts.show_skills(rest)
         elif name == "todo":
             screen.action_show_todos()
+        elif name == "mcp":
+            screen.action_show_mcp()
         elif name == "models":
             if rest:
                 await screen.models.set_model(rest)

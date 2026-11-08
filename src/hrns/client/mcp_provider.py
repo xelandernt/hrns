@@ -51,11 +51,25 @@ from hrns.config.mcp import (
     McpSettings,
     build_client,
     build_token_store,
+    server_target,
 )
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ClientMcpProvider", "ConsentDecision"]
+__all__ = ["ClientMcpProvider", "ConsentDecision", "McpServerHealth"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class McpServerHealth:
+    """One configured MCP server as seen by the client provider."""
+
+    name: str
+    transport: str
+    target: str
+    export: bool
+    state: str
+    detail: str = ""
+    protocol: str = ""
 
 
 @dataclass
@@ -100,6 +114,10 @@ class ClientMcpProvider:
     _granted: set[str] = field(default_factory=set)
     _denied: set[str] = field(default_factory=set)
     _prepared: tuple[AcpMcpServer, ...] | None = None
+    _failures: dict[str, str] = field(default_factory=dict)
+    _protocols: dict[str, str] = field(default_factory=dict)
+    _active: bool = False
+    _agent_ready: bool = False
     _token_store: object | None = None
 
     async def prepare(self) -> None:
@@ -134,7 +152,9 @@ class ClientMcpProvider:
         """Bind the provider and start the servers that do not need consent."""
         await self.close()
         self._provider = McpOverAcpProvider()
-        if not _agent_supports_acp(initialized):
+        self._active = True
+        self._agent_ready = _agent_supports_acp(initialized)
+        if not self._agent_ready:
             return
         self._exported = {
             name: server
@@ -165,7 +185,59 @@ class ClientMcpProvider:
         self._denied.clear()
         self._prepared = None
         self._exported.clear()
+        self._failures.clear()
+        self._protocols.clear()
+        self._active = False
+        self._agent_ready = False
         self._channel = None
+
+    @property
+    def agent_supports_acp(self) -> bool:
+        """Whether the connected agent advertised ``mcpCapabilities.acp``."""
+        return self._agent_ready
+
+    def health(self) -> tuple[McpServerHealth, ...]:
+        """A read-only snapshot of every configured server for the ``/mcp`` view."""
+        items: list[McpServerHealth] = []
+        for name, server in sorted(self.settings.servers.items()):
+            if not server.enabled:
+                state, detail = "disabled", f"enable it with `hrns mcp enable {name}`"
+            elif not server.export:
+                state, detail = "local only", "set export = true to offer it over ACP"
+            elif not self._active:
+                state, detail = "not started", "connect to an agent to start it"
+            elif not self._agent_ready:
+                state, detail = (
+                    "agent cannot use ACP",
+                    "the connected agent did not advertise mcpCapabilities.acp",
+                )
+            elif name in self._failures:
+                state, detail = "failed", self._failures[name]
+            elif name in self._started:
+                state, detail = "running", ""
+            elif name in self._denied:
+                state, detail = (
+                    "denied",
+                    "consent was denied; approve it on the next session or set always_allow = true",
+                )
+            else:
+                state, detail = "waiting for approval", "approve it before the session starts"
+            items.append(
+                McpServerHealth(
+                    name=name,
+                    transport=server.transport,
+                    target=server_target(server),
+                    export=server.export,
+                    state=state,
+                    detail=detail,
+                    protocol=self._protocols.get(name, ""),
+                )
+            )
+        return tuple(items)
+
+    def failures(self) -> tuple[McpServerHealth, ...]:
+        """Servers that failed to start or authenticate."""
+        return tuple(item for item in self.health() if item.state == "failed")
 
     async def _approve(self, name: str, server: McpServerSettings) -> bool:
         if server.always_allow or name in self._granted:
@@ -201,9 +273,11 @@ class ClientMcpProvider:
         return True
 
     async def _offer(self, name: str, server: McpServerSettings) -> None:
+        self._failures.pop(name, None)
         try:
             offering = await self._start_offering(name, server)
-        except Exception:
+        except Exception as exc:
+            self._failures[name] = _failure_reason(exc)
             logger.warning("cannot export MCP server %r over ACP", name, exc_info=True)
             return
         self._offerings.append(offering)
@@ -216,6 +290,7 @@ class ClientMcpProvider:
             upstream = build_client(server, store=store, interactive=False)
             await stack.enter_async_context(upstream)
             _log_era(name, upstream)
+            self._protocols[name] = upstream.protocol_version or ""
             adapter = from_mcp_server(lambda: _proxy_server(upstream, name))
             assert self._channel is not None
             registration = self._provider.register_server(
@@ -241,6 +316,14 @@ def _agent_supports_acp(initialized: object) -> bool:
     capabilities = getattr(initialized, "agent_capabilities", None)
     mcp = getattr(capabilities, "mcp_capabilities", None)
     return bool(getattr(mcp, "acp", False))
+
+
+def _failure_reason(error: BaseException) -> str:
+    """A short, display-safe reason for the TUI."""
+    text = str(error).strip() or type(error).__name__
+    if len(text) > 240:
+        text = text[:237].rstrip() + "…"
+    return text
 
 
 def _log_era(name: str, upstream: Client) -> None:

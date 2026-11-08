@@ -70,6 +70,8 @@ from ..messages import (
     Submitted,
 )
 from ..panels import (
+    McpPanel,
+    McpRefreshRequested,
     SidebarResizeHandle,
     SidebarResizeRequested,
     SidePanel,
@@ -137,6 +139,8 @@ class ChatScreen(_HrnsScreen):
         self.busy = False
         self._activity = ""
         self._hint_note = ""
+        self._mcp_status = ""
+        self._reported_mcp_failures: set[tuple[str, str]] = set()
         self._usage: dict[str, Any] | None = None
         self._context_usage: dict[str, Any] | None = None
         self._session_title: str | None = None
@@ -213,6 +217,7 @@ class ChatScreen(_HrnsScreen):
         self._subscribe()
         self._bind_view_context()
         self.chrome.update_chrome()
+        self._report_mcp_failures()
         self.query_one("#composer", Composer).focus()
         self._run_bootstrap()
 
@@ -261,6 +266,37 @@ class ChatScreen(_HrnsScreen):
 
     async def _notice(self, text: str, severity: str = "info") -> None:
         await self.query_one("#transcript", TranscriptPane).add_notice(text, severity=severity)
+
+    def _refresh_mcp_status(self) -> None:
+        """Keep the status hint in sync with the provider's health snapshot."""
+        failures = self.client.mcp_failures
+        if not failures:
+            self._mcp_status = ""
+        elif len(failures) == 1:
+            self._mcp_status = f"mcp: {failures[0].name} failed"
+        else:
+            self._mcp_status = f"mcp: {len(failures)} servers failed"
+        self.query_one("#mcp-panel", McpPanel).set_health(
+            self.client.mcp_health,
+            connected=self.client.connected,
+            acp=self.client.mcp_agent_supports_acp,
+        )
+        self.chrome.refresh_status()
+
+    def _report_mcp_failures(self, *, reset: bool = False) -> None:
+        """Surface new startup/auth failures once and update the status hint."""
+        if reset:
+            self._reported_mcp_failures.clear()
+        self._refresh_mcp_status()
+        for failure in self.client.mcp_failures:
+            key = (failure.name, failure.detail)
+            if key in self._reported_mcp_failures:
+                continue
+            self._reported_mcp_failures.add(key)
+            self._notice_soon(
+                f"MCP server '{failure.name}' was not exported over ACP: {failure.detail}",
+                "warning",
+            )
 
     # ---------------------------------------------------------------- bootstrap
 
@@ -694,6 +730,10 @@ class ChatScreen(_HrnsScreen):
         event.stop()
         self.chrome.resize_sidebar(event.delta, persist=event.final)
 
+    def on_mcp_refresh_requested(self, event: McpRefreshRequested) -> None:
+        event.stop()
+        self._refresh_mcp_status()
+
     def action_show_todos(self) -> None:
         self.actions.show_todos()
 
@@ -702,6 +742,9 @@ class ChatScreen(_HrnsScreen):
 
     def action_show_activity(self) -> None:
         self.actions.show_activity()
+
+    def action_show_mcp(self) -> None:
+        self.actions.show_mcp()
 
     def action_toggle_panel(self) -> None:
         self.actions.toggle_panel()

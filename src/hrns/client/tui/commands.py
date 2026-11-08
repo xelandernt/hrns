@@ -50,7 +50,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
         aliases=("model",),
     ),
     LocalCommand("effort", "Show or change the session's reasoning effort"),
-    LocalCommand("mcp", "Show MCP servers, tools and connection state"),
+    LocalCommand("mcp", "Show MCP server health and connection state"),
     LocalCommand(
         "todo",
         "Show the session's plan and progress",
