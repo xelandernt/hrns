@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...errors import HrnsClientError
+from ....shared.errors import HrnsClientError
 from ..composer import Composer
 from ..dialogs import ConfirmDialog
 from ..panels import SidePanel

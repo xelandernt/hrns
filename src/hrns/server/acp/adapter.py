@@ -59,9 +59,9 @@ from pydantic_ai.toolsets import AbstractToolset, AgentToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 from pydantic_ai_harness.ask_user import AskUserRequest as HarnessAskUserRequest
 
-from hrns.acp_mcp import AcpChannel, McpCallerOptions, McpOverAcpCaller, bind_caller
-from hrns.capabilities import TodoStore, TodoUpdated
-from hrns.capabilities.todo import _bind_todo_store
+from hrns.server.capabilities import TodoStore, TodoUpdated
+from hrns.server.capabilities.todo import _bind_todo_store
+from hrns.shared.acp_mcp import AcpChannel, McpCallerOptions, McpOverAcpCaller, bind_caller
 
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content

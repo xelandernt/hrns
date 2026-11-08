@@ -25,7 +25,7 @@ from acp.schema import (
     WaitForTerminalExitResponse,
 )
 
-from hrns.config import ClientIoMode
+from hrns.shared.config import ClientIoMode
 
 if os.name == "posix":
     from os import getpgid, killpg

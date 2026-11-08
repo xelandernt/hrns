@@ -13,8 +13,8 @@ from fastmcp.client.transports import SSETransport, StreamableHttpTransport
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.toolsets import AbstractToolset
 
-from hrns.acp_mcp import AcpMcpClientTransport
-from hrns.config.mcp import McpServerSettings, build_transport
+from hrns.shared.acp_mcp import AcpMcpClientTransport
+from hrns.shared.config.mcp import McpServerSettings, build_transport
 
 from .session import AcpSession
 

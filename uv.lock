@@ -694,37 +694,33 @@ wheels = [
 name = "hrns"
 source = { editable = "." }
 dependencies = [
-    { name = "agent-client-protocol" },
     { name = "cyclopts" },
-    { name = "fastmcp-slim", extra = ["client"] },
     { name = "keyring" },
-    { name = "mcp" },
-    { name = "packaging" },
     { name = "platformdirs" },
     { name = "pydantic" },
-    { name = "pydantic-ai-harness" },
-    { name = "pydantic-ai-slim", extra = ["mcp", "openai"] },
     { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "textual" },
     { name = "tomli-w" },
-    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
-all = [
+client = [
+    { name = "agent-client-protocol" },
+    { name = "fastmcp-slim", extra = ["client"] },
+    { name = "mcp" },
+    { name = "pyyaml" },
+    { name = "textual" },
+    { name = "websockets" },
+]
+server = [
+    { name = "agent-client-protocol" },
     { name = "fastapi" },
-    { name = "pydantic-ai-slim", extra = ["anthropic"] },
+    { name = "fastmcp-slim", extra = ["client"] },
+    { name = "mcp" },
+    { name = "pydantic-ai-harness", extra = ["coder"] },
+    { name = "pydantic-ai-slim", extra = ["anthropic", "mcp", "openai"] },
     { name = "starlette" },
     { name = "uvicorn" },
-]
-anthropic = [
-    { name = "pydantic-ai-slim", extra = ["anthropic"] },
-]
-app = [
-    { name = "fastapi" },
-    { name = "starlette" },
-    { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -743,31 +739,29 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-client-protocol", specifier = ">=1.0.0rc3,<2" },
+    { name = "agent-client-protocol", marker = "extra == 'client'", specifier = ">=1.0.0rc3,<2" },
+    { name = "agent-client-protocol", marker = "extra == 'server'", specifier = ">=1.0.0rc3,<2" },
     { name = "cyclopts", specifier = ">=3,<6" },
-    { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.156,<1" },
-    { name = "fastapi", marker = "extra == 'app'", specifier = ">=0.156,<1" },
-    { name = "fastmcp-slim", extras = ["client"], specifier = ">=3.3,<5" },
+    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.156,<1" },
+    { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'client'", specifier = ">=3.3,<5" },
+    { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'server'", specifier = ">=3.3,<5" },
     { name = "keyring", specifier = ">=25" },
-    { name = "mcp", specifier = ">=2.3,<3" },
-    { name = "packaging", specifier = ">=24" },
+    { name = "mcp", marker = "extra == 'client'", specifier = ">=2.3,<3" },
+    { name = "mcp", marker = "extra == 'server'", specifier = ">=2.3,<3" },
     { name = "platformdirs", specifier = ">=4" },
     { name = "pydantic", specifier = ">=2.12,<3" },
-    { name = "pydantic-ai-harness", specifier = ">=0.57.0,<2" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'all'", specifier = "==2.57.0" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", specifier = "==2.57.0" },
-    { name = "pydantic-ai-slim", extras = ["mcp", "openai"], specifier = ">=2.57.0,<3" },
+    { name = "pydantic-ai-harness", extras = ["coder"], marker = "extra == 'server'", specifier = ">=0.57.0,<2" },
+    { name = "pydantic-ai-slim", extras = ["anthropic", "mcp", "openai"], marker = "extra == 'server'", specifier = ">=2.57.0,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
-    { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "starlette", marker = "extra == 'all'", specifier = ">=0.47,<2" },
-    { name = "starlette", marker = "extra == 'app'", specifier = ">=0.47,<2" },
-    { name = "textual", specifier = ">=8.2,<9" },
+    { name = "pyyaml", marker = "extra == 'client'", specifier = ">=6,<7" },
+    { name = "starlette", marker = "extra == 'server'", specifier = ">=0.47,<2" },
+    { name = "textual", marker = "extra == 'client'", specifier = ">=8.2,<9" },
     { name = "tomli-w", specifier = ">=1.2,<2" },
-    { name = "uvicorn", marker = "extra == 'all'", specifier = ">=0.35" },
-    { name = "uvicorn", marker = "extra == 'app'", specifier = ">=0.35" },
-    { name = "websockets", specifier = ">=13,<16" },
+    { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.35" },
+    { name = "websockets", marker = "extra == 'client'", specifier = ">=13,<16" },
+    { name = "websockets", marker = "extra == 'server'", specifier = ">=13,<16" },
 ]
-provides-extras = ["all", "anthropic", "app"]
+provides-extras = ["client", "server"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1578,6 +1572,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/54/7b28a10b6cfa28b13c3f98205aaf800d8f3bf5606530e840a706f0213219/pydantic_ai_harness-0.57.0-py3-none-any.whl", hash = "sha256:88f32fdedf2377b9187f364c10f7cdb9f00f9e076c3fb0492d6b7bcf2d6dcc38", size = 1348115, upload-time = "2026-10-16T03:50:57.818Z" },
 ]
 
+[package.optional-dependencies]
+coder = [
+    { name = "ripgrep", marker = "sys_platform != 'android'" },
+]
+
 [[package]]
 name = "pydantic-ai-slim"
 version = "2.57.0"
@@ -2140,6 +2139,28 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/cf/0e/faf7c7e36630561e3e9611730c47510cd972dd5fde8f95941ff78f76accd/rich_rst-2.2.0.tar.gz", hash = "sha256:b1e6a67f8f694a6f36035624bf73e2b1a0a4be13edaf3ba5e654d9758b61073a", size = 326270, upload-time = "2026-09-27T19:12:42.163Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/4e/716b42bf066e180c1235783b46f095a5d871d05dca7006d2295aac29c491/rich_rst-2.2.0-py3-none-any.whl", hash = "sha256:1ea1c43813dc4a8d86475fce27ffb74e0ada3d4656c9f8130ba2a59868055fe9", size = 279274, upload-time = "2026-09-27T19:12:40.548Z" },
+]
+
+[[package]]
+name = "ripgrep"
+version = "14.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/27/53554c9307bc0647f123d4bf776a0f4d6a3083fb846e4f4abf999a29f220/ripgrep-14.1.0.tar.gz", hash = "sha256:17c866fdee1bf9e1c92ed1057bfd5f253c428ba73145553b59cbef8b4db6fca1", size = 464782, upload-time = "2024-08-10T21:47:35.637Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/f8/57521f4467167a19a32dcd6715cb6d912fa975dfcffe028f832a7a848592/ripgrep-14.1.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:b542bf6da4aa2090665f7bee4760748500fc186b3ff7f4c32acd5790b40f7cd6", size = 2197631, upload-time = "2024-08-10T21:47:25.392Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/79/076193bfa1c5f2a955b887d7cc5dd3ec91f7ea2097a06b7e92e4ebcfb2ae/ripgrep-14.1.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:4a01dbbfd98e13947a78cce80ef3d10e42b74563b42e160d6620a7429e50e779", size = 1949822, upload-time = "2024-08-10T21:33:53.648Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/7d/0afdb9e8ff73ce1af3f3158fb7c88dde4247c60e23743b8e6c94e5ad55ad/ripgrep-14.1.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:80404533ad72f4436030fcd84d49c1ba1e915d272465887ce1f94f4c65f351d9", size = 6896094, upload-time = "2024-08-10T21:47:13.246Z" },
+    { url = "https://files.pythonhosted.org/packages/06/57/b0984433dde43f8d4aa1634ec8f139e97794371e0b0eb4f42a2edeeda0df/ripgrep-14.1.0-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:e73652f3609cf9fe99e0b181979fe3a5c7726b7f8992cba5d452aae4dca82ecd", size = 6676979, upload-time = "2024-08-10T21:47:15.466Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/15/fa99f30708c411ea15735872619e433246336fd9d1338ca7d7f63a994983/ripgrep-14.1.0-py3-none-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:a26a70bd3103984e855db748d1725d3e97ae896e84db93092816f62eab052b12", size = 6872870, upload-time = "2024-08-10T21:47:21.551Z" },
+    { url = "https://files.pythonhosted.org/packages/db/7e/0b85e5a4093885ba80b97054cdb3704bfd3f9af7194e5b052aa7674f5d27/ripgrep-14.1.0-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:21deeafdbc537172a293d2978cfbe31cfcf0c65b66cf1fec11b14fd6860cfae3", size = 6878992, upload-time = "2024-08-10T21:47:17.562Z" },
+    { url = "https://files.pythonhosted.org/packages/19/1a/fe85d13eacd4c9af23e1b786bef894e8e236cf4bdfefaf8909a28fdd524e/ripgrep-14.1.0-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:631a217d7093c5da1917b8e2c4bf71ad00bba2537d0c88a24ec28a6bc450444e", size = 8160851, upload-time = "2024-08-10T21:47:19.427Z" },
+    { url = "https://files.pythonhosted.org/packages/54/e1/26a4e53e3d56d873c03d62253a11fe8042b92878fc27b161a15f7b46c2df/ripgrep-14.1.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2048f2b64a0bfe8c425df0dea6729d9795f2d8df6cda77bf76cf718439c41453", size = 6851971, upload-time = "2024-08-10T21:47:23.268Z" },
+    { url = "https://files.pythonhosted.org/packages/10/d8/890eb71d464d8de0dc0dcf7ca42b1b59238c0187ac199ce56dd3cfd6c1ea/ripgrep-14.1.0-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:62a81311061660d7d3dd6ed99c699d09028186aaa1e26b436052f77c0925ea41", size = 9094460, upload-time = "2024-08-10T21:47:27.246Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/15/8dec67f2e484593b18efcc9cd5a70188ed5bfb1f0b0beb73c1be6e325156/ripgrep-14.1.0-py3-none-musllinux_1_2_armv7l.whl", hash = "sha256:b3e49ee6548e9175cb15535b28c582d756272d4c9cc902fd5e326a00cb69737a", size = 6864721, upload-time = "2024-08-10T21:47:29.813Z" },
+    { url = "https://files.pythonhosted.org/packages/da/6d/c2006b112435a1fbcb3c310bdaec82bf14afac7fc862b665f17f09b182c8/ripgrep-14.1.0-py3-none-musllinux_1_2_i686.whl", hash = "sha256:c380549562662316d10fb1712856ed13b48d24d1b9d3c69d20aab610536cf5ab", size = 6959572, upload-time = "2024-08-10T21:47:31.673Z" },
+    { url = "https://files.pythonhosted.org/packages/83/63/8819227b1550e48df73cc35e24310a5c380da897d7acffbf534281c88ed6/ripgrep-14.1.0-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:d20c74dfa4b1085712ffc6528eb10cdccf4022050539053a5f9203f3959b34e0", size = 8950227, upload-time = "2024-08-10T21:47:33.527Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/36/364b596290b70a41e85bf9f9720cf169aa792845fc9f0b1d3d2be3a58755/ripgrep-14.1.0-py3-none-win32.whl", hash = "sha256:1fe90507ea2f8a08c1b462043062d81800297a953dc58e25b1b28a3d9d505394", size = 1616108, upload-time = "2024-08-10T21:47:39.198Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/a2/acde2fc0e343d2d750a3d0c64e96b30421cbf7e9474334dd6d8e3a33e8d0/ripgrep-14.1.0-py3-none-win_amd64.whl", hash = "sha256:85f991f1c268c81d7b9df44a1bfd3224fc69072d83872ac71e2d8ed5186ef156", size = 1742280, upload-time = "2024-08-10T21:47:37.31Z" },
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-"""One configuration document, shared by the terminal client and the local runtime."""
+"""One configuration document, shared by the client and server."""
 
 from .credentials import (
     GITHUB_COPILOT_CLIENT_ID,
@@ -13,11 +13,11 @@ from .credentials import (
 )
 from .mcp import McpOAuthConfig, McpServerConfig, McpServerSettings, McpSettings
 from .settings import (
+    BUILTIN_CONNECTION,
     CONFIG_ENV_VAR,
     CONFIG_FILE_NAME,
     EFFORT_DEFAULT,
     EFFORT_OFF,
-    LOCAL_CONNECTION,
     PERMISSION_MODES,
     PROJECT_CONFIG_NAME,
     THINKING_LEVELS,
@@ -33,7 +33,7 @@ from .settings import (
     check_provider_name,
     config_files,
     default_config_path,
-    is_local_hrns,
+    is_builtin_hrns,
     project_config_path,
     thinking_from_settings,
     with_thinking,
@@ -46,7 +46,7 @@ __all__ = [
     "EFFORT_OFF",
     "GITHUB_COPILOT_CLIENT_ID",
     "KEYRING_SERVICE",
-    "LOCAL_CONNECTION",
+    "BUILTIN_CONNECTION",
     "PERMISSION_MODES",
     "PROJECT_CONFIG_NAME",
     "THINKING_LEVELS",
@@ -67,7 +67,7 @@ __all__ = [
     "config_files",
     "default_config_path",
     "delete_secret",
-    "is_local_hrns",
+    "is_builtin_hrns",
     "keyring_account",
     "project_config_path",
     "secret_ref",

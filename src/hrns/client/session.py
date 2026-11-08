@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from acp import RequestError
 from acp.schema import AcpMcpServer, HttpMcpServer, McpServerStdio, SseMcpServer
 
-from .errors import HrnsClientError, ProtocolError, describe_rpc_error
+from ..shared.errors import HrnsClientError, ProtocolError, describe_rpc_error
 from .events import SessionsListed
 from .payloads import absolute_path
 

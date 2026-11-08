@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from hrns.config import PermissionMode
+from hrns.shared.config import PermissionMode
 
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS
 

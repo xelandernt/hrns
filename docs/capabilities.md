@@ -7,12 +7,12 @@ own projects and are not repeated here.
 
 | Section                                                 | Import                                   | What it adds                                                  |
 | ------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------- |
-| [Coder](#coder)                                         | `hrns.capabilities.Coder`                | The harness coder, plus the `apply_changes` batch tool        |
-| [`apply_changes`](#apply_changes)                       | `hrns.capabilities.changes.ApplyChanges` | One approved batch of many writes and edits                   |
-| [Todo](#todo)                                           | `hrns.capabilities.Todo`                 | `read_todos` / `write_todos`, and a typed `TodoUpdated` event |
-| [Ask user](#ask-user)                                   | `hrns.capabilities.AskUser`              | `ask_user_question`, rendered as an ACP form elicitation       |
-| [Approval](#approval)                                   | `hrns.app.approvals.require_approval`    | Marks every non-read-only tool `unapproved`                   |
-| [Where the rest comes from](#where-the-rest-comes-from) | `hrns.app.agent.build_agent`             | The default composition of all of the above                   |
+| [Coder](#coder)                                         | `hrns.server.capabilities.Coder`                | The harness coder, plus the `apply_changes` batch tool        |
+| [`apply_changes`](#apply_changes)                       | `hrns.server.capabilities.changes.ApplyChanges` | One approved batch of many writes and edits                   |
+| [Todo](#todo)                                           | `hrns.server.capabilities.Todo`                 | `read_todos` / `write_todos`, and a typed `TodoUpdated` event |
+| [Ask user](#ask-user)                                   | `hrns.server.capabilities.AskUser`              | `ask_user_question`, rendered as an ACP form elicitation       |
+| [Approval](#approval)                                   | `hrns.server.approvals.require_approval`    | Marks every non-read-only tool `unapproved`                   |
+| [Where the rest comes from](#where-the-rest-comes-from) | `hrns.server.agent.build_agent`             | The default composition of all of the above                   |
 
 ## Coder
 
@@ -20,7 +20,7 @@ own projects and are not repeated here.
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 
-from hrns.capabilities import Coder
+from hrns.server.capabilities import Coder
 
 agent = Agent(
     "anthropic:claude-sonnet-5-5",
@@ -128,13 +128,13 @@ where bytes actually land.
 batch becomes **one** `session/request_permission` rather than one per file. The approval
 covers everything in the batch: a client sees a single, all-or-nothing decision.
 
-The capability itself is `hrns.capabilities.changes.ApplyChanges` if you compose your own
+The capability itself is `hrns.server.capabilities.changes.ApplyChanges` if you compose your own
 coder; `Coder` is the supported way to get it.
 
 ## Todo
 
 ```python
-from hrns.capabilities import Coder, Todo
+from hrns.server.capabilities import Coder, Todo
 
 agent = Agent(..., capabilities=[Coder(), Todo()])
 ```
@@ -157,12 +157,12 @@ State is a `TodoStore`. A standalone run gets a fresh one each turn unless you p
 
 ## Ask user
 
-`hrns.capabilities.AskUser` subclasses the harness capability and changes one
+`hrns.server.capabilities.AskUser` subclasses the harness capability and changes one
 default: the tool is deferred instead of answered in-process. That is the only mode
 that works when the human sits behind a protocol.
 
 ```python
-from hrns.capabilities import AskUser
+from hrns.server.capabilities import AskUser
 
 agent = Agent("anthropic:claude-sonnet-5-5", capabilities=[AskUser()])
 ```
@@ -200,7 +200,7 @@ never see the question.
 ## Approval
 
 ```python
-from hrns.app.approvals import READ_ONLY_TOOLS, require_approval
+from hrns.server.approvals import READ_ONLY_TOOLS, require_approval
 
 agent = Agent(..., capabilities=[Coder(), require_approval()])
 ```

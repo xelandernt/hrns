@@ -2,7 +2,7 @@
 
 This repository uses MCP in two directions:
 
-- the local agent loads the `[mcp.servers.*]` entries from `config.toml`;
+- the built-in agent loads the `[mcp.servers.*]` entries from `config.toml`;
 - a connected **client** can offer its own MCP servers to a remote ACP agent over the
   stateless `mcp/message` binding.
 
@@ -46,9 +46,9 @@ outer codes:
 | Side | Owner | What it does |
 | --- | --- | --- |
 | Provider | The client (`hrns` CLI, TUI, or `hrns run`) | Launches or connects to a configured MCP server and serves it to the agent over the ACP connection. |
-| Consumer | The agent (`hrns-local` or another ACP agent) | Advertises `mcpCapabilities`, then turns each `type: "acp"` declaration into an `MCPToolset` backed by `AcpMcpClientTransport`. |
+| Consumer | The agent (`hrns agent` or another ACP agent) | Advertises `mcpCapabilities`, then turns each `type: "acp"` declaration into an `MCPToolset` backed by `AcpMcpClientTransport`. |
 
-`hrns-local` advertises `mcpCapabilities.acp`, `http`, and `sse`. A client exports servers
+`hrns agent` advertises `mcpCapabilities.acp`, `http`, and `sse`. A client exports servers
 only when the agent advertises `acp`; otherwise the declarations are omitted entirely.
 
 The provider terminates both MCP sessions and translates at the method level. The upstream
@@ -130,7 +130,7 @@ Upstream authentication stays on the client and never reaches the agent.
 
 ## The agent side
 
-`hrns-local` passes `acp_mcp_toolsets` as its `session_config`. The helper turns every
+`hrns agent` passes `acp_mcp_toolsets` as its `session_config`. The helper turns every
 declaration into a toolset:
 
 - `McpServerStdio`, `HttpMcpServer`, and `SseMcpServer` become ordinary `MCPToolset`s;
@@ -139,7 +139,7 @@ declaration into a toolset:
 
 Servers are connected during session setup, before the session id is returned, and disposed
 when the session closes. `session/load` and, when the agent advertises it, `session/resume`
-declare and reconnect the same way as `session/new`. `hrns-local` itself supports
+declare and reconnect the same way as `session/new`. `hrns agent` itself supports
 `session/load` but refuses `session/resume`.
 
 ## Transports and authentication

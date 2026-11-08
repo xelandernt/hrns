@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hrns.config import PERMISSION_MODES, TuiSettings
+from hrns.shared.config import PERMISSION_MODES, TuiSettings
 
 from ..commands import LOCAL_COMMANDS, resolve_local_command
 from ..composer import Composer
@@ -169,7 +169,7 @@ class ChatActions:
 | `Left` / `Right` in a form | change a choice or toggle a switch |
 | `Enter` in a form | save and close |
 | `Esc` in a form | cancel without saving |
-| `Ctrl+G` in the local model form | sign in to a provider with an account login |
+| `Ctrl+G` in the model form | sign in to a provider with an account login |
 | `Ctrl+T` | focus the transcript for scrolling; `Esc` returns to the composer |
 | `Ctrl+F` | find text in retained messages, tools, and reasoning |
 | `Alt+Up` / `Alt+Down` | jump to the previous / next user message |

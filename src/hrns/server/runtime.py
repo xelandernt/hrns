@@ -1,4 +1,4 @@
-"""Local ACP entry point backed by the configured Pydantic AI model."""
+"""Built-in ACP entry point backed by the configured Pydantic AI model."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.settings import ModelSettings, merge_model_settings
 
-from hrns.config import (
+from hrns.shared.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
     THINKING_LEVELS,
@@ -42,7 +42,7 @@ from .acp import (
 )
 from .agent import build_agent
 
-__all__ = ["LocalModelResolver", "main"]
+__all__ = ["RuntimeModelResolver", "main"]
 
 #: The ACP config option id for the reasoning-effort ladder.
 _EFFORT_OPTION_ID = "effort"
@@ -90,8 +90,8 @@ def _thinking_support(pydantic_id: str) -> str | None:
     return "supported" if profile.get("supports_thinking") else None
 
 
-class LocalModelResolver(ProviderModelResolver):
-    """The local configuration, exposed as the models and providers ACP can use.
+class RuntimeModelResolver(ProviderModelResolver):
+    """The built-in configuration, exposed as the models and providers ACP can use.
 
     One provider per configured entry, named after the entry, because ACP model ids read
     ``entry:model``. Each entry supports exactly the Pydantic AI provider it is configured
@@ -295,7 +295,7 @@ def _print_catalog(settings: HrnsConfig) -> None:
 
 
 def _check_configured_effort(
-    settings: HrnsConfig, model_id: str, resolver: LocalModelResolver
+    settings: HrnsConfig, model_id: str, resolver: RuntimeModelResolver
 ) -> None:
     """Refuse a configured effort the policy does not offer for the startup model.
 
@@ -334,7 +334,7 @@ def run(
     login: Annotated[bool, Parameter(help="Account login (not supported).")] = False,
     cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
 ) -> None:
-    """Launch the configured local model as an ACP stdio server."""
+    """Run the configured agent as an ACP stdio server."""
     settings = (
         HrnsConfig(config_file=None)
         if env_only
@@ -349,7 +349,7 @@ def run(
     if login:
         raise SystemExit("Account login is not supported by the minimal backend.")
 
-    resolver = LocalModelResolver(settings)
+    resolver = RuntimeModelResolver(settings)
     models = resolver.list_models()
     if not models:
         raise SystemExit("No models are configured. Add a provider and model first.")
@@ -373,8 +373,8 @@ def run(
 
 
 app = App(
-    name="hrns-local",
-    help="Launch the configured local model as an ACP stdio server.",
+    name="hrns agent",
+    help="Run the configured agent as an ACP stdio server.",
     default_command=run,
 )
 

@@ -27,7 +27,7 @@ Reference schema types: `StartNesRequest`, `SuggestNesRequest`, `CloseNesRequest
 
 ## Open questions
 
-- [ ] `hrns-local` marks the entry this deployment starts with as `required`, because
+- [ ] `hrns agent` marks the entry this deployment starts with as `required`, because
       disabling it would leave the default session without a model. Revisit once a client
       needs to disable that entry, or once sessions can fall back to another model.
 - [ ] Decide whether the agent should ever be an MCP provider. `bind_provider` works on

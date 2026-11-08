@@ -1,6 +1,6 @@
 # ACP support
 
-`hrns.app.acp` is this repository's own [Agent Client Protocol](https://agentclientprotocol.com)
+`hrns.server.acp` is this repository's own [Agent Client Protocol](https://agentclientprotocol.com)
 adapter. It targets ACP 1.x directly (`acp` SDK, protocol version 1) and is used by both
 transports: `run_acp_stdio` and the FastAPI mount.
 
@@ -38,7 +38,7 @@ call a refused method in the first place.
 | `sessionCapabilities.list` | the store implements `ListableSessionStore` | `InMemorySessionStore` does |
 | `sessionCapabilities.delete` | the store also implements `DeletableSessionStore` | `InMemorySessionStore` does |
 | `providers` | a `model_resolver` was passed | Enables the `model` config option and `providers/*` |
-| `mcpCapabilities` | `mcp_capabilities` was passed | `hrns-local` advertises `acp`, `http`, and `sse` |
+| `mcpCapabilities` | `mcp_capabilities` was passed | `hrns agent` advertises `acp`, `http`, and `sse` |
 | `promptCapabilities` | never | No image, audio, or embedded-context prompts |
 | `nesCapabilities` | never | No next-edit suggestions |
 | `auth` | never | No authentication methods |
@@ -81,7 +81,7 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 Document tracking exists so a future NES implementation has a correct view of the client's
 open files. Nothing else consumes it today, and unknown sessions are silently ignored.
 
-`mcp/message` is routed by `src/hrns/acp_mcp/router.py`, which replaces the Python SDK's
+`mcp/message` is routed by `src/hrns/shared/acp_mcp/router.py`, which replaces the Python SDK's
 stateful route when a `session_config` is installed. The adapter's `mcp_message` fallback
 still answers `method_not_found` on an unbound connection.
 
@@ -105,7 +105,7 @@ The ACP-backed filesystem and terminal are opt-in through `session_config` on
 `PydanticAIACPAgent`; the default `build_agent` uses the harness `FileSystem` and `Shell`
 on the server side, so a plain mount never asks the client to touch files or run commands.
 
-`session_config` is also where MCP declarations become toolsets. `hrns-local` passes
+`session_config` is also where MCP declarations become toolsets. `hrns agent` passes
 `acp_mcp_toolsets`, which turns `stdio`, `http`, and `sse` entries into ordinary
 `MCPToolset`s and turns `type: "acp"` entries into `AcpMcpClientTransport`s backed by the
 session's caller. The adapter advertises `mcpCapabilities` only when a `session_config` is
@@ -126,7 +126,7 @@ such as reasoning effort; the adapter advertises both only when a
   [`SettingOption`](mount-acp.md#session-settings) `list_options(model_id)` returns. The
   effort option carries `category: "thought_level"`. The bundled terminal client's
   `/effort` uses that option for any connected agent, local or remote, and only writes the
-  `[model_settings]` file when the agent is `hrns-local`.
+  `[model_settings]` file when the agent is `hrns agent`.
 - `session/set_config_option` accepts `model` and any advertised setting id; a value
   outside the advertised choices is `invalid_params`. Selections are persisted with the
   session and revalidated on `session/load`, so a value that a model switch or provider

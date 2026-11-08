@@ -2,9 +2,9 @@
 
 The backend is deliberately small:
 
-- :mod:`hrns.app.agent` builds one Pydantic AI ``Agent`` from capabilities.
-- :mod:`hrns.app.acp` exposes that agent over ACP.
-- :mod:`hrns.app.fastapi` mounts ACP on a FastAPI app.
+- :mod:`hrns.server.agent` builds one Pydantic AI ``Agent`` from capabilities.
+- :mod:`hrns.server.acp` exposes that agent over ACP.
+- :mod:`hrns.server.fastapi` mounts ACP on a FastAPI app.
 
 There is no session server, plugin registry, policy catalog, or custom protocol
 in this package. ACP sessions belong to the adapter.

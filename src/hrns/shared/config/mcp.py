@@ -70,7 +70,7 @@ class McpServerSettings(BaseModel):
     """Offer this server to ACP agents over MCP-over-ACP.
 
     This is the client-side provider switch. ``False`` keeps the server
-    configured for the local agent only; ``True`` makes the client register it
+    configured for the built-in agent only; ``True`` makes the client register it
     on a connection that advertises ``mcpCapabilities.acp``.
     """
     always_allow: bool = False

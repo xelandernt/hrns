@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ....shared.errors import HrnsClientError
 from ...attachments import attachment_summary, build_prompt_blocks, validate_attachment
-from ...errors import HrnsClientError
 from ..commands import LOCAL_COMMANDS, command_suggestion_text
 from ..completion import FileIndex, index_workspace, matching_skills
 from ..composer import AttachmentBar, CommandSuggestions, Composer, PromptQueue

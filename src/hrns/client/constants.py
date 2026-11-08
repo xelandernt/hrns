@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from acp import PROTOCOL_VERSION
 
-from . import _version
+from .. import _version
 
 #: Values shown to the agent in ``initialize``.
 CLIENT_NAME = "hrns-client"

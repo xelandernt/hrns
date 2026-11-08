@@ -1,36 +1,36 @@
-"""Local runtime launch recipes; this module never imports the AI runtime."""
+"""Built-in agent launch recipes; this module never imports the AI runtime."""
 
+import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hrns.config import HrnsConfig, Profile, config_files
-from hrns.config.credentials import store_api_key, stored_api_key_ref
+from hrns.shared.config import HrnsConfig, Profile, config_files
+from hrns.shared.config.credentials import store_api_key, stored_api_key_ref
 
-from .errors import HrnsClientError
+from ..shared.errors import HrnsClientError
 from .launch import ConnectionTarget, local_cwd
 
 __all__ = [
-    "LocalCatalog",
-    "local_credential_available",
-    "local_detail",
-    "local_executable",
-    "local_login_providers",
-    "local_model_catalog",
-    "local_target",
-    "local_thinking_support",
+    "AgentCatalog",
+    "agent_command",
+    "agent_credential_available",
+    "agent_detail",
+    "agent_login_providers",
+    "agent_model_catalog",
+    "agent_target",
+    "agent_thinking_support",
     "store_api_key",
     "stored_api_key_ref",
 ]
 
 
 @dataclass(frozen=True, slots=True)
-class LocalCatalog:
+class AgentCatalog:
     """Provider/model ids plus the reasoning support the runtime advertised."""
 
     models: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -41,35 +41,19 @@ class LocalCatalog:
 
 
 _CATALOG_LOCK = threading.Lock()
-_CATALOG: LocalCatalog | None = None
+_CATALOG: AgentCatalog | None = None
 
 
-def _sibling_script(name: str) -> str | None:
-    """A console script installed next to this interpreter (venv, pipx, uv tool)."""
-    candidate = Path(sys.executable).with_name(name)
-    if candidate.is_file():
-        return str(candidate)
-    if os.name == "nt":
-        # `pip`/`uv` write `hrns-local.exe` (or a `.cmd` shim) on Windows.
-        for suffix in (".exe", ".cmd", ".bat"):
-            candidate = Path(sys.executable).with_name(name + suffix)
-            if candidate.is_file():
-                return str(candidate)
-    return None
+def agent_command() -> list[str]:
+    """Command that runs the built-in ACP agent in a separate process."""
+    return [sys.executable, "-m", "hrns.server.runtime"]
 
 
-def local_executable() -> str | None:
-    """Path to the ``hrns-local`` console script, or ``None`` when it is not installed."""
-    return shutil.which("hrns-local") or _sibling_script("hrns-local")
-
-
-def _load_catalog() -> LocalCatalog:
-    executable = local_executable()
-    if executable is None:
-        return LocalCatalog()
+def _load_catalog() -> AgentCatalog:
+    command = agent_command()
     try:
         completed = subprocess.run(
-            [executable, "--catalog"],
+            [*command, "--catalog"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -77,10 +61,10 @@ def _load_catalog() -> LocalCatalog:
         )
         payload = json.loads(completed.stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
-        return LocalCatalog()
+        return AgentCatalog()
     entries = payload.get("providers") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
-        return LocalCatalog()
+        return AgentCatalog()
     models_by_provider: dict[str, tuple[str, ...]] = {}
     thinking_by_provider: dict[str, dict[str, str]] = {}
     login_providers: set[str] = set()
@@ -101,14 +85,14 @@ def _load_catalog() -> LocalCatalog:
                 for model, level in thinking.items()
                 if isinstance(model, str) and level in ("supported", "always")
             }
-    return LocalCatalog(
+    return AgentCatalog(
         models=models_by_provider,
         thinking=thinking_by_provider,
         logins=frozenset(login_providers),
     )
 
 
-def _catalog() -> LocalCatalog:
+def _catalog() -> AgentCatalog:
     global _CATALOG
     if _CATALOG is not None:
         return _CATALOG
@@ -118,22 +102,22 @@ def _catalog() -> LocalCatalog:
         return _CATALOG
 
 
-def local_model_catalog() -> dict[str, tuple[str, ...]]:
+def agent_model_catalog() -> dict[str, tuple[str, ...]]:
     """Providers and model ids advertised by the installed Pydantic AI runtime.
 
-    The client never imports Pydantic AI; ``hrns-local --catalog`` reads the
+    The client never imports Pydantic AI; ``hrns agent --catalog`` reads the
     pinned runtime's registry and returns JSON. An unavailable runtime produces an
     empty catalog so the dialog can still fall back to manual provider/model input.
     """
     return _catalog().models
 
 
-def local_login_providers() -> frozenset[str]:
+def agent_login_providers() -> frozenset[str]:
     """Providers the runtime can authenticate with an account login."""
     return _catalog().logins
 
 
-def local_thinking_support(provider: str, model: str) -> str | None:
+def agent_thinking_support(provider: str, model: str) -> str | None:
     """``"supported"``, ``"always"``, ``"custom"``, or ``None``.
 
     ``provider`` is the Pydantic AI provider id, not an entry name: two entries of the
@@ -150,7 +134,7 @@ def local_thinking_support(provider: str, model: str) -> str | None:
     return "custom"
 
 
-def local_credential_available(provider: str, api_key_env: str = "") -> bool:
+def agent_credential_available(provider: str, api_key_env: str = "") -> bool:
     """Whether a provider entry can authenticate right now.
 
     An entry passes when its environment variable is set or the keyring holds a secret
@@ -161,7 +145,7 @@ def local_credential_available(provider: str, api_key_env: str = "") -> bool:
     return stored_api_key_ref(provider, api_key_env) is not None
 
 
-def _load_local(config: Path | None) -> HrnsConfig:
+def _load_agent(config: Path | None) -> HrnsConfig:
     try:
         settings = HrnsConfig(config_file=config) if config is not None else HrnsConfig()
         settings.require_model()
@@ -171,36 +155,35 @@ def _load_local(config: Path | None) -> HrnsConfig:
     return settings
 
 
-def _local_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
-    executable = local_executable()
-    if executable is None:
+def _agent_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
+    if importlib.util.find_spec("pydantic_ai") is None:
         raise HrnsClientError(
-            "Local mode requires the hrns-local command. Reinstall hrns so its "
-            "console scripts are on PATH."
+            "The built-in agent needs the server extra. Install `hrns[server]`, "
+            "or connect to a remote agent."
         )
     # The runtime reads the same document this client just read. An explicitly selected
     # file is passed through; otherwise the runtime discovers the user and project
     # documents itself, so a merged view stays merged instead of being flattened.
+    command = agent_command()
+    args = [*command[1:]]
     if settings.config_file is not None:
-        args = ["--config", str(settings.config_file.expanduser().absolute())]
-    elif config_files():
-        args = []
-    else:
-        args = ["--env-only"]
+        args.extend(["--config", str(settings.config_file.expanduser().absolute())])
+    elif not config_files():
+        args.append("--env-only")
     return Profile(
         name=f"{settings.provider}:{settings.model}",
-        command=executable,
+        command=command[0],
         args=args,
         cwd=cwd or "",
-        # Unlike generic ACP agents, the explicitly selected local runtime needs the
-        # user's provider credentials/settings (AWS, Google, proxies, etc.). Keep
-        # references here so secret values never enter profile display/storage.
+        # Unlike generic ACP agents, the built-in agent needs the user's provider
+        # credentials/settings (AWS, Google, proxies, etc.). Keep references here so
+        # secret values never enter profile display/storage.
         env={name: f"env:{name}" for name in os.environ},
     )
 
 
 def _target(settings: HrnsConfig, cwd: str | None) -> ConnectionTarget:
-    profile = _local_profile(settings, cwd)
+    profile = _agent_profile(settings, cwd)
     return ConnectionTarget(
         name=profile.name,
         kind="local",
@@ -209,18 +192,18 @@ def _target(settings: HrnsConfig, cwd: str | None) -> ConnectionTarget:
     )
 
 
-def local_detail(config: Path | None = None, cwd: str | None = None) -> str:
-    """The picker's description of the local target, without reading the keyring."""
-    return _target(_load_local(config), cwd).location_text()
+def agent_detail(config: Path | None = None, cwd: str | None = None) -> str:
+    """The picker's description of the built-in agent, without reading the keyring."""
+    return _target(_load_agent(config), cwd).location_text()
 
 
-def local_target(
+def agent_target(
     config: Path | None = None,
     cwd: str | None = None,
     *,
     api_key_ref: str | None = None,
 ) -> ConnectionTarget:
-    settings = _load_local(config)
+    settings = _load_agent(config)
     entry = settings.require_entry()
     env_has_key = bool(
         settings.api_key is not None or (entry.api_key_env and os.environ.get(entry.api_key_env))
@@ -234,5 +217,5 @@ def local_target(
             raise HrnsClientError(str(exc)) from exc
     target = _target(settings, cwd)
     if api_key_ref is not None:
-        target.profile.env["HRNS_LOCAL_API_KEY"] = api_key_ref
+        target.profile.env["HRNS_API_KEY"] = api_key_ref
     return target

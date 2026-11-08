@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Any
 from acp import RequestError
 from acp.schema import TextContentBlock
 
-from .constants import MAX_MESSAGE_BYTES
-from .errors import (
+from ..shared.errors import (
     ConnectionLost,
     HrnsClientError,
     ProtocolError,
     TransportError,
     describe_rpc_error,
 )
+from .constants import MAX_MESSAGE_BYTES
 from .events import ConfigOptionsUpdated, TurnCompleted, TurnStarted
 
 if TYPE_CHECKING:

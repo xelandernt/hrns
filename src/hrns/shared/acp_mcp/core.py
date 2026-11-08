@@ -6,7 +6,7 @@ connection-oriented prototype: ``mcp/message`` carries ``serverId`` and a
 logical ``requestId``, with no ``mcp/connect`` or ``mcp/disconnect`` exchange.
 
 The wire shape is standard ACP; the local Python SDK does not generate the
-stateless schema yet, so :mod:`hrns.acp_mcp.router` installs these routes on an
+stateless schema yet, so :mod:`hrns.shared.acp_mcp.router` installs these routes on an
 SDK connection and sends raw ``mcp/message`` frames.
 """
 

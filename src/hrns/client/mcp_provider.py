@@ -37,7 +37,7 @@ from mcp_types import (
     CallToolResult as McpCallToolResult,
 )
 
-from hrns.acp_mcp import (
+from hrns.shared.acp_mcp import (
     MCP_PROTOCOL_VERSION,
     AcpChannel,
     McpOverAcpProvider,
@@ -46,7 +46,7 @@ from hrns.acp_mcp import (
     bind_provider,
     from_mcp_server,
 )
-from hrns.config.mcp import (
+from hrns.shared.config.mcp import (
     McpServerSettings,
     McpSettings,
     build_client,

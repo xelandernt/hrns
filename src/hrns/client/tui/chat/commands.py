@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from typing import TYPE_CHECKING, Any
 
-from ...errors import ExtensionUnavailable, HrnsClientError
+from ....shared.errors import ExtensionUnavailable, HrnsClientError
 from ...launch import remote_target
 from ..commands import resolve_local_command
 from ..composer import Composer

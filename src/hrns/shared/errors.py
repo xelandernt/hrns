@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from acp import RequestError
+if TYPE_CHECKING:
+    from acp import RequestError
 
 
 class HrnsClientError(Exception):

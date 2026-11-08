@@ -8,11 +8,13 @@ for terminals and editors.
 ## Install
 
 ```sh
-uv sync --extra app
+uv sync --extra client --extra server
 ```
 
-ACP support is implemented in `hrns.app.acp`; `pydantic-ai-harness` supplies the
-coding capabilities.
+Use `--extra client` for the terminal only and `--extra server` for the agent and
+HTTP entry points; the base install provides the shared `hrns config`, `profiles`,
+and `mcp` commands. ACP support is implemented in `hrns.server.acp`;
+`pydantic-ai-harness` supplies the coding capabilities.
 
 ## Define the agent
 
@@ -39,7 +41,7 @@ binding, policy catalog, manifest, or configuration service.
 ## ACP over stdio
 
 ```python
-from hrns.app.acp import InMemorySessionStore, run_acp_stdio
+from hrns.server.acp import InMemorySessionStore, run_acp_stdio
 
 run_acp_stdio(build_agent(), session_store=InMemorySessionStore())
 ```
@@ -47,14 +49,14 @@ run_acp_stdio(build_agent(), session_store=InMemorySessionStore())
 Or use the packaged entrypoint:
 
 ```sh
-HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app acp
+HRNS_MODEL=anthropic:claude-sonnet-5-5 hrns acp
 ```
 
 ## ACP WebSocket on FastAPI
 
 ```python
 from fastapi import FastAPI
-from hrns.app.fastapi import mount_acp
+from hrns.server.fastapi import mount_acp
 
 app = FastAPI()
 mount_acp(app, lambda _principal: build_agent(), path="/acp")
@@ -72,7 +74,7 @@ advertises it when given a `model_resolver`. The resolver returns the models to 
 the first is each session's default:
 
 ```python
-from hrns.app.acp import ModelChoice, ProviderConfig, ProviderModelResolver, ResolvedModel
+from hrns.server.acp import ModelChoice, ProviderConfig, ProviderModelResolver, ResolvedModel
 
 
 class Models(ProviderModelResolver):
@@ -96,7 +98,7 @@ is what the next `resolve` builds.
 The terminal client consumes that option for remote agents. In local mode,
 `/model provider:model` saves the choice and applies it live when the runtime
 advertises the id. Without an argument, `/model` still opens the picker.
-`hrns-local` advertises every model configured in the shared configuration document
+`hrns agent` advertises every model configured in the shared configuration document
 (`config.toml`; see [Configuration](docs/configuration.md)).
 
 The terminal client can connect to that endpoint directly:
@@ -122,7 +124,7 @@ hrns run --profile team "summarize this repo"
 
 In the TUI connection picker, `n` adds a remote or stdio target and `e` edits the
 selected saved profile, including renaming it. A bare `hrns` reopens the connection you
-used last — the local model, or a saved profile by name — and only falls back to the
+used last — the built-in model, or a saved profile by name — and only falls back to the
 picker, with the reason in its status line, when that connection is gone or unreachable.
 
 Prefer `env:` or `keyring:` references: literal tokens are stored in the profile file
@@ -131,7 +133,7 @@ when a profile is saved.
 ## Run the FastAPI app
 
 ```python
-from hrns.app.fastapi import create_app
+from hrns.server.fastapi import create_app
 
 app = create_app(lambda _principal: build_agent())
 # WS /acp
@@ -140,7 +142,7 @@ app = create_app(lambda _principal: build_agent())
 Or run it:
 
 ```sh
-HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app serve --port 8000
+HRNS_MODEL=anthropic:claude-sonnet-5-5 hrns serve --port 8000
 ```
 
 ## Authentication
@@ -152,7 +154,7 @@ never produce an accepted connection.
 
 ```python
 from fastapi import WebSocket
-from hrns.app.fastapi import create_app
+from hrns.server.fastapi import create_app
 
 async def authenticate(connection: WebSocket) -> str | None:
     token = connection.headers.get("authorization")
@@ -173,8 +175,8 @@ reconnecting user can `session/load` their sessions without ever seeing another
 user's:
 
 ```python
-from hrns.app.acp import InMemorySessionStore
-from hrns.app.fastapi import create_app
+from hrns.server.acp import InMemorySessionStore
+from hrns.server.fastapi import create_app
 
 stores: dict[str, InMemorySessionStore] = {}
 
@@ -196,7 +198,7 @@ list sessions, filter by `cwd`, page with the returned cursor, and delete sessio
 A title is the first user text in the session transcript, and `updatedAt` advances
 whenever a turn is committed. A durable store opts into the same support by
 implementing `ListableSessionStore` (`save`, `load`, `remember`, and `list_sessions`)
-and `DeletableSessionStore` (`delete`) from `hrns.app.acp`.
+and `DeletableSessionStore` (`delete`) from `hrns.server.acp`.
 
 ### Client-managed providers
 
@@ -211,7 +213,7 @@ from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.settings import ModelSettings
 
-from hrns.app.acp import (
+from hrns.server.acp import (
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
@@ -269,7 +271,7 @@ untagged, and clients that ignore `_meta` still see a plain selector.
 
 Add `list_options` and `resolve_settings` to the same resolver to expose model settings
 such as reasoning effort. `list_options(model_id)` returns the values a client may pick
-(the shipped `hrns-local` builds this from `[thinking]`), and `resolve_settings` turns the
+(the shipped `hrns agent` builds this from `[thinking]`), and `resolve_settings` turns the
 session's choices into a `ModelSettings` delta applied before every model request — so an
 effort change made mid-turn lands on the next request. `ProviderModelResolver` defaults to
 no options, so a resolver that only does models needs no change.
@@ -284,15 +286,15 @@ The bundled terminal client drives this with `/providers` when the connected age
 advertises the capability: pick a provider, press `s` to send `providers/set`, or `d` to
 send `providers/disable`. The table's `Models` column lists the models the agent tags with
 that provider id, and `/models` labels each choice the same way, so you can see which
-provider a model runs through before switching. For a local `hrns-local` connection
+provider a model runs through before switching. For the built-in `hrns agent` connection
 `/providers` keeps opening the config-file editor instead, because that is where its
 provider entries come from.
 
 ## Adapter API
 
 ```python
-from hrns.app import PydanticAIACPAgent, build_agent
-from hrns.app.acp import InMemorySessionStore
+from hrns.server import PydanticAIACPAgent, build_agent
+from hrns.server.acp import InMemorySessionStore
 
 agent = build_agent("openai:gpt-6.1-sol")
 acp = PydanticAIACPAgent(agent, session_store=InMemorySessionStore())
@@ -301,14 +303,14 @@ acp = PydanticAIACPAgent(agent, session_store=InMemorySessionStore())
 The adapter is deliberately thin. It translates protocol events; it does not
 define agent behavior.
 
-## Local configuration
+## Configuration
 
-The client and the local runtime read one document: `config.toml` in the platform
+The client and server read one document: `config.toml` in the platform
 config directory, with an optional `hrns.toml` in the working directory overriding it
-key by key. `HRNS_LOCAL_*` environment variables override both.
+key by key. `HRNS_*` environment variables override both.
 [Configuration](docs/configuration.md) is the field reference and the location map.
 
-`hrns-local` launches the ACP entrypoint with the configured provider and model. The
+`hrns agent` launches the ACP entrypoint with the configured provider and model. The
 terminal client reuses that entrypoint, so it passes the same document to it.
 
 In the TUI connection picker, `l` opens provider management. Add or edit a provider
@@ -317,12 +319,12 @@ not in the TOML file. After saving a provider without an active model, the model
 picker opens so a catalog or custom id can be selected. `/model provider:model` also
 sets it directly.
 
-`/providers` acts on whatever you are connected to. Over stdio to `hrns-local` it opens
+`/providers` acts on whatever you are connected to. Over stdio to `hrns agent` it opens
 the entry editor above; connected to a remote agent that advertises provider
 configuration it lists that agent's providers and sends `providers/set` /
 `providers/disable` for you.
 
-`hrns-local` seeds its ACP provider registry from those TOML entries, so a client that
+`hrns agent` seeds its ACP provider registry from those TOML entries, so a client that
 speaks `providers/*` sees one provider per entry and can reroute it to its own gateway.
 The entry this deployment starts with is marked `required`, because disabling it would
 leave the default session without a model; the headers a client sends reach the request
@@ -330,7 +332,7 @@ as `extra_headers` model settings.
 
 ## What was removed
 
-`hrns.runtime`, `hrns.server`, `hrns.protocol`, the plugin registry, policy catalog,
+`hrns.runtime`, `hrns.protocol`, the plugin registry, policy catalog,
 manifests, SQLite/PostgreSQL session machinery, durable queue, leases, and every
 `_hrns/*` extension are gone. ACP is the only backend surface, and the terminal
 client speaks standard ACP only.

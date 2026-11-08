@@ -10,7 +10,7 @@ from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 
-from hrns.capabilities import AskUser, Coder, Todo
+from hrns.server.capabilities import AskUser, Coder, Todo
 
 from .approvals import require_approval
 
@@ -33,7 +33,7 @@ def build_agent(
     to know about them.
 
     Approval is a capability, not an adapter concern. By default every tool
-    outside :data:`hrns.app.approvals.READ_ONLY_TOOLS` is marked ``unapproved``,
+    outside :data:`hrns.server.approvals.READ_ONLY_TOOLS` is marked ``unapproved``,
     so ACP can turn it into a permission request. Pass ``approval=False`` to
     disable that policy.
     """

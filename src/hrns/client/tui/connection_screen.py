@@ -1,4 +1,4 @@
-"""Searchable connection picker for local models, ACP commands, and remote ACP."""
+"""Searchable connection picker for built-in models, ACP commands, and remote ACP."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, ListItem, ListView, Static
 
-from hrns.config import LOCAL_CONNECTION, HrnsConfig, Profile, default_config_path
+from hrns.shared.config import BUILTIN_CONNECTION, HrnsConfig, Profile, default_config_path
 
-from ..errors import HrnsClientError
+from ...shared.errors import HrnsClientError
 from ..launch import ConnectionTarget, profile_target, remote_target
-from ..local import local_detail, local_target
+from ..runtime import agent_detail, agent_target
 from .choice_keys import handle_choice_arrow
 from .dialogs import ChoiceDialog, FormDialog
-from .local import (
+from .model_setup import (
     CustomModelDialog,
     CustomModelRequest,
     ModelPick,
@@ -57,7 +57,7 @@ class ConnectScreen(_HrnsScreen):
         Binding("escape", "escape_picker", "Back", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         Binding("slash", "filter", "Filter", show=False),
-        Binding("l", "configure_local", "Local model", show=False),
+        Binding("l", "configure_local", "Built-in model", show=False),
         Binding("n", "add_target", "New target", show=False),
         Binding("e", "edit_target", "Edit target", show=False),
     ]
@@ -95,7 +95,7 @@ class ConnectScreen(_HrnsScreen):
                 yield self._detail
         yield self._status
         yield Static(
-            "l local providers · n add · e edit · / filter · r refresh · q quit",
+            "l providers · n add · e edit · / filter · r refresh · q quit",
             markup=False,
             classes="panel-hint",
             id="connect-hint",
@@ -132,16 +132,16 @@ class ConnectScreen(_HrnsScreen):
 
     def _render_entries(self) -> None:
         local_ok = True
-        detail = f"Configured {default_config_path()} or HRNS_LOCAL_* environment"
+        detail = f"Configured {default_config_path()} or HRNS_* environment"
         try:
-            detail = local_detail()
+            detail = agent_detail()
         except HrnsClientError as exc:
             local_ok = False
             detail = exc.message
         entries = [
             PickEntry(
                 kind="local",
-                label="Local model",
+                label="Built-in model",
                 detail=detail,
             )
         ]
@@ -168,7 +168,7 @@ class ConnectScreen(_HrnsScreen):
             PickEntry(
                 kind="add_stdio",
                 label="Add stdio ACP command…",
-                detail="Save a local ACP command as a profile.",
+                detail="Save an ACP command as a profile.",
             )
         )
         self.entries = entries
@@ -207,7 +207,7 @@ class ConnectScreen(_HrnsScreen):
         if not identity:
             return 0
         for index, entry in enumerate(self._visible):
-            if identity == LOCAL_CONNECTION and entry.kind == "local":
+            if identity == BUILTIN_CONNECTION and entry.kind == "local":
                 return index
             if entry.profile is not None and entry.profile.name == identity:
                 return index
@@ -276,7 +276,7 @@ class ConnectScreen(_HrnsScreen):
             self._status.update(f"error · {exc}")
             return
         if not settings.providers:
-            self._status.update("No local providers are configured.")
+            self._status.update("No providers are configured.")
             return
         if not settings.provider or not settings.model:
             self.app.push_screen(
@@ -481,7 +481,7 @@ class ConnectScreen(_HrnsScreen):
                     {
                         "name": "command",
                         "title": "Command",
-                        "description": "For example: python -m hrns.app acp --model test",
+                        "description": "For example: python -m hrns.server acp --model test",
                         "kind": "string",
                         "required": True,
                     },
@@ -537,7 +537,7 @@ class ConnectScreen(_HrnsScreen):
 
     def _connect_local(self) -> None:
         try:
-            target = local_target()
+            target = agent_target()
         except HrnsClientError as exc:
             self._status.update(f"error · {exc.message}")
             return

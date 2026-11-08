@@ -30,7 +30,7 @@ from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
-from hrns.app.acp import (
+from hrns.server.acp import (
     InMemorySessionStore,
     ModelChoice,
     ProviderConfig,
@@ -41,8 +41,8 @@ from hrns.app.acp import (
     SettingChoice,
     SettingOption,
 )
-from hrns.app.fastapi import mount_acp
-from hrns.capabilities import AskUser, Todo
+from hrns.server.capabilities import AskUser, Todo
+from hrns.server.fastapi import mount_acp
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 

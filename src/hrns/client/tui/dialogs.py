@@ -13,7 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
-from hrns.config import TuiSettings
+from hrns.shared.config import TuiSettings
 
 from ..interactions import (
     PERMISSION_MODES,

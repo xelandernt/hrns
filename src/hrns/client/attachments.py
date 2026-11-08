@@ -19,7 +19,7 @@ from typing import Any, Sequence
 
 from acp import schema
 
-from .errors import HrnsClientError
+from ..shared.errors import HrnsClientError
 
 __all__ = [
     "MAX_ATTACHMENT_BYTES",

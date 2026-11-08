@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 from acp import RequestError
 from acp.schema import Implementation
 
+from ..shared.errors import ConnectionLost, HrnsClientError, ProtocolError, TransportError
 from .constants import CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION, PROTOCOL_VERSION
-from .errors import ConnectionLost, HrnsClientError, ProtocolError, TransportError
 from .events import ConnectionEvent
 from .transport import AgentTransport, ConnectionBundle
 

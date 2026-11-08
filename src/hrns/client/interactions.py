@@ -12,9 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from hrns.config import PERMISSION_MODES
+from hrns.shared.config import PERMISSION_MODES
 
-from .errors import InteractionRejected, InteractionRequired
+from ..shared.errors import InteractionRejected, InteractionRequired
 
 __all__ = [
     "ElicitationAnswer",

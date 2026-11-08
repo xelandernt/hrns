@@ -1,6 +1,6 @@
-"""Add, edit and delete the named local provider entries.
+"""Add, edit and delete the named provider entries.
 
-Providers are the persistent unit of local configuration: each entry owns its endpoint,
+Providers are the persistent unit of configuration: each entry owns its endpoint,
 its keyring credential and its own custom model ids. ``/models`` then picks a model
 across entries, so this module never touches the active model.
 """
@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Static
 
-from hrns.config import (
+from hrns.shared.config import (
     GITHUB_COPILOT_CLIENT_ID,
     HrnsConfig,
     ProviderEntry,
@@ -31,8 +31,8 @@ from hrns.config import (
     stored_secret,
 )
 
-from ..local import local_login_providers, local_model_catalog
 from ..login import LoginResult, LoginTarget
+from ..runtime import agent_login_providers, agent_model_catalog
 from .dialogs import ConfirmDialog, FormDialog, _collect_fields, _DialogBase
 from .login import DeviceLoginDialog
 
@@ -44,7 +44,7 @@ __all__ = [
     "save_entries",
 ]
 
-#: Used only when ``hrns-local`` is unavailable; the runtime normally supplies the list.
+#: Used only when the built-in agent is unavailable; the runtime normally supplies the list.
 _FALLBACK_PROVIDERS = (
     "deepseek",
     "openai",
@@ -89,7 +89,7 @@ class SavedEntry:
 
 def provider_choices() -> list[tuple[str, str]]:
     """Pydantic AI provider ids the runtime knows, most useful first."""
-    identifiers = list(local_model_catalog())
+    identifiers = list(agent_model_catalog())
     for name in _FALLBACK_PROVIDERS:
         if name not in identifiers:
             identifiers.append(name)
@@ -169,7 +169,7 @@ class ProviderFormDialog(FormDialog):
         self.settings = settings
         self.current = current
         self.path: Path | None = None
-        self._login_providers = local_login_providers()
+        self._login_providers = agent_login_providers()
         entry = settings.entry(current) if current is not None else None
         provider_id = entry.provider_id(current) if entry is not None and current else ""
         default_type = provider_id or _DEFAULT_PROVIDER
@@ -251,9 +251,9 @@ class ProviderFormDialog(FormDialog):
             "An entry groups one endpoint and its credential. Models are chosen separately "
             "with /models, which can also add custom model ids to an entry."
         )
-        if not local_model_catalog():
+        if not agent_model_catalog():
             text += (
-                " The hrns-local catalog could not be read, so no provider ids are suggested; "
+                " The built-in agent catalog could not be read, so no provider ids are suggested; "
                 "type them directly."
             )
         return text
@@ -421,7 +421,7 @@ class ProvidersDialog(_DialogBase):
         table = self.query_one("#provider-table", DataTable)
         table.clear()
         self._names = []
-        catalog = local_model_catalog()
+        catalog = agent_model_catalog()
         for name in sorted(self.settings.providers):
             entry = self.settings.providers[name]
             marker = "●" if name == self.settings.provider else " "

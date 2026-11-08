@@ -1,6 +1,6 @@
-"""``hrns clean``: delete local session history and, on request, the local config.
+"""``hrns clean``: delete session history and, on request, the configuration.
 
-Only local, hrns-owned files are removed. Session history is the default target; the
+Only hrns-owned files on this machine are removed. Session history is the default target; the
 provider configuration is deleted only when it is selected interactively or with
 ``--config``. Stored credentials follow the configuration only when asked for, and
 sessions hosted on a remote server are never touched.
@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .errors import HrnsClientError
-from .headless import EXIT_OK
+from .exit_codes import EXIT_OK
 
 __all__ = [
     "ConfigArtifact",
@@ -30,7 +30,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class SessionArtifact:
-    """One local SQLite database that stores ACP sessions."""
+    """One SQLite database that stores ACP sessions."""
 
     label: str
     path: Path
@@ -38,7 +38,7 @@ class SessionArtifact:
 
 @dataclass(frozen=True, slots=True)
 class ConfigArtifact:
-    """One local provider configuration file and the entries it declares."""
+    """One provider configuration file and the entries it declares."""
 
     label: str
     path: Path
@@ -47,13 +47,13 @@ class ConfigArtifact:
 
 
 def _client_store_path() -> Path:
-    """The local developer agent's session database."""
+    """The built-in agent.s session database."""
     try:
-        from hrns.config import HrnsConfig
+        from hrns.shared.config import HrnsConfig
 
         return Path(HrnsConfig().store).expanduser()
     except Exception:
-        # A broken local config must not block cleanup; fall back to the default.
+        # A broken configuration must not block cleanup; fall back to the default.
         from platformdirs import user_data_path
 
         return user_data_path("hrns") / "local-sessions.db"
@@ -64,7 +64,7 @@ def _runtime_store_path() -> Path | None:
     explicit = os.environ.get("HRNS_STORE")
     if explicit:
         if urlsplit(explicit).scheme in {"postgres", "postgresql"}:
-            # Dropping a PostgreSQL database is never an implicit local cleanup.
+            # Dropping a PostgreSQL database is never an implicit cleanup.
             return None
         return Path(explicit).expanduser()
     from platformdirs import user_data_dir
@@ -73,7 +73,7 @@ def _runtime_store_path() -> Path | None:
 
 
 def session_artifacts() -> list[SessionArtifact]:
-    """Existing local session databases, deduplicated by resolved path."""
+    """Existing session databases, deduplicated by resolved path."""
     candidates: list[tuple[str, Path]] = [("local sessions", _client_store_path())]
     runtime_path = _runtime_store_path()
     if runtime_path is not None:
@@ -91,7 +91,7 @@ def session_artifacts() -> list[SessionArtifact]:
 
 def _config_candidates() -> list[tuple[str, Path]]:
     """The project file and the user file, in the order the runtime reads them."""
-    from hrns.config import default_config_path, project_config_path
+    from hrns.shared.config import default_config_path, project_config_path
 
     return [
         ("project config", project_config_path()),
@@ -123,7 +123,7 @@ def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
 
 
 def config_artifacts() -> list[ConfigArtifact]:
-    """Existing local provider configuration files, deduplicated by resolved path."""
+    """Existing provider configuration files, deduplicated by resolved path."""
     artifacts: list[ConfigArtifact] = []
     seen: set[Path] = set()
     for label, path in _config_candidates():
@@ -137,7 +137,7 @@ def config_artifacts() -> list[ConfigArtifact]:
 
 def _stored_accounts(artifact: ConfigArtifact) -> list[str]:
     """Keyring accounts of this file's entries that currently hold a secret."""
-    from hrns.config.credentials import keyring_account, stored_secret
+    from hrns.shared.config.credentials import keyring_account, stored_secret
 
     accounts: list[str] = []
     for name, api_key_env in artifact.entries:
@@ -234,15 +234,15 @@ def clean(
     config: bool = False,
     keys: bool = False,
 ) -> int:
-    """Delete local session history and, when selected, the local provider config."""
+    """Delete session history and, when selected, the provider config."""
     sessions = session_artifacts()
     configs = config_artifacts()
     if not sessions and not configs:
-        print("Nothing to clean: no local session history or provider config found.")
+        print("nothing to clean: no session history or provider config found.")
         return EXIT_OK
 
     if sessions:
-        print("This permanently deletes local session history:")
+        print("This permanently deletes session history:")
         for artifact in sessions:
             print(_describe(artifact))
     if configs:
@@ -264,7 +264,7 @@ def clean(
         remove_config = _confirm("Delete the provider configuration? [y/N] ")
     if not interactive and sessions and not assume_yes:
         raise HrnsClientError(
-            "Refusing to delete local session history without confirmation in a "
+            "Refusing to delete session history without confirmation in a "
             "non-interactive shell. Re-run with `--yes`, and add `--config` to delete "
             "the provider configuration too."
         )
@@ -303,19 +303,17 @@ def clean(
             count, problems = _remove(_files_for(artifact))
             removed += count
             failures.extend(problems)
-        print(f"Removed local session history ({removed} file{'s' if removed != 1 else ''}).")
+        print(f"Removed session history ({removed} file{'s' if removed != 1 else ''}).")
     if remove_config:
         deleted = 0
         for artifact in configs:
             count, problems = _remove([artifact.path])
             deleted += count
             failures.extend(problems)
-        print(
-            f"Removed local provider configuration ({deleted} file{'s' if deleted != 1 else ''})."
-        )
+        print(f"Removed provider configuration ({deleted} file{'s' if deleted != 1 else ''}).")
     forgotten = 0
     if remove_keys:
-        from hrns.config.credentials import delete_secret, stored_secret
+        from hrns.shared.config.credentials import delete_secret, stored_secret
 
         for account in accounts:
             delete_secret(account)

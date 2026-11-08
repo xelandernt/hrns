@@ -5,17 +5,18 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from hrns.config import Profile
+from hrns.shared.config import Profile
 
-from .constants import CONNECT_TIMEOUT
-from .errors import HrnsClientError
-from .transport import (
-    AgentTransport,
-    StdioAgentTransport,
-    WebSocketAgentTransport,
-    check_websocket_url,
-)
+from ..shared.errors import HrnsClientError
+from ..shared.urls import check_websocket_url
+
+if TYPE_CHECKING:
+    from .transport import AgentTransport
+
+#: Default connect bound, kept here so base profile commands stay dependency-light.
+CONNECT_TIMEOUT = 20.0
 
 __all__ = [
     "ConnectionTarget",
@@ -120,6 +121,8 @@ def remote_target(
 
 def transport_for(target: ConnectionTarget) -> AgentTransport:
     """Build the transport for a resolved target. A new instance every reconnect."""
+    from .transport import StdioAgentTransport, WebSocketAgentTransport
+
     profile = target.profile
     if target.kind == "remote":
         return WebSocketAgentTransport(

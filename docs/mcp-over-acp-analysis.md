@@ -3,10 +3,10 @@
 Status: working analysis, 2026-11-07. Not a decision record yet.
 
 Implementation status: the stateless binding primitives live in
-`src/hrns/acp_mcp/` (`McpOverAcpCaller`, `McpOverAcpProvider`,
+`src/hrns/shared/acp_mcp/` (`McpOverAcpCaller`, `McpOverAcpProvider`,
 `from_mcp_server`, `AcpMcpClientTransport`, and the local Python SDK route
 shim). The client provider (`ClientMcpProvider`), the `[mcp].export` switch,
-the agent-side `acp_mcp_toolsets` helper, and `hrns-local` session wiring are
+the agent-side `acp_mcp_toolsets` helper, and `hrns agent` session wiring are
 in place. Export is gated by client consent at session start, with
 `always_allow` for pre-approved and headless use. Startup and authentication
 failures are surfaced in the `/mcp` side panel and as transcript notices and a
@@ -64,18 +64,18 @@ The important consequences:
 
 ### In this repository
 
-- `src/hrns/app/acp/session.py` already carries
+- `src/hrns/server/acp/session.py` already carries
   `AcpMcpServer | HttpMcpServer | SseMcpServer | McpServerStdio` in
   `AcpSession.mcp_servers`.
-- `src/hrns/app/acp/adapter.py` already passes `mcp_servers` to
-  `session_config`, but nothing implements `session_config`; `hrns-local`,
+- `src/hrns/server/acp/adapter.py` already passes `mcp_servers` to
+  `session_config`, but nothing implements `session_config`; `hrns agent`,
   `build_agent`, and the FastAPI example pass none, so a non-empty
   `mcpServers` is rejected with `invalid_params`.
 - `src/hrns/client/session.py` always sends `mcp_servers=[]`.
-- `src/hrns/config/mcp.py` already models `[mcp.servers.<name>]` with `command`
+- `src/hrns/shared/config/mcp.py` already models `[mcp.servers.<name>]` with `command`
   (stdio) or `url` (HTTP/SSE), OAuth, token storage, and FastMCP transport
   construction. Today only the `hrns mcp` CLI consumes it.
-- `src/hrns/app/acp/toolsets.py` is the pattern for client-backed tools
+- `src/hrns/server/acp/toolsets.py` is the pattern for client-backed tools
   (`acp_filesystem`, `acp_terminal`): the adapter supplies the connection, the
   helper builds a toolset, and `session_config` decides whether to use it.
 
@@ -182,7 +182,7 @@ AcpMcpProvider (connection-scoped)
 
 - the user-facing name (`project-tools`, `playwright`, ...);
 - the upstream MCP client (`fastmcp.Client` built from
-  `hrns.config.mcp.build_transport`);
+  `hrns.shared.config.mcp.build_transport`);
 - the downstream server (`mcp.server.lowlevel.Server` or `MCPServer`) whose
   handlers proxy to the upstream client;
 - the process/connection lifecycle.
@@ -305,7 +305,7 @@ Risks:
 - error mapping and cancellation must be reimplemented at the shim boundary.
 
 Mitigation: isolate everything in one module (for example
-`src/hrns/app/acp/mcp_binding.py`, plus the client-side counterpart), pin
+`src/hrns/server/acp/mcp_binding.py`, plus the client-side counterpart), pin
 `agent-client-protocol`, and add a compatibility test that asserts the router
 shape at startup. Remove the shim when the upstream issue lands.
 

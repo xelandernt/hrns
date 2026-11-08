@@ -12,11 +12,11 @@ from textual.app import App
 from textual.binding import Binding
 from textual.theme import Theme
 
-from hrns.config import HrnsConfig, McpServerSettings, TuiSettings
-from hrns.config.mcp import server_target
+from hrns.shared.config import HrnsConfig, McpServerSettings, TuiSettings
+from hrns.shared.config.mcp import server_target
 
-from ..client import HrnsAcpClient, SessionProxy
-from ..errors import HrnsClientError, InteractionRequired, TransportError
+from ...shared.errors import HrnsClientError, InteractionRequired, TransportError
+from ..client import HrnsAcpClient
 from ..interactions import (
     ElicitationAnswer,
     ElicitationRequest,
@@ -27,8 +27,9 @@ from ..interactions import (
 )
 from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
-from ..local import local_model_catalog
 from ..mcp_provider import ClientMcpProvider, ConsentDecision
+from ..runtime import agent_model_catalog
+from ..session import SessionProxy
 from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
 from .dialogs import ChoiceDialog, ElicitationDialog, PermissionDialog
@@ -722,7 +723,7 @@ class HrnsApp(App[int]):
     @work(thread=True, group="local-catalog", exclusive=True)
     def _warm_local_catalog(self) -> None:
         """Load the Pydantic AI provider/model catalog before the dialog opens."""
-        local_model_catalog()
+        agent_model_catalog()
 
     def _mcp_provider(self) -> ClientMcpProvider:
         return ClientMcpProvider(

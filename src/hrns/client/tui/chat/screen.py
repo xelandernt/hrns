@@ -14,10 +14,10 @@ from textual.containers import Horizontal
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from hrns.config import HrnsConfig
+from hrns.shared.config import HrnsConfig
 
+from ....shared.errors import HrnsClientError
 from ...client import HrnsAcpClient, SessionProxy
-from ...errors import HrnsClientError
 from ...events import (
     AgentTextChunk,
     CommandsUpdated,
@@ -41,12 +41,12 @@ from ...interactions import (
 from ...launch import ConnectionTarget
 from ..choice_keys import handle_choice_arrow
 from ..completion import FileIndex
-from ..local import LocalModelResult
+from ..model_setup import ModelSetupResult
 
 if TYPE_CHECKING:
     pass
 
-from hrns.config import TuiSettings
+from hrns.shared.config import TuiSettings
 
 from ..approval import ApprovalBar
 from ..chat.commands import CommandWorkflow
@@ -636,7 +636,7 @@ class ChatScreen(_HrnsScreen):
         await self.models.set_local_effort(settings, effort)
 
     @work(exit_on_error=False, group="model", exclusive=True)
-    async def _apply_model_settings_worker(self, result: LocalModelResult) -> None:
+    async def _apply_model_settings_worker(self, result: ModelSetupResult) -> None:
         await self.models.apply_model_settings(result)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:

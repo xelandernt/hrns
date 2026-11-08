@@ -17,7 +17,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from hrns.config import (
+from hrns.shared.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
     THINKING_LEVELS,
@@ -25,14 +25,14 @@ from hrns.config import (
     ProviderEntry,
 )
 
-from ..local import local_model_catalog, local_thinking_support
+from ..runtime import agent_model_catalog, agent_thinking_support
 from .dialogs import FormDialog, _DialogBase
 
 __all__ = [
     "CustomModelDialog",
     "CustomModelRequest",
     "EFFORT_LABELS",
-    "LocalModelResult",
+    "ModelSetupResult",
     "ModelPick",
     "ModelPickerDialog",
     "effort_choices",
@@ -43,8 +43,8 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class LocalModelResult:
-    """Saved local model settings plus the identity needed by the caller."""
+class ModelSetupResult:
+    """Saved model settings plus the identity needed by the caller."""
 
     path: Path
     provider: str
@@ -112,7 +112,7 @@ def effort_values(support: str | None) -> tuple[str, ...]:
 
 def effort_choices(provider_id: str, model: str) -> list[dict[str, str]]:
     """ChoiceDialog payload for the effort step; the dialog marks the current value."""
-    support = local_thinking_support(provider_id, model)
+    support = agent_thinking_support(provider_id, model)
     return [
         {"value": value, "name": EFFORT_LABELS[value][0], "description": EFFORT_LABELS[value][1]}
         for value in effort_values(support)
@@ -147,7 +147,7 @@ class ModelPickerDialog(_DialogBase):
     def __init__(self, settings: HrnsConfig, *, subtitle: str = "") -> None:
         super().__init__("Models", subtitle or "The selection applies to the next message.")
         self.settings = settings
-        self.catalog = local_model_catalog()
+        self.catalog = agent_model_catalog()
         self._rows: dict[str, _Row] = {}
         self._filter = Input(placeholder="Filter providers and models…", id="model-filter")
         self._list = OptionList(id="model-options", markup=False)

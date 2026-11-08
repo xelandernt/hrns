@@ -3,7 +3,7 @@
 The agent side of the binding is an ordinary MCP client: FastMCP's
 ``MCPToolset`` (or any MCP client) expects a ``ClientSession``. This transport
 gives it one, then pumps the session's JSON-RPC frames through
-:class:`~hrns.acp_mcp.core.McpOverAcpCaller` and the ACP connection.
+:class:`~hrns.shared.acp_mcp.core.McpOverAcpCaller` and the ACP connection.
 """
 
 from __future__ import annotations

@@ -10,7 +10,7 @@ from typing import Protocol, runtime_checkable
 from acp import schema
 from pydantic_ai.messages import ModelMessage
 
-from hrns.capabilities import TodoItem
+from hrns.server.capabilities import TodoItem
 
 from .session import SessionUpdate
 

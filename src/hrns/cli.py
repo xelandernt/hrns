@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
@@ -16,9 +17,12 @@ from typing import Annotated, Any, Literal
 import tomli_w
 from cyclopts import App, CycloptsError, Parameter
 
-from ..config import (
+from ._version import __version__
+from .client.launch import ConnectionTarget, local_cwd, profile_target, transport_for
+from .client.runtime import agent_target
+from .shared.config import (
+    BUILTIN_CONNECTION,
     KEYRING_SERVICE,
-    LOCAL_CONNECTION,
     HrnsConfig,
     McpOAuthConfig,
     McpServerSettings,
@@ -28,7 +32,7 @@ from ..config import (
     project_config_path,
     stored_api_key_ref,
 )
-from ..config.mcp import (
+from .shared.config.mcp import (
     MCP_NAME_PATTERN,
     build_client,
     build_token_store,
@@ -36,16 +40,9 @@ from ..config.mcp import (
     default_token_store_path,
     server_target,
 )
-from ._version import __version__
-from .client import HrnsAcpClient
-from .errors import HrnsClientError, InteractionRequired
-from .headless import EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run_headless
-from .interactions import HeadlessInteractions
-from .io import parse_client_io
-from .launch import ConnectionTarget, local_cwd, profile_target, transport_for
-from .local import local_target
-from .login import DeviceAuthorization, login, login_target
-from .transport import check_websocket_url
+from .shared.errors import HrnsClientError, InteractionRequired
+from .shared.exit_codes import EXIT_FAILURE, EXIT_OK, EXIT_USAGE
+from .shared.urls import check_websocket_url
 
 __all__ = ["main", "build_parser"]
 
@@ -60,7 +57,7 @@ ConfigOption = Annotated[
         metavar="PATH",
         help=(
             "Read one configuration file instead of merging the user and project "
-            "documents. Also HRNS_LOCAL_CONFIG_FILE."
+            "documents. Also HRNS_CONFIG_FILE."
         ),
     ),
 ]
@@ -233,9 +230,69 @@ def _clean_command(
     config: bool = False,
     keys: bool = False,
 ) -> int:
-    from .clean import clean
+    from .shared.clean import clean
 
     return clean(assume_yes=yes, dry_run=dry_run, config=config, keys=keys)
+
+
+def _agent_command(
+    *,
+    config: ConfigOption = None,
+    env_only: Annotated[
+        bool,
+        Parameter(help="Ignore the configuration file and use environment variables only."),
+    ] = False,
+    catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
+    login: Annotated[bool, Parameter(help="Account login (not supported).")] = False,
+    cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+) -> int:
+    _require_server_extra()
+    from .server.runtime import run as run_agent
+
+    run_agent(config=config, env_only=env_only, catalog=catalog, login=login, cwd=cwd)
+    return EXIT_OK
+
+
+def _acp_command(
+    *,
+    model: Annotated[
+        str | None, Parameter(help="Pydantic AI model id; defaults to HRNS_MODEL.")
+    ] = None,
+    cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+) -> int:
+    _require_server_extra()
+    from .server.acp import run_acp_stdio
+    from .server.agent import build_agent
+
+    run_acp_stdio(build_agent(model, cwd=cwd))
+    return EXIT_OK
+
+
+def _serve_command(
+    *,
+    model: Annotated[
+        str | None, Parameter(help="Pydantic AI model id; defaults to HRNS_MODEL.")
+    ] = None,
+    cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> int:
+    _require_server_extra()
+    if importlib.util.find_spec("uvicorn") is None or importlib.util.find_spec("fastapi") is None:
+        raise HrnsClientError(
+            "Serving over WebSocket needs the server extra. "
+            "Install it with `pip install 'hrns[server]'`."
+        )
+    import uvicorn
+
+    from .server.agent import build_agent
+    from .server.fastapi import create_app
+
+    def agent_factory(_principal: object):
+        return build_agent(model, cwd=cwd)
+
+    uvicorn.run(create_app(agent_factory), host=host, port=port)
+    return EXIT_OK
 
 
 def _mcp_add_command(
@@ -321,13 +378,14 @@ def _mcp_logout_command(name: str, *, config: ConfigOption = None) -> int:
 def _register_commands(app: App) -> None:
     app.command(_connect_command, name="connect", help="Open the full-screen terminal")
     app.command(_run_command, name="run", help="Run one prompt headlessly and print the result")
-    app.command(
-        _login_command, name="login", help="Sign in to a local provider with an account login"
-    )
+    app.command(_agent_command, name="agent", help="Run the configured agent over ACP stdio")
+    app.command(_acp_command, name="acp", help="Run an agent over ACP stdio")
+    app.command(_serve_command, name="serve", help="Serve the agent over WebSocket and FastAPI")
+    app.command(_login_command, name="login", help="Sign in to a provider with an account login")
     app.command(
         _clean_command,
         name="clean",
-        help="Delete local session history and, with --config, the local provider config",
+        help="Delete session history and, with --config, the provider config",
     )
 
     profiles = App(name="profiles", help="Manage saved connection profiles")
@@ -338,7 +396,13 @@ def _register_commands(app: App) -> None:
     app.command(profiles)
 
     config_app = App(name="config", help="Show and inspect the effective configuration")
-    config_app.default(_config_show_command)
+
+    def config_help() -> int:
+        config_app.help_print()
+        return EXIT_OK
+
+    config_app.default(config_help)
+    config_app.command(_config_show_command, name="show", help="Print the effective configuration")
     config_app.command(
         _config_path_command, name="path", help="Print the source files, one per line"
     )
@@ -350,7 +414,7 @@ def _register_commands(app: App) -> None:
     )
     app.command(config_app)
 
-    mcp = App(name="mcp", help="Manage MCP servers for the local agent")
+    mcp = App(name="mcp", help="Manage MCP servers for the built-in agent")
 
     def mcp_help() -> int:
         mcp.help_print()
@@ -414,6 +478,30 @@ def _config(args: SimpleNamespace) -> HrnsConfig:
     """Read the configuration; no explicit file means the user and project merge."""
     path = getattr(args, "config", None)
     return HrnsConfig(config_file=path) if path is not None else HrnsConfig()
+
+
+def _require_client_extra() -> None:
+    """Fail with an install hint instead of an ImportError from a missing extra."""
+    if all(
+        importlib.util.find_spec(name) is not None
+        for name in ("textual", "acp", "websockets", "fastmcp")
+    ):
+        return
+    raise HrnsClientError(
+        "This command needs the client extra. Install it with `pip install 'hrns[client]'`."
+    )
+
+
+def _require_server_extra() -> None:
+    """Fail with an install hint instead of an ImportError from a missing extra."""
+    if all(
+        importlib.util.find_spec(name) is not None
+        for name in ("pydantic_ai", "pydantic_ai_harness", "acp", "mcp", "fastmcp")
+    ):
+        return
+    raise HrnsClientError(
+        "This command needs the server extra. Install it with `pip install 'hrns[server]'`."
+    )
 
 
 @dataclass(frozen=True)
@@ -584,10 +672,10 @@ def _config_keys(args: SimpleNamespace) -> int:
         account = keyring_account(name, entry.api_key_env)
         ref = stored_api_key_ref(name, entry.api_key_env)
         active = name == settings.provider
-        local_secret = settings.api_key.get_secret_value() if active and settings.api_key else None
-        local_kind = ""
-        if local_secret is not None:
-            local_kind = "reference" if local_secret.startswith(("env:", "keyring:")) else "literal"
+        agent_secret = settings.api_key.get_secret_value() if active and settings.api_key else None
+        agent_kind = ""
+        if agent_secret is not None:
+            agent_kind = "reference" if agent_secret.startswith(("env:", "keyring:")) else "literal"
         providers.append(
             {
                 "provider": name,
@@ -598,8 +686,8 @@ def _config_keys(args: SimpleNamespace) -> int:
                 "keyringAccount": account,
                 "keyringRef": ref or f"keyring:{KEYRING_SERVICE}/{account}",
                 "keyringStored": ref is not None,
-                "hrnsLocalApiKey": local_secret is not None,
-                "hrnsLocalApiKeyKind": local_kind,
+                "hrnsApiKey": agent_secret is not None,
+                "hrnsApiKeyKind": agent_kind,
             }
         )
     if args.json:
@@ -629,10 +717,10 @@ def _config_keys(args: SimpleNamespace) -> int:
         else:
             print("  env:     (no api_key_env configured)")
         if item["active"]:
-            local = "set" if item["hrnsLocalApiKey"] else "not set"
-            kind = str(item["hrnsLocalApiKeyKind"] or "")
+            local = "set" if item["hrnsApiKey"] else "not set"
+            kind = str(item["hrnsApiKeyKind"] or "")
             suffix = f", {kind}" if kind else ""
-            print(f"  HRNS_LOCAL_API_KEY: {local}{suffix}")
+            print(f"  HRNS_API_KEY: {local}{suffix}")
     print("\nValues are never printed by this command.")
     return EXIT_OK
 
@@ -719,7 +807,7 @@ async def _resolve_target(
             raise HrnsClientError(
                 "A command was supplied without --stdio. Use `--stdio -- CMD ARGS`."
             )
-        return local_target(getattr(args, "config", None), cwd_override)
+        return agent_target(getattr(args, "config", None), cwd_override)
     command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
     if stdio_requested:
         profile = _stdio_profile("cli", command, cwd_override)
@@ -751,8 +839,8 @@ def _remembered_target(config: HrnsConfig, args: SimpleNamespace) -> ConnectionT
     if not identity:
         return None
     cwd = getattr(args, "cwd", None)
-    if identity == LOCAL_CONNECTION:
-        return local_target(getattr(args, "config", None), cwd)
+    if identity == BUILTIN_CONNECTION:
+        return agent_target(getattr(args, "config", None), cwd)
     profile = config.profile.get(identity)
     if profile is None:
         config.forget_connection()
@@ -777,6 +865,12 @@ def _answers(args: SimpleNamespace) -> dict[str, Any]:
 
 
 async def _command_run(args: SimpleNamespace) -> int:
+    _require_client_extra()
+    from .client.client import HrnsAcpClient
+    from .client.headless import run_headless
+    from .client.interactions import HeadlessInteractions
+    from .client.io import parse_client_io
+
     config = _config(args)
     if args.stdio:
         command, prompt_words = _split_stdio_remainder(args.remainder)
@@ -801,7 +895,7 @@ async def _command_run(args: SimpleNamespace) -> int:
     client_io = args.client_io or target.profile.client_io
     if client_io is None and args.session and args.cwd is None:
         client_io = "off"
-    from .mcp_provider import ClientMcpProvider
+    from .client.mcp_provider import ClientMcpProvider
 
     client = HrnsAcpClient(
         lambda: transport_for(target),
@@ -875,6 +969,10 @@ def _command_profiles(args: SimpleNamespace) -> int:
 
 
 async def _command_login(args: SimpleNamespace) -> int:
+    _require_client_extra()
+    _require_server_extra()
+    from .client.login import DeviceAuthorization, login, login_target
+
     target = login_target(args.provider, args.config)
     print(f"Signing in to {target.provider} (account {target.account})", flush=True)
 
@@ -901,7 +999,9 @@ async def _command_login(args: SimpleNamespace) -> int:
 
 
 def _command_connect(args: SimpleNamespace) -> int:
-    from .tui.app import run_terminal
+    _require_client_extra()
+    from .client.io import parse_client_io
+    from .client.tui.app import run_terminal
 
     config = _config(args)
     preselect: ConnectionTarget | None = None

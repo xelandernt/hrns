@@ -5,13 +5,18 @@
 All command-line entry points are built with [Cyclopts](https://cyclopts.readthedocs.io/).
 Do not add `argparse`, Click, or Typer parsers.
 
-- `hrns` — `src/hrns/client/cli.py` is the main Cyclopts `App` (commands such as
-  `connect`, `run`, `profiles`, and `mcp`). It is exposed through
-  `hrns.client.cli:main`.
-- `hrns-app` — `src/hrns/app/__main__.py` registers `acp` and `serve` as
-  `@app.command` functions. It is exposed through `hrns.app.__main__:main`.
-- `hrns-local` — `src/hrns/app/local.py` uses a Cyclopts `App` with `run` as its
-  default command. It is exposed through `hrns.app.local:main`.
+- `hrns` — `src/hrns/cli.py` is the one Cyclopts `App`. It registers the client
+  commands (`connect`, `run`, `login`), the server commands (`agent`, `acp`,
+  `serve`), and the shared commands (`config`, `profiles`, `mcp`, `clean`). It is
+  exposed through `hrns.cli:main`.
+- `src/hrns/client/` holds the terminal, headless runner, transports, and the
+  built-in agent launcher; it never imports the server package.
+- `src/hrns/server/` holds the Pydantic AI agent, capabilities, ACP adapter, and
+  FastAPI mount.
+- `src/hrns/shared/` holds the configuration document, credentials, MCP-over-ACP
+  binding, errors, and URL validation used by both sides.
+- `hrns.server.runtime` also exposes its own Cyclopts `App` with `run` as the
+  default command, so `python -m hrns.server.runtime` remains usable.
 
 Commands are plain functions with typed keyword arguments; Cyclopts derives
 options, types, defaults, and help text from those signatures. Parameter help is
@@ -19,7 +24,7 @@ declared inline with `Annotated[..., Parameter(help="...")]`. Each module expose
 a `main()` that calls its `App`, which keeps the `[project.scripts]` targets
 unchanged.
 
-`hrns.client.cli` uses `types.SimpleNamespace` as an internal argument container
+`hrns.cli` uses `types.SimpleNamespace` as an internal argument container
 for its command implementations, so the codebase has no `argparse` dependency at
 all.
 
@@ -27,7 +32,7 @@ all.
 
 `agent-client-protocol` is pinned to the 1.0 release candidate (`>=1.0.0rc3,<2`).
 That release provides the full ACP v1 method table, including `session/delete`.
-`hrns` implements the adapter itself in `src/hrns/app/acp/`, derived from the design
+`hrns` implements the adapter itself in `src/hrns/server/acp/`, derived from the design
 of `pydantic-ai-harness`'s experimental ACP adapter but targeting ACP 1.x directly.
 
 `pydantic-ai-harness`'s `[acp]` extra still declares `agent-client-protocol<0.12`,
@@ -44,7 +49,7 @@ until their features exist (see `TODO.md`).
 
 ## MCP over ACP
 
-`src/hrns/acp_mcp/` implements the stateless MCP-over-ACP binding for MCP
+`src/hrns/shared/acp_mcp/` implements the stateless MCP-over-ACP binding for MCP
 2026-07-28. It targets the current ACP RFD, not the Python SDK's older
 `mcp/connect` / `connectionId` prototype: every `mcp/message` carries a
 `serverId` and a logical `requestId`, and each request carries its MCP version
@@ -76,7 +81,7 @@ and serves the upstream session through `from_mcp_server`; the client includes
 the resulting declarations in `session/new`. On the agent, `acp_mcp_toolsets`
 turns every client declaration into an ordinary `MCPToolset`: standard
 stdio/HTTP/SSE entries connect directly, while `type: "acp"` entries use
-`AcpMcpClientTransport` over the session's caller. `hrns-local` installs that
+`AcpMcpClientTransport` over the session's caller. `hrns agent` installs that
 session config and advertises `mcpCapabilities.acp`.
 
 Upstream revision is best-effort, not a second supported binding.
@@ -106,7 +111,7 @@ The feasibility analysis, work breakdown, and open decisions live in
 ## ACP models and provider configuration
 
 One object answers everything ACP asks about models: `ModelResolver`
-(`src/hrns/app/acp/models.py`). ACP has no model methods — models are a session config
+(`src/hrns/server/acp/models.py`). ACP has no model methods — models are a session config
 option — and provider routing is three methods that reroute them, so the two live
 together. `list_models()` supplies the `model` option and the ids a client may select,
 `resolve()` turns a selection into a runnable model and the settings that choice needs,
@@ -120,13 +125,13 @@ The adapter advertises both the model option and the `providers` capability exac
 resolver is supplied. `ProviderModelResolver` is the base a resolver subclasses: it owns
 the provider state (`InMemoryProviderRegistry`) and implements `resolve` so the model's own
 provider config is what builds it, leaving `list_models` and `build_model` to the subclass.
-`LocalModelResolver` in `hrns-local` seeds it from the TOML provider entries, derives model
+`RuntimeModelResolver` in `hrns agent` seeds it from the TOML provider entries, derives model
 ids from `settings.model_targets()`, and raises `ProviderDisabled` instead of silently
 falling back to a configured endpoint.
 
 ACP's provider payload reports routing endpoints, not the models behind them, so the
 model→provider link travels separately: each `ModelChoice.provider_id` becomes
-`_meta.providerId` on the model option. `hrns-local` derives it from the `entry:model` id;
+`_meta.providerId` on the model option. `hrns agent` derives it from the `entry:model` id;
 the client's `/providers` table groups the option's values by that tag, and `/models`
 appends it to any model name that does not already read `provider:model`.
 
@@ -135,7 +140,7 @@ appends it to any model name that does not already read `provider:model`.
 Settings are the same object's second surface, because they have the same owner as models
 and routing. `list_options(model_id)` advertises the non-model options a deployment allows
 for a model — the shipped effort ladder is a `thought_level` select built by
-`LocalModelResolver` — and `resolve_settings(model_id, setting_selections)` turns session
+`RuntimeModelResolver` — and `resolve_settings(model_id, setting_selections)` turns session
 selections into a `ModelSettings` **delta**. The adapter merges that delta over
 `ResolvedModel.settings` and the agent's own settings on every model request: passing a
 callable `model_settings` is what lets `session/set_config_option` land on the next request
@@ -149,7 +154,7 @@ snapshot the options before mutating resolver state and send `config_option_upda
 resident session whose list changed, because nothing else tells such a client its choices
 shrank.
 
-`hrns-local` reads the policy from `[thinking]` (`levels`, `allow_off`) and intersects it
+`hrns agent` reads the policy from `[thinking]` (`levels`, `allow_off`) and intersects it
 with the model's profile via `infer_model_profile`, so a model that cannot reason gets no
 option and an always-on model does not offer `off`. `[model_settings].thinking` remains the
 agent-level baseline; the runtime refuses to start if it names a level the policy does not
@@ -195,9 +200,9 @@ the slot never implies a remote connection that is not there.
 
 ## One configuration document
 
-`src/hrns/config/settings.py` holds `HrnsConfig`, the single pydantic-settings model both
+`src/hrns/shared/config/settings.py` holds `HrnsConfig`, the single pydantic-settings model both
 sides of the project read. The alternative — a client model for `profiles.toml` and a
-runtime model for `hrns.local.toml` — meant two schemas, two loaders, and two answers to
+runtime model for `hrns.toml` — meant two schemas, two loaders, and two answers to
 "what is configured?"; a provider entry a client could not see, or a profile the runtime
 rejected as an unknown key. One document removes that class of bug: a profile and a
 provider are validated by the same `extra="forbid"` model, so a typo fails both programs
@@ -211,11 +216,11 @@ model with unknown keys is a typo detector.
 Precedence is expressed as pydantic-settings source order — init, environment, project
 document, user document, defaults — which deep-merges each source over the next, so a
 project `hrns.toml` overrides exactly the keys it names and leaves the rest of the user
-document intact. `--config PATH` (or `HRNS_LOCAL_CONFIG_FILE`) collapses that to a single
+document intact. `--config PATH` (or `HRNS_CONFIG_FILE`) collapses that to a single
 file and is a contract: a selected file that does not exist is an error, not a silent fall
-back to defaults. The environment prefix stays `HRNS_LOCAL_`; `HRNS_MODEL` and `HRNS_STORE`
-belong to the ACP app and the FastAPI mount, and reading them here would make one variable
-mean two things.
+back to defaults. The environment prefix is `HRNS_`; `HRNS_MODEL` and `HRNS_STORE`
+are read by every entry point, so the same variable means the same thing in the
+terminal, the built-in agent, and the HTTP server.
 
 `Profile` and `TuiSettings` are plain models inside the same document, so `hrns` needs no
 facade: `HrnsConfig.profile` is the map the picker lists, `HrnsConfig.tui` is what the
@@ -225,16 +230,16 @@ user file (defaults omitted). Project documents are read, never written.
 ## Reopening the last connection
 
 A bare `hrns` reconnects to the connection this terminal used last instead of always
-defaulting to the local model. The identity is one string in the document's `[tui]`
+defaulting to the built-in model. The identity is one string in the document's `[tui]`
 section, written by the same `HrnsConfig.save()` that persists theme and permission
-mode: `local` for the built-in runtime, a profile name for a saved stdio or remote target.
+mode: `builtin` for the built-in runtime, a profile name for a saved stdio or remote target.
 An ad-hoc `--server`/`--stdio` command line is not remembered, because it belongs to no
 file and there would be nothing to reopen. The identity never carries a working directory:
 a reopened connection starts where the new launch stands, or where its profile says.
 
 Remembering happens once a session exists, so a connection that fails at `session/new`
-does not become the next launch's default. Resolution failures — an unconfigured local
-model, a deleted profile, a dead endpoint — drop into the picker with the reason in its
+does not become the next launch's default. Resolution failures — an unconfigured
+built-in model, a deleted profile, a dead endpoint — drop into the picker with the reason in its
 status line rather than exiting, and a profile deleted from disk is forgotten outright so
 its name cannot fail on every launch. The picker's cursor starts on the remembered entry,
 which makes Enter a retry of the connection that just failed.
@@ -244,7 +249,7 @@ uses it: `hrns run` takes its target from its own arguments every time.
 
 ## Todos
 
-`hrns.capabilities.Todo` is a standalone Pydantic AI capability with two tools:
+`hrns.server.capabilities.Todo` is a standalone Pydantic AI capability with two tools:
 `read_todos` reads the ordered list; `write_todos` replaces it completely (an empty
 list clears it). `TodoItem` has content, priority (`high`, `medium`, `low`), and
 status (`pending`, `in_progress`, `completed`). Items are immutable snapshots.
@@ -252,7 +257,7 @@ Static instructions explain the workflow; there is no model-request reminder inj
 
 ```python
 from pydantic_ai import Agent
-from hrns.capabilities import Todo, TodoStore
+from hrns.server.capabilities import Todo, TodoStore
 
 # Fresh state per standalone run:
 agent = Agent("provider:model", capabilities=[Todo()])
@@ -284,7 +289,7 @@ the agent controls it.
 
 ## Ask user
 
-`hrns.capabilities.AskUser` wraps the harness capability and adds one default: the
+`hrns.server.capabilities.AskUser` wraps the harness capability and adds one default: the
 tool is `ask_user_question` and every call is deferred. It takes one to ten
 questions, each with a short header, the question text, two to six options, and a
 `multi_select` flag. The harness owns the schema and validation; this repository

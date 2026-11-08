@@ -1,4 +1,4 @@
-"""The one configuration document shared by the terminal client and the local runtime.
+"""The one configuration document shared by the client and server.
 
 Both programs read the same file. Sections name their owner: ``[profile.<name>]`` and
 ``[tui]`` belong to the client, while ``provider``/``model``, ``[providers.<name>]``,
@@ -6,12 +6,12 @@ Both programs read the same file. Sections name their owner: ``[profile.<name>]`
 A single pydantic-settings model parses the whole document, so a typo in any section
 fails the same way wherever it is read.
 
-Precedence, highest first: constructor arguments, ``HRNS_LOCAL_*`` environment
+Precedence, highest first: constructor arguments, ``HRNS_*`` environment
 variables, the project file ``./hrns.toml``, the user file ``config.toml`` in the
 platform config directory, then defaults. Files merge key by key: a project file only
 overrides the entries and values it names, so a repository can add one profile or
 provider without copying the user's document. ``--config PATH`` (or
-``HRNS_LOCAL_CONFIG_FILE``) selects a single file and disables that merge.
+``HRNS_CONFIG_FILE``) selects a single file and disables that merge.
 
 Providers are named entries: ``[providers.<name>]`` holds how to reach one provider, and
 ``provider``/``model`` at the top level say which entry and model are active. Two entries
@@ -62,7 +62,7 @@ CONFIG_FILE_NAME = "config.toml"
 PROJECT_CONFIG_NAME = "hrns.toml"
 
 #: Environment variable that selects one document instead of the merge.
-CONFIG_ENV_VAR = "HRNS_LOCAL_CONFIG_FILE"
+CONFIG_ENV_VAR = "HRNS_CONFIG_FILE"
 
 #: What this terminal offers the agent: filesystem reads, writes, and commands.
 ClientIoMode = Literal["off", "read", "all"]
@@ -73,8 +73,8 @@ PermissionMode = Literal["ask", "reads", "all"]
 #: Status-bar labels for the permission modes; the stored value is the mode itself.
 PERMISSION_MODES: tuple[PermissionMode, ...] = ("ask", "reads", "all")
 
-#: Identity of the built-in local runtime; every other identity is a profile name.
-LOCAL_CONNECTION = "local"
+#: Identity of the built-in runtime; every other identity is a profile name.
+BUILTIN_CONNECTION = "builtin"
 
 
 class ProviderNameError(ValueError):
@@ -167,7 +167,7 @@ class TuiSettings(BaseModel):
 class ThinkingSettings(BaseModel):
     """The reasoning efforts this deployment offers, and whether ``off`` is one.
 
-    This is a policy, not a capability probe: ``hrns-local`` intersects it with the
+    This is a policy, not a capability probe: the built-in agent intersects it with the
     model's profile, so a level the model cannot use is not advertised even when listed
     here. An empty ``levels`` removes the reasoning-effort option entirely.
     """
@@ -188,7 +188,7 @@ class ThinkingSettings(BaseModel):
 
 
 class ProviderEntry(BaseModel):
-    """One configured local provider: how to reach it and which models it offers."""
+    """One configured provider: how to reach it and which models it offers."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -261,14 +261,12 @@ class ProviderEntry(BaseModel):
 class HrnsConfig(BaseSettings):
     """The whole document: client sections and runtime sections, one schema.
 
-    Environment overrides use the ``HRNS_LOCAL_`` prefix (``HRNS_LOCAL_PROVIDER``,
-    ``HRNS_LOCAL_MODEL``, ``HRNS_LOCAL_CONFIG_FILE``), which is what the runtime has
-    always read. ``HRNS_MODEL`` and ``HRNS_STORE`` belong to the other entry points and
-    are deliberately not read here.
+    Environment overrides use the ``HRNS_`` prefix (``HRNS_PROVIDER``,
+    ``HRNS_MODEL``, ``HRNS_CONFIG_FILE``). ``HRNS_STORE`` is shared by every entry point.
     """
 
     model_config = SettingsConfigDict(
-        env_prefix="HRNS_LOCAL_",
+        env_prefix="HRNS_",
         env_nested_delimiter="__",
         extra="forbid",
         hide_input_in_errors=True,
@@ -331,7 +329,7 @@ class HrnsConfig(BaseSettings):
     def adopt_env_provider(self) -> HrnsConfig:
         """An env-selected provider id becomes an implicit entry.
 
-        ``HRNS_LOCAL_PROVIDER=deepseek`` with ``DEEPSEEK_API_KEY`` in the environment is
+        ``HRNS_PROVIDER=deepseek`` with ``DEEPSEEK_API_KEY`` in the environment is
         the headless setup and carries no ``[providers]`` table, so the selection is
         promoted to an entry with no endpoint or key of its own; the provider reads its
         own variables.
@@ -355,7 +353,7 @@ class HrnsConfig(BaseSettings):
     ):
         init_kwargs = init_settings.init_kwargs
         if "config_file" in init_kwargs and init_kwargs["config_file"] is None:
-            # ``hrns-local --env-only``: no document at all.
+            # ``hrns agent --env-only``: no document at all.
             return init_settings, env_settings
         explicit = init_kwargs.get("config_file") or env_settings().get("config_file")
         if explicit:
@@ -380,8 +378,7 @@ class HrnsConfig(BaseSettings):
                 )
             if "api_key" in payload:
                 raise ValueError(
-                    f"{path}: use api_key_env in the document, or HRNS_LOCAL_API_KEY in "
-                    "the environment."
+                    f"{path}: use api_key_env in the document, or HRNS_API_KEY in the environment."
                 )
             sources.append(source)
         return (init_settings, env_settings, *sources)
@@ -468,12 +465,12 @@ class HrnsConfig(BaseSettings):
     def require_model(self) -> None:
         if not self.provider or self.provider not in self.providers:
             raise ValueError(
-                "No local provider is configured. Add one with /providers in the terminal "
+                "No provider is configured. Add one with /providers in the terminal "
                 f"or under [providers.<name>] in {CONFIG_FILE_NAME}."
             )
         if not self.model:
             raise ValueError(
-                "Configure a local model with /models in the terminal or set model in "
+                "Configure a model with /models in the terminal or set model in "
                 f"{CONFIG_FILE_NAME}."
             )
 
@@ -501,14 +498,14 @@ class HrnsConfig(BaseSettings):
         return self.tui.last_connection
 
     def connection_identity(self, profile: Profile) -> str | None:
-        """How the terminal remembers a connection: a profile name or ``local``.
+        """How the terminal remembers a connection: a profile name or ``builtin``.
 
         An ad-hoc profile assembled on the command line belongs to no file, so it is
         not remembered at all; there would be nothing to reopen.
         """
         if profile.name in self.profile:
             return profile.name
-        return LOCAL_CONNECTION if is_local_hrns(profile) else None
+        return BUILTIN_CONNECTION if is_builtin_hrns(profile) else None
 
     def remember_connection(self, identity: str | None) -> None:
         """Persist the connection to reopen next time; a preference never costs a session."""
@@ -529,7 +526,7 @@ class HrnsConfig(BaseSettings):
     # --------------------------------------------------------- credentials
 
     def resolved_api_key(self, name: str | None = None) -> str | None:
-        """The key for an entry, from the environment or ``HRNS_LOCAL_API_KEY``."""
+        """The key for an entry, from the environment or ``HRNS_API_KEY``."""
         selected = name if name is not None else self.provider
         if self.api_key is not None and selected == self.provider:
             return self.api_key.get_secret_value()
@@ -542,13 +539,19 @@ class HrnsConfig(BaseSettings):
         return None
 
 
-def is_local_hrns(profile: Profile | None) -> bool:
-    """Whether a profile launches this installation's ``hrns-local`` runtime.
+def is_builtin_hrns(profile: Profile | None) -> bool:
+    """Whether a profile launches this installation's built-in agent.
 
-    The command is stored as the resolved path, so compare the file name rather
-    than the profile text.
+    The client launches ``sys.executable -m hrns.server.runtime``; a saved profile may
+    instead name the ``hrns agent`` subcommand. Compare argv rather than the command
+    path, which is the resolved interpreter for the built-in target.
     """
-    return profile is not None and Path(profile.command).name == "hrns-local"
+    if profile is None:
+        return False
+    args = profile.args
+    if Path(profile.command).name in {"hrns", "hrns.exe"} and args[:1] == ["agent"]:
+        return True
+    return args[:2] == ["-m", "hrns.server.runtime"]
 
 
 def thinking_from_settings(settings: HrnsConfig) -> str | None:

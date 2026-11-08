@@ -3,7 +3,7 @@
 `mount_acp` exposes an ACP agent over a FastAPI WebSocket endpoint.
 
 ```python
-from hrns.app.fastapi import mount_acp
+from hrns.server.fastapi import mount_acp
 
 def mount_acp(
     app: FastAPI,
@@ -105,7 +105,7 @@ Chooses the store for one principal. Sessions in one store are invisible to ever
 principal, so a reconnecting user can `session/load` their own work and only their own.
 
 ```python
-from hrns.app.acp import InMemorySessionStore
+from hrns.server.acp import InMemorySessionStore
 
 _stores: dict[str, InMemorySessionStore] = {}
 
@@ -213,7 +213,7 @@ from collections.abc import Mapping, Sequence
 
 from pydantic_ai.settings import ModelSettings
 
-from hrns.app.acp import SettingChoice, SettingOption
+from hrns.server.acp import SettingChoice, SettingOption
 
 
 def list_options(self, model_id: str) -> Sequence[SettingOption]:
@@ -270,7 +270,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
-from hrns.app.acp import (
+from hrns.server.acp import (
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
@@ -320,9 +320,9 @@ the factory and the store factory, while the resolver is shared by every connect
 from fastapi import FastAPI, WebSocket
 from pydantic_ai.agent import AbstractAgent
 
-from hrns.app import build_agent
-from hrns.app.acp import InMemorySessionStore
-from hrns.app.fastapi import mount_acp
+from hrns.server import build_agent
+from hrns.server.acp import InMemorySessionStore
+from hrns.server.fastapi import mount_acp
 
 app = FastAPI()
 _stores: dict[str, InMemorySessionStore] = {}
@@ -360,7 +360,7 @@ A complete runnable version is in [`examples/fastapi_app.py`](https://github.com
 `create_app` is the one-liner equivalent:
 
 ```python
-from hrns.app.fastapi import create_app
+from hrns.server.fastapi import create_app
 
 app = create_app(agent_factory, authenticate=authenticate)  # WS /acp
 ```

@@ -1,4 +1,4 @@
-"""Local provider secrets in the OS keyring, shared by the client and the runtime.
+"""Provider secrets in the OS keyring, shared by the client and the runtime.
 
 One account per provider entry: the entry's ``api_key_env`` name when it has one, so a
 pasted key and an account login for that entry resolve to the same secret. Entries that
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import threading
 
-#: Keyring service that holds local provider credentials.
-KEYRING_SERVICE = "hrns.local"
+#: Keyring service that holds provider credentials.
+KEYRING_SERVICE = "hrns"
 
 #: One successful lookup per account per process. macOS authorizes every keychain
 #: read separately, so the same credential must not be read twice during startup.
@@ -93,7 +93,7 @@ def delete_secret(account: str) -> None:
 
 
 def stored_api_key_ref(provider: str, api_key_env: str = "") -> str | None:
-    """Keyring reference for a previously saved local provider credential."""
+    """Keyring reference for a previously saved provider credential."""
     account = keyring_account(provider, api_key_env)
     return secret_ref(account) if stored_secret(account) is not None else None
 

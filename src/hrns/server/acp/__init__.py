@@ -1,6 +1,6 @@
 """Our own Agent Client Protocol adapter for Pydantic AI agents.
 
-The public surface mirrors what ``hrns.app`` previously imported from
+The public surface mirrors what ``hrns.server`` previously imported from
 ``pydantic_ai_harness.experimental.acp``, but the implementation lives here and targets
 ACP 1.x directly.
 """

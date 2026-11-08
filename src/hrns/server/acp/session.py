@@ -16,8 +16,8 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
-from hrns.acp_mcp import AcpChannel, McpOverAcpCaller
-from hrns.capabilities import TodoStore
+from hrns.server.capabilities import TodoStore
+from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 
 # A single MCP server configuration, in any of the transports ACP carries.
 McpServer: TypeAlias = (

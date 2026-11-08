@@ -32,17 +32,17 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
+from ..shared.errors import (
+    HrnsClientError,
+    InteractionRejected,
+    InteractionRequired,
+    describe_rpc_error,
+)
 from .bus import EventBus
 from .connection import ConnectionLifecycle
 from .constants import (
     CLIENT_NAME,
     CONNECT_TIMEOUT,
-)
-from .errors import (
-    HrnsClientError,
-    InteractionRejected,
-    InteractionRequired,
-    describe_rpc_error,
 )
 from .events import (
     SessionsListed,

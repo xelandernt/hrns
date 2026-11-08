@@ -1,6 +1,6 @@
 # Configuration
 
-`hrns` keeps one document. The terminal client and the local runtime both read it, so a
+`hrns` keeps one document. The client and server both read it, so a
 profile, a provider, and a preference live in the same file and are validated by the same
 pydantic-settings model. A typo anywhere fails both programs the same way instead of
 being silently ignored by one of them.
@@ -11,11 +11,11 @@ being silently ignored by one of them.
 | --- | --- |
 | User document | `config.toml` in the platform config directory (macOS: `~/Library/Application Support/hrns/config.toml`, Linux: `~/.config/hrns/config.toml`, Windows: `%LOCALAPPDATA%\hrns\config.toml`) |
 | Project document | `hrns.toml` in the working directory |
-| Explicit document | `--config PATH` or `HRNS_LOCAL_CONFIG_FILE=PATH` |
+| Explicit document | `--config PATH` or `HRNS_CONFIG_FILE=PATH` |
 
 The user document is the one `hrns` writes. A project document only overrides the keys it
 names, so a repository can add one profile or provider without copying the rest.
-`--config` reads exactly that file and disables the merge; it is what `hrns-local --config`
+`--config` reads exactly that file and disables the merge; it is what `hrns agent --config`
 receives when a profile must pin one file.
 
 `hrns profiles path` prints the file in effect.
@@ -25,7 +25,7 @@ receives when a profile must pin one file.
 Highest first:
 
 1. Command-line options (`--model`, `--server`, `--stdio`, …).
-2. `HRNS_LOCAL_*` environment variables.
+2. `HRNS_*` environment variables.
 3. The project document (`./hrns.toml`).
 4. The user document (`config.toml`).
 5. Built-in defaults.
@@ -37,11 +37,11 @@ so a project file can add `[profile.repo]` next to the user's `[profile.team]`.
 ## A complete example
 
 ```toml
-# Which local model the runtime starts with.
+# Which model the built-in agent starts with.
 provider = "deepseek"
 model = "deepseek-flash"
 
-# Where the runtime keeps sessions (default: local-sessions.db in the data directory).
+# Where the built-in agent keeps sessions (default: local-sessions.db in the data directory).
 store = "~/Library/Application Support/hrns/local-sessions.db"
 
 [providers.deepseek]
@@ -76,7 +76,7 @@ show_thoughts = false
 permission_mode = "all"                # ask | reads | all
 client_io = "all"                      # off | read | all
 sidebar_width = 76
-last_connection = "local"
+last_connection = "builtin"
 
 [profile.team]
 transport = "server"
@@ -99,7 +99,7 @@ notes = "scratch agent"
 
 ### `[tui]`
 
-Terminal preferences. The client writes this section; the runtime ignores it.
+Terminal preferences. The client writes this section; the server ignores it.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -109,7 +109,7 @@ Terminal preferences. The client writes this section; the runtime ignores it.
 | `permission_mode` | `ask` \| `reads` \| `all` | `"ask"` | `ask` surfaces every approval; `reads` auto-answers read-only tools; `all` auto-approves any call the agent offered an allow option for (not a sandbox) |
 | `client_io` | `off` \| `read` \| `all` | `"all"` | What this terminal offers the agent: nothing, filesystem reads, or reads plus writes and terminal commands |
 | `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
-| `last_connection` | string | `""` | `local` or a profile name: the connection a bare `hrns` reopens. Written on connect, not meant to be hand-edited |
+| `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written on connect, not meant to be hand-edited |
 
 ### `[profile.<name>]`
 
@@ -131,16 +131,16 @@ A saved connection. The table key is the profile's name.
 | `default` | bool | `false` | Candidate for a launch that names no profile |
 | `notes` | string | `""` | Free-form text carried with the profile |
 
-## Runtime reference
+## Agent reference
 
-The local runtime (`hrns-local`, `hrns-local --catalog`, and any `hrns.app` entry point
-that builds the local model) reads these.
+The built-in agent (`hrns agent`, `hrns agent --catalog`, and any `hrns.server` entry point
+that builds the model) reads these.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `provider` | string | `""` | Name of the active `[providers]` entry |
 | `model` | string | `""` | Bare model id for that entry; the provider lives in `provider` |
-| `store` | path | `local-sessions.db` in the platform data directory | Session database for the runtime |
+| `store` | path | `local-sessions.db` in the platform data directory | Session database for the built-in agent |
 
 ### `[providers.<name>]`
 
@@ -161,7 +161,7 @@ different endpoints and keys under one provider implementation.
 Forwarded as `ModelSettings` to every run. `thinking` is special: a level
 (`minimal`, `low`, `medium`, `high`, `xhigh`) enables reasoning, `false` disables it, and
 omitting it keeps the provider default. The TUI's `/effort` writes this key when connected
-to `hrns-local`; for any other agent it changes the session's `effort` config option
+to `hrns agent`; for any other agent it changes the session's `effort` config option
 instead, because only the server that owns this file can persist it.
 
 This is the baseline every session starts from. A client that changes reasoning effort
@@ -169,8 +169,8 @@ over ACP overrides it for its own session.
 
 ### `[thinking]`
 
-The reasoning-effort policy `hrns-local` advertises to ACP clients. It is a server-side
-allowlist: the runtime intersects it with the model's own profile, so a level the model
+The reasoning-effort policy `hrns agent` advertises to ACP clients. It is a server-side
+allowlist: the built-in agent intersects it with the model's own profile, so a level the model
 cannot use is never offered, and a value outside the list is rejected rather than clamped.
 
 | Field | Type | Default | Meaning |
@@ -189,7 +189,7 @@ allow_off = false
 ```
 
 If `[model_settings].thinking` names a level the policy does not offer for the startup
-model, `hrns-local` refuses to start rather than running with an effort no client can see.
+model, `hrns agent` refuses to start rather than running with an effort no client can see.
 
 ### `[mcp]`
 
@@ -222,7 +222,7 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 `export = true` makes the client offer an enabled server to an agent that advertises
 `mcpCapabilities.acp`: it launches the stdio command or connects to the URL, then proxies
 the server over the ACP connection. Default `false` keeps the server configured for the
-local agent only.
+built-in agent only.
 
 Exporting is still gated by the client's user. At session start an interactive client
 asks whether the agent may use the server: allow once, allow for this connection, always
@@ -237,28 +237,29 @@ Never write a key into the document. Use a reference:
 
 - `env:NAME` — read the process environment.
 - `keyring:service/user` — read the OS keyring; `hrns login` stores account tokens under
-  `hrns.local/<entry>`.
+  `hrns/<entry>`.
 - Anything else is a literal, which is only appropriate for non-secrets such as `PATH`.
 
 `api_key_env` names the variable a provider entry reads; the keyring wins over pasted keys
-for the same entry, so a login and a saved key cannot disagree.
+for the same entry, so a login and a saved key cannot disagree. Keys stored under the
+old `hrns.local` service are not read after the rename; re-enter them once.
 
 ## Environment variables
 
 Runtime settings can be overridden without editing the file. The prefix is
-`HRNS_LOCAL_`, and `__` reaches into a section:
+`HRNS_`, and `__` reaches into a section:
 
 ```sh
-HRNS_LOCAL_PROVIDER=deepseek \
-HRNS_LOCAL_MODEL=deepseek-flash \
+HRNS_PROVIDER=deepseek \
+HRNS_MODEL=deepseek-flash \
 DEEPSEEK_API_KEY=... \
-hrns-local --env-only
+hrns agent --env-only
 ```
 
-`HRNS_LOCAL_CONFIG_FILE` selects one document, `HRNS_LOCAL_API_KEY` supplies a key
-directly (the client passes a keyring reference this way), and `HRNS_LOCAL_STORE`
-overrides the session database. `HRNS_MODEL` and `HRNS_STORE` belong to the other entry
-points (`hrns.app serve`, the FastAPI mount) and are deliberately not read here.
+`HRNS_CONFIG_FILE` selects one document, `HRNS_API_KEY` supplies a key
+directly (the client passes a keyring reference this way), and `HRNS_STORE`
+overrides the session database. `HRNS_MODEL` and `HRNS_STORE` are read by the
+terminal, the built-in agent, and `hrns serve`.
 
 ## Reading, writing, and validation
 
@@ -270,13 +271,14 @@ points (`hrns.app serve`, the FastAPI mount) and are deliberately not read here.
   close to what a person would write.
 - Saving goes to the user document unless `--config` selected another file. A project
   document is read, never written.
-- The client passes the same document to the runtime it spawns, so a local model selected
-  in the TUI is the one `hrns-local` runs.
+- The client passes the same document to the built-in agent it spawns, so a model selected
+  in the TUI is the one `hrns agent` runs.
 
 ## Managing the file from the CLI
 
 ```sh
-hrns config                      # sources and the effective configuration
+hrns config                      # list the config subcommands
+hrns config show                 # sources and the effective configuration
 hrns config path                 # source files, one per line
 hrns config get provider         # one dotted key, e.g. mcp.servers.playwright.url
 hrns config keys                 # keyring accounts and env sources, never values
@@ -289,7 +291,7 @@ hrns mcp list
 hrns login github-copilot
 ```
 
-`hrns config` prints the merged document as TOML and marks each source as `project`,
+`hrns config show` prints the merged document as TOML and marks each source as `project`,
 `user`, `selected`, or `environment`. `--json` prints the same data as JSON, `--all`
 includes defaults, and `--reveal` prints literal secrets that are otherwise shown as
 `***`. `hrns config keys` lists each provider's keyring service/account and environment
