@@ -8,16 +8,6 @@ from hrns.server import build_agent
 agent = build_agent("anthropic:claude-sonnet-5-5")
 ```
 
-The backend is deliberately small:
-
-- `hrns.server.agent` builds the `Agent` from Pydantic AI capabilities.
-- `hrns.server.acp` is this project's ACP adapter.
-- `hrns.server.fastapi` mounts the adapter on FastAPI.
-
-There is no custom session server, plugin registry, policy catalog, wire protocol,
-or extension surface. ACP session persistence belongs to the adapter and the
-application that hosts it. The terminal client speaks standard ACP only.
-
 ## Reference
 
 - [Configuration](configuration.md) — the one `config.toml` both the client and the local
