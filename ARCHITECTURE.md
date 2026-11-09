@@ -60,6 +60,11 @@ The adapter implements the complete `acp.Agent` protocol. `session/list` and
 `session/delete` are backed by `ListableSessionStore`/`DeletableSessionStore`, and
 `providers/*` plus the `model` and setting config options are backed by a `ModelResolver`
 the caller supplies. MCP-over-ACP is opt-in through attachment configuration; NES is unsupported.
+ACP's own `fs/*` and `terminal/*` are the same kind of opt-in: the client's
+`client_io` only advertises them, and an agent installs `acp_filesystem` /
+`acp_terminal` through `attachment_config` to expose `read_file`, `write_file`, and
+`run_command`. `examples/fastapi_app.py` wires both; the default `hrns agent` does
+not, so its `Coder` works on the server workspace instead of the client's.
 
 ## Server-owned sessions
 

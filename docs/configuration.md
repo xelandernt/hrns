@@ -115,6 +115,20 @@ Terminal preferences. The client reads and writes terminal preferences here.
 | `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
 | `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |
 
+`client_io` advertises ACP client capabilities; it does not by itself give the agent
+tools. The agent must install `acp_filesystem` / `acp_terminal` through
+`attachment_config` (see [Mount ACP](mount-acp.md#client-filesystem-and-terminal)).
+The shipped `hrns agent` does not, so `client_io` has no effect against it. An agent
+that installs the toolsets, such as `examples/fastapi_app.py`, exposes `read_file`,
+`write_file`, and `run_command` when the client uses `"all"`. With `"read"`, writes
+fall back to the server's own filesystem instead of the client's.
+
+On a `server` profile, `remote_cwd` is the workspace path sent to the agent. The
+current `client_io` implementation also uses that string as its local root, so a
+remote path that does not exist on the client makes `fs/*` requests fail. Until the
+root is decoupled from `remote_cwd`, omit it or set it to a path that also exists
+locally.
+
 ### `[profile.<name>]`
 
 A saved connection. The table key is the profile's name.

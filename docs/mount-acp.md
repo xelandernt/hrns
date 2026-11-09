@@ -39,7 +39,7 @@ and output types flow through its session and turn handles.
 | `session_store` | Separate `InMemorySessionStore` | Persistence scoped to this registration |
 | `model_resolver` | `None` | Model choices, provider routing, and session settings |
 | `session_config` | `None` | Per-session dependencies, capabilities, toolsets, and workspace |
-| `attachment_config` | `None` | Client toolsets configured on each ACP attachment |
+| `attachment_config` | `None` | Client toolsets (MCP, filesystem, terminal) configured on each ACP attachment |
 | `permission_policy` | `None` | Permission choices for deferred approvals |
 | `usage_limits` | `None` | Limits applied to agent runs |
 | `tool_presenter` | `None` | Tool-call presentation for ACP updates |
@@ -73,6 +73,43 @@ def client_tools(attachment: AcpSession) -> AcpAttachmentConfig[None]:
 # attachment_config=client_tools,
 # mcp_capabilities=schema.McpCapabilities(acp=True, http=True, sse=True)
 ```
+
+### Client filesystem and terminal
+
+The same hook installs ACP's client filesystem and terminal toolsets. These are
+separate from MCP: the client's `client_io` setting advertises `fs/read_text_file`,
+`fs/write_text_file`, and `terminal/*`, and the agent turns them into `read_file`,
+`write_file`, and `run_command`. Install them explicitly:
+
+```python
+from hrns.server.acp import (
+    AcpAttachmentConfig,
+    AcpSession,
+    acp_filesystem,
+    acp_terminal,
+)
+
+def attachment_tools(attachment: AcpSession) -> AcpAttachmentConfig[None]:
+    toolsets = [
+        toolset
+        for toolset in (acp_filesystem(attachment), acp_terminal(attachment))
+        if toolset is not None
+    ]
+    return AcpAttachmentConfig(toolsets=toolsets)
+
+# Pass this when registering:
+# attachment_config=attachment_tools,
+```
+
+`acp_filesystem` returns `None` unless the client advertises `fs.readTextFile`;
+`acp_terminal` returns `None` unless it advertises terminal support. With
+`client_io = "read"`, `write_file` falls back to a local `FileSystem` bounded by
+the session `cwd` instead of the client. `acp_filesystem` defines `read_file` and
+`write_file`, which collide with `Coder`'s tools, so install it on an agent without
+`Coder`, or rename/filter one side. `examples/fastapi_app.py` is a working example
+that has no `Coder`.
+
+### Dispatch
 
 Client tools refresh at model-step boundaries through `DynamicToolset`. Dispatch
 validates the attachment generation before calling a client tool. MCP binding/protocol/tool errors retain their native

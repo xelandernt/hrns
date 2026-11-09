@@ -21,6 +21,12 @@ Two skills are defined in Python rather than on disk: a deployment can ship a fi
 skill library with the app, and the client sees them in ``/skills`` exactly like
 discovered ones. The agent loads one itself with ``load_capability``, or a person
 writes ``$release-notes`` in the composer.
+
+The agent also installs the ACP client filesystem and terminal toolsets. A client
+that connects with ``client_io = "all"`` (the terminal's default) gives it
+``read_file``, ``write_file``, and ``run_command`` against the client's machine;
+``"read"`` advertises only reads, and ``"off"`` gives it no client tools. This
+example has no server-side ``Coder``, so those are its only file and command tools.
 """
 
 from __future__ import annotations
@@ -40,6 +46,8 @@ from starlette.requests import HTTPConnection
 
 from hrns.server import HrnsServer
 from hrns.server.acp import (
+    AcpAttachmentConfig,
+    AcpSession,
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
@@ -48,6 +56,8 @@ from hrns.server.acp import (
     ResolvedModel,
     SettingChoice,
     SettingOption,
+    acp_filesystem,
+    acp_terminal,
 )
 from hrns.server.capabilities import AskUser, Skills, Todo
 
@@ -251,8 +261,30 @@ def agent_factory() -> AbstractAgent[None, str]:
     return Agent(capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS])
 
 
+def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
+    """Add the client's filesystem and terminal as tools for this attachment.
+
+    ``client_io`` only advertises ACP ``fs/`` and ``terminal/`` capabilities. They
+    become model tools only when the agent installs the matching toolsets, which is
+    why this hook exists: the factory above has no ``Coder``, so these are the
+    agent's only file and command tools. ``client_io = "read"`` yields ``read_file``;
+    ``"all"`` adds client-backed ``write_file`` and ``run_command``.
+    """
+    toolsets = [
+        toolset
+        for toolset in (acp_filesystem(session), acp_terminal(session))
+        if toolset is not None
+    ]
+    return AcpAttachmentConfig(toolsets=toolsets)
+
+
 server = HrnsServer()
-coder = server.add_agent("coder", factory=agent_factory, model_resolver=resolver)
+coder = server.add_agent(
+    "coder",
+    factory=agent_factory,
+    model_resolver=resolver,
+    attachment_config=attachment_config,
+)
 
 
 @asynccontextmanager

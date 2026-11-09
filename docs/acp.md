@@ -95,6 +95,11 @@ The adapter calls these methods on the connected client:
 
 The ACP-backed filesystem and terminal are opt-in through `attachment_config` on
 `server.add_agent`; the default `build_agent` runs file and shell tools on the server.
+`client_io` only *advertises* the capabilities: the agent must install
+`acp_filesystem` / `acp_terminal` to turn them into `read_file`, `write_file`, and
+`run_command`. [Mount ACP](mount-acp.md#client-filesystem-and-terminal) shows the
+wiring, and `examples/fastapi_app.py` installs it. A stock `hrns agent` does not, so
+it ignores `client_io` and edits its own workspace instead.
 
 `attachment_config` is where MCP declarations become toolsets. `hrns agent` passes
 `acp_mcp_toolsets`, which turns `stdio`, `http`, and `sse` entries into ordinary

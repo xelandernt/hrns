@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os.path
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -13,7 +13,6 @@ from typing import Protocol
 import anyio
 from acp import Client, schema
 from pydantic_ai import ModelRetry
-from pydantic_ai.capabilities import Toolset
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
@@ -91,20 +90,18 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
         return f"Wrote {path} ({len(content)} characters)."
 
 
-def acp_filesystem(session: AcpSession) -> Toolset[None] | None:
-    """Build an ACP-client-backed filesystem capability for ``session``, or ``None``."""
+def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
+    """Build an ACP-client-backed filesystem toolset for ``session``, or ``None``."""
     capabilities = session.client_capabilities
     fs = capabilities.fs if capabilities is not None else None
     if fs is None or not fs.read_text_file:
         return None
     local_writer = None if fs.write_text_file else _FallbackFileWriter(session.cwd)
-    return Toolset(
-        AcpFileSystemToolset[None](
-            client=session.client,
-            session_id=session.session_id,
-            cwd=session.cwd,
-            local_writer=local_writer,
-        )
+    return AcpFileSystemToolset[None](
+        client=session.client,
+        session_id=session.session_id,
+        cwd=session.cwd,
+        local_writer=local_writer,
     )
 
 
@@ -119,6 +116,13 @@ def _format_terminal_output(result: schema.TerminalOutputResponse) -> str:
     elif status is not None and status.signal is not None:
         parts.append(f"[terminated by signal {status.signal}]")
     return "\n".join(parts)
+
+
+def _shell_invocation(command: str) -> tuple[str, list[str]]:
+    """Wrap a shell line in the platform shell so pipes and redirection work."""
+    if os.name == "posix":
+        return os.environ.get("SHELL") or "/bin/sh", ["-c", command]
+    return os.environ.get("COMSPEC") or "cmd.exe", ["/c", command]
 
 
 class AcpTerminalToolset(FunctionToolset[AgentDepsT]):
@@ -145,9 +149,13 @@ class AcpTerminalToolset(FunctionToolset[AgentDepsT]):
         Args:
             command: The shell command line to execute.
         """
+        shell, shell_args = _shell_invocation(command)
         create = asyncio.ensure_future(
             self._client.create_terminal(
-                command=command, session_id=self._session_id, cwd=self._cwd
+                command=shell,
+                args=shell_args,
+                session_id=self._session_id,
+                cwd=self._cwd,
             )
         )
         terminal_id: str | None = None
@@ -180,15 +188,13 @@ class AcpTerminalToolset(FunctionToolset[AgentDepsT]):
                     )
 
 
-def acp_terminal(session: AcpSession) -> Toolset[None] | None:
-    """Build an ACP-client-backed terminal capability for ``session``, or ``None``."""
+def acp_terminal(session: AcpSession) -> AcpTerminalToolset[None] | None:
+    """Build an ACP-client-backed terminal toolset for ``session``, or ``None``."""
     capabilities = session.client_capabilities
     if capabilities is None or not capabilities.terminal:
         return None
-    return Toolset(
-        AcpTerminalToolset[None](
-            client=session.client, session_id=session.session_id, cwd=session.cwd
-        )
+    return AcpTerminalToolset[None](
+        client=session.client, session_id=session.session_id, cwd=session.cwd
     )
 
 
