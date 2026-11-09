@@ -8,21 +8,21 @@ This repository uses MCP in two directions:
 
 The first direction is ordinary MCP configuration and is documented in
 [Configuration](configuration.md#mcp). This page covers the second direction: what the
-binding serves, how export is approved, and what is deliberately still missing.
+binding, export consent, and request handling.
 
 ## The binding
 
 MCP-over-ACP targets [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28)
 and the ACP RFD
 [MCP-over-ACP: Stateless MCP Requests over ACP](https://agentclientprotocol.com/rfds/mcp-over-acp).
-It has no connection handshake:
+Each operation is a self-contained exchange:
 
 - A provider registers an opaque `serverId` and declares it in `session/new`,
   `session/load`, or `session/resume` as `{"type": "acp", "name": ..., "serverId": ...}`.
 - Every operation is one ACP `mcp/message` request carrying `{serverId, requestId, method,
   params}`. `requestId` is a fresh logical MCP request id; the outer JSON-RPC id is separate.
-- There is no `mcp/connect`, no `mcp/disconnect`, and no MCP `initialize`. Each request
-  carries its protocol version, client capabilities, and client info in `params._meta`.
+- Each request carries its protocol version, client capabilities, and client info
+  in `params._meta`.
 - A successful ACP response carries exactly one inner outcome: `{"result": ...}` or
   `{"error": {code, message, data?}}`. An MCP protocol error is a successful ACP response;
   only a failure of the binding itself uses an outer ACP error.
@@ -53,7 +53,7 @@ only when the agent advertises `acp`; otherwise the declarations are omitted ent
 
 The provider terminates both MCP sessions and translates at the method level. The upstream
 and downstream sessions are independent, so the upstream may speak an older revision while
-the ACP side stays on 2026-07-28. Raw MCP frames are never tunneled.
+the ACP side stays on 2026-07-28. The proxy translates individual methods between them.
 
 ## Configuring an export
 
@@ -90,12 +90,10 @@ At session start the client asks whether the agent may use each exported server:
 - **always allow** — declare it now and persist `always_allow = true` in `config.toml`;
 - **deny** — leave it out of this session's declarations.
 
-An unapproved server is never started, so no upstream process or connection is created for
-a denied entry. A non-interactive client (`hrns run`) cannot ask; it exports only servers
-with `always_allow = true` and denies everything else.
+Approval gates upstream startup and session declarations. A non-interactive client
+(`hrns run`) exports servers with `always_allow = true`.
 
-Consent is a client decision, not an agent approval policy. Per-call approval is out of
-scope: once a server is exported, the agent can call all of its tools.
+The client owns export consent. Once exported, the server exposes its tools to the agent.
 
 ## Health
 
@@ -105,9 +103,9 @@ with its state (`running`, `failed`, `disabled`, `local only`, `not started`,
 negotiated upstream revision.
 `r` refreshes the view; it also refreshes after a connection or session change.
 
-Failures are not silent. A server that fails to start, authenticate, or negotiate appears
+A server that fails to start, authenticate, or negotiate appears
 in the panel with the reason, and the chat screen shows a transcript notice plus a status
-hint. The session continues without that server.
+hint. The session continues with the servers that started successfully.
 
 ## What is served
 
@@ -117,16 +115,16 @@ The provider mirrors the upstream's advertised capabilities and exposes:
 | --- | --- |
 | `server/discover` | Reports the proxied server's capabilities |
 | `ping` | Answered directly |
-| `tools/list`, `tools/call` | Proxied; an upstream `isError` result stays an MCP result, not an ACP error |
+| `tools/list`, `tools/call` | Proxied; upstream `isError` results are preserved |
 | `resources/list`, `resources/read`, `resources/templates/list` | Proxied when the upstream has resources |
 | `prompts/list`, `prompts/get` | Proxied when the upstream has prompts |
 | `completion/complete` | Proxied when the upstream has completions |
 | `notifications/progress` | Forwarded as request-scoped ACP notifications |
-| `input_required` results | Passed through opaquely (see [MRTR](#mrtr-has-no-retry-policy)) |
+| `input_required` results | Passed through opaquely (see [MRTR](#input-required-results)) |
 | `$/cancel_request` | Cancels the handler; cleanup runs shielded and the outer request returns `-32800` |
 
 Resources, prompts, and completions are advertised only when the upstream advertises them.
-Upstream authentication stays on the client and never reaches the agent.
+The client owns upstream authentication.
 
 ## The agent side
 
@@ -141,7 +139,7 @@ declaration into a toolset:
 Servers are connected during session setup, before the session id is returned, and disposed
 when the session closes. `session/load` and, when the agent advertises it, `session/resume`
 declare and reconnect the same way as `session/new`. `hrns agent` itself supports
-`session/load` but refuses `session/resume`.
+`session/load` for restoration.
 
 ## Transports and authentication
 
@@ -153,76 +151,42 @@ declare and reconnect the same way as `session/new`. `hrns agent` itself support
 
 Headers and environment values support `{env:NAME}` expansion. OAuth tokens live in the
 configured token store; `hrns mcp auth <name>` performs an interactive login and
-`hrns mcp logout <name>` clears it. A runtime export never opens a browser — if a server
-needs authentication, the failure is logged and that server is skipped for the session.
+`hrns mcp logout <name>` clears it. Complete interactive authentication before exporting.
+Authentication failures are logged and the affected server is skipped for that session.
 
-## Known gaps
+## Request scope
 
-### `subscriptions/listen` is not streamed
+### Catalog updates
 
-At MCP 2026-07-28 a client receives change notifications only by sending a
-`subscriptions/listen` request whose **response is the stream**. There is no standing GET
-stream, and there is no replay: a dropped stream is ended, and the client must re-listen and
-refetch.
+The provider serves one result or error per `mcp/message`. Tool, prompt, and resource
+catalogs advertise `listChanged: false`. Consumers can poll or refetch to observe changes.
+A `subscriptions/listen` request receives the inner MCP `METHOD_NOT_FOUND` (`-32601`).
 
-This provider serves the single-exchange path only: one `mcp/message` request produces one
-`result` or `error`. It does not install a `subscriptions/listen` handler, so:
+Long-lived subscriptions require an additional provider path with acknowledgement
+ordering, subscription correlation, filtering, and cancellation. The implementation
+notes are in [MCP binding internals](mcp-over-acp-analysis.md).
 
-- the proxied server advertises `listChanged: false` for tools, prompts, and resources, and
-  no resource subscription capability, because the MCP SDK derives those flags from whether
-  `subscriptions/listen` is served;
-- an agent that calls `subscriptions/listen` anyway receives an inner MCP
-  `METHOD_NOT_FOUND` (`-32601`), not an outer ACP error;
-- no upstream change notification is forwarded, so an agent must poll or refetch to notice
-  a changed tool, prompt, or resource list.
+### Input-required results
 
-Supporting it is a separate long-lived provider path, not a flag on the existing one. It
-needs at minimum:
+Results with `resultType: "input_required"` pass through to the consumer. The consumer
+owns input collection, retry requests with fresh `requestId` values, and a stopping policy.
 
-- a driver that keeps one operation alive after its acknowledgement instead of returning a
-  single outcome;
-- acknowledgement ordering: the `notifications/subscriptions/acknowledged` frame must be
-  first, and the subscription must be registered before that frame is written so an event
-  published during the write is buffered, not lost;
-- correlation: every notification and the final result carry
-  `_meta["io.modelcontextprotocol/subscriptionId"]` equal to the logical `requestId`;
-- per-stream filtering of `toolsListChanged`, `promptsListChanged`,
-  `resourcesListChanged`, and `resourceSubscriptions`;
-- cancellation and disposal: ACP `$/cancel_request`, session close, and server disposal must
-  end the stream without leaking its subscription slot; an abrupt end is not resumable.
+### Upstream revisions
 
-The design notes and the remaining work breakdown are in
-[`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md).
+Upstream negotiation uses automatic protocol selection. Handshake-era servers work on a
+best-effort basis for the finite methods the proxy translates. The proxy mirrors upstream
+capabilities and logs the negotiated revision. A reverse request for sampling, elicitation,
+or roots receives `INVALID_REQUEST`.
 
-### MRTR has no retry policy
+### Provider declarations
 
-Results with `resultType: "input_required"` pass through to the agent unchanged. The
-provider does not collect input responses, choose a fresh `requestId`, retry the request,
-or decide when to stop. An agent that does not implement that policy simply sees an
-`input_required` result it cannot complete.
-
-### Legacy upstreams are best-effort
-
-An upstream may speak a handshake-era revision (`initialize`, session state). `fastmcp`
-negotiates with `mode="auto"`, so such a server still works for the methods the proxy
-translates, and the negotiated revision is logged. This is not a second supported binding:
-
-- capabilities are mirrored, so the agent never sees a resource, prompt, or completion the
-  upstream does not have;
-- reverse requests (`sampling/createMessage`, `elicitation/create`, `roots/list`) are not
-  bridged and are not advertised. A server that needs one fails the call with the MCP SDK's
-  `INVALID_REQUEST` instead of hanging.
-
-### The agent is never a provider
-
-`bind_provider` works on an `AgentSideConnection`, but ACP has no standard
-agent-to-client declaration path. The supported flow is client-provided only.
+The supported declaration flow is client to agent: clients offer servers in session
+requests, and the agent consumes them through `AcpMcpClientTransport`.
 
 ## References
 
 - [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp)
 - [MCP 2026-07-28 specification](https://modelcontextprotocol.io/specification/2026-07-28)
-- [ACP support](acp.md#known-gaps) — the method inventory and the adapter's own gaps
+- [ACP support](acp.md#runtime-scope) — method inventory and runtime scope
 - [Configuration](configuration.md#mcp) — every `[mcp]` field
-- [`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md) — implementation analysis and work
-  breakdown
+- [`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md) — binding internals and subscription requirements

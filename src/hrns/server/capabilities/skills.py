@@ -122,16 +122,16 @@ class Skills(SkillsCapability[AgentDepsT]):
         cwd: str | Path = ".",
         include: frozenset[str] | None = None,
         exclude: frozenset[str] | None = None,
-        programmatic: Sequence[Skill] = (),
+        skills: Sequence[Skill] = (),
         script_executor: SkillScriptExecutor | None = None,
         id: str | None = "hrns.skills",
     ) -> None:
-        if not libraries and not programmatic:
+        if not libraries and not skills:
             raise ValueError("Skills needs at least one library directory or programmatic skill.")
         self.libraries = tuple(Path(path) for path in libraries)
         self.cwd = Path(cwd)
         self._catalog: SkillCatalog | None = None
-        self._programmatic = tuple(programmatic)
+        self._programmatic = tuple(skills)
         super().__init__(
             self.libraries,
             skills=self._programmatic,

@@ -1,6 +1,6 @@
 # hrns
 
-Pydantic AI agents with server-owned conversations, ACP interaction, and read-only AG-UI streams.
+[Pydantic AI](https://ai.pydantic.dev/) agents with server-owned conversations, ACP interaction, and read-only AG-UI streams.
 
 hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**,
 for terminals and editors.
@@ -12,31 +12,20 @@ uv sync --extra client --extra server
 ```
 
 Use `--extra client` for the terminal only and `--extra server` for the agent and
-HTTP entry points; the base install provides the shared `hrns config`, `profiles`,
-and `mcp` commands. ACP support is implemented in `hrns.server.acp`;
-`pydantic-ai-harness` supplies the coding capabilities.
+HTTP entry points. The base install provides the shared `hrns config`, `profiles`,
+and `mcp` commands.
 
 ## Define the agent
 
 ```python
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import LocalWorkspace
-from pydantic_ai_harness.coder import Coder
+from hrns.server import build_agent
 
-
-def build_agent(model: str = "anthropic:claude-sonnet-5-5") -> Agent:
-    return Agent(
-        model,
-        name="hrns",
-        capabilities=[
-            LocalWorkspace("."),
-            Coder(),
-        ],
-    )
+agent = build_agent("anthropic:claude-sonnet-5-5", cwd=".")
 ```
 
-Everything the agent does is a capability. There is no plugin registry,
-binding, policy catalog, manifest, or configuration service.
+The default agent includes coding tools, task tracking, skills, user questions, and
+approval handling. Compose your own agent with the [capabilities](docs/capabilities.md)
+reference.
 
 ## Skills
 
@@ -44,8 +33,7 @@ The agent reads [Agent Skills](https://agentskills.io/specification) from
 `<workspace>/.agents/skills` and `~/.agents/skills` by default. A skill is a directory
 with a `SKILL.md`; the model sees its name and description, and loads the instructions
 only when it needs them. A person can list skills with `/skills` and invoke one with
-`$name`; the terminal sends the id, and the server expands it, so the body never
-travels over the wire.
+`$name`; the terminal sends the id, and the server expands the instructions.
 
 ```toml
 [skills]
@@ -53,9 +41,8 @@ paths = ["~/shared/skills"]            # libraries read before the defaults
 exclude = ["experimental-release-notes"]
 ```
 
-`hrns.server.capabilities.Skills` wraps `pydantic_ai_skills.SkillsCapability`, and
-`build_agent` installs it by default. Skills defined in Python can ship with an app
-instead of on disk — see `examples/fastapi_app.py`. The full reference, including the
+`build_agent` discovers skills by default. Applications can supply Python definitions
+with `Skills(skills=...)`; see `examples/fastapi_app.py`. The full reference, including the
 ACP `_meta` payloads and the security notes, is in [docs/skills.md](docs/skills.md).
 
 ## Serve agents
@@ -66,7 +53,7 @@ from fastapi import FastAPI
 from hrns.server import HrnsServer, build_agent
 
 server = HrnsServer()
-coder = server.add_agent("coder", factory=lambda: build_agent(cwd="/srv/project"))
+coder = server.add_agent("coder", factory=lambda: build_agent("anthropic:claude-sonnet-5-5", cwd="/srv/project"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -118,7 +105,7 @@ For stdio:
 ```python
 from hrns.server import build_agent, run_acp_stdio
 
-run_acp_stdio(lambda: build_agent())
+run_acp_stdio(lambda: build_agent("anthropic:claude-sonnet-5-5"))
 ```
 
 `hrns acp` starts the default agent over stdio; `hrns agent` uses the configured
@@ -135,8 +122,7 @@ key by key. `HRNS_*` environment variables override both.
 terminal client reuses that entrypoint, so it passes the same document to it.
 
 In the TUI connection picker, `l` opens provider management. Add or edit a provider
-to paste its API key into the password field; the key is stored in the OS keyring,
-not in the TOML file. After saving a provider without an active model, the model
+to paste its API key into the password field; the key is stored in the OS keyring. After saving a provider without an active model, the model
 picker opens so a catalog or custom id can be selected. `/model provider:model` also
 sets it directly.
 
@@ -151,22 +137,14 @@ The entry this deployment starts with is marked `required`, because disabling it
 leave the default session without a model; the headers a client sends reach the request
 as `extra_headers` model settings.
 
-## Limitations
+## Runtime behavior
 
-- Sessions, queues, pending interactions, and observation are process-local. Run one
-  worker per server. Durable session stores restore committed state after restart;
-  they do not restore active tasks or queued prompts.
-- Provider configuration is in memory and applies from the next model resolution, which
-  is the next turn; a turn already in flight is unaffected. MCP-over-ACP supports tools,
-  resources, prompts, completions, progress, and input-required results; long-lived
-  subscriptions are not streamed yet (see [MCP over ACP](docs/mcp.md)). Legacy
-  (handshake-era) upstream MCP servers are best-effort: the proxy mirrors their advertised
-  capabilities and logs the negotiated revision, but does not bridge reverse requests
-  (sampling, elicitation, roots). An exported server is offered only after the client's
-  user approves it at session start (or `always_allow = true` is configured); headless
-  clients deny it otherwise. Startup and authentication failures appear in the `/mcp`
-  side panel and as a status hint. Next
-  edit suggestions (`nes/*`) remain unimplemented and are not advertised.
-- `build_agent` adds a small approval capability by default: reads run freely, writes and
-  shell calls are marked `unapproved` so ACP can request permission. Pass
-  `approval=False` to disable it.
+- Run one worker per server. Sessions, queues, pending interactions, and observation live
+  in the process. Durable session stores restore committed state after restart.
+- Provider routing changes apply on the next turn. A running turn keeps its selected
+  endpoint; session setting changes apply before its next model request.
+- MCP exports require client consent at session start. Headless clients export servers
+  configured with `always_allow = true`. The `/mcp` panel shows startup and authentication
+  failures. See [MCP over ACP](docs/mcp.md) for the request scope and upstream behavior.
+- Tool approvals are enabled by default. Reads run freely; file writes and shell calls
+  request permission through ACP. `approval=False` delegates approval to the deployment.

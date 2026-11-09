@@ -1,415 +1,67 @@
-# MCP-over-ACP: feasibility and implementation analysis
+# MCP binding internals
 
-Status: working analysis, 2026-11-07. Not a decision record yet.
+The stateless MCP-over-ACP binding serves client-provided tools, resources, prompts,
+completions, progress, and input-required results. For configuration and examples, see
+[MCP over ACP](mcp.md). Architecture decisions are recorded in `ARCHITECTURE.md`.
 
-Implementation status: the stateless binding primitives live in
-`src/hrns/shared/acp_mcp/` (`McpOverAcpCaller`, `McpOverAcpProvider`,
-`from_mcp_server`, `AcpMcpClientTransport`, and the local Python SDK route
-shim). The client provider (`ClientMcpProvider`), the `[mcp].export` switch,
-the agent-side `acp_mcp_toolsets` helper, and `hrns agent` session wiring are
-in place. Export is gated by client consent at session start, with
-`always_allow` for pre-approved and headless use. Startup and authentication
-failures are surfaced in the `/mcp` side panel and as transcript notices and a
-status hint. Long-lived subscriptions and an explicit MRTR retry policy remain;
-legacy upstreams are best-effort (section 3.4).
+## Components
 
-Scope: the **stateless** MCP-over-ACP binding for **MCP 2026-07-28**, implemented
-on both ends of this repository, with no `_hrns/*` protocol extensions. The
-client is the MCP provider; a remote ACP agent is the consumer.
-
-Two provider cases are in scope:
-
-1. the client **launches** an MCP server process (for example
-   `npx @playwright/mcp@latest`) and offers it to the agent;
-2. the client **connects** to an existing MCP server (HTTP/SSE, or an
-   already-running stdio process) and offers it to the agent.
-
-Both are the same mechanism: an upstream MCP client session bridged to a
-stateless MCP-over-ACP provider on the ACP connection.
-
-## 1. What the protocol requires
-
-The binding is defined by the ACP RFD
-[MCP-over-ACP: Stateless MCP Requests over ACP](https://agentclientprotocol.com/rfds/mcp-over-acp)
-and targets only
-[MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28).
-
-The important consequences:
-
-- A provider registers an opaque `serverId` and declares it in `session/new`
-  as `{"type": "acp", "name": ..., "serverId": ...}`.
-- The agent sends `mcp/message` requests with
-  `{serverId, requestId, method, params}`. `requestId` is a fresh logical MCP
-  request id; the outer ACP JSON-RPC id is separate and may be renumbered by a
-  proxy.
-- There is no `mcp/connect` / `mcp/disconnect` exchange and no MCP
-  `initialize` handshake. Every request carries its protocol version and client
-  capabilities in inner `params._meta`.
-- A successful ACP response carries exactly one inner outcome:
-  `{"result": ...}` or `{"error": {code, message, data?}}`. An MCP protocol
-  error is a successful ACP response; only binding failures use outer ACP
-  errors.
-- Provider notifications are ACP notifications on `mcp/message` with the same
-  `serverId` / `requestId`. They are request-scoped.
-- Cancellation is ACP's existing `$/cancel_request` on the outer request.
-- MRTR replaces reverse requests: a provider can return
-  `resultType: "input_required"` with `inputRequests` / `requestState`; the
-  caller retries with a fresh `requestId`, `inputResponses`, and the unchanged
-  state.
-- Subscriptions are long-lived `subscriptions/listen` requests; their
-  notifications carry `_meta["io.modelcontextprotocol/subscriptionId"]` equal
-  to the logical `requestId`.
-
-## 2. What already exists
-
-### In this repository
-
-- `src/hrns/server/acp/session.py` already carries
-  `AcpMcpServer | HttpMcpServer | SseMcpServer | McpServerStdio` in
-  `AcpSession.mcp_servers`.
-- `src/hrns/server/acp/adapter.py` already passes `mcp_servers` to
-  `session_config`, but nothing implements `session_config`; `hrns agent`,
-  `build_agent`, and the FastAPI example pass none, so a non-empty
-  `mcpServers` is rejected with `invalid_params`.
-- `src/hrns/client/session.py` always sends `mcp_servers=[]`.
-- `src/hrns/shared/config/mcp.py` already models `[mcp.servers.<name>]` with `command`
-  (stdio) or `url` (HTTP/SSE), OAuth, token storage, and FastMCP transport
-  construction. Today only the `hrns mcp` CLI consumes it.
-- `src/hrns/server/acp/toolsets.py` is the pattern for client-backed tools
-  (`acp_filesystem`, `acp_terminal`): the adapter supplies the connection, the
-  helper builds a toolset, and `session_config` decides whether to use it.
-
-### In the installed dependencies
-
-- `agent-client-protocol==1.0.0rc3` has `AcpMcpServer`,
-  `McpCapabilities.acp`, `use_unstable_protocol=True`, and the **stateful**
-  methods `mcp/connect`, `mcp/message(connectionId, ...)`, `mcp/disconnect`.
-  It has no stateless types, no `MessageMcpResponse` carrier, and no `McpError`.
-- `mcp==2.3.0` already supports the modern era:
-  - `LATEST_PROTOCOL_VERSION == "2026-07-28"`, `LATEST_MODERN_VERSION == "2026-07-28"`
-  - `mcp.server.lowlevel.Server.run()` is dual-era
-  - `mcp.server.runner.serve_one()` is the single-exchange modern driver
-  - `mcp.server._streamable_http_modern._SingleExchangeDispatchContext` is the
-    one-request dispatch context (progress sink, no back-channel)
-  - `mcp.Client` supports a custom `Transport` and `mode="auto"`
-- `pydantic-ai-slim[mcp]` exposes `MCPToolset`, which accepts a
-  `fastmcp.client.transports.base.ClientTransport` directly (or a
-  `fastmcp.Client`).
-- `fastmcp-slim[client]` provides `ClientTransport`, stdio/HTTP/SSE transports,
-  OAuth, and token storage. Server support is **not** installed and is not
-  needed: the provider can use `mcp.server` from the `mcp` package.
-
-### In the Python SDK upstream
-
-The Python SDK's **generated** schema is behind the spec's **draft v1
-schema**. The draft already defines the stateless `serverId` / `requestId`
-envelope, `McpRequestId`, the `MessageMcpResponse` carrier, and
-`MessageMcpNotification`
-([published draft v1 schema](https://agentclientprotocol.com/protocol/v1/draft/schema)).
-The SDK's `schema/schema.json` still defines `ConnectMcpRequest` /
-`connectionId` / `DisconnectMcpRequest`, all `UNSTABLE`. No released version or
-`main` supports the stateless binding. The Rust SDK has already removed the
-stateful prototype
-([migration doc](https://github.com/agentclientprotocol/rust-sdk/blob/main/md/migration-stateless-mcp.md)),
-and the TypeScript SDK ships the stateless binding
-([core.ts](https://github.com/agentclientprotocol/typescript-sdk/blob/main/src/mcp/core.ts)).
-This is the gap tracked in `ISSUE.md`.
-
-## 3. Architecture
-
-### 3.1 Agent side (consumer)
-
-The agent must:
-
-1. Advertise `mcpCapabilities.acp = true` when it can consume ACP-provided
-   servers.
-2. On `session/new` / `session/load`, for each `AcpMcpServer` declaration,
-   build an MCP client transport bound to that `serverId`.
-3. Expose it to the model as a toolset.
-
-The clean integration is a `ClientTransport` implementation:
-
-```
-AcpMcpClientTransport(ClientTransport)
-    connect_session() -> ClientSession
-        in-memory client streams
-        pump task:
-            outgoing SessionMessage -> ACP request:
-                mcp/message {serverId, requestId, method, params}
-                response carrier -> SessionMessage response
-            inbound ACP notification (same serverId/requestId)
-                -> SessionMessage notification
-        close(): cancel outstanding operations
-```
-
-`pydantic_ai.mcp.MCPToolset` accepts the transport directly, so no custom
-toolset is required:
-
-```python
-MCPToolset(AcpMcpClientTransport(client, server_id), id=server_name)
-```
-
-The adapter must own the inbound notification routing because `notify_mcp`
-arrives on the adapter's connection. A connection-scoped registry keyed by
-`(serverId, requestId)` is enough. The toolset helper (`acp_mcp_toolsets`, by
-analogy with `acp_filesystem` / `acp_terminal`) stays outside the adapter; the
-adapter only provides the connection and the notification hook. This keeps the
-adapter's "translate protocol events; do not define agent behavior" contract.
-
-Lifecycle: connect during session setup, before returning the session id, as
-the RFD requires the provider to be ready when it publishes the declaration.
-Disconnect on session close. A `session/load` replays the transcript and then
-reconnects the servers.
-
-Tool naming: use the server name as `MCPToolset(id=...)`; if the model-facing
-names collide, prefix with the server name. Pydantic AI already namespaces
-toolsets by id, but verify against the current version.
-
-### 3.2 Client side (provider)
-
-`HrnsAcpClient` is the ACP client object. It must implement the provider
-direction of `mcp/message` and own a registry of offerings:
-
-```
-AcpMcpProvider (connection-scoped)
-    offerings: dict[server_id, Offering]
-    handle_mcp_message(params) -> MessageMcpResponse carrier
-    handle_mcp_notification(params) -> None
-    close()
-```
-
-`Offering` holds:
-
-- the user-facing name (`project-tools`, `playwright`, ...);
-- the upstream MCP client (`fastmcp.Client` built from
-  `hrns.shared.config.mcp.build_transport`);
-- the downstream server (`mcp.server.lowlevel.Server` or `MCPServer`) whose
-  handlers proxy to the upstream client;
-- the process/connection lifecycle.
-
-Upstream:
-
-- `command` → `fastmcp.client.transports.StdioTransport` (the client starts and
-  owns the process; this is feature 1).
-- `url` → `StreamableHttpTransport` / `SSETransport` through the existing
-  `build_transport`, preserving headers, OAuth, and token storage (feature 2).
-- Reuse `McpServerSettings`, `expand_env_map`, and the token store; no second
-  config schema.
-
-Downstream:
-
-- Build a low-level `Server` with handlers for `tools/list`, `tools/call`,
-  `ping`, and optionally resources/prompts/completions.
-- For each ACP request, use `mcp.server.runner.serve_one` with a
-  one-exchange dispatch context adapted from
-  `_SingleExchangeDispatchContext`. Replace its SSE sink with ACP
-  `send_notification("mcp/message", {serverId, requestId, method, params})`.
-- Return `{"result": result}` or `{"error": {"code", "message", "data"}}`.
-  Map handler exceptions with `modern_error_data`; transport failures become
-  outer `-33002`.
-- Honour `$/cancel_request`: the handler task is cancelled, cleanup runs
-  shielded, notifications stop, and the outer request returns `-32800`.
-
-Registration and declaration:
-
-- Generate an opaque `serverId` per offering for the ACP connection lifetime,
-  e.g. `hrns:<name>:<8 hex>`. Do not rebind it.
-- Declare `AcpMcpServer(name=..., server_id=...)` in `session/new` and
-  `session/load` only when the agent advertises `mcpCapabilities.acp`.
-- Keep the offering alive across sessions; a later session may reuse the same
-  registration, as the RFD allows.
-
-### 3.3 Why the proxy cannot tunnel raw MCP frames
-
-The upstream and downstream sessions are independent MCP connections, often
-different protocol eras:
-
-- `npx @playwright/mcp` today speaks a legacy handshake-era MCP revision
-  (`initialize`, session state).
-- The downstream binding is stateless MCP 2026-07-28: no `initialize`,
-  per-request `_meta`, MRTR.
-
-Passing raw JSON-RPC through would send 2026-07-28 envelopes to a legacy
-server, or legacy `initialize` to the agent. The provider must terminate both
-sessions and translate at the method level:
-
-- `tools/list` → upstream `list_tools()` → descriptors passed through;
-- `tools/call` → upstream `call_tool()` → result or `McpError`;
-- progress callbacks → downstream `ctx.progress` → ACP notification;
-- upstream `isError` stays an MCP result, not an ACP error;
-- upstream authentication stays on the client and never reaches the agent.
-
-The `mcp` Python SDK's dual-era support makes this tractable: the upstream
-client can negotiate legacy, while the downstream provider serves modern via
-`serve_one`.
-
-### 3.4 Legacy upstream policy
-
-Supporting legacy upstreams fully is not a translation problem, it is a new
-feature:
-
-- A handshake-era server's reverse requests (`sampling/createMessage`,
-  `elicitation/create`, `roots/list`) happen inside a live `call_tool()` await.
-  The downstream binding has no back-channel: it can only return
-  `input_required` and wait for a retry with a fresh `requestId`. Resuming would
-  mean either re-issuing the upstream call (repeating side effects) or
-  answering locally (a client-side model, client-side UI, or client-side
-  filesystem), which is a product and trust decision, not protocol work.
-- Legacy change notifications (`list_changed`, logging) map onto modern
-  `subscriptions/listen`, which the provider does not serve yet.
-
-The chosen policy is **best-effort, not supported**:
-
-- `build_client` uses `mode="auto"`, so a legacy server still negotiates and
-  works for the finite methods the proxy translates.
-- `_proxy_server` mirrors the upstream's `server_capabilities`, so
-  `server/discover` never advertises resources, prompts, or completions the
-  upstream does not have.
-- The negotiated revision is logged; a non-`2026-07-28` server logs a warning.
-- Reverse requests are not advertised, so a legacy server that needs one gets
-  the MCP SDK's `INVALID_REQUEST` ("Sampling not supported", "Elicitation not
-  supported", "List roots not supported") instead of a hang or a bridge.
-- `hrns mcp` keeps `mode="auto"` so a legacy server can still be inspected.
-
-## 4. The Python SDK gap and the local workaround
-
-### Option A: wait for upstream
-
-Not acceptable if the feature is needed now, and the issue may take time to
-land. The old prototype is also a dead end.
-
-### Option B: local compatibility shim (recommended short term)
-
-The Python SDK's connection layer is small enough to extend without forking:
-
-- `MessageRouter` is public (`acp.router.MessageRouter`) and
-  `add_route(Route(...))` replaces a method's handler. Requests and
-  notifications are separate route tables, so `mcp/message` can be both.
-- `Connection.send_request(method, params)` and
-  `send_notification(method, params)` are generic; they do not require a typed
-  wrapper.
-- After `ClientSideConnection` / `AgentSideConnection` is constructed, the
-  handler is at `connection._conn._handler` (private). Replace the
-  `mcp/message` request and notification routes with stateless handlers, and
-  send stateless messages through `_conn.send_request` /
-  `send_notification`.
-
-This is a **protocol-conformant** workaround: the wire bytes are the RFD's,
-not an extension. It only bypasses the SDK's outdated pydantic model for one
-method.
-
-Risks:
-
-- private attributes (`_conn`, `_handler`) can change between SDK releases;
-- the SDK's typed `mcp_message` helpers become unusable for this method;
-- error mapping and cancellation must be reimplemented at the shim boundary.
-
-Mitigation: isolate everything in one module (for example
-`src/hrns/server/acp/mcp_binding.py`, plus the client-side counterpart), pin
-`agent-client-protocol`, and add a compatibility test that asserts the router
-shape at startup. Remove the shim when the upstream issue lands.
-
-### Option C: fork or vendor the SDK
-
-Works, but creates a maintenance burden disproportionate to the size of the
-change. Not recommended unless the upstream issue stalls.
-
-### Option D: contribute the change upstream
-
-The right long-term answer, and the subject of `ISSUE.md`. The change is
-moderate: schema types, interface signatures, route registration, carrier
-validation, and tests. The SDK already has the pieces (router, generic
-connection, cancellation); the work is mostly semantics.
-
-## 5. Work breakdown and rough effort
-
-Estimates are person-days for one engineer who knows this repository. They are
-for the MVP (tools only), not the full MCP feature surface.
-
-| Component | Effort | Notes |
+| Component | Module | Responsibility |
 | --- | --- | --- |
-| Stateless wire types + router shim (both ends) | 2–3 | Schema models, route replacement, carrier validation, ID tracking |
-| Agent consumer transport + `MCPToolset` | 2–3 | `ClientTransport`, memory streams, notification routing, lifecycle |
-| Client provider registry + `serve_one` dispatch | 2–3 | Envelope validation, active-ID bookkeeping, error mapping |
-| Upstream proxy: spawn stdio + HTTP/SSE, tools | 3–5 | Reuse `config.mcp`, FastMCP clients, low-level server handlers |
-| Progress notifications + cancellation | 2–3 | Sink-to-ACP, `$/cancel_request`, shielded cleanup |
-| Config/TUI export + session declarations | 1–2 | Opt-in flag, `serverId`, `session/new` payload, status |
-| Tests (unit, in-process echo, playwright smoke) | 3–5 | Most of the confidence comes from here |
-| **MVP total** | **~15–24** | About 3–5 weeks, including review cycles |
+| `McpOverAcpProvider` | `hrns.shared.acp_mcp.core` | Register server IDs, validate envelopes, dispatch requests, track active IDs, and map errors |
+| `McpOverAcpCaller` | `hrns.shared.acp_mcp.core` | Send requests with protocol metadata, correlate notifications, and forward cancellation |
+| `from_mcp_server` | `hrns.shared.acp_mcp.server` | Adapt server handlers to one exchange through `serve_one` |
+| `AcpMcpClientTransport` | `hrns.shared.acp_mcp.transport` | Expose the binding as an MCP client transport |
+| Route binding | `hrns.shared.acp_mcp.router` | Install request and notification handlers on the ACP connection |
+| `ClientMcpProvider` | `hrns.client.mcp_provider` | Obtain consent, start upstream servers, publish declarations, and own cleanup |
+| `acp_mcp_toolsets` | `hrns.server.acp.mcp` | Build attachment toolsets from client declarations |
 
-Beyond the MVP:
+## Request flow
 
-| Feature | Additional effort | Risk |
-| --- | --- | --- |
-| Resources, resource templates, prompts, completion | 3–5 | Low–medium |
-| Subscriptions (`subscriptions/listen`) | 3–5 | High: long-lived operation, ack ordering, cancellation |
-| MRTR / `input_required` | 3–5 | High: opaque state, retries, policy |
-| Full conformance and stress tests | 5–10 | Medium |
+1. The client obtains consent for an enabled server with `export = true`.
+2. The client starts its upstream connection, registers an opaque `serverId`, and includes
+   the declaration in the session request.
+3. The agent creates an attachment toolset backed by `AcpMcpClientTransport`.
+4. Each operation sends `mcp/message` with `serverId`, a fresh logical `requestId`, and
+   per-request protocol metadata. The outer ACP JSON-RPC ID identifies the transport request.
+5. The provider translates the method to its upstream session and returns an inner
+   `result` or `error`. Progress notifications carry the same logical request ID.
+6. Cancellation uses ACP `$/cancel_request`; handler cleanup runs under shielding.
 
-A realistic first milestone is **two weeks**: one in-process echo MCP server,
-agent-side consumption, and the stateless envelope working end to end with
-tests. The playwright-mcp stdio proxy is the next milestone.
+Upstream and downstream sessions negotiate independently. The proxy translates methods,
+preserves tool-error results, mirrors upstream capabilities, and keeps upstream credentials
+on the client. MCP protocol errors use the inner carrier; binding failures use outer ACP
+codes. See the [error table](mcp.md#the-binding).
 
-## 6. Main risks
+## Connection routing
 
-1. **Private SDK shim.** The router replacement relies on
-   `connection._conn._handler`. A minor SDK refactor breaks it. Mitigate with a
-   single module, a startup assertion, and an upstream PR.
-2. **Legacy ↔ modern bridge.** Playwright and many current servers are
-   legacy-era. The proxy terminates both sessions and translates at the method
-   level; raw tunneling will not work. Finite methods are best-effort, but
-   reverse requests are not bridged (section 3.4), so a legacy server that
-   needs sampling, elicitation, or roots fails at the call.
-3. **Stateless server lifecycle.** Per-request serving is straightforward;
-   subscriptions and long-lived operations are not. Do not advertise
-   subscription support until it is tested.
-4. **Security and consent.** Exporting every configured MCP server to any
-   connected agent gives that agent the client's local tools and credentials.
-   Export stays opt-in (`export = true` per server), and the client asks at
-   session start before declaring it; `always_allow` is the pre-approved
-   headless path. Per-call approval remains out of scope.
-5. **Tool naming.** Multiple servers can expose the same tool name. Decide
-   between prefixing and rejecting collisions before the model sees them.
-6. **Protocol churn.** The binding is a draft RFD. Pin the MCP protocol
-   version and keep the wire shim isolated so it can follow the RFD.
-7. **Error-domain mistakes.** Mixing inner MCP codes with outer ACP codes is
-   the most likely conformance bug (for example, treating an inner `-32000` as
-   ACP auth-required). Test colliding codes explicitly.
+The route binding installs stateless `mcp/message` request and notification handlers on
+both connection directions. It uses the connection's router and raw request/notification
+send methods. Access to private connection attributes is isolated in `router.py`; review
+that boundary when upgrading the ACP dependency.
 
-## 7. Recommended sequence
+A connection owns its server registrations and active request IDs. Attachment cleanup
+releases those resources. Agent tool dispatch validates attachment generation to keep
+calls associated with the client whose tools were advertised.
 
-1. File the upstream issue (`ISSUE.md`); optionally open a draft PR for the
-   schema and router changes.
-2. Implement the stateless models and the local shim in one module, with unit
-   tests against a fake ACP connection.
-3. Implement the agent consumer transport and prove it against an in-process
-   echo MCP server.
-4. Implement the client provider for a spawned stdio upstream
-   (playwright-mcp) and run the first real end-to-end turn.
-5. Add HTTP/SSE upstreams and reuse the existing OAuth/token store.
-6. Add progress notifications and cancellation.
-7. Add the opt-in export setting and the `session/new` declaration.
-8. Add resources/prompts, then subscriptions, then MRTR, in that order.
-9. Remove the shim when the Python SDK ships the stateless binding.
+## Subscription work
 
-## 8. Open decisions
+The current provider serves finite exchanges. Implementing `subscriptions/listen` requires:
 
-- **Export policy:** all enabled `[mcp]` servers, or only servers with an
-  explicit `acp = true`? Recommendation: opt-in, default off.
-- **Consent:** decided. The client gates export at session start (allow once,
-  allow for the connection, always allow, deny) instead of trusting the agent's
-  approval policy. `always_allow = true` persists the grant, and a
-  non-interactive client denies anything not pre-approved. Per-call approval is
-  still out of scope.
-- **Session scope:** declare every offering in every session, or let the user
-  select which servers each session sees?
-- **Feature surface:** tools only for the MVP, or resources/prompts too?
-- **Naming:** prefix model-facing tool names with the server name, or rely on
-  `MCPToolset(id=...)`?
-- **Fallback:** when the agent does not advertise `mcpCapabilities.acp`,
-  should the client declare reachable stdio/HTTP servers directly, or remain
-  silent?
-- **Protocol version:** the downstream binding is pinned to `2026-07-28` and
-  rejects other versions with the inner `-32022` carrier as the RFD requires.
-  The upstream connection stays on `mode="auto"` and is best-effort, so a
-  legacy server is usable without becoming a supported binding (section 3.4).
+| Concern | Required behavior |
+| --- | --- |
+| Serving | Keep a provider operation alive after acknowledgement |
+| Ordering | Register the subscription before writing `notifications/subscriptions/acknowledged`; buffer events during that write |
+| Correlation | Set `_meta["io.modelcontextprotocol/subscriptionId"]` to the logical request ID on each notification and final result |
+| Filtering | Respect tools, prompts, resources, and resource-subscription filters |
+| Cancellation | Release the subscription on cancellation, session close, or server disposal |
+| Recovery | Re-listen and refetch after a dropped stream |
+
+Input-required results already pass through. A consumer retry policy must collect input,
+choose a fresh request ID, preserve opaque state, and define when retries stop.
+Remaining work is tracked in `TODO.md`.
+
+## References
+
+- [MCP-over-ACP RFD](https://agentclientprotocol.com/rfds/mcp-over-acp)
+- [MCP 2026-07-28 specification](https://modelcontextprotocol.io/specification/2026-07-28)

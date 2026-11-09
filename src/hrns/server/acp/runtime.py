@@ -764,12 +764,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 await self._send_update(turn, update)
         capability = self._skills
         if skills and capability is not None:
-            # The person invoked these. The text joins the prompt as a block, the way
-            # OpenCode injects a skill, rather than a fabricated ``load_capability``
-            # turn: an assistant message with tool calls and no ``reasoning_content``
-            # is rejected by thinking-mode providers such as DeepSeek. The capability
-            # still marks these leaves always-on for the session, which opens the
-            # bundled-file gate and keeps them out of the model's deferred catalog.
+            # Add invoked instructions as user content and keep the skills active
+            # for the session so their bundled-file tools are available.
             state.invoked_skills.update(info.id for info in skills)
             injected = [
                 f'<skill_content name="{info.id}">\n'

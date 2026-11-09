@@ -4,7 +4,7 @@
 and read-only AG-UI routes for the same live sessions.
 
 ```sh
-uv sync --extra server --extra ag-ui
+uv sync --extra client --extra server --extra ag-ui
 DEEPSEEK_API_KEY=... uvicorn examples.fastapi_app:app --reload
 hrns connect --server ws://127.0.0.1:8000/acp/coder --token example-token
 ```

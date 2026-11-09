@@ -1,9 +1,8 @@
 # Configuration
 
-`hrns` keeps one document. The client and server both read it, so a
-profile, a provider, and a preference live in the same file and are validated by the same
-pydantic-settings model. A typo anywhere fails both programs the same way instead of
-being silently ignored by one of them.
+`hrns` stores profiles, providers, and preferences in one configuration document.
+The client and server share its schema and validation rules; invalid settings
+report the file and field that need correction.
 
 ## Where the file is
 
@@ -14,7 +13,7 @@ being silently ignored by one of them.
 | Explicit document | `--config PATH` or `HRNS_CONFIG_FILE=PATH` |
 
 The user document is the one `hrns` writes. A project document only overrides the keys it
-names, so a repository can add one profile or provider without copying the rest.
+names, so a repository can add a profile or provider to the user configuration.
 `--config` reads exactly that file and disables the merge; it is what `hrns agent --config`
 receives when a profile must pin one file.
 
@@ -31,7 +30,7 @@ Highest first:
 5. Built-in defaults.
 
 Files merge key by key: setting `provider = "local-gw"` in a project document keeps the
-user document's providers that the project does not mention. Sections merge the same way,
+user document's other providers. Sections merge the same way,
 so a project file can add `[profile.repo]` next to the user's `[profile.team]`.
 
 ## A complete example
@@ -45,7 +44,7 @@ model = "deepseek-flash"
 store = "~/Library/Application Support/hrns/local-sessions.db"
 
 [providers.deepseek]
-type = "deepseek"                      # Pydantic AI provider id; defaults to the entry name
+type = "deepseek"                      # Provider type; defaults to the entry name
 api_key_env = "DEEPSEEK_API_KEY"       # which environment variable holds the key
 custom_models = ["deepseek-flash"]     # model ids to offer besides the catalog's
 options = { timeout = 60 }             # extra keyword arguments for the provider
@@ -55,11 +54,11 @@ type = "openai"
 base_url = "http://127.0.0.1:11434/v1"
 
 [model_settings]
-thinking = "high"                      # forwarded to Pydantic AI ModelSettings
+thinking = "high"                      # baseline model request settings
 
 [thinking]
 levels = ["low", "medium", "high"]     # which reasoning efforts sessions may select
-allow_off = false                      # do not offer "off" on models that can disable it
+allow_off = false                      # require reasoning on models with an effort option
 
 [skills]
 enabled = true
@@ -104,17 +103,17 @@ notes = "scratch agent"
 
 ### `[tui]`
 
-Terminal preferences. The client writes this section; the server ignores it.
+Terminal preferences. The client reads and writes terminal preferences here.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `theme` | string | `"hrns"` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark`, or `ansi-light` |
 | `auto_expand_tools` | bool | `false` | Render every tool result expanded |
 | `show_thoughts` | bool | `false` | Render the agent's reasoning |
-| `permission_mode` | `ask` \| `reads` \| `all` | `"ask"` | `ask` surfaces every approval; `reads` auto-answers read-only tools; `all` auto-approves any call the agent offered an allow option for (not a sandbox) |
+| `permission_mode` | `ask` \| `reads` \| `all` | `"ask"` | `ask` surfaces every approval; `reads` auto-answers read-only tools; `all` auto-approves any call the agent offered an allow option for (executes with the workspace permissions) |
 | `client_io` | `off` \| `read` \| `all` | `"all"` | What this terminal offers the agent: nothing, filesystem reads, or reads plus writes and terminal commands |
 | `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
-| `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written on connect, not meant to be hand-edited |
+| `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |
 
 ### `[profile.<name>]`
 
@@ -130,7 +129,7 @@ A saved connection. The table key is the profile's name.
 | `url` | string | `""` | ACP WebSocket endpoint (server); `wss://` for remote hosts, `ws://` only for loopback |
 | `agent` | string | `""` | Optional agent label shown beside a remote profile |
 | `token` | string | `""` | Bearer token or secret reference (server) |
-| `remote_cwd` | string | `""` | Workspace path sent to a remote agent; never rewritten locally |
+| `remote_cwd` | string | `""` | Workspace path passed directly to a remote agent |
 | `auth_method` | string | `""` | Agent-advertised auth method id to try automatically |
 | `client_io` | `off` \| `read` \| `all` | unset | Overrides `[tui].client_io` for this connection |
 | `default` | bool | `false` | Candidate for a launch that names no profile |
@@ -151,11 +150,11 @@ that builds the model) reads these.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `type` | string | entry name | Pydantic AI provider id (`openai`, `anthropic`, `deepseek`, `gateway/openai`, …). Empty reuses the entry name |
+| `type` | string | entry name | Provider type (`openai`, `anthropic`, `deepseek`, `gateway/openai`, …). Empty reuses the entry name |
 | `base_url` | string | `""` | `http(s)` endpoint for an OpenAI-compatible server. Credentials, query strings and fragments are rejected |
 | `api_key_env` | string | `""` | Environment variable holding this entry's key |
 | `copilot_client_id` | string | `""` | GitHub OAuth app for the Copilot device login; empty uses GitHub's public client |
-| `custom_models` | list of strings | `[]` | Model ids to offer besides the catalog's; must not contain `:` |
+| `custom_models` | list of strings | `[]` | Model ids to offer besides the catalog's; use bare ids separated from the provider name |
 | `options` | table | `{}` | Extra keyword arguments for the provider constructor |
 
 Two entries may use the same `type`, which is how `openai-work` and `openai-home` hold
@@ -163,7 +162,7 @@ different endpoints and keys under one provider implementation.
 
 ### `[model_settings]`
 
-Forwarded as `ModelSettings` to every run. `thinking` is special: a level
+Forwarded as [model settings](https://ai.pydantic.dev/api/settings/) to every run. `thinking` is special: a level
 (`minimal`, `low`, `medium`, `high`, `xhigh`) enables reasoning, `false` disables it, and
 omitting it keeps the provider default. The TUI's `/effort` writes this key when connected
 to `hrns agent`; for any other agent it changes the session's `effort` config option
@@ -174,16 +173,16 @@ over ACP overrides it for its own session.
 
 ### `[thinking]`
 
-The reasoning-effort policy `hrns agent` advertises to ACP clients. It is a server-side
-allowlist: the built-in agent intersects it with the model's own profile, so a level the model
-cannot use is never offered, and a value outside the list is rejected rather than clamped.
+The reasoning-effort policy `hrns agent` advertises to ACP clients. The built-in
+agent intersects this allowlist with the model profile. Advertised levels are supported
+by both the policy and the model. Values outside the policy receive a validation error.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `levels` | list | all five levels | Values the `effort` option offers, in display order |
 | `allow_off` | bool | `true` | Offer `off` on models whose reasoning can be disabled |
 
-`default` is always offered and means "send no `thinking` setting". An empty `levels`
+`default` is always offered and uses the baseline `thinking` setting. An empty `levels`
 removes the effort option entirely. Listing a value that is not one of `minimal`, `low`,
 `medium`, `high`, `xhigh` is a configuration error.
 
@@ -193,8 +192,8 @@ levels = ["low", "medium", "high"]
 allow_off = false
 ```
 
-If `[model_settings].thinking` names a level the policy does not offer for the startup
-model, `hrns agent` refuses to start rather than running with an effort no client can see.
+The startup model must support `[model_settings].thinking` within the advertised policy;
+a conflicting value produces a startup validation error.
 
 ### `[mcp]`
 
@@ -222,7 +221,7 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 | `include_tools` | list of strings | `[]` | Only these tools (mutually exclusive with `exclude_tools`) |
 | `exclude_tools` | list of strings | `[]` | All tools except these |
 | `timeout` | float | `10.0` | Seconds before a request to the server fails |
-| `oauth` | bool or table | `true` | `true` uses OAuth with dynamic registration; `false` never tries it; a table sets `client_id`, `client_secret`, `scopes`, and `callback_port` |
+| `oauth` | bool or table | `true` | `true` uses OAuth with dynamic registration; `false` disables OAuth; a table sets `client_id`, `client_secret`, `scopes`, and `callback_port` |
 
 `export = true` makes the client offer an enabled server to an agent that advertises
 `mcpCapabilities.acp`: it launches the stdio command or connects to the URL, then proxies
@@ -231,23 +230,22 @@ built-in agent only.
 
 Exporting is still gated by the client's user. At session start an interactive client
 asks whether the agent may use the server: allow once, allow for this connection, always
-allow, or deny. A denied server is left out of the session declaration, and an
-unapproved server is never started. `always_allow = true` skips the prompt and
+allow, or deny. Approval gates server startup and inclusion in the session declaration. `always_allow = true` skips the prompt and
 persists the grant in this document; headless clients (`hrns run`) cannot ask, so
 they only export servers that are pre-approved this way.
 
 ### `[skills]`
 
-Agent Skills, described in full on the [Skills](skills.md) page. The defaults need no
-configuration: `<workspace>/.agents/skills` and `~/.agents/skills` are read when they
+Agent Skills, described in full on the [Skills](skills.md) page. The default libraries
+are `<workspace>/.agents/skills` and `~/.agents/skills` are read when they
 exist.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Expose skills to the agent and to `$name` invocation |
-| `paths` | list of paths | `[]` | Extra libraries, read before the defaults. Relative paths resolve against the working directory; `~` is expanded. A path that does not exist is an error |
+| `paths` | list of paths | `[]` | Extra libraries, read before the defaults. Relative paths resolve against the working directory; `~` is expanded. Each explicit path must be an existing directory |
 | `include` | list of strings | `[]` | Exact skill ids to expose; empty exposes every discovered skill |
-| `exclude` | list of strings | `[]` | Exact skill ids to hide; cannot be combined with `include` |
+| `exclude` | list of strings | `[]` | Exact skill ids to hide; use either `include` or `exclude` |
 
 ```toml
 [skills]
@@ -262,7 +260,7 @@ catalog entirely.
 
 ## Secrets
 
-Never write a key into the document. Use a reference:
+Store credentials in the environment or OS keyring and use a reference:
 
 - `env:NAME` — read the process environment.
 - `keyring:service/user` — read the OS keyring; `hrns login` stores account tokens under
@@ -270,12 +268,11 @@ Never write a key into the document. Use a reference:
 - Anything else is a literal, which is only appropriate for non-secrets such as `PATH`.
 
 `api_key_env` names the variable a provider entry reads; the keyring wins over pasted keys
-for the same entry, so a login and a saved key cannot disagree. Keys stored under the
-old `hrns.local` service are not read after the rename; re-enter them once.
+for the same entry. Account tokens use the `hrns/<entry>` service.
 
 ## Environment variables
 
-Runtime settings can be overridden without editing the file. The prefix is
+Environment variables override runtime settings. The prefix is
 `HRNS_`, and `__` reaches into a section:
 
 ```sh
@@ -299,7 +296,7 @@ terminal, the built-in agent, and `hrns serve`.
   remembered connection. Values equal to their defaults are omitted, so the file stays
   close to what a person would write.
 - Saving goes to the user document unless `--config` selected another file. A project
-  document is read, never written.
+  document supplies read-only overrides.
 - The client passes the same document to the built-in agent it spawns, so a model selected
   in the TUI is the one `hrns agent` runs.
 
@@ -310,7 +307,7 @@ hrns config                      # list the config subcommands
 hrns config show                 # sources and the effective configuration
 hrns config path                 # source files, one per line
 hrns config get provider         # one dotted key, e.g. mcp.servers.playwright.url
-hrns config keys                 # keyring accounts and env sources, never values
+hrns config keys                 # keyring accounts and environment sources
 hrns profiles list               # saved connections from the document
 hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN
 hrns profiles remove team
@@ -324,6 +321,6 @@ hrns login github-copilot
 `user`, `selected`, or `environment`. `--json` prints the same data as JSON, `--all`
 includes defaults, and `--reveal` prints literal secrets that are otherwise shown as
 `***`. `hrns config keys` lists each provider's keyring service/account and environment
-variable name, plus whether a value is present; it never prints the value.
+variable name, plus whether a value is present.
 
 `hrns clean --config` removes the document; `hrns clean` removes session history.

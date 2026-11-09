@@ -230,7 +230,7 @@ _INCIDENT_REVIEW = Skill(
 )
 
 #: The capability the example ships: only the two programmatic skills, no disk discovery.
-_EXAMPLE_SKILLS = Skills(programmatic=(_RELEASE_NOTES, _INCIDENT_REVIEW))
+_EXAMPLE_SKILLS = Skills(skills=(_RELEASE_NOTES, _INCIDENT_REVIEW))
 
 resolver = ExampleModelResolver()
 

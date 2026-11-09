@@ -1,20 +1,20 @@
 # ACP support
 
 `hrns.server.acp` is this repository's own [Agent Client Protocol](https://agentclientprotocol.com)
-adapter. It targets ACP 1.x directly (`acp` SDK, protocol version 1) and is used by both
+adapter. It targets ACP 1.x (protocol version 1) and serves both
 transports: `run_acp_stdio` and the FastAPI mount.
 
-This page is the inventory: which ACP methods the adapter answers, which it refuses, and
-which it never advertises. For mounting it on a web server, see [mount_acp](mount-acp.md).
+This page lists method behavior, advertised capabilities, and client interactions.
+For hosting, see [agent servers](mount-acp.md).
 
 ## Status legend
 
 | Status          | Meaning                                                                                                       |
 |-----------------|---------------------------------------------------------------------------------------------------------------|
-| **Yes**         | Implemented, no extra wiring needed                                                                           |
-| **Conditional** | Implemented, but only when the adapter was constructed with the required object; otherwise `method_not_found` |
-| **No**          | Always `method_not_found`, and never advertised in `initialize`                                               |
-| **Ignored**     | The notification is accepted and has no effect                                                                |
+| **Yes**         | Available on every adapter                                                                           |
+| **Conditional** | Available with the required configuration; other calls receive `method_not_found` |
+| **No**          | Returns `method_not_found`                                               |
+| **Ignored**     | The notification is accepted and discarded                                                                |
 
 ## Transport
 
@@ -23,13 +23,11 @@ which it never advertises. For mounting it on a web server, see [mount_acp](moun
 | stdio     | `run_acp_stdio(factory, session_store=..., model_resolver=...)` | Newline-delimited JSON on stdin/stdout                  |
 | WebSocket | `server.mount_acp(app, prefix="/acp")`                          | One text frame per JSON message, bridged to the adapter |
 
-Both run the adapter with `use_unstable_protocol=True`, so unstable methods are routed to
-it rather than filtered by the SDK.
+Both transports enable unstable protocol methods with `use_unstable_protocol=True`.
 
 ## What `initialize` advertises
 
-The adapter advertises only what it can actually do, so a well-behaved client will not
-call a refused method in the first place.
+`initialize` reports capabilities according to the adapter configuration:
 
 | Field | Advertised when | Notes |
 | --- | --- | --- |
@@ -39,9 +37,6 @@ call a refused method in the first place.
 | `sessionCapabilities.delete` | the store also implements `DeletableSessionStore` | `InMemorySessionStore` does |
 | `providers` | a `model_resolver` was passed | Enables the `model` config option and `providers/*` |
 | `mcpCapabilities` | `mcp_capabilities` was passed | `hrns agent` advertises `acp`, `http`, and `sse` |
-| `promptCapabilities` | never | No image, audio, or embedded-context prompts |
-| `nesCapabilities` | never | No next-edit suggestions |
-| `auth` | never | No authentication methods |
 
 ## Agent methods
 
@@ -50,24 +45,24 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | Method | Kind | Status | Condition / behavior |
 | --- | --- | --- | --- |
 | `initialize` | request | **Yes** | Negotiates version 1 and returns the advertisement above |
-| `authenticate` | request | **Yes** | No-op returning `null`; no auth methods are advertised, so a client has no reason to call it |
+| `authenticate` | request | **Yes** | Returns `null`; admission is configured on the transport mount |
 | `providers/list` | request | **Conditional** | Requires `model_resolver` |
 | `providers/set` | request | **Conditional** | Requires `model_resolver`; a `ValueError` from the resolver becomes `invalid_params` |
 | `providers/disable` | request | **Conditional** | Same; a `required` provider cannot be disabled |
 | `session/new` | request | **Yes** | First advertised model is the session default; returns the `model` and setting config options when a resolver is present |
 | `session/load` | request | **Conditional** | Requires a `session_store`; attaches to live execution or restores saved state, then replays before responding |
-| `session/set_mode` | request | **No** | Modes are not implemented |
+| `session/set_mode` | request | **No** | Returns `method_not_found` |
 | `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
 | `session/prompt` | request | **Yes** | Queues one turn in the shared FIFO and streams `session/update`; `stop_reason` is the finish reason, or `cancelled` |
 | `session/cancel` | notification | **Yes** | Cancels the in-flight turn and pauses pending work; the prompt returns `cancelled` |
-| `mcp/message` | request | **Conditional** | The SDK route is replaced by the stateless binding on a connected adapter; it serves agent-as-provider/proxy requests. Client-provided servers are consumed through `McpOverAcpCaller`. |
+| `mcp/message` | request | **Conditional** | The stateless binding routes registered provider requests; client-provided servers are consumed through `McpOverAcpCaller` |
 | `session/list` | request | **Conditional** | Requires a `ListableSessionStore`; supports `cwd` filter and cursor paging |
 | `session/delete` | request | **Conditional** | Requires a `DeletableSessionStore`; closes live state first |
-| `session/fork` | request | **No** | Not implemented |
-| `session/resume` | request | **No** | Not implemented; use `session/load` |
+| `session/fork` | request | **No** | Returns `method_not_found` |
+| `session/resume` | request | **No** | Restore saved sessions with `session/load` |
 | `session/close` | request | **Yes** | Cancels any active turn and discards session state |
-| `logout` | request | **Yes** | No-op; there is no login to end |
-| `nes/start` | request | **No** | No next-edit-suggestion service |
+| `logout` | request | **Yes** | Returns `null` |
+| `nes/start` | request | **No** | Returns `method_not_found` |
 | `nes/suggest` | request | **No** | Same |
 | `nes/accept` | notification | **Ignored** | Accepted and dropped |
 | `nes/reject` | notification | **Ignored** | Accepted and dropped |
@@ -78,17 +73,15 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `document/didSave` | notification | **Yes** | Marks the tracked document saved |
 | `document/didFocus` | notification | **Yes** | Records cursor and viewport |
 
-Document tracking exists so a future NES implementation has a correct view of the client's
-open files. Nothing else consumes it today, and document state is restricted to the attached session and cleared on detach.
+Document notifications maintain a session-local view of open files, cursor, and viewport.
+Detach clears this document state.
 
-`mcp/message` is routed by `src/hrns/shared/acp_mcp/router.py`, which replaces the Python SDK's
-stateful route on a connected adapter. The adapter's `mcp_message` fallback
+`mcp/message` is routed by `src/hrns/shared/acp_mcp/router.py`. The adapter's `mcp_message` fallback
 still answers `method_not_found` on an unbound connection.
 
 ## Client methods the agent calls
 
-The adapter is a client of the editor/terminal on the other side. These are the client
-methods it may send, and when.
+The adapter calls these methods on the connected client:
 
 | Method | Sent when |
 | --- | --- |
@@ -97,13 +90,11 @@ methods it may send, and when.
 | `fs/read_text_file` | Only when the agent uses `AcpFileSystemToolset` / `acp_filesystem`, and the client advertises `fs.readTextFile` |
 | `fs/write_text_file` | Same, when the client also advertises `fs.writeTextFile`; otherwise writes fall back to a local `FileSystem` bounded by the session `cwd` |
 | `terminal/create`, `terminal/wait_for_exit`, `terminal/output`, `terminal/kill`, `terminal/release` | Only when the agent uses `AcpTerminalToolset` / `acp_terminal`, and the client advertises terminal support |
-| `mcp/message` | When the adapter uses a client-provided (`type: "acp"`) server; the caller sends requests and receives request-scoped notifications. `mcp/connect` and `mcp/disconnect` are never sent: the binding is stateless. |
+| `mcp/message` | When the adapter uses a client-provided (`type: "acp"`) server; the caller sends requests and receives request-scoped notifications |
 | `elicitation/create` | When the model calls `ask_user_question` and the client advertised `elicitation.form`; one form per call, session-scoped to the tool call |
-| `elicitation/complete` | Never; `ask_user_question` elicitation is answered synchronously |
 
 The ACP-backed filesystem and terminal are opt-in through `attachment_config` on
-`server.add_agent`; the default `build_agent` uses the harness `FileSystem` and `Shell`
-on the server side, so a plain mount never asks the client to touch files or run commands.
+`server.add_agent`; the default `build_agent` runs file and shell tools on the server.
 
 `attachment_config` is where MCP declarations become toolsets. `hrns agent` passes
 `acp_mcp_toolsets`, which turns `stdio`, `http`, and `sse` entries into ordinary
@@ -117,8 +108,8 @@ authentication failures also appear as transcript notices and a status hint.
 
 ## Session config: the `model` and setting options
 
-ACP has no model methods. Models are a session config option, and so are model settings
-such as reasoning effort; the adapter advertises both only when a
+Models and settings such as reasoning effort are session config options.
+The adapter advertises them when a
 [`ModelResolver`](mount-acp.md#the-resolver-object) is supplied:
 
 - `session/new` and `session/load` return `configOptions` containing a `model` select,
@@ -130,10 +121,10 @@ such as reasoning effort; the adapter advertises both only when a
 - `session/set_config_option` accepts `model` and any advertised setting id; a value
   outside the advertised choices is `invalid_params`. Selections are persisted with the
   session and revalidated on `session/load`, so a value that a model switch or provider
-  reroute removed is dropped instead of replayed.
+  reroute removed is dropped.
 - The model is resolved per turn, so a routing change from `providers/set` applies from
   the next turn; a turn already running keeps the endpoint it started with.
-- Setting selections are applied per **model request**, not per turn: `resolve_settings`
+- Setting selections are applied before each **model request**: `resolve_settings`
   runs before each request in the agent's tool loop, so a change made during a turn lands
   on the next request of that same turn. A request already in flight keeps its settings.
 - `providers/set` and `providers/disable` can change which settings a model offers. When
@@ -141,11 +132,10 @@ such as reasoning effort; the adapter advertises both only when a
 
 ## Skills in `_meta`
 
-There is no skills method or content block. When the agent has a
+When the agent has a
 [`Skills`](skills.md) capability, `session/new` and `session/load` return its catalog in
 the response `_meta` under `hrns/skills`, and `session/prompt` accepts a reference in a
-text block's `_meta` under the same key. Both are ordinary ACP `_meta` payloads, so a
-client that does not understand them ignores them and a client that does gets `$name`
+text block's `_meta` under the same key. Clients use these payloads to offer `$name`
 completion. The full payload shapes are on the [Skills](skills.md) page.
 
 
@@ -161,30 +151,24 @@ A resolver's `ProviderDisabled` becomes `invalid_params` while resolving, and a
 `ValueError` from `providers/set` or `providers/disable` does too. Any other exception
 escapes as an internal error, so raise those two for anything a client can fix.
 
-## Known gaps
+## Runtime scope
 
-- MCP-over-ACP supports tools, resources, prompts, completions, progress, and
-  input-required results, but long-lived `subscriptions/listen` streams and an explicit
-  MRTR retry policy are not implemented. Legacy (handshake-era) upstreams are best-effort.
-  See [MCP over ACP](mcp.md) for the exact wire gap and what a client should expect.
-- Next-edit suggestions, session fork/resume, and session modes are not implemented.
-  None of them are advertised.
-- Form elicitation is used only for `ask_user_question`. URL elicitation is never sent, and
-  a client without form support gets a plain "proceed without an answer" result.
-- One connection per adapter. `session/list` and `session/delete` work for stores that
-  support them, but there is no multi-client fan-out above the adapter.
-- Provider configuration is process-scoped and in memory. It is never persisted with a
-  session and never echoed back with secrets.
-
-The MCP-over-ACP binding is documented in [`mcp.md`](mcp.md); implementation notes and the
-remaining work breakdown are in [`mcp-over-acp-analysis.md`](mcp-over-acp-analysis.md).
+- MCP-over-ACP serves tools, resources, prompts, completions, progress, and input-required
+  results through single exchanges. See [MCP over ACP](mcp.md) for polling, retries, and
+  upstream transport behavior.
+- Questions use form elicitation. A client lacking form support receives a plain
+  proceed-with-an-assumption result.
+- One ACP client attaches to each live session. Session list/delete depend on the store's
+  interfaces.
+- Provider configuration lives in memory at registration scope. Public provider payloads
+  contain routing endpoints; credentials remain in request settings.
 
 ## Shared live sessions
 
 Execution belongs to the server, so disconnecting ACP leaves accepted work alive.
 Only one ACP client may attach to a session. Programmatic turns and ACP prompts use
 one FIFO; cancellation/errors pause it, with inspection/resume/clear available only
-in Python. Approvals and questions wait without a client and are reissued after
-reconnection. The `_hrns/session/state` notification and `hrns/session/state` load
-metadata report revisioned server-started turn state; no queue-management extension
-is provided. [AG-UI](ag_ui.md) provides independent read-only observation.
+in Python. Approvals and questions wait for a client and are reissued after reconnection.
+The `_hrns/session/state` notification and `hrns/session/state` load metadata report
+revisioned server-started turn state. [AG-UI](ag_ui.md) provides independent read-only
+observation.
