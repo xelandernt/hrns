@@ -1,6 +1,6 @@
 # Read-only AG-UI observation
 
-Install `hrns[server,ag-ui]` (or `uv sync --extra server --extra ag-ui`).
+Install `hrns[ag-ui]` (or `hrns-slim[server,ag-ui]` for a slim installation).
 `HrnsServer` adds a publisher to each
 live session and an independent HTTP mount:
 

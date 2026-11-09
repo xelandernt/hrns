@@ -281,7 +281,7 @@ def _serve_command(
     if importlib.util.find_spec("uvicorn") is None or importlib.util.find_spec("fastapi") is None:
         raise HrnsClientError(
             "Serving over WebSocket needs the server extra. "
-            "Install it with `pip install 'hrns[server]'`."
+            "Install it with `pip install 'hrns-slim[server]'`."
         )
     from contextlib import asynccontextmanager
 
@@ -498,7 +498,7 @@ def _require_client_extra() -> None:
     ):
         return
     raise HrnsClientError(
-        "This command needs the client extra. Install it with `pip install 'hrns[client]'`."
+        "This command needs the client extra. Install it with `pip install 'hrns-slim[client]'`."
     )
 
 
@@ -510,7 +510,7 @@ def _require_server_extra() -> None:
     ):
         return
     raise HrnsClientError(
-        "This command needs the server extra. Install it with `pip install 'hrns[server]'`."
+        "This command needs the server extra. Install it with `pip install 'hrns-slim[server]'`."
     )
 
 

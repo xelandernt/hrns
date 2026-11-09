@@ -158,7 +158,7 @@ def _load_agent(config: Path | None) -> HrnsConfig:
 def _agent_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
     if importlib.util.find_spec("pydantic_ai") is None:
         raise HrnsClientError(
-            "The built-in agent needs the server extra. Install `hrns[server]`, "
+            "The built-in agent needs the server extra. Install `hrns-slim[server]`, "
             "or connect to a remote agent."
         )
     # The runtime reads the same document this client just read. An explicitly selected

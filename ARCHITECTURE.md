@@ -1,19 +1,34 @@
 # Architecture
 
+## Distribution packages
+
+`hrns` is the default distribution: a metadata-only wrapper depending on the same
+version of `hrns-slim[client,server]`. Its `ag-ui` extra forwards to `hrns-slim[ag-ui]`.
+`hrns-slim`, defined in `hrns_slim/pyproject.toml`, owns all code in `hrns_slim/hrns` and retains
+the `client`, `server`, and `ag-ui` extras. Both distributions expose the `hrns` command;
+Python imports remain `hrns`. Runtime version reporting reads `hrns-slim` metadata.
+
+Both packages use Hatchling with the `uv-dynamic-versioning` version source and
+metadata hook, following Pydantic AI's full/slim package structure. Versioning and
+same-version dependency pins are declared in TOML. The tag pattern accepts this
+repository's unprefixed version tags, with a `0.0.1` fallback when Git is unavailable.
+The uv workspace resolves the local slim package during development;
+`just build` builds both distributions for one release.
+
 ## CLI
 
 All command-line entry points are built with [Cyclopts](https://cyclopts.readthedocs.io/).
 Do not add `argparse`, Click, or Typer parsers.
 
-- `hrns` — `src/hrns/cli.py` is the one Cyclopts `App`. It registers the client
+- `hrns` — `hrns_slim/hrns/cli.py` is the one Cyclopts `App`. It registers the client
   commands (`connect`, `run`, `login`), the server commands (`agent`, `acp`,
   `serve`), and the shared commands (`config`, `profiles`, `mcp`, `clean`). It is
   exposed through `hrns.cli:main`.
-- `src/hrns/client/` holds the terminal, headless runner, transports, and the
+- `hrns_slim/hrns/client/` holds the terminal, headless runner, transports, and the
   built-in agent launcher; it never imports the server package.
-- `src/hrns/server/` holds the Pydantic AI agent, capabilities, ACP adapter, and
+- `hrns_slim/hrns/server/` holds the Pydantic AI agent, capabilities, ACP adapter, and
   FastAPI mount.
-- `src/hrns/shared/` holds the configuration document, credentials, MCP-over-ACP
+- `hrns_slim/hrns/shared/` holds the configuration document, credentials, MCP-over-ACP
   binding, errors, and URL validation used by both sides.
 - `hrns.server.runtime` also exposes its own Cyclopts `App` with `run` as the
   default command, so `python -m hrns.server.runtime` remains usable.
@@ -32,7 +47,7 @@ all.
 
 `agent-client-protocol` is pinned to the 1.0 release candidate (`>=1.0.0rc3,<2`).
 That release provides the full ACP v1 method table, including `session/delete`.
-`hrns` implements the adapter itself in `src/hrns/server/acp/`, derived from the design
+`hrns` implements the adapter itself in `hrns_slim/hrns/server/acp/`, derived from the design
 of `pydantic-ai-harness`'s experimental ACP adapter but targeting ACP 1.x directly.
 
 `pydantic-ai-harness`'s `[acp]` extra still declares `agent-client-protocol<0.12`,
@@ -131,7 +146,7 @@ subscriptions are not durable. Cross-worker ownership/fan-out is outside this AP
 
 ## MCP over ACP
 
-`src/hrns/shared/acp_mcp/` implements the stateless MCP-over-ACP binding for MCP
+`hrns_slim/hrns/shared/acp_mcp/` implements the stateless MCP-over-ACP binding for MCP
 2026-07-28. It targets the current ACP RFD, not the Python SDK's older
 `mcp/connect` / `connectionId` prototype: every `mcp/message` carries a
 `serverId` and a logical `requestId`, and each request carries its MCP version
@@ -193,7 +208,7 @@ Binding internals and subscription requirements are documented in
 ## ACP models and provider configuration
 
 One object answers everything ACP asks about models: `ModelResolver`
-(`src/hrns/server/acp/models.py`). ACP has no model methods — models are a session config
+(`hrns_slim/hrns/server/acp/models.py`). ACP has no model methods — models are a session config
 option — and provider routing is three methods that reroute them, so the two live
 together. `list_models()` supplies the `model` option and the ids a client may select,
 `resolve()` turns a selection into a runnable model and the settings that choice needs,
@@ -282,7 +297,7 @@ the slot never implies a remote connection that is not there.
 
 ## One configuration document
 
-`src/hrns/shared/config/settings.py` holds `HrnsConfig`, the single pydantic-settings model both
+`hrns_slim/hrns/shared/config/settings.py` holds `HrnsConfig`, the single pydantic-settings model both
 sides of the project read. The alternative — a client model for `profiles.toml` and a
 runtime model for `hrns.toml` — meant two schemas, two loaders, and two answers to
 "what is configured?"; a provider entry a client could not see, or a profile the runtime

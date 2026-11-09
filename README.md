@@ -8,12 +8,16 @@ for terminals and editors.
 ## Install
 
 ```sh
-uv sync --extra client --extra server
+uvx hrns
 ```
 
-Use `--extra client` for the terminal only and `--extra server` for the agent and
-HTTP entry points. The base install provides the shared `hrns config`, `profiles`,
-and `mcp` commands.
+Or install with `pip install hrns`. Both include the terminal client and server.
+
+For a minimal installation, use `hrns-slim`, adding `[client]` for the terminal or
+`[server]` for the agent and HTTP entry points. Without extras, it provides the shared
+`hrns config`, `profiles`, and `mcp` commands. Python imports and the command remain `hrns`.
+
+For local development, run `just install`.
 
 ## Define the agent
 
@@ -65,7 +69,7 @@ server.mount_acp(app, prefix="/acp")
 server.mount_ag_ui(app, prefix="/ag-ui")
 ```
 
-Install observation support with `uv sync --extra client --extra server --extra ag-ui`.
+Install observation support with `pip install 'hrns[ag-ui]'`.
 Use `AcpServer` when only ACP is needed. Register multiple factories under different
 agent IDs. One ACP client may interact with a session while any number of AG-UI clients
 observe it. Execution survives client disconnects.

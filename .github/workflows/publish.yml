@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
-          # hatch-vcs derives the version from git tags, so history must be complete.
+          # uv-dynamic-versioning derives the version from git tags, so history must be complete.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.2
         with:
@@ -32,10 +32,10 @@ jobs:
         run: |
           set -euo pipefail
           expected="${TAG#v}"
-          actual="$(uv run python -c 'from importlib.metadata import version; print(version("hrns"))')"
+          actual="$(uv run python -c 'from importlib.metadata import version; full = version("hrns"); assert full == version("hrns-slim"), "Package versions differ"; print(full)')"
           echo "tag=$expected built=$actual"
           if [ "$expected" != "$actual" ]; then
-            echo "::error::Tag $TAG does not match the built version $actual. Tag the release with the version hatch-vcs should produce (for example 0.1.0)."
+            echo "::error::Tag $TAG does not match the built version $actual. Tag the release with the version uv-dynamic-versioning should produce (for example 0.1.0)."
             exit 1
           fi
       - name: Validate distribution metadata

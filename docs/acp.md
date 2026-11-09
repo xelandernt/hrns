@@ -76,7 +76,7 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 Document notifications maintain a session-local view of open files, cursor, and viewport.
 Detach clears this document state.
 
-`mcp/message` is routed by `src/hrns/shared/acp_mcp/router.py`. The adapter's `mcp_message` fallback
+`mcp/message` is routed by `hrns_slim/hrns/shared/acp_mcp/router.py`. The adapter's `mcp_message` fallback
 still answers `method_not_found` on an unbound connection.
 
 ## Client methods the agent calls

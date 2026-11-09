@@ -9,6 +9,12 @@ resolution-markers = [
     "python_full_version < '3.12' or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
 ]
 
+[manifest]
+members = [
+    "hrns",
+    "hrns-slim",
+]
+
 [[package]]
 name = "ag-ui-protocol"
 version = "0.1.22"
@@ -706,6 +712,53 @@ wheels = [
 name = "hrns"
 source = { editable = "." }
 dependencies = [
+    { name = "hrns-slim", extra = ["client", "server"] },
+]
+
+[package.optional-dependencies]
+ag-ui = [
+    { name = "hrns-slim", extra = ["ag-ui"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "build" },
+    { name = "httpx" },
+    { name = "prek" },
+    { name = "pyrefly" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+]
+docs = [
+    { name = "mkdocstrings-python" },
+    { name = "zensical" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hrns-slim", extras = ["ag-ui"], marker = "extra == 'ag-ui'", editable = "hrns_slim" },
+    { name = "hrns-slim", extras = ["client", "server"], editable = "hrns_slim" },
+]
+provides-extras = ["ag-ui"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "build", specifier = ">=1.2" },
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "prek", specifier = ">=0.5.7" },
+    { name = "pyrefly", specifier = ">=1.4.0" },
+    { name = "ruff", specifier = ">=0.11" },
+    { name = "types-pyyaml", specifier = ">=6" },
+]
+docs = [
+    { name = "mkdocstrings-python", specifier = ">=2.0.10" },
+    { name = "zensical", specifier = ">=0.0.67,<0.1" },
+]
+
+[[package]]
+name = "hrns-slim"
+source = { editable = "hrns_slim" }
+dependencies = [
     { name = "cyclopts" },
     { name = "keyring" },
     { name = "platformdirs" },
@@ -739,20 +792,6 @@ server = [
     { name = "websockets" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "build" },
-    { name = "httpx" },
-    { name = "prek" },
-    { name = "pyrefly" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-]
-docs = [
-    { name = "mkdocstrings-python" },
-    { name = "zensical" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'client'", specifier = ">=1.0.0rc3,<2" },
@@ -780,20 +819,6 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'server'", specifier = ">=13,<16" },
 ]
 provides-extras = ["ag-ui", "client", "server"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "build", specifier = ">=1.2" },
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "prek", specifier = ">=0.5.7" },
-    { name = "pyrefly", specifier = ">=1.4.0" },
-    { name = "ruff", specifier = ">=0.11" },
-    { name = "types-pyyaml", specifier = ">=6" },
-]
-docs = [
-    { name = "mkdocstrings-python", specifier = ">=2.0.10" },
-    { name = "zensical", specifier = ">=0.0.67,<0.1" },
-]
 
 [[package]]
 name = "httpcore"

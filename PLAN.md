@@ -35,18 +35,18 @@ server.mount_ag_ui(app, prefix="/ag-ui")
 
 | Current location | Behavior | Required change |
 | --- | --- | --- |
-| `src/hrns/server/fastapi.py` | Factory and adapter per WebSocket; optional store per principal | Mount registered agents onto one shared runtime |
-| `src/hrns/server/acp/adapter.py` | Owns connections, sessions, execution, approvals, replay | Keep wire dispatch; extract connection-independent execution/state |
-| `src/hrns/server/acp/adapter.py:load_session` | Restores a separate state and cancels a prior resident turn | Attach to an existing live state; restore only when absent |
-| `src/hrns/server/acp/adapter.py:prompt` | Request cancellation normally cancels its turn | Separate request waiter from server-owned task |
-| `src/hrns/server/acp/session.py` | Configuration input requires an ACP client | Separate server session configuration from client attachment configuration |
-| `src/hrns/server/acp/adapter.py:session_history` | Exposes committed history, generally updated at turn completion | Publish live events independently of committed model history |
-| `src/hrns/client/turn.py` | Primarily derives turn completion from its own prompt response | Handle state of server-started turns after attachment |
-| `src/hrns/server/acp/server.py` | Single-agent convenience entry points | Route stdio and network hosting through the new runtime |
+| `hrns_slim/hrns/server/fastapi.py` | Factory and adapter per WebSocket; optional store per principal | Mount registered agents onto one shared runtime |
+| `hrns_slim/hrns/server/acp/adapter.py` | Owns connections, sessions, execution, approvals, replay | Keep wire dispatch; extract connection-independent execution/state |
+| `hrns_slim/hrns/server/acp/adapter.py:load_session` | Restores a separate state and cancels a prior resident turn | Attach to an existing live state; restore only when absent |
+| `hrns_slim/hrns/server/acp/adapter.py:prompt` | Request cancellation normally cancels its turn | Separate request waiter from server-owned task |
+| `hrns_slim/hrns/server/acp/session.py` | Configuration input requires an ACP client | Separate server session configuration from client attachment configuration |
+| `hrns_slim/hrns/server/acp/adapter.py:session_history` | Exposes committed history, generally updated at turn completion | Publish live events independently of committed model history |
+| `hrns_slim/hrns/client/turn.py` | Primarily derives turn completion from its own prompt response | Handle state of server-started turns after attachment |
+| `hrns_slim/hrns/server/acp/server.py` | Single-agent convenience entry points | Route stdio and network hosting through the new runtime |
 
 ## Public Python API
 
-The public API is implemented in `src/hrns/server/acp/host.py` and `src/hrns/server/host.py`.
+The public API is implemented in `hrns_slim/hrns/server/acp/host.py` and `hrns_slim/hrns/server/host.py`.
 
 ```python
 from contextlib import asynccontextmanager
