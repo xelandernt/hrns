@@ -272,6 +272,14 @@ price, because `acp.schema.Usage` is tokens only. The context gauge is
 leaves the client's status band blank, which is why the adapter emits the gauge at the
 end of every prompt.
 
+It also emits it as the turn progresses. A request that ends in a tool call has already
+produced its tokens, so the adapter sends the gauge when the tool call starts: the readout
+follows the work instead of appearing only when the prompt returns, which for a long
+tool-using turn is minutes after the person started watching it. `used` is that request's
+tokens, and `cost` is the committed session total plus the run so far, so the spend moves
+while the turn runs and is corrected to the exact total when it commits. A gauge identical
+to the one already sent is dropped rather than repeated for every parallel tool call.
+
 `used` is the last request's input, cache-read, cache-write, and output tokens: cache
 tokens are part of the prompt, and the response becomes context for the next request.
 `size` comes from the resolved model's profile `context_window`; when the profile has
@@ -283,6 +291,21 @@ absent for models pricing data does not know.
 The gauge is sent straight to the connection rather than recorded in the session
 transcript: replaying a stale percentage into a loaded session would describe context
 that session does not have.
+
+## Session titles
+
+A session's name is derived, never stored separately: `title_from_updates` takes the first
+user text in its transcript, collapses its whitespace, and truncates it to 80 characters.
+`session/list` reports that derivation for stored sessions, and the runtime announces the
+same one with `session/update` `session_info_update` once a turn commits, so a client's
+session list and its status band cannot disagree about what a session is called. A session
+whose transcript holds no user text — before the first prompt, or one that carried only
+attachments — is untitled in both places rather than named after its id.
+
+Like the usage gauge, the title is sent to the connection and not recorded in the
+transcript: it is a function of the transcript, so a restoring runtime derives it again and
+re-announces it right after the replay `session/load` and reconnects perform. A title that
+has not changed is not repeated on later turns.
 
 ## Connection identity in the TUI
 

@@ -132,6 +132,14 @@ class SessionPanel(Vertical):
             self._current_session = session_id
             self._render_sessions()
 
+    def set_title(self, session_id: str, title: str) -> None:
+        """Rename a listed session in place when the agent announces its title."""
+        for item in self._sessions:
+            if str(item.get("sessionId") or item.get("session_id") or "") == session_id:
+                item["title"] = title
+                self._render_sessions()
+                return
+
     def _render_sessions(self) -> None:
         selected = self.selected_session_id()
         self._table.clear()

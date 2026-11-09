@@ -427,8 +427,9 @@ class ChatScreen(_HrnsScreen):
             if event.title:
                 self._session_title = event.title
                 self.chrome.update_chrome()
-                if not self._loading_session:
-                    self.refresh_sessions()
+                self.query_one("#side-panel", SidePanel).sessions.set_title(
+                    event.session_id, event.title
+                )
             return
         if isinstance(event, UsageUpdated):
             if event.summary.get("scope") == "context":

@@ -34,6 +34,7 @@ from pydantic_ai.messages import (
     FunctionToolResultEvent,
     ModelMessage,
     ModelResponse,
+    OutputToolCallEvent,
     PartDeltaEvent,
     PartStartEvent,
     RetryPromptPart,
@@ -107,6 +108,7 @@ from .store import (
     ListableSessionStore,
     SessionStore,
     StoredSession,
+    title_from_updates,
 )
 from .toolsets import AttachmentToolset
 
@@ -222,6 +224,13 @@ def _context_window(model: Model | str | None) -> int | None:
     return None
 
 
+def _last_response(messages: Sequence[ModelMessage]) -> ModelResponse | None:
+    """The newest model response among a run's messages."""
+    return next(
+        (message for message in reversed(messages) if isinstance(message, ModelResponse)), None
+    )
+
+
 def _context_tokens(response: ModelResponse) -> int:
     """Tokens the last request left in the context window.
 
@@ -255,6 +264,15 @@ class RunObserver(Protocol):
     def close(self) -> None: ...
 
     def interrupted(self, messages: list[ModelMessage]) -> None: ...
+
+
+class _LiveUsage(Protocol):
+    """A run handle's usage and messages while it is still streaming."""
+
+    @property
+    def usage(self) -> RunUsage: ...
+
+    def all_messages(self) -> list[ModelMessage]: ...
 
 
 class _TurnCancelled(Exception):
@@ -333,6 +351,10 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self._mcp_caller: McpOverAcpCaller | None = None
         self._mcp_channel: AcpChannel | None = None
         self._state: SessionState[AgentDepsT] | None = None
+        #: The session title the attached client has been told, derived from the transcript.
+        self._title: str | None = None
+        #: The last usage gauge sent, so a turn that changes nothing does not repeat it.
+        self._usage_update: schema.UsageUpdate | None = None
 
     @property
     def _listable_store(self) -> ListableSessionStore | None:
@@ -421,6 +443,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             todos=TodoStore(items=stored.todos),
             invoked_skills=set(stored.skills),
         )
+        self._title = title_from_updates(self.state.transcript)
         if self._reconcile_setting_selections(self.state):
             await self._persist(self.state)
 
@@ -670,6 +693,11 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             try:
                 for update in replay:
                     await conn.session_update(session_id=self.state.session_id, update=update)
+                if self._title is not None:
+                    await conn.session_update(
+                        session_id=self.state.session_id,
+                        update=schema.SessionInfoUpdate(title=self._title),
+                    )
                 if self._conn is not conn:
                     raise ConnectionError("attachment ended during replay")
                 self.attachment_toolsets = prepared_toolsets
@@ -810,6 +838,10 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
                         async def emit(event: AgentStreamEvent) -> None:
                             await self._emit_event(turn, event)
+                            # A tool call means its request completed, so the gauge can
+                            # follow the turn instead of waiting for it to end.
+                            if isinstance(event, (FunctionToolCallEvent, OutputToolCallEvent)):
+                                await self._emit_live_usage(state, stream)
 
                         if self.observer is not None:
                             result = await self.observer.consume(
@@ -874,11 +906,12 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
         if usage.cost is not None:
             state.cost = (state.cost or Decimal(0)) + usage.cost
-        await self._emit_usage(turn, state, response=last_response)
+        await self._emit_usage(state, response=last_response)
 
         state.history = history
         state.transcript.extend(turn.updates)
         self.live_updates = []
+        await self._announce_title(state)
         try:
             await self._persist(state)
         except asyncio.CancelledError:
@@ -888,6 +921,20 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             )
             stop_reason = "cancelled"
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
+
+    async def _announce_title(self, state: SessionState[AgentDepsT]) -> None:
+        """Name the session from its first user text, the same way ``session/list`` does.
+
+        A client that only sees ``session/list`` for stored sessions would otherwise keep
+        showing the session id in its status band while the list shows a title. The update
+        is not recorded in the transcript: the title is a function of it, so a fresh
+        runtime derives the same name when it restores and announces it on attach.
+        """
+        title = title_from_updates(state.transcript)
+        if title is None or title == self._title:
+            return
+        self._title = title
+        await self._deliver_update(schema.SessionInfoUpdate(title=title))
 
     async def _persist_interrupted_todos(
         self, state: SessionState[AgentDepsT], turn: _TurnState
@@ -913,17 +960,20 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def _emit_usage(
         self,
-        turn: _TurnState,
         state: SessionState[AgentDepsT],
         *,
         response: ModelResponse | None,
+        spent: Decimal | None = None,
     ) -> None:
         """Publish the usage gauge clients render as context percentage and session cost.
 
         ``PromptResponse.usage`` carries only per-turn token totals and has no room for
         either figure, so an agent that stays silent here leaves the client's readout
         blank. The gauge is deliberately not recorded in the transcript: replaying a
-        stale percentage into a freshly loaded session would be wrong.
+        stale percentage into a freshly loaded session would be wrong. ``spent`` is the
+        session total to report, defaulting to the committed one; a caller following a
+        running turn passes the committed total plus the run so far. Repeating a gauge
+        the client already has tells it nothing, so an unchanged one is dropped.
         """
         if response is None:
             return
@@ -932,17 +982,34 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         used = _context_tokens(response)
         if size is None or used <= 0:
             return
-        await self._deliver_update(
-            schema.UsageUpdate(
-                used=used,
-                size=size,
-                cost=(
-                    schema.Cost(amount=float(state.cost), currency="USD")
-                    if state.cost is not None
-                    else None
-                ),
-            ),
+        total = state.cost if spent is None else spent
+        update = schema.UsageUpdate(
+            used=used,
+            size=size,
+            cost=(schema.Cost(amount=float(total), currency="USD") if total is not None else None),
         )
+        if update == self._usage_update:
+            return
+        self._usage_update = update
+        await self._deliver_update(update)
+
+    async def _emit_live_usage(self, state: SessionState[AgentDepsT], run: _LiveUsage) -> None:
+        """Follow a running turn with the gauge as soon as a request has completed.
+
+        Waiting for the prompt to return leaves the readout empty or stuck on the previous
+        turn for the whole run, which is the longest stretch a person watches it. The run
+        handle reports the requests finished so far; a custom ``AbstractAgent`` need not
+        support that live view, and the end of the turn still reports the gauge then.
+        """
+        try:
+            usage = run.usage
+            response = _last_response(run.all_messages())
+        except Exception:
+            return
+        spent = state.cost
+        if usage.cost is not None:
+            spent = (spent or Decimal(0)) + usage.cost
+        await self._emit_usage(state, response=response, spent=spent)
 
     async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
         for chunk in chunk_text(text):

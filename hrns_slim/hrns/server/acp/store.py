@@ -74,7 +74,7 @@ class DeletableSessionStore(SessionStore, Protocol):
 _PAGE_SIZE = 100
 
 
-def _title_from_updates(updates: Sequence[object]) -> str | None:
+def title_from_updates(updates: Sequence[object]) -> str | None:
     """Derive a session title from the first user text in its transcript."""
     for update in updates:
         if not isinstance(update, schema.UserMessageChunk):
@@ -112,7 +112,7 @@ class InMemorySessionStore(ListableSessionStore, DeletableSessionStore):
         self._summaries[session_id] = SessionSummary(
             session_id=session_id,
             cwd=session.cwd,
-            title=_title_from_updates(session.updates)
+            title=title_from_updates(session.updates)
             or (previous.title if previous is not None else None),
             updated_at=datetime.now(UTC),
         )
