@@ -69,8 +69,9 @@ def index_workspace(root: Path) -> tuple[list[str], FileIndex]:
 def matching_skills(skills: Iterable[Mapping[str, Any]], query: str) -> list[Mapping[str, Any]]:
     """Skills whose name or description matches `query`, best first.
 
-    Names win over descriptions, and a name prefix wins over a loose subsequence match, so
-    typing `$re` surfaces `review` before `code-review`.
+    An empty query, which is what a bare ``$`` is, lists every skill alphabetically.
+    Otherwise names win over descriptions, and a name prefix wins over a loose
+    subsequence match, so typing ``$re`` surfaces ``review`` before ``code-review``.
     """
     needle = query.casefold().strip()
 
@@ -78,7 +79,7 @@ def matching_skills(skills: Iterable[Mapping[str, Any]], query: str) -> list[Map
         name = str(skill.get("name", "")).casefold()
         description = str(skill.get("description", "")).casefold()
         if not needle:
-            return (0, len(name), name)
+            return (0, 0, name)
         if name.startswith(needle):
             return (0, len(name), name)
         characters = iter(name)

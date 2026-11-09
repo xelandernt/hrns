@@ -9,13 +9,12 @@ from __future__ import annotations
 import difflib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from hrns.shared.config import PermissionMode
+
 from ..constants import UI_MAX_TOOL_CONTENT_CHARS
-from ..interactions import PERMISSION_MODES
-from ..io import ClientIoMode, parse_client_io
 
 __all__ = [
     "activity_label",
@@ -33,6 +32,7 @@ __all__ = [
     "merge_tool_event",
     "model_option",
     "option_values",
+    "parse_permission_mode",
     "permission_mode_label",
     "presentation_payload",
     "tool_args_preview",
@@ -48,6 +48,15 @@ TOOL_STATUS_LABELS = {
     "failed": "✕ failed",
     "": "○ queued",
 }
+
+
+def parse_permission_mode(value: str) -> PermissionMode:
+    """Parse an explicit mode, treating an unrecognized value as ``ask``."""
+    if value == "reads":
+        return "reads"
+    if value == "all":
+        return "all"
+    return "ask"
 
 
 def permission_mode_label(mode: str) -> str:
@@ -376,38 +385,66 @@ def config_option_value(option: dict[str, Any]) -> str:
     return str(current if current is not None else "—")
 
 
+def value_provider(item: dict[str, Any]) -> str:
+    """The provider a select value is tagged with in ``_meta.providerId``, if any."""
+    meta = item.get("_meta")
+    if not isinstance(meta, dict):
+        return ""
+    provider = meta.get("providerId")
+    return provider if isinstance(provider, str) else ""
+
+
+def _value_row(item: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    name = str(item.get("name", item.get("value", "")))
+    return {
+        "value": str(item.get("value", "")),
+        "name": f"{prefix}{name}",
+        "description": str(item.get("description") or ""),
+        "provider": value_provider(item),
+    }
+
+
 def option_values(option: dict[str, Any]) -> list[dict[str, str]]:
     values: list[dict[str, str]] = []
     for item in option.get("options") or []:
-        if isinstance(item, dict):
-            values.append(
-                {
-                    "value": str(item.get("value", "")),
-                    "name": str(item.get("name", item.get("value", ""))),
-                    "description": str(item.get("description") or ""),
-                }
-            )
+        if not isinstance(item, dict):
+            continue
+        nested = item.get("options")
+        if isinstance(nested, list):
+            # A grouped select: the group's own label prefixes each of its values.
+            prefix = f"{item.get('name', '')} / " if item.get("name") else ""
+            values.extend(_value_row(child, prefix) for child in nested if isinstance(child, dict))
+            continue
+        values.append(_value_row(item))
     for group in option.get("groups") or []:
-        for item in group.get("options") or []:
-            if isinstance(item, dict):
-                values.append(
-                    {
-                        "value": str(item.get("value", "")),
-                        "name": f"{group.get('name', '')} / {item.get('name', item.get('value', ''))}",
-                        "description": str(item.get("description") or ""),
-                    }
-                )
+        if not isinstance(group, dict):
+            continue
+        prefix = f"{group.get('name', '')} / " if group.get("name") else ""
+        values.extend(
+            _value_row(item, prefix)
+            for item in group.get("options") or []
+            if isinstance(item, dict)
+        )
     return values
 
 
 def effort_option(
     options: tuple[dict[str, Any], ...] | list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Find the local runtime's unified reasoning-effort option, if advertised."""
+    """Find the session's reasoning-effort option, if the agent advertises one.
+
+    ``effort`` is this project's id; ``thought_level`` is ACP's reserved category, so an
+    agent that names the selector differently still works.
+    """
+    by_category: dict[str, Any] | None = None
     for option in options:
-        if isinstance(option, dict) and option.get("id") == "effort":
+        if not isinstance(option, dict):
+            continue
+        if option.get("id") == "effort":
             return option
-    return None
+        if by_category is None and option.get("category") == "thought_level":
+            by_category = option
+    return by_category
 
 
 def model_option(
@@ -656,6 +693,46 @@ def binding_summary(binding: dict[str, Any], snapshot: dict[str, Any] | None) ->
     return state
 
 
+def _enum_choices(entries: object) -> list[tuple[str, str]]:
+    if not isinstance(entries, list):
+        return []
+    return [
+        (str(item), str(item))
+        for item in entries
+        if isinstance(item, (str, int, float)) and not isinstance(item, bool)
+    ]
+
+
+def _titled_choices(entries: object) -> list[tuple[str, str]]:
+    """ACP titled options: ``{const, title, description}``; the value is ``const``."""
+    if not isinstance(entries, list):
+        return []
+    choices: list[tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("const", entry.get("title"))
+        label = entry.get("title") or value
+        if isinstance(value, str) and value and isinstance(label, str) and label:
+            choices.append((value, label))
+    return choices
+
+
+def _choice_descriptions(entries: object) -> dict[str, str]:
+    """Descriptions attached to titled choices, keyed by their value."""
+    if not isinstance(entries, list):
+        return {}
+    descriptions: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("const", entry.get("title"))
+        description = entry.get("description")
+        if isinstance(value, str) and isinstance(description, str) and description:
+            descriptions[value] = description
+    return descriptions
+
+
 def build_form_fields(
     schema: dict[str, Any], current: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
@@ -672,17 +749,21 @@ def build_form_fields(
         field_type = str(spec.get("type") or "string")
         kind = field_type
         choices: list[tuple[str, str]] = []
+        descriptions: dict[str, str] = {}
         item_type = "string"
-        if field_type == "string" and isinstance(spec.get("enum"), list):
-            kind = "select"
-            choices = [(str(item), str(item)) for item in spec["enum"]]
+        if field_type == "string":
+            choices = _titled_choices(spec.get("oneOf")) or _enum_choices(spec.get("enum"))
+            descriptions = _choice_descriptions(spec.get("oneOf"))
+            if choices:
+                kind = "select"
         elif field_type == "array":
             items = spec.get("items") or {}
             if isinstance(items, dict):
                 item_type = str(items.get("type") or "string")
-            if isinstance(items, dict) and isinstance(items.get("enum"), list):
+                choices = _titled_choices(items.get("anyOf")) or _enum_choices(items.get("enum"))
+                descriptions = _choice_descriptions(items.get("anyOf"))
+            if choices:
                 kind = "multi"
-                choices = [(str(item), str(item)) for item in items["enum"]]
             else:
                 # Comma-separated input is the terminal-friendly representation
                 # for an array without a closed set of choices.
@@ -693,13 +774,39 @@ def build_form_fields(
                 "title": str(spec.get("title") or name.replace("_", " ")),
                 "description": str(spec.get("description") or ""),
                 "kind": kind,
+                "question": kind in {"select", "multi"},
                 "choices": choices,
+                "choice_descriptions": descriptions,
                 "itemType": item_type,
                 "required": name in required,
                 "default": spec.get("default", current.get(name)),
             }
         )
+    _attach_custom_answers(fields)
     return fields
+
+
+def _attach_custom_answers(fields: list[dict[str, Any]]) -> None:
+    """Fold a ``qN_text`` companion into its ``qN`` choice field.
+
+    ``ask_user_question`` sends a select and a typed-answer string for each
+    question. The terminal renders that pair as one question whose last option
+    is the custom answer, rather than two unrelated form rows.
+    """
+    by_name = {field["name"]: field for field in fields}
+    companions: list[dict[str, Any]] = []
+    for field in fields:
+        name = field["name"]
+        if not name.endswith("_text") or field.get("kind") != "string":
+            continue
+        choice = by_name.get(name.removesuffix("_text"))
+        if choice is None or choice.get("kind") not in {"select", "multi"}:
+            continue
+        choice["allow_custom"] = True
+        choice["custom_name"] = name
+        companions.append(field)
+    if companions:
+        fields[:] = [field for field in fields if field not in companions]
 
 
 def coerce_value(field: dict[str, Any], raw: Any) -> Any:
@@ -740,53 +847,3 @@ def coerce_value(field: dict[str, Any], raw: Any) -> Any:
     if raw is None:
         return ""
     return str(raw)
-
-
-@dataclass
-class Settings:
-    """Terminal preferences persisted beside profiles."""
-
-    theme: str = "hrns"
-    auto_expand_tools: bool = False
-    show_thoughts: bool = False
-    permission_mode: str = "ask"
-    client_io: ClientIoMode = "all"
-    sidebar_width: int = 52
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_mapping(cls, mapping: dict[str, Any] | None) -> Settings:
-        mapping = mapping or {}
-        mode = str(mapping.get("permissionMode", mapping.get("permission_mode", "ask")))
-        if mode not in PERMISSION_MODES:
-            mode = "ask"
-        raw_sidebar_width = mapping.get("sidebarWidth", mapping.get("sidebar_width", 52))
-        try:
-            sidebar_width = (
-                int(raw_sidebar_width) if not isinstance(raw_sidebar_width, bool) else 52
-            )
-        except (TypeError, ValueError):
-            sidebar_width = 52
-        sidebar_width = max(32, min(76, sidebar_width))
-        return cls(
-            theme=str(mapping.get("theme", "hrns")),
-            auto_expand_tools=bool(
-                mapping.get("autoExpandTools", mapping.get("auto_expand_tools", False))
-            ),
-            show_thoughts=bool(mapping.get("showThoughts", mapping.get("show_thoughts", False))),
-            permission_mode=mode,
-            client_io=parse_client_io(
-                str(mapping.get("clientIo", mapping.get("client_io", "all")))
-            ),
-            sidebar_width=sidebar_width,
-        )
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "theme": self.theme,
-            "auto_expand_tools": self.auto_expand_tools,
-            "show_thoughts": self.show_thoughts,
-            "permission_mode": self.permission_mode,
-            "client_io": self.client_io,
-            "sidebar_width": self.sidebar_width,
-        }

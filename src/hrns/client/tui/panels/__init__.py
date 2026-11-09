@@ -1,5 +1,6 @@
 """Side panel widgets."""
 
+from .mcp import McpPanel, McpRefreshRequested
 from .side import (
     SidebarResizeHandle,
     SidebarResizeRequested,
@@ -8,6 +9,8 @@ from .side import (
 )
 
 __all__ = [
+    "McpPanel",
+    "McpRefreshRequested",
     "SidebarResizeHandle",
     "SidebarResizeRequested",
     "SidePanel",

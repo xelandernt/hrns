@@ -1,4 +1,4 @@
-"""Searchable connection picker for local models, ACP commands, and remote ACP."""
+"""Searchable connection picker for built-in models, ACP commands, and remote ACP."""
 
 from __future__ import annotations
 
@@ -13,16 +13,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, ListItem, ListView, Static
 
-from hrns.config import LocalSettings
+from hrns.shared.config import BUILTIN_CONNECTION, HrnsConfig, Profile, default_config_path
 
-from ..errors import HrnsClientError
-from ..launch import ConnectionTarget, local_cwd, remote_cwd, remote_target
-from ..local import local_detail, local_target
-from ..profiles import Profile, Profiles, default_profiles_path
-from ..transport import check_websocket_url
+from ...shared.errors import HrnsClientError
+from ..launch import ConnectionTarget, profile_target, remote_target
+from ..runtime import agent_detail, agent_target
 from .choice_keys import handle_choice_arrow
 from .dialogs import ChoiceDialog, FormDialog
-from .local import (
+from .model_setup import (
     CustomModelDialog,
     CustomModelRequest,
     ModelPick,
@@ -59,21 +57,21 @@ class ConnectScreen(_HrnsScreen):
         Binding("escape", "escape_picker", "Back", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         Binding("slash", "filter", "Filter", show=False),
-        Binding("l", "configure_local", "Local model", show=False),
+        Binding("l", "configure_local", "Built-in model", show=False),
         Binding("n", "add_target", "New target", show=False),
         Binding("e", "edit_target", "Edit target", show=False),
     ]
 
     def __init__(
         self,
-        profiles: Profiles,
+        config: HrnsConfig,
         *,
         initial_target: ConnectionTarget | None = None,
         auto_connect: bool = False,
         status_message: str | None = None,
     ) -> None:
         super().__init__()
-        self.profiles = profiles
+        self.config = config
         self.initial_target = initial_target
         self.auto_connect = auto_connect
         self.status_message = status_message
@@ -97,7 +95,7 @@ class ConnectScreen(_HrnsScreen):
                 yield self._detail
         yield self._status
         yield Static(
-            "l local providers · n add · e edit · / filter · r refresh · q quit",
+            "l providers · n add · e edit · / filter · r refresh · q quit",
             markup=False,
             classes="panel-hint",
             id="connect-hint",
@@ -134,20 +132,20 @@ class ConnectScreen(_HrnsScreen):
 
     def _render_entries(self) -> None:
         local_ok = True
-        detail = "Configured hrns.local.toml or HRNS_LOCAL_* environment"
+        detail = f"Configured {default_config_path()} or HRNS_* environment"
         try:
-            detail = local_detail()
+            detail = agent_detail()
         except HrnsClientError as exc:
             local_ok = False
             detail = exc.message
         entries = [
             PickEntry(
                 kind="local",
-                label="Local model",
+                label="Built-in model",
                 detail=detail,
             )
         ]
-        for profile in sorted(self.profiles.profiles.values(), key=lambda item: item.name):
+        for profile in sorted(self.config.profile.values(), key=lambda item: item.name):
             if not (profile.command or (profile.is_remote and profile.url)):
                 continue
             transport = "remote" if profile.is_remote else "stdio"
@@ -170,7 +168,7 @@ class ConnectScreen(_HrnsScreen):
             PickEntry(
                 kind="add_stdio",
                 label="Add stdio ACP command…",
-                detail="Save a local ACP command as a profile.",
+                detail="Save an ACP command as a profile.",
             )
         )
         self.entries = entries
@@ -199,8 +197,21 @@ class ConnectScreen(_HrnsScreen):
             label.append(entry.label)
             self._list.append(ListItem(Static(label, markup=False)))
         if self._visible:
-            self._list.index = 0
-            self._show_detail(self._visible[0])
+            index = self._remembered_index()
+            self._list.index = index
+            self._show_detail(self._visible[index])
+
+    def _remembered_index(self) -> int:
+        """Where the cursor starts: the connection used last, else the top of the list."""
+        identity = self.config.last_connection
+        if not identity:
+            return 0
+        for index, entry in enumerate(self._visible):
+            if identity == BUILTIN_CONNECTION and entry.kind == "local":
+                return index
+            if entry.profile is not None and entry.profile.name == identity:
+                return index
+        return 0
 
     def _show_detail(self, entry: PickEntry) -> None:
         lines = [entry.label, entry.detail]
@@ -250,7 +261,7 @@ class ConnectScreen(_HrnsScreen):
 
     def action_configure_local(self) -> None:
         try:
-            settings = LocalSettings()
+            settings = HrnsConfig()
         except (ValueError, OSError) as exc:
             self._status.update(f"error · {exc}")
             return
@@ -260,12 +271,12 @@ class ConnectScreen(_HrnsScreen):
         if result is None:
             return
         try:
-            settings = LocalSettings()
+            settings = HrnsConfig()
         except (ValueError, OSError) as exc:
             self._status.update(f"error · {exc}")
             return
         if not settings.providers:
-            self._status.update("No local providers are configured.")
+            self._status.update("No providers are configured.")
             return
         if not settings.provider or not settings.model:
             self.app.push_screen(
@@ -277,7 +288,7 @@ class ConnectScreen(_HrnsScreen):
         self._status.update(f"Local model: {settings.provider}:{settings.model}")
 
     def _local_model_picked(
-        self, settings: LocalSettings, result: ModelPick | CustomModelRequest | None
+        self, settings: HrnsConfig, result: ModelPick | CustomModelRequest | None
     ) -> None:
         if isinstance(result, ModelPick):
             self._save_local_model(settings, result.provider, result.model)
@@ -301,7 +312,7 @@ class ConnectScreen(_HrnsScreen):
             apply,
         )
 
-    def _add_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
+    def _add_local_model(self, settings: HrnsConfig, provider: str, model: str) -> None:
         try:
             _path, updated = save_custom_model(settings, provider, model)
         except (ValueError, OSError) as exc:
@@ -309,7 +320,7 @@ class ConnectScreen(_HrnsScreen):
             return
         self._save_local_model(updated, provider, model)
 
-    def _save_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
+    def _save_local_model(self, settings: HrnsConfig, provider: str, model: str) -> None:
         try:
             configured = settings.model_copy(update={"provider": provider, "model": model})
             path = configured.save(settings.config_file)
@@ -470,7 +481,7 @@ class ConnectScreen(_HrnsScreen):
                     {
                         "name": "command",
                         "title": "Command",
-                        "description": "For example: python -m hrns.app acp --model test",
+                        "description": "For example: python -m hrns.server acp --model test",
                         "kind": "string",
                         "required": True,
                     },
@@ -515,56 +526,30 @@ class ConnectScreen(_HrnsScreen):
         profile.env = dict(original.env)
         profile.auth_method = original.auth_method
         profile.client_io = original.client_io
-        profile.default_for_server = original.default_for_server
+        profile.default = original.default
         profile.notes = original.notes
 
     def _save_profile(self, profile: Profile, *, replacing: str | None = None) -> None:
         if replacing is not None and replacing != profile.name:
-            self.profiles.profiles.pop(replacing, None)
-        if not self.profiles.sources:
-            self.profiles.sources.append(default_profiles_path())
-        self.profiles.upsert(profile)
-        self.profiles.save(self.profiles.sources[0])
+            self.config.profile.pop(replacing, None)
+        self.config.profile[profile.name] = profile
+        self.config.save()
 
     def _connect_local(self) -> None:
         try:
-            target = local_target()
+            target = agent_target()
         except HrnsClientError as exc:
             self._status.update(f"error · {exc.message}")
             return
         self._connect_worker(target)
 
     def _connect_profile(self, profile: Profile) -> None:
-        if profile.is_remote:
-            if not profile.url:
-                self._status.update(f"Profile '{profile.name}' has no server URL.")
-                return
-            try:
-                check_websocket_url(profile.url)
-                cwd = remote_cwd(profile)
-            except HrnsClientError as exc:
-                self._status.update(f"error · {exc.message}")
-                return
-            self._connect_worker(
-                ConnectionTarget(
-                    name=profile.name,
-                    kind="remote",
-                    profile=profile,
-                    cwd=cwd,
-                )
-            )
+        try:
+            target = profile_target(profile)
+        except HrnsClientError as exc:
+            self._status.update(f"error · {exc.message}")
             return
-        if not profile.command:
-            self._status.update(f"Profile '{profile.name}' has no command.")
-            return
-        self._connect_worker(
-            ConnectionTarget(
-                name=profile.name,
-                kind="local",
-                profile=profile,
-                cwd=local_cwd(profile),
-            )
-        )
+        self._connect_worker(target)
 
     @work(group="connect", exclusive=True)
     async def _connect_worker(self, target: ConnectionTarget) -> None:

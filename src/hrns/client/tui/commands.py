@@ -42,15 +42,15 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
     ),
     LocalCommand(
         "providers",
-        "Add, edit or delete local providers, their endpoints and keys",
+        "Edit providers, or change the connected agent's provider routing",
     ),
     LocalCommand(
         "models",
         "Select a model, or set one directly with /model [provider:]model",
         aliases=("model",),
     ),
-    LocalCommand("effort", "Set the local model's reasoning effort"),
-    LocalCommand("mcp", "Show MCP servers, tools and connection state"),
+    LocalCommand("effort", "Show or change the session's reasoning effort"),
+    LocalCommand("mcp", "Show MCP server health and connection state"),
     LocalCommand(
         "todo",
         "Show the session's plan and progress",

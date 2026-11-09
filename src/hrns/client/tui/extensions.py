@@ -107,7 +107,7 @@ def build_view(
     state: Any,
     context: ViewContext,
 ) -> ViewHandle | None:
-    """Instantiate one local provider view, returning ``None`` for normal fallback.
+    """Instantiate one client-provided provider view, returning ``None`` for normal fallback.
 
     Loader/factory failures are contained here: the caller keeps its readable fallback and
     never retries with the other view kind.

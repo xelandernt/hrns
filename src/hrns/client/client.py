@@ -8,13 +8,14 @@ interaction policy boundary. No runtime or Pydantic AI imports live here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
 from acp.client.connection import ClientSideConnection
 from acp.schema import (
     AcceptElicitationResponse,
+    AcpMcpServer,
     AllowedOutcome,
     BooleanConfigOptionCapabilities,
     CancelElicitationResponse,
@@ -31,18 +32,17 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
+from ..shared.errors import (
+    HrnsClientError,
+    InteractionRejected,
+    InteractionRequired,
+    describe_rpc_error,
+)
 from .bus import EventBus
 from .connection import ConnectionLifecycle
 from .constants import (
     CLIENT_NAME,
     CONNECT_TIMEOUT,
-)
-from .errors import (
-    HrnsClientError,
-    InteractionRejected,
-    InteractionRequired,
-    ProtocolError,
-    describe_rpc_error,
 )
 from .events import (
     SessionsListed,
@@ -58,9 +58,13 @@ from .io import (
 )
 from .payloads import elicitation_record, normalize_permission
 from .session import SessionLifecycle, SessionProxy
+from .skills import SkillMention
 from .transport import AgentTransport, ConnectionBundle
 from .turn import TurnService
 from .updates import dispatch_update
+
+if TYPE_CHECKING:
+    from .mcp_provider import ClientMcpProvider, McpServerHealth
 
 __all__ = ["HrnsAcpClient", "DEFAULT_INTERACTION_POLICY"]
 
@@ -84,6 +88,7 @@ class HrnsAcpClient:
         connect_timeout: float = CONNECT_TIMEOUT,
         auth_method: str = "",
         client_io: ClientIoMode = "all",
+        mcp: ClientMcpProvider | None = None,
     ) -> None:
         self.policy: InteractionPolicy = policy or DEFAULT_INTERACTION_POLICY
         self.advertise_extension = advertise_extension
@@ -91,6 +96,7 @@ class HrnsAcpClient:
         self.connect_timeout = connect_timeout
         self.auth_method = auth_method.strip()
         self.io = ClientIo(ClientIoPolicy(mode=client_io))
+        self.mcp = mcp
 
         self.bus = EventBus()
         self.initialized: Any = None
@@ -138,14 +144,50 @@ class HrnsAcpClient:
     def connected(self) -> bool:
         return self.connection_lifecycle.connected
 
+    async def prepare_mcp(self) -> None:
+        """Resolve MCP export consent before a timed session call."""
+        if self.mcp is not None:
+            await self.mcp.prepare()
+
+    async def mcp_declarations(self) -> tuple[AcpMcpServer, ...]:
+        """Declarations for one session, asking consent for exported servers."""
+        return await self.mcp.declarations() if self.mcp is not None else ()
+
+    @property
+    def mcp_health(self) -> tuple[McpServerHealth, ...]:
+        """A read-only snapshot of every configured MCP server."""
+        return self.mcp.health() if self.mcp is not None else ()
+
+    @property
+    def mcp_agent_supports_acp(self) -> bool:
+        """Whether the connected agent advertised MCP-over-ACP."""
+        return self.mcp.agent_supports_acp if self.mcp is not None else False
+
+    @property
+    def mcp_failures(self) -> tuple[McpServerHealth, ...]:
+        """MCP servers that failed to start or authenticate."""
+        return self.mcp.failures() if self.mcp is not None else ()
+
     # --------------------------------------------------------------- lifecycle
 
     async def connect(self) -> Any:
-        return await self.connection_lifecycle.connect()
+        response = await self.connection_lifecycle.connect()
+        if self.mcp is not None:
+            try:
+                await self.mcp.start(self.connection, self.initialized)
+            except BaseException:
+                await self.connection_lifecycle.disconnect()
+                await self.io.close()
+                raise
+        return response
 
     async def disconnect(self) -> None:
-        await self.connection_lifecycle.disconnect()
-        await self.io.close()
+        try:
+            if self.mcp is not None:
+                await self.mcp.close()
+        finally:
+            await self.connection_lifecycle.disconnect()
+            await self.io.close()
 
     def has_session_capability(self, name: str) -> bool:
         """Ask whether the agent advertised a session lifecycle feature."""
@@ -219,8 +261,9 @@ class HrnsAcpClient:
         prompt: str | list[Any],
         *,
         display_text: str | None = None,
+        skills: Sequence[SkillMention] = (),
     ) -> Any:
-        return await self.turns.prompt(session_id, prompt, display_text=display_text)
+        return await self.turns.prompt(session_id, prompt, display_text=display_text, skills=skills)
 
     async def cancel(self, session_id: str) -> None:
         await self.turns.cancel(session_id)
@@ -232,13 +275,6 @@ class HrnsAcpClient:
         self, session_id: str, config_id: str, value: str | bool
     ) -> tuple[dict[str, Any], ...]:
         return await self.turns.set_config_option(session_id, config_id, value)
-
-    async def _raw_request(self, method: str, params: dict[str, Any]) -> Any:
-        """Send one request through the SDK connection's public JSON-RPC layer."""
-        conn = getattr(self.bundle.conn, "_conn", None)
-        if conn is None or not hasattr(conn, "send_request"):
-            raise ProtocolError(f"The installed ACP SDK cannot send '{method}' requests.")
-        return await conn.send_request(method, params)
 
     async def drain_events(self, *, timeout: float = 1.0) -> None:
         """Let notification handlers and event consumers catch up with a prompt response."""
@@ -281,7 +317,10 @@ class HrnsAcpClient:
     def complete_session_load(self, session_id: str) -> None:
         """Publish the buffered replay in arrival order."""
         for update in self._session_load_buffers.pop(session_id, []):
-            dispatch_update(self.bus, session_id, update)
+            if isinstance(update, tuple) and update[0] == "hrns/session/state":
+                self.turns.apply_server_state(update[1])
+            else:
+                dispatch_update(self.bus, session_id, update)
 
     def abort_session_load(self, session_id: str) -> None:
         """Discard an incomplete replay; it is never authoritative client state."""
@@ -374,4 +413,9 @@ class HrnsAcpClient:
         raise RequestError.method_not_found(method)
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        return None
+        if method == "hrns/session/state":
+            session_id = params.get("sessionId")
+            if session_id in self._session_load_buffers:
+                self._session_load_buffers[session_id].append(("hrns/session/state", params))
+            else:
+                self.turns.apply_server_state(params)

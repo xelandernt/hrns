@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from acp import PROTOCOL_VERSION
 
-from . import _version
+from .. import _version
 
 #: Values shown to the agent in ``initialize``.
 CLIENT_NAME = "hrns-client"
@@ -26,8 +26,6 @@ MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 WS_PING_INTERVAL = 30.0
 WS_PING_TIMEOUT = 30.0
 WS_WRITE_LIMIT = 1024 * 1024
-
-CONFIG_DIR_NAME = "hrns"
-CONFIG_FILE_NAME = "profiles.toml"
-PROJECT_CONFIG_NAME = "hrns.toml"
-CONFIG_ENV_OVERRIDE = "HRNS_PROFILES"
+#: A peer that never acknowledges the close frame must not stall teardown; after a
+#: failed handshake this used to add the library's 10-second default to every retry.
+WS_CLOSE_TIMEOUT = 2.0

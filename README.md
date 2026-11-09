@@ -1,222 +1,150 @@
 # hrns
 
-**One Pydantic AI agent. One protocol adapter. No custom backend.**
+[Pydantic AI](https://ai.pydantic.dev/) agents with server-owned conversations, ACP interaction, and read-only AG-UI streams.
 
-hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**
-(`pydantic-ai-harness`), for terminals and editors.
+hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**,
+for terminals and editors.
 
 ## Install
 
 ```sh
-uv sync --extra app
+uv sync --extra client --extra server
 ```
 
-ACP support comes from `pydantic-ai-harness[acp]`.
+Use `--extra client` for the terminal only and `--extra server` for the agent and
+HTTP entry points. The base install provides the shared `hrns config`, `profiles`,
+and `mcp` commands.
 
 ## Define the agent
 
 ```python
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import LocalWorkspace
-from pydantic_ai_harness.coder import Coder
+from hrns.server import build_agent
 
-
-def build_agent(model: str = "anthropic:claude-sonnet-5-5") -> Agent:
-    return Agent(
-        model,
-        name="hrns",
-        capabilities=[
-            LocalWorkspace("."),
-            Coder(),
-        ],
-    )
+agent = build_agent("anthropic:claude-sonnet-5-5", cwd=".")
 ```
 
-Everything the agent does is a capability. There is no plugin registry,
-binding, policy catalog, manifest, or configuration service.
+The default agent includes coding tools, task tracking, skills, user questions, and
+approval handling. Compose your own agent with the [capabilities](docs/capabilities.md)
+reference.
 
-## ACP over stdio
+## Skills
+
+The agent reads [Agent Skills](https://agentskills.io/specification) from
+`<workspace>/.agents/skills` and `~/.agents/skills` by default. A skill is a directory
+with a `SKILL.md`; the model sees its name and description, and loads the instructions
+only when it needs them. A person can list skills with `/skills` and invoke one with
+`$name`; the terminal sends the id, and the server expands the instructions.
+
+```toml
+[skills]
+paths = ["~/shared/skills"]            # libraries read before the defaults
+exclude = ["experimental-release-notes"]
+```
+
+`build_agent` discovers skills by default. Applications can supply Python definitions
+with `Skills(skills=...)`; see `examples/fastapi_app.py`. The full reference, including the
+ACP `_meta` payloads and the security notes, is in [docs/skills.md](docs/skills.md).
+
+## Serve agents
 
 ```python
-from pydantic_ai_harness.experimental.acp import InMemorySessionStore, run_acp_stdio_sync
-
-run_acp_stdio_sync(build_agent(), session_store=InMemorySessionStore())
-```
-
-Or use the packaged entrypoint:
-
-```sh
-HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app acp
-```
-
-## ACP WebSocket on FastAPI
-
-```python
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from hrns.app.fastapi import mount_acp
+from hrns.server import HrnsServer, build_agent
 
-app = FastAPI()
-mount_acp(app, lambda _principal: build_agent(), path="/acp")
+server = HrnsServer()
+coder = server.add_agent("coder", factory=lambda: build_agent("anthropic:claude-sonnet-5-5", cwd="/srv/project"))
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with server:
+        yield
+
+app = FastAPI(lifespan=lifespan)
+server.mount_acp(app, prefix="/acp")
+server.mount_ag_ui(app, prefix="/ag-ui")
 ```
 
-Each WebSocket gets its own `PydanticAIACPAgent`. The upstream adapter is
-stdio-oriented and single-connection, so the FastAPI mount bridges each WebSocket
-text frame to the adapter's newline-delimited JSON stream. Shared multi-viewer
-ACP sessions still need a fan-out layer above it.
+Install observation support with `uv sync --extra client --extra server --extra ag-ui`.
+Use `AcpServer` when only ACP is needed. Register multiple factories under different
+agent IDs. One ACP client may interact with a session while any number of AG-UI clients
+observe it. Execution survives client disconnects.
 
-### ACP model switching
-
-ACP exposes model selection as a standard session config option, but the adapter
-only advertises it when given a list. Pass `models`; the first id is each
-session's default. Use `model_resolver` when the advertised ids are not Pydantic
-AI model ids:
+Inside the server lifecycle, start work directly:
 
 ```python
-mount_acp(
-    app,
-    lambda _principal: build_agent(),
-    models=["openai:gpt-5.1", "anthropic:claude-sonnet-4-5"],
-)
+session = await coder.new_session(cwd="/srv/project")
+turn = await session.submit("Investigate the deployment failure")
+result = await turn.result()
 ```
 
-The terminal client consumes that option for remote agents. In local mode,
-`/model provider:model` saves the choice and applies it live when the runtime
-advertises the id. Without an argument, `/model` still opens the picker.
-`hrns-local` advertises every model configured in `hrns.local.toml`.
-
-The terminal client can connect to that endpoint directly:
+Follow-ups share a FIFO with ACP prompts. Cancellation and failures pause it;
+`pending_prompts()`, `resume_queue()`, and `clear_queue()` are Python-only controls.
+Permissions/questions wait for an ACP attachment. See [agent servers](docs/mount-acp.md)
+for configuration, authentication, stores, and model/provider routing, and
+[AG-UI observation](docs/ag_ui.md) for read-only snapshots and SSE replay.
 
 ```sh
-hrns connect --server ws://127.0.0.1:8000/acp
-hrns run --server ws://127.0.0.1:8000/acp "summarize this repo"
+hrns connect --server ws://127.0.0.1:8000/acp/coder
+hrns run --server ws://127.0.0.1:8000/acp/coder "summarize this repo"
 ```
 
-`ws://` is accepted only for loopback development; remote hosts need `wss://`. Pass a
-bearer token with `--token env:NAME` (or `keyring:service/user`), or save the endpoint:
+Remote hosts require `wss://`. Pass a bearer token with `--token env:NAME` or
+`--token keyring:service/user`; admitted clients share the agent's server scope.
+The [FastAPI example](examples/fastapi_app.py) shows both mounts with authentication.
+
+For the packaged single-agent server:
 
 ```sh
-hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN --cwd /workspace
-hrns run --profile team "summarize this repo"
+HRNS_MODEL=provider:model hrns serve --port 8000
+# ACP endpoint: ws://127.0.0.1:8000/acp/agent
 ```
 
-`--token` also accepts a literal token, and the TUI can connect directly:
-
-```text
-/connect wss://host/acp --token env:TEAM_TOKEN --cwd /workspace
-```
-
-In the TUI connection picker, `n` adds a remote or stdio target and `e` edits the
-selected saved profile, including renaming it.
-
-Prefer `env:` or `keyring:` references: literal tokens are stored in the profile file
-when a profile is saved.
-
-## Run the FastAPI app
+For stdio:
 
 ```python
-from hrns.app.fastapi import create_app
+from hrns.server import build_agent, run_acp_stdio
 
-app = create_app(lambda _principal: build_agent())
-# WS /acp
+run_acp_stdio(lambda: build_agent("anthropic:claude-sonnet-5-5"))
 ```
 
-Or run it:
+`hrns acp` starts the default agent over stdio; `hrns agent` uses the configured
+models and provider routing. The terminal uses the same configured entry point.
 
-```sh
-HRNS_MODEL=anthropic:claude-sonnet-5-5 python -m hrns.app serve --port 8000
-```
+## Configuration
 
-## Authentication
+The client and server read one document: `config.toml` in the platform
+config directory, with an optional `hrns.toml` in the working directory overriding it
+key by key. `HRNS_*` environment variables override both.
+[Configuration](docs/configuration.md) is the field reference and the location map.
 
-`mount_acp` and `create_app` accept an async `authenticate` callback. It receives
-the raw FastAPI `WebSocket` and returns an identity. Returning `None` rejects the
-peer: ACP closes before the upgrade is accepted. Exceptions are server errors and
-never produce an accepted connection.
-
-```python
-from fastapi import WebSocket
-from hrns.app.fastapi import create_app
-
-async def authenticate(connection: WebSocket) -> str | None:
-    token = connection.headers.get("authorization")
-    return user_for_token(token) if token else None
-
-app = create_app(lambda principal: build_agent(), authenticate=authenticate)
-```
-
-The agent factory always takes exactly one argument: the principal, or `None`
-when no callback is configured. It runs once per accepted ACP connection. The
-principal type is generic, so the callback can return whatever identity object
-the deployment uses and the factory receives that same type.
-
-### Per-user ACP sessions
-
-ACP stores sessions in a `SessionStore`. Give each principal their own store so a
-reconnecting user can `session/load` their sessions without ever seeing another
-user's:
-
-```python
-from hrns.app.acp import InMemorySessionStore
-from hrns.app.fastapi import create_app
-
-stores: dict[str, InMemorySessionStore] = {}
-
-def session_store_for(principal: str | None) -> InMemorySessionStore:
-    return stores.setdefault(principal or "anonymous", InMemorySessionStore())
-
-app = create_app(
-    lambda principal: build_agent(),
-    authenticate=authenticate,
-    session_store_factory=session_store_for,
-)
-```
-
-`InMemorySessionStore` is process-local. Use a shared durable implementation for
-multiple workers or restarts.
-
-`InMemorySessionStore` also implements `session/list`: clients can list sessions,
-filter by `cwd`, and page with the returned cursor. A title is the first user text
-in the session transcript, and `updatedAt` advances whenever a turn is committed.
-A durable store gets the same support by implementing `ListableSessionStore`
-(`save`, `load`, `remember`, and `list_sessions`) from `hrns.app.acp`.
-
-## Adapter API
-
-```python
-from hrns.app import PydanticAIACPAgent, build_agent
-from hrns.app.acp import InMemorySessionStore
-
-agent = build_agent("openai:gpt-6.1-sol")
-acp = PydanticAIACPAgent(agent, session_store=InMemorySessionStore())
-```
-
-The adapter is deliberately thin. It translates protocol events; it does not
-define agent behavior.
-
-## Local configuration
-
-`hrns-local` reads `hrns.local.toml` (or `HRNS_LOCAL_*` environment variables) and
-launches the ACP entrypoint with the configured provider and model. The existing
-terminal client still uses this entrypoint.
+`hrns agent` launches the ACP entrypoint with the configured provider and model. The
+terminal client reuses that entrypoint, so it passes the same document to it.
 
 In the TUI connection picker, `l` opens provider management. Add or edit a provider
-to paste its API key into the password field; the key is stored in the OS keyring,
-not in the TOML file. After saving a provider without an active model, the model
+to paste its API key into the password field; the key is stored in the OS keyring. After saving a provider without an active model, the model
 picker opens so a catalog or custom id can be selected. `/model provider:model` also
 sets it directly.
 
-## What was removed
+`/providers` acts on whatever you are connected to. Over stdio to `hrns agent` it opens
+the entry editor above; connected to a remote agent that advertises provider
+configuration it lists that agent's providers and sends `providers/set` /
+`providers/disable` for you.
 
-`hrns.runtime`, `hrns.server`, `hrns.protocol`, the plugin registry, policy catalog,
-manifests, SQLite/PostgreSQL session machinery, durable queue, leases, and every
-`_hrns/*` extension are gone. ACP is the only backend surface, and the terminal
-client speaks standard ACP only.
+`hrns agent` seeds its ACP provider registry from those TOML entries, so a client that
+speaks `providers/*` sees one provider per entry and can reroute it to its own gateway.
+The entry this deployment starts with is marked `required`, because disabling it would
+leave the default session without a model; the headers a client sends reach the request
+as `extra_headers` model settings.
 
-## Limitations
+## Runtime behavior
 
-- The ACP adapter has one connection per adapter. `session/list` works for listable
-  stores (including `InMemorySessionStore`); `session/delete` and multi-viewer fan-out
-  are not implemented.
-- `build_agent` adds a small approval capability by default: reads run freely, writes and
-  shell calls are marked `unapproved` so ACP can request permission. Pass
-  `approval=False` to disable it.
+- Run one worker per server. Sessions, queues, pending interactions, and observation live
+  in the process. Durable session stores restore committed state after restart.
+- Provider routing changes apply on the next turn. A running turn keeps its selected
+  endpoint; session setting changes apply before its next model request.
+- MCP exports require client consent at session start. Headless clients export servers
+  configured with `always_allow = true`. The `/mcp` panel shows startup and authentication
+  failures. See [MCP over ACP](docs/mcp.md) for the request scope and upstream behavior.
+- Tool approvals are enabled by default. Reads run freely; file writes and shell calls
+  request permission through ACP. `approval=False` delegates approval to the deployment.

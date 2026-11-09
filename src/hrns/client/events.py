@@ -125,6 +125,13 @@ class TurnCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionExecutionState:
+    session_id: str
+    status: str
+    turn_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class SessionsListed:
     """``session/list`` result used by the sessions panel."""
 

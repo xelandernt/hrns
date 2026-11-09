@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from typing import TYPE_CHECKING, Any
 
-from ...errors import ExtensionUnavailable, HrnsClientError
+from ....shared.errors import ExtensionUnavailable, HrnsClientError
 from ...launch import remote_target
 from ..commands import resolve_local_command
 from ..composer import Composer
@@ -150,13 +150,15 @@ class CommandWorkflow:
             await screen.prompts.show_skills(rest)
         elif name == "todo":
             screen.action_show_todos()
+        elif name == "mcp":
+            screen.action_show_mcp()
         elif name == "models":
             if rest:
                 await screen.models.set_model(rest)
             else:
                 await screen.models.show_models()
         elif name == "providers":
-            screen.models.open_providers()
+            await screen.models.show_providers()
         elif name == "effort":
             await screen.models.show_effort()
         elif name == "permissions":

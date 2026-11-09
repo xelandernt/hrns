@@ -5,29 +5,32 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hrns.config import (
+from acp import RequestError
+
+from hrns.shared.config import (
     EFFORT_DEFAULT,
-    LocalSettings,
+    HrnsConfig,
+    is_builtin_hrns,
     thinking_from_settings,
     with_thinking,
 )
 
-from ...errors import HrnsClientError
-from ...local import (
-    is_local_hrns,
-    local_credential_available,
-    local_model_catalog,
-    local_target,
-    local_thinking_support,
+from ....shared.errors import HrnsClientError, describe_rpc_error
+from ...runtime import (
+    agent_credential_available,
+    agent_model_catalog,
+    agent_target,
+    agent_thinking_support,
 )
+from ..agent_providers import AgentProviderRequest, AgentProvidersDialog, models_by_provider
 from ..choice_keys import stepped_value
 from ..dialogs import ChoiceDialog
-from ..local import (
+from ..model_setup import (
     CustomModelDialog,
     CustomModelRequest,
-    LocalModelResult,
     ModelPick,
     ModelPickerDialog,
+    ModelSetupResult,
     effort_choices,
     effort_label,
     save_custom_model,
@@ -116,18 +119,18 @@ class ModelWorkflow:
         screen.chrome.update_chrome()
         return True
 
-    # ------------------------------------------------------------- local model
+    # ---------------------------------------------------------- built-in model
 
-    def local_settings(self) -> LocalSettings:
+    def local_settings(self) -> HrnsConfig:
         screen = self.screen
         target = screen.target
         args = (
             target.profile.args
-            if is_local_hrns(target.profile if target is not None else None)
+            if is_builtin_hrns(target.profile if target is not None else None)
             else []
         )
         config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
-        return LocalSettings(config_file=config) if config else LocalSettings()
+        return HrnsConfig(config_file=config) if config else HrnsConfig()
 
     async def show_models(self) -> None:
         """Local provider models, or the remote agent's advertised models."""
@@ -138,7 +141,7 @@ class ModelWorkflow:
                 "warning",
             )
             return
-        if screen.target.kind != "local" or not is_local_hrns(screen.target.profile):
+        if screen.target.kind != "local" or not is_builtin_hrns(screen.target.profile):
             await self.show_model_dialog()
             return
         try:
@@ -148,7 +151,7 @@ class ModelWorkflow:
             return
         if not settings.providers:
             await screen._notice(
-                "No local providers are configured yet. Add one, then pick a model.",
+                "No providers are configured yet. Add one, then pick a model.",
                 "warning",
             )
             self.open_providers(settings)
@@ -171,7 +174,7 @@ class ModelWorkflow:
                 "warning",
             )
             return
-        if screen.target.kind == "local" and is_local_hrns(screen.target.profile):
+        if screen.target.kind == "local" and is_builtin_hrns(screen.target.profile):
             try:
                 settings = self.local_settings()
             except (ValueError, OSError) as exc:
@@ -179,7 +182,7 @@ class ModelWorkflow:
                 return
             if not settings.providers:
                 await screen._notice(
-                    "No local providers are configured yet. Add one with /providers.",
+                    "No providers are configured yet. Add one with /providers.",
                     "warning",
                 )
                 return
@@ -193,8 +196,8 @@ class ModelWorkflow:
         await self._set_agent_model(target)
 
     @staticmethod
-    def _resolve_local_model(settings: LocalSettings, target: str) -> tuple[str, str]:
-        """Resolve ``model`` or ``provider:model`` against the local configuration."""
+    def _resolve_local_model(settings: HrnsConfig, target: str) -> tuple[str, str]:
+        """Resolve ``model`` or ``provider:model`` against the configuration."""
         provider, separator, model = target.partition(":")
         if separator:
             provider = provider.strip()
@@ -204,7 +207,7 @@ class ModelWorkflow:
             if provider not in settings.providers:
                 available = ", ".join(sorted(settings.providers)) or "none"
                 raise HrnsClientError(
-                    f"Unknown local provider '{provider}'. Configured providers: {available}."
+                    f"Unknown provider '{provider}'. Configured providers: {available}."
                 )
             return provider, model
         folded = target.casefold()
@@ -231,7 +234,7 @@ class ModelWorkflow:
             return next(iter(settings.providers)), target
         available = ", ".join(sorted(settings.providers)) or "none"
         raise HrnsClientError(
-            f"No local provider is selected. Use provider:model. Configured providers: {available}."
+            f"No provider is selected. Use provider:model. Configured providers: {available}."
         )
 
     async def _set_agent_model(self, target: str) -> None:
@@ -299,7 +302,7 @@ class ModelWorkflow:
         raise HrnsClientError(f"Unknown {label} '{target}'. Available: {available}.")
 
     def models_picked(
-        self, settings: LocalSettings, result: ModelPick | CustomModelRequest | None
+        self, settings: HrnsConfig, result: ModelPick | CustomModelRequest | None
     ) -> None:
         """React to the model picker: switch model, or add a custom id first."""
         if isinstance(result, ModelPick):
@@ -307,7 +310,7 @@ class ModelWorkflow:
         elif isinstance(result, CustomModelRequest):
             self.add_custom_model(settings, result.provider, result.model)
 
-    def open_providers(self, settings: LocalSettings | None = None) -> None:
+    def open_providers(self, settings: HrnsConfig | None = None) -> None:
         """Open the provider table, reloading the settings when none were passed."""
         screen = self.screen
         try:
@@ -316,6 +319,87 @@ class ModelWorkflow:
             screen.app.notify(f"Local settings are unavailable: {exc}", severity="error")
             return
         screen.app.push_screen(ProvidersDialog(current), self.providers_saved)
+
+    async def show_providers(self) -> None:
+        """Local provider entries, or the connected agent's provider routing.
+
+        the built-in agent reads its entries from the config file, so editing that file is the
+        operation that matters for a local connection. Any other agent that advertises the
+        ``providers`` capability gets its own in-memory routing editor instead.
+        """
+        screen = self.screen
+        if screen.session.client is not screen.client:
+            await screen._notice(
+                "This session is not attached to the reconnected client. Start a new session first.",
+                "warning",
+            )
+            return
+        if screen.target.kind == "local" and is_builtin_hrns(screen.target.profile):
+            self.open_providers()
+            return
+        if not self.agent_supports_providers():
+            await screen._notice(
+                "This agent does not accept provider configuration; it does not advertise "
+                "the ACP providers capability.",
+                "warning",
+            )
+            return
+        await self.open_agent_providers()
+
+    def agent_supports_providers(self) -> bool:
+        """Whether the connected agent advertises ``agentCapabilities.providers``."""
+        capabilities = getattr(self.screen.client.initialized, "agent_capabilities", None)
+        return getattr(capabilities, "providers", None) is not None
+
+    async def open_agent_providers(self) -> None:
+        """List the agent's providers and offer to route or disable one."""
+        screen = self.screen
+        try:
+            listing = await screen.client.connection.list_providers()
+        except RequestError as exc:
+            await screen._notice(describe_rpc_error("providers/list", exc), "error")
+            return
+        except HrnsClientError as exc:
+            await screen._notice(exc.message, "error")
+            return
+        screen.app.push_screen(
+            AgentProvidersDialog(
+                list(listing.providers),
+                models=models_by_provider(screen.session.config_options),
+            ),
+            self.agent_providers_closed,
+        )
+
+    def agent_providers_closed(self, request: AgentProviderRequest | None) -> None:
+        """Apply the choice the table returned, then show the agent's new state."""
+        if request is None:
+            return
+        self.screen.run_worker(
+            self.apply_agent_provider(request),
+            group="providers",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def apply_agent_provider(self, request: AgentProviderRequest) -> None:
+        screen = self.screen
+        try:
+            if request.kind == "disable":
+                await screen.client.connection.disable_provider(request.provider_id)
+            else:
+                await screen.client.connection.set_provider(
+                    request.provider_id,
+                    request.api_type,
+                    request.base_url,
+                    request.headers or None,
+                )
+        except RequestError as exc:
+            method = f"providers/{request.kind}"
+            await screen._notice(describe_rpc_error(method, exc), "error")
+        except HrnsClientError as exc:
+            await screen._notice(exc.message, "error")
+            return
+        await self.open_agent_providers()
 
     def providers_saved(self, result: Any) -> None:
         screen = self.screen
@@ -331,7 +415,7 @@ class ModelWorkflow:
         if result.changed:
             screen.app.notify(f"Providers saved to {result.path}")
 
-    def add_custom_model(self, settings: LocalSettings, provider: str, initial: str = "") -> None:
+    def add_custom_model(self, settings: HrnsConfig, provider: str, initial: str = "") -> None:
         """Remember an id the catalog does not list, then switch to it."""
         screen = self.screen
         provider_id = settings.provider_id(provider)
@@ -352,18 +436,18 @@ class ModelWorkflow:
 
         screen.app.push_screen(CustomModelDialog(provider, provider_id, initial), apply)
 
-    def select_local_model(self, settings: LocalSettings, provider: str, model: str) -> None:
+    def select_local_model(self, settings: HrnsConfig, provider: str, model: str) -> None:
         """Model choice first; prompt for effort when that model can reason.
 
         Canceling the effort step cancels the whole change, matching Codex.
         """
         screen = self.screen
         provider_id = settings.provider_id(provider)
-        support = local_thinking_support(provider_id, model)
+        support = agent_thinking_support(provider_id, model)
         if support is None:
             # A model outside the catalog has unknown support: keep a manually
             # configured thinking level instead of clearing it.
-            known = model in local_model_catalog().get(provider_id, ())
+            known = model in agent_model_catalog().get(provider_id, ())
             screen._save_model_selection_worker(
                 settings, provider, model, None, touch_thinking=known
             )
@@ -385,18 +469,20 @@ class ModelWorkflow:
 
     def choose_effort(
         self,
-        settings: LocalSettings,
+        settings: HrnsConfig,
         provider: str,
         model: str,
         *,
         current: str | None,
         on_select: Any,
+        choices: list[dict[str, str]] | None = None,
     ) -> None:
+        """Offer the effort ladder; the server's ACP option wins over the local catalog."""
         self.screen.app.push_screen(
             ChoiceDialog(
                 "Reasoning effort",
                 f"{provider}:{model}. Applies to the next message.",
-                effort_choices(settings.provider_id(provider), model),
+                choices or effort_choices(settings.provider_id(provider), model),
                 current=current or EFFORT_DEFAULT,
             ),
             lambda value: on_select(value) if value else None,
@@ -404,7 +490,7 @@ class ModelWorkflow:
 
     async def save_model_selection(
         self,
-        settings: LocalSettings,
+        settings: HrnsConfig,
         provider: str,
         model: str,
         effort: str | None,
@@ -413,7 +499,7 @@ class ModelWorkflow:
     ) -> None:
         screen = self.screen
         entry = settings.entry(provider)
-        if entry is not None and not local_credential_available(provider, entry.api_key_env):
+        if entry is not None and not agent_credential_available(provider, entry.api_key_env):
             await screen._notice(
                 f"{provider} has no API key yet. Add one in /providers, or press Ctrl+G there "
                 "to sign in.",
@@ -429,7 +515,7 @@ class ModelWorkflow:
             await screen._notice(f"Could not save the model selection: {exc}", "error")
             return
         await self.apply_model_settings(
-            LocalModelResult(
+            ModelSetupResult(
                 path=path,
                 provider=provider,
                 model=model,
@@ -440,6 +526,14 @@ class ModelWorkflow:
         )
 
     async def show_effort(self) -> None:
+        """Offer the session's effort ladder, whichever transport the agent uses.
+
+        An agent that advertises an ``effort`` config option is authoritative: the server
+        decides which levels exist and applies the choice before each request. Only
+        the built-in agent also remembers it in the config file, because that is where its
+        policy lives; every other target — including a remote ACP server — uses the plain
+        config-option path.
+        """
         screen = self.screen
         if screen.session.client is not screen.client:
             await screen._notice(
@@ -447,24 +541,30 @@ class ModelWorkflow:
                 "warning",
             )
             return
-        if screen.target.kind != "local" or not is_local_hrns(screen.target.profile):
+        if screen.target is not None and is_builtin_hrns(screen.target.profile):
+            await self._show_local_effort()
+            return
+        option = effort_option(screen.session.config_options)
+        if option is None:
             await screen._notice(
-                "Reasoning effort is only available for local models.",
-                "warning",
+                "This agent does not advertise a reasoning-effort option.", "warning"
             )
             return
+        await self.change_standard_option(str(option.get("id") or "effort"))
+
+    async def _show_local_effort(self) -> None:
+        """Persist the effort for the next ``hrns agent`` launch, then apply it here."""
+        screen = self.screen
         try:
             settings = self.local_settings()
         except (ValueError, OSError) as exc:
             await screen._notice(f"Local settings are unavailable: {exc}", "error")
             return
         if not settings.provider or not settings.model:
-            await screen._notice(
-                "Configure a local model before setting reasoning effort.", "error"
-            )
+            await screen._notice("Configure a model before setting reasoning effort.", "error")
             return
         provider_id = settings.provider_id()
-        support = local_thinking_support(provider_id, settings.model)
+        support = agent_thinking_support(provider_id, settings.model)
         if support is None:
             await screen._notice(
                 f"{settings.provider}:{settings.model} does not advertise reasoning effort.",
@@ -482,10 +582,11 @@ class ModelWorkflow:
             settings.provider,
             settings.model,
             current=current,
+            choices=option_values(option) if option is not None else None,
             on_select=lambda effort: screen._set_local_effort_worker(settings, effort),
         )
 
-    async def set_local_effort(self, settings: LocalSettings, effort: str) -> None:
+    async def set_local_effort(self, settings: HrnsConfig, effort: str) -> None:
         screen = self.screen
         try:
             configured = with_thinking(settings, effort)
@@ -494,7 +595,7 @@ class ModelWorkflow:
             await screen._notice(f"Could not save the reasoning effort: {exc}", "error")
             return
         await self.apply_model_settings(
-            LocalModelResult(
+            ModelSetupResult(
                 path=path,
                 provider=settings.provider,
                 model=settings.model,
@@ -504,7 +605,7 @@ class ModelWorkflow:
             )
         )
 
-    async def apply_model_settings(self, result: LocalModelResult) -> None:
+    async def apply_model_settings(self, result: ModelSetupResult) -> None:
         """Switch the session's model in place; restart only when it cannot be switched.
 
         The runtime resolves ``name:model`` ids itself, so a provider change is a config
@@ -554,7 +655,7 @@ class ModelWorkflow:
                     await screen._notice(f"Model: {wanted}{suffix}", "success")
                     return
         try:
-            target = local_target(
+            target = agent_target(
                 result.path,
                 api_key_ref=result.api_key_ref,
                 cwd=screen.target.cwd,
@@ -567,7 +668,7 @@ class ModelWorkflow:
         screen.app.target = target
         screen.target = target
         await screen._notice(
-            "Restarting hrns-local so it advertises the saved model; reloading this session "
+            "Restarting the built-in agent so it advertises the saved model; reloading this session "
             "afterwards.",
             "warning",
         )
@@ -587,6 +688,7 @@ class ModelWorkflow:
         if not values:
             await screen._notice("This agent does not advertise any models.", "warning")
             return
+        choices = [{**value, "name": model_label(value)} for value in values]
 
         def apply(value: str | None) -> None:
             if value is not None and option is not None:
@@ -603,7 +705,7 @@ class ModelWorkflow:
             ChoiceDialog(
                 "Model",
                 subtitle,
-                values,
+                choices,
                 current=str(option.get("currentValue")) if option is not None else None,
             ),
             apply,
@@ -618,3 +720,17 @@ class ModelWorkflow:
             return
         screen.chrome.update_chrome()
         await screen._notice(f"Mode set to {mode_id}.", "success")
+
+
+def model_label(value: dict[str, str]) -> str:
+    """A model's display name, with the provider it is tagged with.
+
+    The agent tags each value with ``_meta.providerId``; when the name already reads
+    ``provider:model`` the tag adds nothing, so it is only appended for ids that do not
+    carry the provider.
+    """
+    name = value["name"]
+    provider = value.get("provider") or ""
+    if not provider or name.startswith(f"{provider}:"):
+        return name
+    return f"{name} — {provider}"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...errors import HrnsClientError
+from ....shared.errors import HrnsClientError
 from ..composer import Composer
 from ..dialogs import ConfirmDialog
 from ..panels import SidePanel
@@ -102,6 +102,7 @@ class SessionWorkflow:
         screen.app.session = loaded
         screen.chrome.update_chrome()
         await screen._notice(f"Loaded session {session_id}.", "success")
+        screen._report_mcp_failures()
         screen.query_one("#composer", Composer).focus()
         screen._refresh_panels()
 
@@ -148,6 +149,7 @@ class SessionWorkflow:
         await screen.query_one("#transcript", TranscriptPane).clear_transcript()
         screen.chrome.update_chrome()
         await screen._notice(f"Started session {session.session_id}.", "success")
+        screen._report_mcp_failures()
         screen.query_one("#composer", Composer).focus()
         screen._refresh_panels()
 

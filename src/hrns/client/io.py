@@ -14,7 +14,6 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 from acp import RequestError
 from acp.schema import (
@@ -25,6 +24,8 @@ from acp.schema import (
     TerminalOutputResponse,
     WaitForTerminalExitResponse,
 )
+
+from hrns.shared.config import ClientIoMode
 
 if os.name == "posix":
     from os import getpgid, killpg
@@ -60,9 +61,6 @@ def read_only_path(relative: str) -> bool:
         or name.endswith((".pem", ".key"))
     )
 
-
-ClientIoMode = Literal["off", "read", "all"]
-"""What this client offers agents: nothing, filesystem reads, or everything it can serve."""
 
 #: Every client capability path this terminal knows how to answer.
 SERVED_CLIENT_CAPABILITIES: frozenset[str] = frozenset(

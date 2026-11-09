@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
+from acp.schema import AcpMcpServer, HttpMcpServer, McpServerStdio, SseMcpServer
 
-from .errors import HrnsClientError, ProtocolError, describe_rpc_error
+from ..shared.errors import HrnsClientError, ProtocolError, describe_rpc_error
 from .events import SessionsListed
 from .payloads import absolute_path
+from .skills import SkillMention, from_session_meta
 
 if TYPE_CHECKING:
     from .client import HrnsAcpClient
+
+McpServerDeclaration = AcpMcpServer | HttpMcpServer | McpServerStdio | SseMcpServer
 
 
 class SessionProxy:
@@ -25,6 +29,7 @@ class SessionProxy:
         # The agent may ask this client for file I/O and terminal commands from here on.
         client.io.remember(session_id, cwd)
         self.config_options: tuple[dict[str, Any], ...] = ()
+        self.skills: tuple[dict[str, object], ...] = ()
         self.modes: dict[str, Any] | None = None
         self.current_mode_id: str | None = None
         self._unsubscribe: list[Callable[[], None]] = []
@@ -44,11 +49,27 @@ class SessionProxy:
 
     # commands ---------------------------------------------------------------
 
-    async def prompt(self, text: str, *, display_text: str | None = None) -> Any:
-        return await self.client.prompt(self.session_id, text, display_text=display_text)
+    async def prompt(
+        self,
+        text: str,
+        *,
+        display_text: str | None = None,
+        skills: Sequence[SkillMention] = (),
+    ) -> Any:
+        return await self.client.prompt(
+            self.session_id, text, display_text=display_text, skills=skills
+        )
 
-    async def prompt_blocks(self, blocks: list[Any], *, display_text: str) -> Any:
-        return await self.client.prompt(self.session_id, blocks, display_text=display_text)
+    async def prompt_blocks(
+        self,
+        blocks: list[Any],
+        *,
+        display_text: str,
+        skills: Sequence[SkillMention] = (),
+    ) -> Any:
+        return await self.client.prompt(
+            self.session_id, blocks, display_text=display_text, skills=skills
+        )
 
     async def cancel(self) -> None:
         await self.client.cancel(self.session_id)
@@ -114,15 +135,17 @@ class SessionLifecycle:
         client = self.client
         absolute_path(cwd, label="working directory")
         self.check_additional_directories(additional_directories)
+        mcp_servers: list[McpServerDeclaration] = list(await client.mcp_declarations())
         try:
             response = await client.connection.new_session(
                 cwd=cwd,
                 additional_directories=additional_directories,
-                mcp_servers=[],
+                mcp_servers=mcp_servers,
             )
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/new", exc)) from exc
         session = SessionProxy(client, response.session_id, cwd)
+        session.skills = from_session_meta(response.field_meta)
         session.apply_state(response.modes, response.config_options)
         return session
 
@@ -143,12 +166,13 @@ class SessionLifecycle:
             )
         if not replay:
             raise ProtocolError("session/load always replays history in ACP v1.")
+        mcp_servers: list[McpServerDeclaration] = list(await client.mcp_declarations())
         client.begin_session_load(session_id)
         try:
             response = await client.connection.load_session(
                 cwd=cwd,
                 session_id=session_id,
-                mcp_servers=[],
+                mcp_servers=mcp_servers,
                 additional_directories=additional_directories,
             )
         except RequestError as exc:
@@ -160,7 +184,11 @@ class SessionLifecycle:
         client.complete_session_load(session_id)
         session = SessionProxy(client, session_id, cwd)
         if response is not None:
+            session.skills = from_session_meta(response.field_meta)
             session.apply_state(response.modes, response.config_options)
+            state = (response.field_meta or {}).get("hrns/session/state")
+            if isinstance(state, dict):
+                client.turns.apply_server_state(state)
         return session
 
     async def resume_session(
@@ -175,16 +203,18 @@ class SessionLifecycle:
         self.check_additional_directories(additional_directories)
         if not self.has_capability("resume"):
             raise ProtocolError("This agent does not advertise session/resume; use session/load.")
+        mcp_servers: list[McpServerDeclaration] = list(await client.mcp_declarations())
         try:
             response = await client.connection.resume_session(
                 session_id=session_id,
                 cwd=cwd,
-                mcp_servers=[],
+                mcp_servers=mcp_servers,
                 additional_directories=additional_directories,
             )
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/resume", exc)) from exc
         session = SessionProxy(client, session_id, cwd)
+        session.skills = from_session_meta(response.field_meta)
         session.apply_state(response.modes, response.config_options)
         return session
 
@@ -219,15 +249,17 @@ class SessionLifecycle:
             await client.connection.close_session(session_id=session_id)
         except RequestError as exc:
             raise HrnsClientError(describe_rpc_error("session/close", exc)) from exc
+        client.turns.forget_session(session_id)
 
     async def delete_session(self, session_id: str) -> None:
         client = self.client
         if not self.has_capability("delete"):
             raise ProtocolError("This agent does not advertise session/delete.")
-        # ACP SDK 0.11.1 exposes the request model but not a convenience method.
         try:
-            result = await client._raw_request("session/delete", {"sessionId": session_id})
+            await client.connection.delete_session(session_id=session_id)
         except RequestError as exc:
-            raise HrnsClientError(describe_rpc_error("session/delete", exc)) from exc
-        if result is not None and not isinstance(result, dict):
-            raise ProtocolError("session/delete returned an unexpected response")
+            # ACP says clients SHOULD treat -32002 as a successful delete: the session is
+            # already gone, which is the outcome the caller asked for.
+            if exc.code != -32002:
+                raise HrnsClientError(describe_rpc_error("session/delete", exc)) from exc
+        client.turns.forget_session(session_id)

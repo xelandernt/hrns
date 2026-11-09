@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from ...interactions import PERMISSION_MODES
+from hrns.shared.config import PERMISSION_MODES, TuiSettings
+
 from ..commands import LOCAL_COMMANDS, resolve_local_command
 from ..composer import Composer
 from ..dialogs import (
@@ -16,7 +16,6 @@ from ..dialogs import (
     TranscriptSearchDialog,
 )
 from ..panels import SidePanel
-from ..state import Settings
 from ..transcript import TranscriptPane
 
 if TYPE_CHECKING:
@@ -170,7 +169,7 @@ class ChatActions:
 | `Left` / `Right` in a form | change a choice or toggle a switch |
 | `Enter` in a form | save and close |
 | `Esc` in a form | cancel without saving |
-| `Ctrl+G` in the local model form | sign in to a provider with an account login |
+| `Ctrl+G` in the model form | sign in to a provider with an account login |
 | `Ctrl+T` | focus the transcript for scrolling; `Esc` returns to the composer |
 | `Ctrl+F` | find text in retained messages, tools, and reasoning |
 | `Alt+Up` / `Alt+Down` | jump to the previous / next user message |
@@ -225,7 +224,7 @@ invents commands the agent did not advertise.
         def apply(mode: str | None) -> None:
             if mode not in PERMISSION_MODES:
                 return
-            screen.settings = replace(screen.settings, permission_mode=mode)
+            screen.settings = screen.settings.model_copy(update={"permission_mode": mode})
             screen.app.apply_settings(screen.settings)
             screen.chrome.apply_settings()
             screen._notice_soon(f"Approvals: {labels[mode]}.", "success")
@@ -243,7 +242,7 @@ invents commands the agent did not advertise.
     def show_settings(self) -> None:
         screen = self.screen
 
-        def apply(settings: Settings | None) -> None:
+        def apply(settings: TuiSettings | None) -> None:
             if settings is None:
                 return
             previous = screen.settings.client_io
@@ -260,6 +259,10 @@ invents commands the agent did not advertise.
             SettingsDialog(screen.settings),
             apply,
         )
+
+    def show_mcp(self) -> None:
+        self.show_panel("mcp")
+        self.screen._refresh_mcp_status()
 
     def find_transcript_action(self) -> None:
         screen = self.screen

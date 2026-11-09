@@ -14,10 +14,10 @@ from textual.containers import Horizontal
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from hrns.config import LocalSettings
+from hrns.shared.config import HrnsConfig
 
+from ....shared.errors import HrnsClientError
 from ...client import HrnsAcpClient, SessionProxy
-from ...errors import HrnsClientError
 from ...events import (
     AgentTextChunk,
     CommandsUpdated,
@@ -25,6 +25,7 @@ from ...events import (
     ConnectionEvent,
     ModesUpdated,
     PlanChanged,
+    SessionExecutionState,
     SessionInfoChanged,
     ToolEvent,
     TurnCompleted,
@@ -33,20 +34,22 @@ from ...events import (
     UserMessageReplayed,
 )
 from ...interactions import (
-    AskUserRequest,
-    AskUserResponse,
+    ElicitationAnswer,
+    ElicitationRequest,
     PermissionDecision,
     PermissionRequest,
 )
 from ...launch import ConnectionTarget
 from ..choice_keys import handle_choice_arrow
 from ..completion import FileIndex
-from ..local import LocalModelResult
+from ..model_setup import ModelSetupResult
 
 if TYPE_CHECKING:
     pass
 
-from ..approval import ApprovalBar, AskUserBar
+from hrns.shared.config import TuiSettings
+
+from ..approval import ApprovalBar
 from ..chat.commands import CommandWorkflow
 from ..chat.model import ModelWorkflow
 from ..chat.prompts import PromptWorkflow
@@ -57,16 +60,19 @@ from ..composer import (
     Composer,
     PromptQueue,
 )
+from ..dialogs import ElicitationBar
 from ..messages import (
     ApprovalDecided,
-    AskUserAnswered,
     AttachmentRemoved,
     CommandSuggestionKey,
+    ElicitationAnswered,
     OutputPending,
     QueueAction,
     Submitted,
 )
 from ..panels import (
+    McpPanel,
+    McpRefreshRequested,
     SidebarResizeHandle,
     SidebarResizeRequested,
     SidePanel,
@@ -82,10 +88,7 @@ from ..panels.session import (
     SessionResumeRequested,
 )
 from ..screen_base import _HrnsScreen
-from ..state import (
-    Settings,
-    activity_label,
-)
+from ..state import activity_label
 from ..status import StatusBar
 from ..transcript import TranscriptPane
 from .actions import ChatActions
@@ -112,7 +115,6 @@ class ChatScreen(_HrnsScreen):
         Binding("ctrl+n", "new_session", "New session", show=False),
         Binding("ctrl+r", "reconnect", "Reconnect", show=False),
         Binding("ctrl+enter", "submit_composer", "Send", show=False, priority=True),
-        Binding("ctrl+s", "submit_question", "Submit answer", show=False, priority=True),
         Binding("escape", "interrupt_or_focus", "Stop", show=False),
         Binding("ctrl+q", "quit_app", "Quit", show=False, priority=True),
     ]
@@ -122,7 +124,7 @@ class ChatScreen(_HrnsScreen):
         client: HrnsAcpClient,
         session: SessionProxy,
         target: ConnectionTarget,
-        settings: Settings,
+        settings: TuiSettings,
         *,
         initial_session_id: str | None = None,
         initial_load: bool = False,
@@ -138,6 +140,8 @@ class ChatScreen(_HrnsScreen):
         self.busy = False
         self._activity = ""
         self._hint_note = ""
+        self._mcp_status = ""
+        self._reported_mcp_failures: set[tuple[str, str]] = set()
         self._usage: dict[str, Any] | None = None
         self._context_usage: dict[str, Any] | None = None
         self._session_title: str | None = None
@@ -163,7 +167,7 @@ class ChatScreen(_HrnsScreen):
         self._session_rows: list[dict[str, Any]] = []
         self._session_cursor: str | None = None
         self._approval_future: asyncio.Future[PermissionDecision] | None = None
-        self._answers_future: asyncio.Future[AskUserResponse] | None = None
+        self._elicitation_future: asyncio.Future[ElicitationAnswer] | None = None
         self._redirect_after_turn = False
         self._suggestion_items: list[dict[str, Any]] = []
         self._suggestion_index = 0
@@ -171,8 +175,6 @@ class ChatScreen(_HrnsScreen):
         self._workspace_files: list[str] = []
         self._file_index = FileIndex(())
         self._workspace_root = Path.cwd()
-        self._skills: list[dict[str, Any]] = []
-        self._skills_loading = False
         if target.location().get("kind") == "local" and Path(target.cwd).is_dir():
             self._workspace_root = Path(target.cwd).resolve()
         self.actions = ChatActions(self)
@@ -183,6 +185,15 @@ class ChatScreen(_HrnsScreen):
         self.sessions = SessionWorkflow(self)
         self.models = ModelWorkflow(self)
 
+    @property
+    def _skills(self) -> list[dict[str, Any]]:
+        """The skill catalog the session advertised when it was created or loaded.
+
+        Read from the session rather than cached, so replacing the session on
+        ``session/load`` or reconnect automatically updates ``/skills`` and ``$``.
+        """
+        return [dict(item) for item in self.session.skills]
+
     # --------------------------------------------------------------- structure
 
     def compose(self) -> ComposeResult:
@@ -192,8 +203,8 @@ class ChatScreen(_HrnsScreen):
             yield SidePanel()
         yield Button("New output ↓ · Ctrl+End", id="new-output")
         yield PromptQueue(id="prompt-queue")
-        with Horizontal(id="ask-user-dock"):
-            yield AskUserBar(id="ask-user")
+        with Horizontal(id="question-dock"):
+            pass
         with Horizontal(id="approval-dock"):
             yield ApprovalBar(id="approval")
         with Horizontal(id="suggestions-dock"):
@@ -214,12 +225,13 @@ class ChatScreen(_HrnsScreen):
         self._subscribe()
         self._bind_view_context()
         self.chrome.update_chrome()
+        self._report_mcp_failures()
         self.query_one("#composer", Composer).focus()
         self._run_bootstrap()
 
     def on_unmount(self) -> None:
         self._resolve_approval(None, focus=False)
-        self._resolve_questions(AskUserResponse(cancelled=True), focus=False)
+        self._settle_elicitation(ElicitationAnswer(action="cancel"))
         if self._consumer is not None:
             self._consumer.cancel()
             self._consumer = None
@@ -231,6 +243,7 @@ class ChatScreen(_HrnsScreen):
         self.query_one(
             "#transcript", TranscriptPane
         ).view_context = self.commands.make_view_context(self.session)
+        self.prompts.refresh_skills()
 
     def _subscribe(self) -> None:
         if self._unsubscribe is not None:
@@ -262,6 +275,37 @@ class ChatScreen(_HrnsScreen):
 
     async def _notice(self, text: str, severity: str = "info") -> None:
         await self.query_one("#transcript", TranscriptPane).add_notice(text, severity=severity)
+
+    def _refresh_mcp_status(self) -> None:
+        """Keep the status hint in sync with the provider's health snapshot."""
+        failures = self.client.mcp_failures
+        if not failures:
+            self._mcp_status = ""
+        elif len(failures) == 1:
+            self._mcp_status = f"mcp: {failures[0].name} failed"
+        else:
+            self._mcp_status = f"mcp: {len(failures)} servers failed"
+        self.query_one("#mcp-panel", McpPanel).set_health(
+            self.client.mcp_health,
+            connected=self.client.connected,
+            acp=self.client.mcp_agent_supports_acp,
+        )
+        self.chrome.refresh_status()
+
+    def _report_mcp_failures(self, *, reset: bool = False) -> None:
+        """Surface new startup/auth failures once and update the status hint."""
+        if reset:
+            self._reported_mcp_failures.clear()
+        self._refresh_mcp_status()
+        for failure in self.client.mcp_failures:
+            key = (failure.name, failure.detail)
+            if key in self._reported_mcp_failures:
+                continue
+            self._reported_mcp_failures.add(key)
+            self._notice_soon(
+                f"MCP server '{failure.name}' was not exported over ACP: {failure.detail}",
+                "warning",
+            )
 
     # ---------------------------------------------------------------- bootstrap
 
@@ -317,7 +361,13 @@ class ChatScreen(_HrnsScreen):
             self._turns_started += 1
             self._set_busy(True)
             return
+        if isinstance(event, SessionExecutionState):
+            self._set_busy(event.status in {"running", "waiting"})
+            self._activity = "waiting for input" if event.status == "waiting" else "working"
+            self.chrome.refresh_status()
+            return
         if isinstance(event, TurnCompleted):
+            self._set_busy(False)
             self.prompts.recover_steering()
             if event.stop_reason not in {"end_turn", ""}:
                 self._queue_paused = True
@@ -345,6 +395,7 @@ class ChatScreen(_HrnsScreen):
                     message += f" {event.detail}"
                 await self._notice(message, severity)
             self.chrome.update_chrome()
+            self.app.call_later(self.send_next_queued)
             return
         if isinstance(event, CommandsUpdated):
             self._commands = event.commands
@@ -467,28 +518,46 @@ class ChatScreen(_HrnsScreen):
             self._redirect_after_turn = True
             self._cancel_turn()
 
-    # --------------------------------------------------------------- questions
+    # ------------------------------------------------------------- elicitation
 
-    async def request_questions(self, request: AskUserRequest) -> AskUserResponse:
-        if self._answers_future is not None:
-            self._resolve_questions(AskUserResponse(cancelled=True))
-        future: asyncio.Future[AskUserResponse] = asyncio.get_running_loop().create_future()
-        self._answers_future = future
-        self.query_one("#ask-user", AskUserBar).show(request)
-        return await future
+    async def request_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
+        dock = self.query_one("#question-dock", Horizontal)
+        if self._elicitation_future is not None:
+            self._settle_elicitation(ElicitationAnswer(action="cancel"))
+            with contextlib.suppress(Exception):
+                await dock.remove_children()
+        future: asyncio.Future[ElicitationAnswer] = asyncio.get_running_loop().create_future()
+        self._elicitation_future = future
+        bar = ElicitationBar(request)
+        await dock.mount(bar)
+        bar.focus_row(0)
+        try:
+            return await future
+        except asyncio.CancelledError:
+            self._settle_elicitation(ElicitationAnswer(action="cancel"))
+            with contextlib.suppress(Exception):
+                await dock.remove_children()
+            raise
 
-    def _resolve_questions(self, response: AskUserResponse, *, focus: bool = True) -> None:
-        future, self._answers_future = self._answers_future, None
+    def _settle_elicitation(self, answer: ElicitationAnswer) -> None:
+        future, self._elicitation_future = self._elicitation_future, None
         if future is not None and not future.done():
-            future.set_result(response)
+            future.set_result(answer)
+
+    async def on_elicitation_answered(self, event: ElicitationAnswered) -> None:
+        self._settle_elicitation(event.answer)
         with contextlib.suppress(Exception):
-            self.query_one("#ask-user", AskUserBar).hide()
-        if focus and self.is_mounted:
+            await self.query_one("#question-dock", Horizontal).remove_children()
+        if self.is_mounted:
             with contextlib.suppress(Exception):
                 self.query_one("#composer", Composer).focus()
 
-    def on_ask_user_answered(self, event: AskUserAnswered) -> None:
-        self._resolve_questions(event.response)
+    def _decline_elicitation(self) -> bool:
+        if self._elicitation_future is None:
+            return False
+        with contextlib.suppress(Exception):
+            self.query_one(ElicitationBar).action_decline()
+        return True
 
     def on_key(self, event: Any) -> None:
         """Left/Right change a focused choice control; approval shortcuts need focus."""
@@ -567,7 +636,7 @@ class ChatScreen(_HrnsScreen):
     @work(exit_on_error=False, group="model", exclusive=True)
     async def _save_model_selection_worker(
         self,
-        settings: LocalSettings,
+        settings: HrnsConfig,
         provider: str,
         model: str,
         effort: str | None,
@@ -579,11 +648,11 @@ class ChatScreen(_HrnsScreen):
         )
 
     @work(exit_on_error=False, group="model", exclusive=True)
-    async def _set_local_effort_worker(self, settings: LocalSettings, effort: str) -> None:
+    async def _set_local_effort_worker(self, settings: HrnsConfig, effort: str) -> None:
         await self.models.set_local_effort(settings, effort)
 
     @work(exit_on_error=False, group="model", exclusive=True)
-    async def _apply_model_settings_worker(self, result: LocalModelResult) -> None:
+    async def _apply_model_settings_worker(self, result: ModelSetupResult) -> None:
         await self.models.apply_model_settings(result)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -677,6 +746,10 @@ class ChatScreen(_HrnsScreen):
         event.stop()
         self.chrome.resize_sidebar(event.delta, persist=event.final)
 
+    def on_mcp_refresh_requested(self, event: McpRefreshRequested) -> None:
+        event.stop()
+        self._refresh_mcp_status()
+
     def action_show_todos(self) -> None:
         self.actions.show_todos()
 
@@ -685,6 +758,9 @@ class ChatScreen(_HrnsScreen):
 
     def action_show_activity(self) -> None:
         self.actions.show_activity()
+
+    def action_show_mcp(self) -> None:
+        self.actions.show_mcp()
 
     def action_toggle_panel(self) -> None:
         self.actions.toggle_panel()
@@ -714,8 +790,7 @@ class ChatScreen(_HrnsScreen):
         self.actions.show_settings()
 
     def action_interrupt_or_focus(self) -> None:
-        if self._answers_future is not None:
-            self.query_one("#ask-user", AskUserBar).action_decline()
+        if self._decline_elicitation():
             return
         if self._approval_future is not None:
             # Esc is the Codex-style "no, and tell it what to do differently":
@@ -731,23 +806,15 @@ class ChatScreen(_HrnsScreen):
 
     def action_submit_composer(self) -> None:
         """Send whatever the composer holds, from any focused chat widget."""
-        if self._answers_future is not None:
-            self.query_one("#ask-user", AskUserBar).action_submit()
+        if self._elicitation_future is not None:
+            with contextlib.suppress(Exception):
+                self.query_one(ElicitationBar).action_accept_form()
             return
         composer = self.query_one("#composer", Composer)
         if not composer.text.strip():
             composer.focus()
             return
         composer.action_submit()
-
-    def action_submit_question(self) -> None:
-        """Submit a pending agent question; a no-op otherwise.
-
-        Ctrl+Enter and Ctrl+J need terminal support for modified keys, so
-        Ctrl+S is the reliable fallback for the question bar.
-        """
-        if self._answers_future is not None:
-            self.query_one("#ask-user", AskUserBar).action_submit()
 
     def action_focus_transcript(self) -> None:
         self.query_one("#transcript", TranscriptPane).focus()

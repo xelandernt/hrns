@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from textual.message import Message
 
-from ..interactions import AskUserResponse
+from ..interactions import ElicitationAnswer
 
 
 class Submitted(Message):
@@ -50,9 +50,9 @@ class ApprovalDecided(Message):
         self.option_id = option_id
 
 
-class AskUserAnswered(Message):
-    """The local user finished or declined an agent question."""
+class ElicitationAnswered(Message):
+    """The local user accepted or declined a non-modal elicitation."""
 
-    def __init__(self, response: AskUserResponse) -> None:
+    def __init__(self, answer: ElicitationAnswer) -> None:
         super().__init__()
-        self.response = response
+        self.answer = answer

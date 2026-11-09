@@ -1,6 +1,6 @@
-"""Account logins for local providers, driven through the runtime's device flow.
+"""Account logins for providers, driven through the built-in agent's device flow.
 
-The client never imports Pydantic AI: it starts ``hrns-local --login PROVIDER`` and
+The client never imports Pydantic AI: it starts ``hrns agent --login PROVIDER`` and
 renders the JSON events that process prints.
 """
 
@@ -12,10 +12,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from hrns.config import LocalSettings, keyring_account
+from hrns.shared.config import HrnsConfig, keyring_account
 
-from .errors import HrnsClientError
-from .local import local_executable
+from ..shared.errors import HrnsClientError
+from .runtime import agent_command
 
 __all__ = [
     "DeviceAuthorization",
@@ -64,7 +64,7 @@ def login_target(provider: str | None = None, config: Path | None = None) -> Log
     provider id (``github-copilot``) when no entry uses that name yet.
     """
     try:
-        settings = LocalSettings(config_file=config) if config is not None else LocalSettings()
+        settings = HrnsConfig(config_file=config) if config is not None else HrnsConfig()
     except (ValueError, OSError) as exc:
         raise HrnsClientError(str(exc)) from exc
     selected = (provider or settings.provider).strip()
@@ -122,15 +122,10 @@ async def login(
     ``on_authorization`` runs once the code is available, so a terminal can show it
     before the caller starts waiting. Cancelling the awaited task stops the runtime.
     """
-    executable = local_executable()
-    if executable is None:
-        raise HrnsClientError(
-            "Account login requires the hrns-local command. Reinstall hrns so its "
-            "console scripts are on PATH."
-        )
+    command = agent_command()
     client_id = ["--client-id", target.client_id] if target.client_id else []
     process = await asyncio.create_subprocess_exec(
-        executable,
+        *command,
         "--login",
         target.provider,
         "--account",

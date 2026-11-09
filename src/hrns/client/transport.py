@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ipaddress
+import os
 import socket
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 
 from acp.client.connection import ClientSideConnection
 from acp.transports import spawn_stdio_transport
@@ -17,9 +16,17 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI, WebSocketException
 
-from .constants import MAX_MESSAGE_BYTES, WS_PING_INTERVAL, WS_PING_TIMEOUT, WS_WRITE_LIMIT
-from .errors import ProtocolError, TransportError
-from .profiles import secret_value
+from hrns.shared.config.credentials import keyring_secret
+
+from ..shared.errors import ProtocolError, SecretMissing, TransportError
+from ..shared.urls import check_websocket_url
+from .constants import (
+    MAX_MESSAGE_BYTES,
+    WS_CLOSE_TIMEOUT,
+    WS_PING_INTERVAL,
+    WS_PING_TIMEOUT,
+    WS_WRITE_LIMIT,
+)
 
 __all__ = [
     "AgentTransport",
@@ -31,6 +38,35 @@ __all__ = [
 
 StderrHandler = Callable[[str], None]
 LossHandler = Callable[[str, BaseException | None], None]
+
+
+def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | None:
+    """Resolve ``env:`` and ``keyring:`` references; literals pass through unchanged."""
+    if not reference:
+        return None
+    if reference.startswith("env:"):
+        name = reference[4:]
+        if not name:
+            raise SecretMissing(reference, "no environment variable named")
+        value = (env if env is not None else os.environ).get(name)
+        if value is None:
+            raise SecretMissing(reference, f"environment variable '{name}' is not set")
+        return value
+    if reference.startswith("keyring:"):
+        remainder = reference[len("keyring:") :]
+        if not remainder:
+            raise SecretMissing(reference, "no service named")
+        service, _, username = remainder.partition("/")
+        if username == "":
+            username = "default"
+        try:
+            value = keyring_secret(service, username)
+        except Exception as exc:
+            raise SecretMissing(reference, f"keyring lookup failed ({exc})") from exc
+        if value is None:
+            raise SecretMissing(reference, f"keyring has no entry '{service}' for '{username}'")
+        return value
+    return reference
 
 
 def _default_stderr(line: str) -> None:
@@ -54,7 +90,7 @@ class ConnectionBundle:
         writer: asyncio.StreamWriter,
         handle: Any,
         conn: ClientSideConnection,
-        reader_handle: Any = None,
+        reader_handle: Awaitable[Any] | Callable[[], Awaitable[Any]] | None = None,
         closer: Callable[[], Any] | None = None,
         name: str = "agent",
     ) -> None:
@@ -68,19 +104,34 @@ class ConnectionBundle:
         self.closed = False
 
     async def close(self) -> None:
+        """Tear the connection down, even when the calling task is being cancelled.
+
+        Cleanup runs in its own task: a cancelled connect or a cancelled reconnect worker
+        must not leave the reader or the websocket bridge half-closed. A leftover coroutine
+        object is also how the terminal ends up printing "coroutine ... was never awaited".
+        """
         if self.closed:
             return
         self.closed = True
-        with contextlib.suppress(Exception):
+        cleanup = asyncio.ensure_future(self._cleanup())
+        # Shielded so a cancelled caller cannot abort teardown. The cancellation still
+        # propagates from this await; `cleanup` keeps running to completion.
+        await asyncio.shield(cleanup)
+
+    async def _cleanup(self) -> None:
+        with contextlib.suppress(Exception, asyncio.CancelledError):
             await self.conn.close()
         if self._closer is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 result = self._closer()
                 if asyncio.iscoroutine(result):
                     await result
-        if self.reader_handle is not None:
-            with contextlib.suppress(Exception):
-                await self.reader_handle
+        handle = self.reader_handle
+        if handle is not None:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                if callable(handle):
+                    handle = handle()
+                await handle
 
 
 class AgentTransport(Protocol):
@@ -97,7 +148,7 @@ class AgentTransport(Protocol):
     async def close(self) -> None: ...
 
 
-class StdioAgentTransport:
+class StdioAgentTransport(AgentTransport):
     """Launch an independently installed ACP agent over direct argv stdio."""
 
     def __init__(
@@ -237,34 +288,7 @@ class StdioAgentTransport:
             self._bundle = None
 
 
-def check_websocket_url(url: str) -> str:
-    """Return *url* when it is a usable ACP WebSocket endpoint.
-
-    A bearer token must never cross the network in plaintext, so ``ws://`` is
-    accepted only for loopback development; everything else needs ``wss://``.
-    """
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
-        raise TransportError(f"WebSocket URL must start with ws:// or wss://, got '{url}'")
-    if parsed.scheme == "ws" and not _is_loopback_host(parsed.hostname):
-        raise TransportError(
-            "Refusing plaintext ws:// to a remote host; use wss://. "
-            "Plain ws:// is allowed only for loopback development."
-        )
-    return url
-
-
-def _is_loopback_host(host: str) -> bool:
-    if host.lower().rstrip(".") == "localhost":
-        return True
-    try:
-        address = ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        return False
-    return address.is_loopback
-
-
-class WebSocketAgentTransport:
+class WebSocketAgentTransport(AgentTransport):
     """ACP over a WebSocket endpoint, one JSON-RPC message per text frame.
 
     The ACP SDK expects newline-framed asyncio streams, so a socketpair bridges
@@ -316,6 +340,7 @@ class WebSocketAgentTransport:
                     max_size=MAX_MESSAGE_BYTES,
                     ping_interval=WS_PING_INTERVAL,
                     ping_timeout=WS_PING_TIMEOUT,
+                    close_timeout=WS_CLOSE_TIMEOUT,
                     write_limit=WS_WRITE_LIMIT,
                     additional_headers=self._auth_headers(),
                     open_timeout=self.connect_timeout,
@@ -435,7 +460,7 @@ class WebSocketAgentTransport:
             writer=local_writer,
             handle=ws,
             conn=conn,
-            reader_handle=closed.wait(),
+            reader_handle=closed.wait,
             closer=close_transport,
             name=self.name,
         )

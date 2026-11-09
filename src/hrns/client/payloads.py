@@ -16,7 +16,7 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from .errors import HrnsClientError
+from ..shared.errors import HrnsClientError
 from .interactions import ElicitationRequest, PermissionRequest
 
 

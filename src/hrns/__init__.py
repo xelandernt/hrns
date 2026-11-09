@@ -2,9 +2,10 @@
 
 The distribution exposes three subpackages:
 
-- ``hrns.app``: the agent composition and the ACP/FastAPI adapters.
-- ``hrns.client``: the Textual terminal and standard ACP client.
-- ``hrns.config``: local provider/model settings.
+- ``hrns.client``: the Textual terminal, standard ACP client, and built-in agent launcher.
+- ``hrns.server``: the agent composition and the ACP/FastAPI adapters.
+- ``hrns.shared``: configuration, credentials, MCP-over-ACP, errors, and URL helpers.
 
-Importing ``hrns`` does not import any subpackage.
+``hrns.cli`` is the unified command line. Importing ``hrns`` does not import any
+subpackage.
 """

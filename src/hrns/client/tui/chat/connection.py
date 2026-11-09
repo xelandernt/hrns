@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
-from ...errors import HrnsClientError
+from ....shared.errors import HrnsClientError
 from ..composer import Composer
 from ..transcript import TranscriptPane
 
@@ -52,6 +52,7 @@ class ReconnectWorkflow:
         screen.client = new_client
         screen.app.client = new_client
         screen.connected = True
+        screen._report_mcp_failures(reset=True)
         screen.chrome.reset_activity()
         screen._subscribe()
         await screen._notice("Reconnected.", "success")

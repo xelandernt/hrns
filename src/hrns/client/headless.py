@@ -16,10 +16,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
+from ..shared.errors import HrnsClientError, InteractionRequired
+from ..shared.exit_codes import (
+    EXIT_FAILURE,
+    EXIT_INTERACTION_REQUIRED,
+    EXIT_OK,
+)
 from .attachments import attachment_summary, build_prompt_blocks
 from .client import HrnsAcpClient
 from .constants import CLIENT_VERSION
-from .errors import HrnsClientError, InteractionRequired
 from .events import (
     AgentTextChunk,
     CommandsUpdated,
@@ -29,13 +34,9 @@ from .events import (
     TurnCompleted,
 )
 from .session import SessionProxy
+from .skills import find_mentions
 
-__all__ = ["EXIT_INTERACTION_REQUIRED", "RunOutcome", "HeadlessRun", "run_headless"]
-
-EXIT_OK = 0
-EXIT_FAILURE = 1
-EXIT_USAGE = 2
-EXIT_INTERACTION_REQUIRED = 3
+__all__ = ["RunOutcome", "HeadlessRun", "run_headless"]
 
 
 @dataclass
@@ -290,12 +291,14 @@ async def run_headless(
         runner.outcome.cwd = cwd
         runner.attach()
         attached = True
+        skills = find_mentions(prompt, session.skills)
         if timeout:
             await asyncio.wait_for(
-                session.prompt_blocks(blocks, display_text=prompt), timeout=timeout
+                session.prompt_blocks(blocks, display_text=prompt, skills=skills),
+                timeout=timeout,
             )
         else:
-            await session.prompt_blocks(blocks, display_text=prompt)
+            await session.prompt_blocks(blocks, display_text=prompt, skills=skills)
     except InteractionRequired as exc:
         runner.note_interaction(exc)
         error = exc

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from textual import work
@@ -12,11 +13,12 @@ from textual.app import App
 from textual.binding import Binding
 from textual.theme import Theme
 
-from ..client import HrnsAcpClient, SessionProxy
-from ..errors import HrnsClientError, InteractionRequired
+from hrns.shared.config import HrnsConfig, McpServerSettings, TuiSettings
+from hrns.shared.config.mcp import server_target
+
+from ...shared.errors import HrnsClientError, InteractionRequired, TransportError
+from ..client import HrnsAcpClient
 from ..interactions import (
-    AskUserRequest,
-    AskUserResponse,
     ElicitationAnswer,
     ElicitationRequest,
     InteractionPolicy,
@@ -26,12 +28,13 @@ from ..interactions import (
 )
 from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
-from ..local import local_model_catalog
-from ..profiles import Profiles
+from ..mcp_provider import ClientMcpProvider, ConsentDecision
+from ..runtime import agent_model_catalog
+from ..session import SessionProxy
+from ..skills import SkillMention
 from .chat.screen import ChatScreen
 from .connection_screen import ConnectScreen
-from .dialogs import ElicitationDialog, PermissionDialog
-from .state import Settings
+from .dialogs import ChoiceDialog, ElicitationDialog, PermissionDialog
 
 __all__ = ["HrnsApp", "run_terminal"]
 
@@ -67,13 +70,11 @@ class UiInteractionPolicy(InteractionPolicy):
         return await self.app.ask_permission(request)
 
     async def answer_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
+        if request.kind == "form":
+            for screen in reversed(self.app.screen_stack):
+                if isinstance(screen, ChatScreen):
+                    return await screen.request_elicitation(request)
         return await self.app.ask_elicitation(request)
-
-    async def answer_questions(self, request: AskUserRequest) -> AskUserResponse:
-        for screen in reversed(self.app.screen_stack):
-            if isinstance(screen, ChatScreen):
-                return await screen.request_questions(request)
-        return AskUserResponse(cancelled=True)
 
 
 class HrnsApp(App[int]):
@@ -307,44 +308,24 @@ class HrnsApp(App[int]):
 
     /* ----------------------------------------------------------- composer */
 
-    #ask-user-dock,
+    #question-dock,
     #approval-dock {
         height: auto;
         padding: 0 2;
         background: transparent;
     }
-    #ask-user {
+    .question-bar {
         height: auto;
         max-height: 18;
-        margin: 0;
         padding: 0 1;
         background: $surface;
         border: round $accent 75%;
     }
-    #ask-user .ask-tabs {
-        height: auto;
-        padding: 0 0 1 0;
-    }
-    #ask-user .ask-question {
+    .question-title {
         height: auto;
         padding-bottom: 1;
-    }
-    #ask-user #ask-options {
-        background: transparent;
-        height: auto;
-        max-height: 8;
-        scrollbar-size-vertical: 1;
-    }
-    #ask-user #ask-options:focus {
-        border: none;
-    }
-    #ask-user #ask-custom-input {
-        display: none;
-        margin-top: 1;
-    }
-    #ask-user .ask-hint {
-        height: auto;
-        color: $text-muted;
+        color: $text;
+        text-style: bold;
     }
     #approval {
         height: auto;
@@ -463,7 +444,7 @@ class HrnsApp(App[int]):
         color: $text-muted;
     }
     .narrow #composer-dock,
-    .narrow #ask-user-dock,
+    .narrow #question-dock,
     .narrow #approval-dock,
     .narrow #suggestions-dock { padding: 0 1; }
     .narrow .message-header { margin-top: 0; }
@@ -571,8 +552,64 @@ class HrnsApp(App[int]):
     .field-row {
         height: auto;
     }
-    .field-line {
+    .question-tabs {
         height: 1;
+    }
+    .question-tab {
+        width: auto;
+        max-width: 24;
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    .question-tab.active {
+        color: $text;
+        text-style: bold;
+        background: $accent 25%;
+    }
+    .question-review {
+        height: auto;
+        padding: 0 1 1 1;
+        color: $text;
+    }
+    .question-row {
+        padding: 0 1 1 1;
+    }
+    .question-field-title {
+        height: auto;
+        color: $text;
+        text-style: bold;
+    }
+    .question-field-text {
+        height: auto;
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+    .question-row .field-value {
+        height: auto;
+    }
+    .question-custom-row {
+        height: auto;
+        min-height: 1;
+        padding-left: 0;
+    }
+    .question-custom-row.question-cursor {
+        background: $accent 20%;
+    }
+    .question-option-marker {
+        width: 2;
+        color: $text;
+    }
+    .question-option-label {
+        width: auto;
+        padding-right: 1;
+        color: $text;
+    }
+    .field-line {
+        height: auto;
+        min-height: 1;
     }
     .field-row:focus,
     .field-row:focus-within {
@@ -647,7 +684,7 @@ class HrnsApp(App[int]):
 
     def __init__(
         self,
-        profiles: Profiles,
+        config: HrnsConfig,
         *,
         initial_target: ConnectionTarget | None = None,
         initial_session: str | None = None,
@@ -655,12 +692,11 @@ class HrnsApp(App[int]):
         client_io: ClientIoMode | None = None,
     ) -> None:
         super().__init__()
-        self.profiles = profiles
+        self.config = config
         self.initial_target = initial_target
         self.initial_session = initial_session
         self.status_message = status_message
         self.client_io = client_io
-        self.settings = Settings.from_mapping(profiles.tui)
         self.client: HrnsAcpClient | None = None
         self.session: SessionProxy | None = None
         self.target: ConnectionTarget | None = None
@@ -671,7 +707,7 @@ class HrnsApp(App[int]):
 
     def on_mount(self) -> None:
         self.register_theme(HRNS_THEME)
-        theme = self.settings.theme if self.settings.theme else "hrns"
+        theme = self.config.tui.theme if self.config.tui.theme else "hrns"
         try:
             self.theme = theme
         except Exception:
@@ -679,7 +715,7 @@ class HrnsApp(App[int]):
         self._warm_local_catalog()
         self.push_screen(
             ConnectScreen(
-                self.profiles,
+                self.config,
                 initial_target=self.initial_target,
                 auto_connect=self.initial_target is not None,
                 status_message=self.status_message,
@@ -689,7 +725,14 @@ class HrnsApp(App[int]):
     @work(thread=True, group="local-catalog", exclusive=True)
     def _warm_local_catalog(self) -> None:
         """Load the Pydantic AI provider/model catalog before the dialog opens."""
-        local_model_catalog()
+        agent_model_catalog()
+
+    def _mcp_provider(self) -> ClientMcpProvider:
+        return ClientMcpProvider(
+            self.config.mcp,
+            consent=self.ask_mcp_consent,
+            persist=self.config.save,
+        )
 
     def make_client(self) -> HrnsAcpClient:
         if self.target is None:
@@ -700,6 +743,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
+            mcp=self._mcp_provider(),
         )
 
     def client_io_mode(self, target: ConnectionTarget) -> ClientIoMode:
@@ -712,7 +756,7 @@ class HrnsApp(App[int]):
             return self.client_io
         if target.profile.client_io is not None:
             return target.profile.client_io
-        return self.settings.client_io
+        return self.config.tui.client_io
 
     async def connect_target(self, target: ConnectionTarget) -> ChatScreen:
         """Connect, open the initial session, and push the chat workspace."""
@@ -721,6 +765,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
+            mcp=self._mcp_provider(),
         )
         await client.connect()
         self.target = target
@@ -731,13 +776,25 @@ class HrnsApp(App[int]):
                 session = SessionProxy(client, self.initial_session, target.cwd)
                 initial_load = True
             else:
-                session = await client.new_session(target.cwd)
+                try:
+                    # The user answers consent prompts, so keep their thinking time
+                    # out of the agent's session/new timeout.
+                    await client.prepare_mcp()
+                    session = await asyncio.wait_for(
+                        client.new_session(target.cwd), timeout=client.connect_timeout
+                    )
+                except TimeoutError as exc:
+                    raise TransportError(
+                        f"{target.location_text()} did not answer session/new within "
+                        f"{client.connect_timeout:g}s."
+                    ) from exc
             self.session = session
+            self.config.remember_connection(self.config.connection_identity(target.profile))
             screen = ChatScreen(
                 client,
                 session,
                 target,
-                self.settings,
+                self.config.tui,
                 initial_session_id=self.initial_session if initial_load else None,
                 initial_load=initial_load,
             )
@@ -753,14 +810,18 @@ class HrnsApp(App[int]):
 
     @work(group="turn", exclusive=True)
     async def start_turn(
-        self, screen: ChatScreen, text: str, blocks: list[Any] | None = None
+        self,
+        screen: ChatScreen,
+        text: str,
+        blocks: list[Any] | None = None,
+        skills: Sequence[SkillMention] = (),
     ) -> None:
         """Run one prompt in an app-owned worker so panel switches do not cancel it."""
         try:
             if blocks is not None:
-                await screen.session.prompt_blocks(blocks, display_text=text)
+                await screen.session.prompt_blocks(blocks, display_text=text, skills=skills)
             else:
-                await screen.session.prompt(text)
+                await screen.session.prompt(text, skills=skills)
         except InteractionRequired as exc:
             screen._queue_paused = True
             if screen in self.screen_stack:
@@ -780,7 +841,11 @@ class HrnsApp(App[int]):
         finally:
             if screen in self.screen_stack:
                 await screen._events.join()
-                screen._set_busy(False)
+                screen._set_busy(
+                    screen.client.turns.is_running(screen.session.session_id)
+                    if screen.client.turns.server_lifecycle
+                    else False
+                )
                 screen.prompts.refresh_queue()
                 self.call_later(screen.send_next_queued)
 
@@ -829,13 +894,13 @@ class HrnsApp(App[int]):
         The modal remains only as a fallback when another screen is on top, so a
         permission request can never be buried behind an unrelated dialog.
         """
-        decision = auto_permission(self.settings.permission_mode, request)
+        decision = auto_permission(self.config.tui.permission_mode, request)
         if decision is not None:
             return decision
 
         async with self._approval_lock:
             # The mode may have changed while this request waited for the lock.
-            decision = auto_permission(self.settings.permission_mode, request)
+            decision = auto_permission(self.config.tui.permission_mode, request)
             if decision is not None:
                 return decision
             if not self.screen_stack:
@@ -880,17 +945,60 @@ class HrnsApp(App[int]):
         except asyncio.CancelledError:
             return ElicitationAnswer(action="cancel")
 
-    def apply_settings(self, settings: Settings) -> None:
-        self.settings = settings
+    async def ask_mcp_consent(self, name: str, server: McpServerSettings) -> ConsentDecision:
+        """Ask before an exported MCP server is offered to the agent."""
+        if not self.screen_stack:
+            return ConsentDecision.DENY
+        subtitle = f"{server_target(server)}\n\nThe agent will be able to call this server's tools."
+        choices = [
+            {
+                "value": ConsentDecision.ALLOW_ONCE.value,
+                "name": "Allow once",
+                "description": "Offer this server for this session only.",
+            },
+            {
+                "value": ConsentDecision.ALLOW_SESSION.value,
+                "name": "Allow for this connection",
+                "description": "Offer it to every session until you disconnect.",
+            },
+            {
+                "value": ConsentDecision.ALWAYS_ALLOW.value,
+                "name": "Always allow",
+                "description": "Offer it in future sessions too and save the setting.",
+            },
+            {
+                "value": ConsentDecision.DENY.value,
+                "name": "Deny",
+                "description": "Do not offer this server to the agent.",
+            },
+        ]
+        future: asyncio.Future[ConsentDecision] = asyncio.get_running_loop().create_future()
+
+        def done(result: str | None) -> None:
+            if future.done():
+                return
+            try:
+                future.set_result(ConsentDecision(result) if result else ConsentDecision.DENY)
+            except ValueError:
+                future.set_result(ConsentDecision.DENY)
+
+        try:
+            self.push_screen(ChoiceDialog(f"Allow MCP server '{name}'?", subtitle, choices), done)
+        except Exception:
+            return ConsentDecision.DENY
+        try:
+            return await future
+        except asyncio.CancelledError:
+            return ConsentDecision.DENY
+
+    def apply_settings(self, settings: TuiSettings) -> None:
+        """Adopt terminal preferences and persist them in the document."""
+        self.config.tui = settings
         if settings.theme:
             with contextlib.suppress(Exception):
                 self.theme = settings.theme
-        self.profiles.tui = {
-            **(self.profiles.tui or {}),
-            **settings.to_mapping(),
-        }
         with contextlib.suppress(Exception):
-            self.profiles.save_tui()
+            self.config.save()
 
     # ----------------------------------------------------------------- quitting
 
@@ -910,7 +1018,7 @@ class HrnsApp(App[int]):
 
 
 def run_terminal(
-    profiles: Profiles,
+    config: HrnsConfig,
     *,
     initial_target: ConnectionTarget | None = None,
     initial_session: str | None = None,
@@ -919,7 +1027,7 @@ def run_terminal(
 ) -> int:
     """Run the terminal app to completion and always close the agent connection."""
     app = HrnsApp(
-        profiles,
+        config,
         initial_target=initial_target,
         initial_session=initial_session,
         status_message=status_message,

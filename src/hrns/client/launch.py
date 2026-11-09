@@ -5,20 +5,23 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .constants import CONNECT_TIMEOUT
-from .errors import HrnsClientError
-from .profiles import Profile
-from .transport import (
-    AgentTransport,
-    StdioAgentTransport,
-    WebSocketAgentTransport,
-    check_websocket_url,
-)
+from hrns.shared.config import Profile
+
+from ..shared.errors import HrnsClientError
+from ..shared.urls import check_websocket_url
+
+if TYPE_CHECKING:
+    from .transport import AgentTransport
+
+#: Default connect bound, kept here so base profile commands stay dependency-light.
+CONNECT_TIMEOUT = 20.0
 
 __all__ = [
     "ConnectionTarget",
     "local_cwd",
+    "profile_target",
     "remote_cwd",
     "remote_target",
     "transport_for",
@@ -67,6 +70,32 @@ def remote_cwd(profile: Profile, override: str | None = None) -> str:
     return candidate
 
 
+def profile_target(profile: Profile, cwd_override: str | None = None) -> ConnectionTarget:
+    """Resolve a saved profile into the connection it describes.
+
+    ``cwd_override`` is the CLI's ``--cwd``: a stdio agent starts there, while a
+    remote profile sends it as the workspace path instead of its own.
+    """
+    if profile.is_remote:
+        if not profile.url:
+            raise HrnsClientError(f"Profile '{profile.name}' has no server URL.")
+        check_websocket_url(profile.url)
+        return ConnectionTarget(
+            name=profile.name,
+            kind="remote",
+            profile=profile,
+            cwd=remote_cwd(profile, cwd_override),
+        )
+    if not profile.command:
+        raise HrnsClientError(f"Profile '{profile.name}' has no command.")
+    return ConnectionTarget(
+        name=profile.name,
+        kind="local",
+        profile=profile,
+        cwd=local_cwd(profile, cwd_override),
+    )
+
+
 def remote_target(
     url: str,
     *,
@@ -92,6 +121,8 @@ def remote_target(
 
 def transport_for(target: ConnectionTarget) -> AgentTransport:
     """Build the transport for a resolved target. A new instance every reconnect."""
+    from .transport import StdioAgentTransport, WebSocketAgentTransport
+
     profile = target.profile
     if target.kind == "remote":
         return WebSocketAgentTransport(
