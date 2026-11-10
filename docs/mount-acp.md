@@ -150,6 +150,9 @@ await coder.cancel_session(session.session_id)
 queued = await session.pending_prompts()
 await session.resume_queue()
 await session.clear_queue()
+
+# Close by ID through the agent registration:
+await coder.close_session(session.session_id)
 ```
 
 `get_session(session_id)` reuses the live session or restores it from its registration's
@@ -159,6 +162,11 @@ revisioned running/waiting/idle state and the last outcome.
 `cancel_session(session_id)` uses the same lookup as `get_session`: it reuses the live
 session or restores saved state, and raises `KeyError` for an unknown ID. It cancels
 the active turn and pauses queued prompts, keeping the session available for reuse.
+
+`close_session(session_id)` uses the same lookup and unknown-ID errors. It cancels
+the active turn, clears queued prompts, detaches the client, and releases the live
+session and observers. Stored history remains available for later restoration
+through `get_session(session_id)`.
 
 Text and typed ACP prompt-content sequences are accepted. `submit` returns immediately
 with a `TurnHandle`; execution continues independently of the `result()` waiter. Results

@@ -330,6 +330,11 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         session = await self.get_session(session_id)
         await session.cancel()
 
+    async def close_session(self, session_id: str) -> None:
+        """Close the session, preserving stored history; raise KeyError if unknown."""
+        session = await self.get_session(session_id)
+        await session.close()
+
     def connection(
         self, principal: PrincipalT | None = None
     ) -> PydanticAIACPAgent[PrincipalT, AgentDepsT, OutputDataT]:

@@ -108,6 +108,11 @@ and delegates to `Session.cancel()`. It shares lookup/restoration and unknown-ID
 errors with `get_session`, cancels the active turn, and pauses queued work without
 closing the session or clearing pending prompts.
 
+`RegisteredAgent.close_session(session_id)` resolves through `get_session` and
+delegates to `Session.close()`, sharing its lookup/restoration and unknown-ID errors.
+Closing cancels active work, clears queued prompts, detaches delivery, closes observers,
+and removes the live session and view. Stored history remains available for restoration.
+
 `interactions.py` retains unanswered decisions while disconnected, reissues after
 attachment replay, and ignores responses from departed generations. A connected
 client without form support gets the existing unavailable-question result. Client
