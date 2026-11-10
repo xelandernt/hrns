@@ -1,5 +1,9 @@
 # hrns
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xelandernt/hrns/main/docs/assets/hrns.svg" alt="hrns logo" width="128" height="128">
+</p>
+
 [Pydantic AI](https://ai.pydantic.dev/) agents with server-owned conversations, ACP interaction, and read-only AG-UI streams.
 
 hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**,

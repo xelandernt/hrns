@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="96 92 320 324" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">hrns</title>
+  <defs>
+    <linearGradient id="purple" x1="128" y1="112" x2="376" y2="400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D5B3FF"/>
+      <stop offset=".48" stop-color="#A66AFF"/>
+      <stop offset="1" stop-color="#7735E8"/>
+    </linearGradient>
+  </defs>
+  <path d="M112 108C120 154 146 183 184 192V238H328V192C366 183 392 154 400 108V198C400 225 380 246 360 254V378C360 390 350 400 338 400H328V294H184V400H174C162 400 152 390 152 378V254C132 246 112 225 112 198V108Z" fill="url(#purple)"/>
+  <path d="M256 235L287 266L256 297L225 266L256 235Z" fill="#08070B"/>
+  <path d="M256 256L266 266L256 276L246 266L256 256Z" fill="#D5B3FF"/>
+</svg>

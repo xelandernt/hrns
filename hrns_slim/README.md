@@ -1,5 +1,9 @@
 # hrns-slim
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xelandernt/hrns/main/docs/assets/hrns.svg" alt="hrns logo" width="128" height="128">
+</p>
+
 Minimal installation of [hrns](https://github.com/xelandernt/hrns).
 
 ```sh

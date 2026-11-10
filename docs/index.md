@@ -1,5 +1,7 @@
 # hrns
 
+<img src="assets/hrns.svg" alt="hrns logo" width="128" height="128">
+
 Define one Pydantic AI agent and expose it over ACP.
 
 ```python

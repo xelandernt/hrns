@@ -533,3 +533,19 @@ A decline, a cancel, an empty form, or a client without form support returns a
 plain string telling the model to proceed and state its assumption. None of them is
 a tool error. `ask_user_question` is in `READ_ONLY_TOOLS`: the question is the
 interaction, not a side effect, so it is never wrapped in a permission prompt.
+
+## Documentation branding
+
+`docs/assets/hrns.svg` is the shared logo for the documentation and both package
+READMEs. The READMEs use its raw GitHub URL so the image also renders on package
+indexes. Zensical uses the same SVG for the header and favicon; the home page
+includes a larger version. `zensical.toml` defines light and dark palettes that
+follow the system preference by default and offer a system/light/dark toggle.
+`docs/stylesheets/extra.css` maps the logo's purple, lavender, and near-black colors
+to theme variables, with darker links on light surfaces and lighter links on dark
+surfaces.
+
+Zensical's native `llmstxt` support generates `llms.txt`, Markdown copies of the
+public documentation pages, and `llms-full.txt` during the normal docs build.
+The section lists in `zensical.toml` select the public pages and their ordering;
+links use the configured documentation site URL.

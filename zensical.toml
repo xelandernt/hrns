@@ -6,6 +6,7 @@ repo_url = "https://github.com/xelandernt/hrns"
 edit_uri = "edit/main/docs/"
 docs_dir = "docs"
 site_dir = "site"
+extra_css = ["stylesheets/extra.css"]
 nav = [
     { "Home" = "index.md" },
     { "Configuration" = "configuration.md" },
@@ -17,3 +18,38 @@ nav = [
     { "Authentication" = "authentication.md" },
     { "AG-UI observation" = "ag_ui.md" },
 ]
+
+[project.theme]
+logo = "assets/hrns.svg"
+favicon = "assets/hrns.svg"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.plugins.llmstxt]
+full_output = "llms-full.txt"
+
+[project.plugins.llmstxt.sections]
+"Getting started" = ["index.md", "configuration.md"]
+"Agent capabilities" = ["capabilities.md", "skills.md"]
+"Servers and protocols" = ["acp.md", "mcp.md", "mount-acp.md", "authentication.md", "ag_ui.md"]

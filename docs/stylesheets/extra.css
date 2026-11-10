@@ -1,0 +1,31 @@
+/* Colors from the hrns logo, with contrasting links for each scheme. */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #7735e8;
+  --md-primary-fg-color--light: #a66aff;
+  --md-primary-fg-color--dark: #5e24bd;
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: #5e24bd;
+  --md-accent-fg-color--transparent: #7735e81a;
+  --md-accent-bg-color: #ffffff;
+  --md-default-bg-color: #fcfaff;
+  --md-default-bg-color--light: #fcfaffb3;
+  --md-default-bg-color--lighter: #fcfaff4d;
+  --md-default-bg-color--lightest: #fcfaff1f;
+  --md-code-bg-color: #f2edf8;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 260;
+  --md-primary-fg-color: #d5b3ff;
+  --md-primary-fg-color--light: #e6d3ff;
+  --md-primary-fg-color--dark: #a66aff;
+  --md-primary-bg-color: #08070b;
+  --md-accent-fg-color: #a66aff;
+  --md-accent-fg-color--transparent: #a66aff1a;
+  --md-accent-bg-color: #08070b;
+  --md-default-bg-color: #08070b;
+  --md-default-bg-color--light: #08070bb3;
+  --md-default-bg-color--lighter: #08070b4d;
+  --md-default-bg-color--lightest: #08070b1f;
+  --md-code-bg-color: #17121f;
+}
