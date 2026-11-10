@@ -291,7 +291,7 @@ def _serve_command(
     from .server import AcpServer
     from .server.agent import build_agent
 
-    server = AcpServer()
+    server = AcpServer[None]()
     server.add_agent("agent", factory=lambda _session: build_agent(model, cwd=cwd))
 
     @asynccontextmanager

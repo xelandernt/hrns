@@ -105,8 +105,7 @@ from .session import (
     apply_content_changes,
 )
 from .store import (
-    ListableSessionStore,
-    SessionStore,
+    SessionPersistence,
     StoredSession,
     title_from_updates,
 )
@@ -317,7 +316,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         agent_id: str = "agent",
         permission_policy: PermissionPolicy | None = None,
         tool_presenter: ToolCallPresenter | None = None,
-        session_store: SessionStore,
+        session_store: SessionPersistence,
         model_resolver: ModelResolver | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> None:
@@ -355,11 +354,6 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self._title: str | None = None
         #: The last usage gauge sent, so a turn that changes nothing does not repeat it.
         self._usage_update: schema.UsageUpdate | None = None
-
-    @property
-    def _listable_store(self) -> ListableSessionStore | None:
-        store = self._session_store
-        return store if isinstance(store, ListableSessionStore) else None
 
     def _model_choices(self) -> Sequence[ModelChoice]:
         """The models advertised in the ``model`` config option, in priority order."""
@@ -425,8 +419,6 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             cwd=cwd,
             model=choices[0].model_id if choices else None,
         )
-        if (store := self._listable_store) is not None:
-            await store.remember(session_id, cwd=cwd)
         await self._persist(self.state)
 
     async def restore(self, session_id: str, stored: StoredSession) -> None:

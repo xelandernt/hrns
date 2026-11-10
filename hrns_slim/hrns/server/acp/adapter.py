@@ -14,22 +14,29 @@ from pydantic_ai.tools import AgentDepsT
 
 from hrns.shared.acp_mcp import McpOverAcpCaller, bind_caller
 
+from .._types import PrincipalT
 from .content import PromptContentBlock
 from .host import RegisteredAgent, Session
 from .models import ModelChoice
 from .runtime import ConfigOptions
 from .session import McpServers
-from .store import DeletableSessionStore, ListableSessionStore
+from .store import DeletableSessionStore, ListableSessionStore, SessionAccess, StoredSession
 
 
-class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
-    def __init__(self, registration: RegisteredAgent[AgentDepsT, OutputDataT]) -> None:
+class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]):
+    def __init__(
+        self,
+        registration: RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT],
+        *,
+        principal: PrincipalT | None = None,
+    ) -> None:
+        self._principal = principal
         self._registration = registration
         self._session_store = registration.store
         self._model_resolver = registration.resolver
         self._conn: Client | None = None
         self._client_capabilities: schema.ClientCapabilities | None = None
-        self._sessions: dict[str, Session[AgentDepsT, OutputDataT]] = {}
+        self._sessions: dict[str, Session[PrincipalT, AgentDepsT, OutputDataT]] = {}
         self._name = registration.agent_id
         self._version = "0.1.0"
         self._mcp_capabilities = registration.mcp_capabilities
@@ -47,7 +54,21 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 session._runtime.detach()
         self._sessions.clear()
 
-    def _session(self, session_id: str) -> Session[AgentDepsT, OutputDataT]:
+    async def _load(self, session_id: str, operation: SessionAccess) -> StoredSession:
+        try:
+            stored = await self._session_store.load(
+                session_id, principal=self._principal, operation=operation
+            )
+        except PermissionError as exc:
+            raise acp.RequestError(-32003, "Not authorized") from exc
+        if stored is None:
+            raise acp.RequestError.invalid_params({"session_id": session_id})
+        return stored
+
+    async def _session(
+        self, session_id: str, operation: SessionAccess
+    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+        await self._load(session_id, operation)
         session = self._sessions.get(session_id)
         if session is None or session._closed or session._runtime._conn is not self._conn:
             raise acp.RequestError.invalid_params(
@@ -56,7 +77,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         return session
 
     async def _attach(
-        self, session: Session[AgentDepsT, OutputDataT], mcp_servers: McpServers
+        self, session: Session[PrincipalT, AgentDepsT, OutputDataT], mcp_servers: McpServers
     ) -> None:
         if self._conn is None:
             raise RuntimeError("ACP connection has not initialized")
@@ -72,7 +93,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         mcp_servers: McpServers = None,
         **kwargs: object,
     ) -> schema.NewSessionResponse:
-        session = await self._registration.new_session(cwd=cwd)
+        try:
+            session = await self._registration.new_session(cwd=cwd, principal=self._principal)
+        except PermissionError as exc:
+            raise acp.RequestError(-32003, "Not authorized") from exc
         runtime = session._runtime
         try:
             config_options = runtime._config_options(runtime.state)
@@ -96,9 +120,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         **kwargs: object,
     ) -> schema.LoadSessionResponse:
         try:
-            session = await self._registration.get_session(session_id)
+            session = await self._registration.get_session(session_id, principal=self._principal)
         except KeyError as exc:
             raise acp.RequestError.invalid_params({"session_id": session_id}) from exc
+        except PermissionError as exc:
+            raise acp.RequestError(-32003, "Not authorized") from exc
         if str(Path(cwd).resolve()) != session.cwd:
             raise acp.RequestError.invalid_params({"reason": "session cwd does not match"})
         runtime = session._runtime
@@ -113,15 +139,17 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     async def prompt(
         self, session_id: str, prompt: list[PromptContentBlock], **kwargs: object
     ) -> schema.PromptResponse:
-        handle = await self._session(session_id)._accept(prompt, self._conn)
+        session = await self._session(session_id, "session/prompt")
+        handle = await session._accept(prompt, self._conn)
         result = await handle.result()
         return schema.PromptResponse(stop_reason=result.stop_reason, usage=result.usage)
 
     async def cancel(self, session_id: str, **kwargs: object) -> None:
-        await self._session(session_id).cancel()
+        session = await self._session(session_id, "session/cancel")
+        await session.cancel()
 
     async def close_session(self, session_id: str, **kwargs: object) -> schema.CloseSessionResponse:
-        session = self._session(session_id)
+        session = await self._session(session_id, "session/close")
         await session.close()
         self._sessions.pop(session_id, None)
         return schema.CloseSessionResponse()
@@ -133,6 +161,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         if store is None or self._listable_store is None:
             raise acp.RequestError.method_not_found("session/delete")
         async with self._registration._lock:
+            await self._load(session_id, "session/delete")
             session = self._registration._sessions.get(session_id)
             if session is not None:
                 if session._runtime._conn is not None and session._runtime._conn is not self._conn:
@@ -143,7 +172,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 self._registration._sessions.pop(session_id, None)
                 self._registration._views.pop(session_id, None)
                 self._sessions.pop(session_id, None)
-            await store.delete(session_id)
+            try:
+                await store.delete(session_id, principal=self._principal)
+            except PermissionError as exc:
+                raise acp.RequestError(-32003, "Not authorized") from exc
         return schema.DeleteSessionResponse()
 
     def _options_snapshot(self) -> dict[str, ConfigOptions | None]:
@@ -158,12 +190,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 await session._runtime._push_option_changes(before.get(sid))
 
     @property
-    def _listable_store(self) -> ListableSessionStore | None:
+    def _listable_store(self) -> ListableSessionStore[PrincipalT] | None:
         store = self._session_store
         return store if isinstance(store, ListableSessionStore) else None
 
     @property
-    def _deletable_store(self) -> DeletableSessionStore | None:
+    def _deletable_store(self) -> DeletableSessionStore[PrincipalT] | None:
         store = self._session_store
         return store if isinstance(store, DeletableSessionStore) else None
 
@@ -216,9 +248,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         if store is None:
             raise acp.RequestError.method_not_found("session/list")
         try:
-            summaries, next_cursor = await store.list_sessions(cwd=cwd, cursor=cursor)
+            summaries, next_cursor = await store.list_sessions(
+                principal=self._principal, cwd=cwd, cursor=cursor
+            )
         except ValueError as exc:
             raise acp.RequestError.invalid_params({"cursor": cursor, "reason": str(exc)}) from exc
+        except PermissionError as exc:
+            raise acp.RequestError(-32003, "Not authorized") from exc
         return schema.ListSessionsResponse(
             sessions=[
                 schema.SessionInfo(
@@ -243,7 +279,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object
     ) -> schema.SetSessionConfigOptionResponse | None:
-        return await self._session(session_id)._runtime.set_config_option(
+        session = await self._session(session_id, "session/set_config_option")
+        return await session._runtime.set_config_option(
             config_id=config_id, session_id=session_id, value=value, **kwargs
         )
 
@@ -288,7 +325,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         text: str,
         **kwargs: object,
     ) -> None:
-        return await self._session(session_id)._runtime.did_open(
+        session = await self._session(session_id, "document/didOpen")
+        return await session._runtime.did_open(
             session_id=session_id,
             uri=uri,
             language_id=language_id,
@@ -305,7 +343,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         content_changes: list[schema.TextDocumentContentChangeEvent],
         **kwargs: object,
     ) -> None:
-        return await self._session(session_id)._runtime.did_change(
+        session = await self._session(session_id, "document/didChange")
+        return await session._runtime.did_change(
             session_id=session_id,
             uri=uri,
             version=version,
@@ -314,14 +353,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         )
 
     async def did_close(self, session_id: str, uri: str, **kwargs: object) -> None:
-        return await self._session(session_id)._runtime.did_close(
-            session_id=session_id, uri=uri, **kwargs
-        )
+        session = await self._session(session_id, "document/didClose")
+        return await session._runtime.did_close(session_id=session_id, uri=uri, **kwargs)
 
     async def did_save(self, session_id: str, uri: str, **kwargs: object) -> None:
-        return await self._session(session_id)._runtime.did_save(
-            session_id=session_id, uri=uri, **kwargs
-        )
+        session = await self._session(session_id, "document/didSave")
+        return await session._runtime.did_save(session_id=session_id, uri=uri, **kwargs)
 
     async def did_focus(
         self,
@@ -332,7 +369,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         visible_range: schema.Range,
         **kwargs: object,
     ) -> None:
-        return await self._session(session_id)._runtime.did_focus(
+        session = await self._session(session_id, "document/didFocus")
+        return await session._runtime.did_focus(
             session_id=session_id,
             uri=uri,
             version=version,

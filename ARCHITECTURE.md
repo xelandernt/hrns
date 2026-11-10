@@ -133,9 +133,37 @@ AG-UI APIs (minimum 2.57.0, exercised offline at that version).
 `mount_ag_ui` independently mounts GET snapshot and SSE routes under
 `{prefix}/{agent_id}/sessions/{session_id}`. They observe resident sessions and never
 start execution. HTTP and WebSocket admission use the same `HTTPConnection` callback
-contract; AG-UI handlers accept `HTTPConnection` and pass it to the shared authorization
-helper. All admitted identities have equal server scope. Read-only semantics are
+contract; AG-UI handlers accept `HTTPConnection` for authentication. Read-only semantics are
 application/OpenAPI metadata, not an invented AG-UI capability; mutations return 405.
+
+Authentication resolves an application-owned principal once per ACP connection and
+once per AG-UI HTTP request. Session access and visibility belong to the registration's
+store: `create`, `load`, `list_sessions`, and `delete` receive the principal directly.
+`AcpServer[PrincipalT]`, registrations, adapters, and `SessionStore[PrincipalT]`
+preserve its type. Store inputs use `PrincipalT | None` to model anonymous admission;
+authentication returns `PrincipalT | None`, with `None` rejecting a configured callback.
+The runtime depends only on the trusted `SessionPersistence.save` protocol.
+`load` also receives a `SessionAccess` operation, allowing separate permissions for
+loading, prompting, cancellation, settings, deletion, document changes, and observation.
+It runs before resident-session lookup as well as restoration, so the in-memory cache
+cannot bypass the application's permissions. Session creation passes the assigned ID,
+resolved cwd, and principal to `store.create` before invoking the agent factory.
+
+Listing delegates to the principal-aware store, which filters before pagination and
+returns its own cursor. Harness performs no per-result authorization pass. `save` is
+trusted runtime persistence without a caller principal: accepted work and persistence
+outlive ACP connections. Direct Python session handles are trusted server objects;
+registration creation/lookup and explicit ACP adapters can supply a principal. Stdio
+also accepts a host-provided principal. The default in-memory store permits access
+for every principal; ownership, roles, and database queries belong to the application.
+
+A store `PermissionError` returns Harness ACP error -32003 or HTTP 403. Returning
+`None` from `load` hides a session as unavailable (ACP invalid parameters / HTTP 404).
+Failed HTTP authentication returns 401; failed WebSocket authentication closes with
+1008 before ACP starts. Denial responses omit exception details. Permissions are checked
+when each operation is accepted; accepted prompts and open observation streams continue
+if permissions later change. Unsupported operations stay unsupported, and provider
+routing retains registration scope. See `docs/authentication.md` for the public contract.
 
 Each native run passes through one `AGUIEventStream` converter and encoder, with
 server-assigned conversation/native-run IDs. Its native events also feed ACP.

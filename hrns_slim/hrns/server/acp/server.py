@@ -9,6 +9,7 @@ import acp
 from acp import schema
 from pydantic_ai.agent import AbstractAgent
 
+from .._types import PrincipalT
 from .host import AcpServer
 from .models import ModelResolver
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
@@ -20,13 +21,14 @@ def run_acp_stdio(
         [SessionContext], AbstractAgent[None, str] | Awaitable[AbstractAgent[None, str]]
     ],
     *,
-    session_store: SessionStore | None = None,
+    principal: PrincipalT | None = None,
+    session_store: SessionStore[PrincipalT] | None = None,
     model_resolver: ModelResolver | None = None,
     session_config: SessionConfigFunc[None] | None = None,
     attachment_config: AttachmentConfigFunc[None] | None = None,
     mcp_capabilities: schema.McpCapabilities | None = None,
 ) -> None:
-    server = AcpServer()
+    server = AcpServer[PrincipalT]()
     registration = server.add_agent(
         "agent",
         factory=factory,
@@ -39,7 +41,7 @@ def run_acp_stdio(
 
     async def serve() -> None:
         async with server:
-            adapter = registration.connection()
+            adapter = registration.connection(principal=principal)
             try:
                 await acp.run_agent(adapter, use_unstable_protocol=True)
             finally:

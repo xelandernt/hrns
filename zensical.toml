@@ -14,5 +14,6 @@ nav = [
     { "ACP support" = "acp.md" },
     { "MCP over ACP" = "mcp.md" },
     { "Agent servers" = "mount-acp.md" },
+    { "Authentication" = "authentication.md" },
     { "AG-UI observation" = "ag_ui.md" },
 ]

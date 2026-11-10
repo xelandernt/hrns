@@ -5,14 +5,34 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 from acp import schema
 from pydantic_ai.messages import ModelMessage
 
+from hrns.server._types import PrincipalT
 from hrns.server.capabilities import TodoItem
 
 from .session import SessionUpdate
+
+PrincipalT_contra = TypeVar("PrincipalT_contra", contravariant=True)
+
+SessionAccess: TypeAlias = Literal[
+    "session/load",
+    "session/prompt",
+    "session/cancel",
+    "session/close",
+    "session/delete",
+    "session/set_config_option",
+    "document/didOpen",
+    "document/didChange",
+    "document/didClose",
+    "document/didSave",
+    "document/didFocus",
+    "ag-ui/snapshot",
+    "ag-ui/events",
+]
+"""The requested use of a session passed to its principal-aware store lookup."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -30,17 +50,29 @@ class StoredSession:
     skills: tuple[str, ...] = ()
 
 
-class SessionStore(Protocol):
-    """Where the adapter saves and restores sessions so ``session/load`` can reopen them.
-
-    A ``save`` that raises is logged and swallowed; a ``load`` that raises fails
-    ``session/load`` with an internal error. Implementations do not need to translate their
-    own errors into ACP errors.
-    """
+class SessionPersistence(Protocol):
+    """Trusted runtime persistence, independent of any caller identity."""
 
     async def save(self, session_id: str, session: StoredSession) -> None: ...
 
-    async def load(self, session_id: str) -> StoredSession | None: ...
+
+class SessionStore(SessionPersistence, Protocol[PrincipalT_contra]):
+    """Persistence and principal-aware session access implemented by the application.
+
+    ``create``, ``load``, ``list_sessions``, and ``delete`` receive the caller's
+    principal. Raise PermissionError to deny access. ``load`` receives the requested
+    operation so applications can enforce separate permissions. It also gates resident
+    sessions before client operations; it is called even when no restore is needed.
+    ``save`` is trusted runtime persistence and has no connection-owned principal.
+    """
+
+    async def create(
+        self, session_id: str, *, cwd: str, principal: PrincipalT_contra | None
+    ) -> None: ...
+
+    async def load(
+        self, session_id: str, *, principal: PrincipalT_contra | None, operation: SessionAccess
+    ) -> StoredSession | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,21 +86,23 @@ class SessionSummary:
 
 
 @runtime_checkable
-class ListableSessionStore(SessionStore, Protocol):
+class ListableSessionStore(SessionStore[PrincipalT_contra], Protocol[PrincipalT_contra]):
     """A session store the adapter can enumerate for ``session/list``."""
 
-    async def remember(self, session_id: str, *, cwd: str) -> None: ...
-
     async def list_sessions(
-        self, *, cwd: str | None = None, cursor: str | None = None
+        self,
+        *,
+        principal: PrincipalT_contra | None,
+        cwd: str | None = None,
+        cursor: str | None = None,
     ) -> tuple[Sequence[SessionSummary], str | None]: ...
 
 
 @runtime_checkable
-class DeletableSessionStore(SessionStore, Protocol):
+class DeletableSessionStore(SessionStore[PrincipalT_contra], Protocol[PrincipalT_contra]):
     """A session store the adapter can delete from for ``session/delete``."""
 
-    async def delete(self, session_id: str) -> None: ...
+    async def delete(self, session_id: str, *, principal: PrincipalT_contra | None) -> None: ...
 
 
 _PAGE_SIZE = 100
@@ -99,8 +133,10 @@ def _cursor_offset(cursor: str | None) -> int:
     return offset
 
 
-class InMemorySessionStore(ListableSessionStore, DeletableSessionStore):
-    """Process-local store that also supports ``session/list`` and ``session/delete``."""
+class InMemorySessionStore(
+    ListableSessionStore[PrincipalT], DeletableSessionStore[PrincipalT], Generic[PrincipalT]
+):
+    """Process-local persistence with unrestricted access for every principal."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, StoredSession] = {}
@@ -117,20 +153,16 @@ class InMemorySessionStore(ListableSessionStore, DeletableSessionStore):
             updated_at=datetime.now(UTC),
         )
 
-    async def load(self, session_id: str) -> StoredSession | None:
+    async def load(
+        self, session_id: str, *, principal: PrincipalT | None, operation: SessionAccess
+    ) -> StoredSession | None:
         return self._sessions.get(session_id)
 
-    async def remember(self, session_id: str, *, cwd: str) -> None:
-        previous = self._summaries.get(session_id)
-        self._summaries[session_id] = SessionSummary(
-            session_id=session_id,
-            cwd=cwd,
-            title=previous.title if previous is not None else None,
-            updated_at=previous.updated_at if previous is not None else datetime.now(UTC),
-        )
+    async def create(self, session_id: str, *, cwd: str, principal: PrincipalT | None) -> None:
+        await self.save(session_id, StoredSession(cwd=cwd))
 
     async def list_sessions(
-        self, *, cwd: str | None = None, cursor: str | None = None
+        self, *, principal: PrincipalT | None, cwd: str | None = None, cursor: str | None = None
     ) -> tuple[Sequence[SessionSummary], str | None]:
         sessions = [
             summary
@@ -149,6 +181,6 @@ class InMemorySessionStore(ListableSessionStore, DeletableSessionStore):
         next_cursor = str(next_offset) if next_offset < len(sessions) else None
         return page, next_cursor
 
-    async def delete(self, session_id: str) -> None:
+    async def delete(self, session_id: str, *, principal: PrincipalT | None) -> None:
         self._sessions.pop(session_id, None)
         self._summaries.pop(session_id, None)

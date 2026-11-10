@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from hrns.server import HrnsServer, build_agent
 
-server = HrnsServer()
+server = HrnsServer[None]()
 coder = server.add_agent("coder", factory=lambda session: build_agent("anthropic:claude-sonnet-5-5", cwd=session.cwd))
 
 @asynccontextmanager
@@ -32,7 +32,13 @@ server.mount_ag_ui(app, prefix="/ag-ui")
 | `GET /ag-ui/{agent_id}/sessions/{session_id}/events` | Long-lived AG-UI SSE |
 
 Pass the same `authenticate` callback to both mounts; it accepts Starlette's
-`HTTPConnection` for HTTP and WebSocket. Unknown or nonresident sessions return 404.
+`HTTPConnection` for HTTP and WebSocket. Each request passes the returned principal
+to the registration's `SessionStore.load`, with operation `ag-ui/snapshot` or
+`ag-ui/events`, before reading resident state. Raising `PermissionError` returns
+HTTP 403; returning `None` gives 404. Authentication failures return 401.
+[Authentication](authentication.md) explains operation permissions and store integration.
+Access is checked when the request opens; existing streams continue if permissions
+later change. Unknown or nonresident sessions return 404 after the store lookup.
 Observation reads resident session state. Mutation methods receive 405.
 OpenAPI and application metadata (`readOnly: true`) describe the endpoint contract.
 

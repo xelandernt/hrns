@@ -12,10 +12,12 @@ import acp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.requests import HTTPConnection
 
+from ._types import PrincipalT
+
 if TYPE_CHECKING:
     from .acp.host import AcpServer
 
-Authenticator: TypeAlias = Callable[[HTTPConnection], Awaitable[object | None]]
+Authenticator: TypeAlias = Callable[[HTTPConnection], Awaitable[PrincipalT | None]]
 
 
 @asynccontextmanager
@@ -105,20 +107,21 @@ async def _serve_acp(
         await websocket.close()
 
 
-async def authorize(connection: HTTPConnection, authenticate: Authenticator | None) -> bool:
-    return authenticate is None or await authenticate(connection) is not None
-
-
 def mount_acp_routes(
-    server: AcpServer, app: FastAPI, *, prefix: str, authenticate: Authenticator | None = None
+    server: AcpServer[PrincipalT],
+    app: FastAPI,
+    *,
+    prefix: str,
+    authenticate: Authenticator[PrincipalT] | None = None,
 ) -> None:
     @app.websocket(prefix.rstrip("/") + "/{agent_id}")
     async def acp_endpoint(websocket: WebSocket, agent_id: str) -> None:
-        if not await authorize(websocket, authenticate):
+        principal = await authenticate(websocket) if authenticate is not None else None
+        if authenticate is not None and principal is None:
             await websocket.close(code=1008)
             return
         entry = server._registrations.get(agent_id)
         if entry is None or not server._running:
             await websocket.close(code=1008)
             return
-        await _serve_acp(websocket, entry.adapter())
+        await _serve_acp(websocket, entry.adapter(principal))

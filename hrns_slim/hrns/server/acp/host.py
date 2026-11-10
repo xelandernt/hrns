@@ -21,6 +21,7 @@ from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
+from .._types import PrincipalT
 from .content import PromptContentBlock
 from .models import ModelResolver
 from .permission import PermissionPolicy
@@ -67,10 +68,10 @@ class SessionView:
     observer: RunObserver | None
 
 
-class Session(Generic[AgentDepsT, OutputDataT]):
+class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
     def __init__(
         self,
-        registration: RegisteredAgent[AgentDepsT, OutputDataT],
+        registration: RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT],
         runtime: SessionRuntime[AgentDepsT, OutputDataT],
     ) -> None:
         self._registration = registration
@@ -218,16 +219,17 @@ class Session(Generic[AgentDepsT, OutputDataT]):
 
 
 @dataclass
-class _RegistrationEntry:
-    adapter: Callable[[], acp.Agent]
+class _RegistrationEntry(Generic[PrincipalT]):
+    adapter: Callable[[PrincipalT | None], acp.Agent]
     close: Callable[[], Awaitable[None]]
     views: dict[str, SessionView]
+    store: SessionStore[PrincipalT]
 
 
-class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
+class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
     def __init__(
         self,
-        server: AcpServer,
+        server: AcpServer[PrincipalT],
         agent_id: str,
         factory: Callable[
             [SessionContext],
@@ -236,7 +238,7 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
         ],
         *,
         deps: AgentDepsT,
-        session_store: SessionStore,
+        session_store: SessionStore[PrincipalT],
         model_resolver: ModelResolver | None,
         session_config: SessionConfigFunc[AgentDepsT] | None,
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None,
@@ -257,7 +259,7 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
         self._usage_limits = usage_limits
         self._tool_presenter = tool_presenter
         self.mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
-        self._sessions: dict[str, Session[AgentDepsT, OutputDataT]] = {}
+        self._sessions: dict[str, Session[PrincipalT, AgentDepsT, OutputDataT]] = {}
         self._views: dict[str, SessionView] = {}
         self._lock = asyncio.Lock()
 
@@ -281,7 +283,7 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
 
     def _remember(
         self, runtime: SessionRuntime[AgentDepsT, OutputDataT]
-    ) -> Session[AgentDepsT, OutputDataT]:
+    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
         self._server._require_running()
         session = Session(self, runtime)
         runtime.observer = self._server._make_observer(session.session_id, session.history())
@@ -292,24 +294,31 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
         )
         return session
 
-    async def new_session(self, *, cwd: str) -> Session[AgentDepsT, OutputDataT]:
+    async def new_session(
+        self, *, cwd: str, principal: PrincipalT | None = None
+    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
         self._server._require_running()
         context = SessionContext(
             agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
         )
+        await self.store.create(context.session_id, cwd=context.cwd, principal=principal)
         runtime = await self._make_runtime(context)
         await runtime.create(context.session_id, context.cwd)
         return self._remember(runtime)
 
-    async def get_session(self, session_id: str) -> Session[AgentDepsT, OutputDataT]:
+    async def get_session(
+        self, session_id: str, *, principal: PrincipalT | None = None
+    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
         self._server._require_running()
         async with self._lock:
             self._server._require_running()
-            if session_id in self._sessions:
-                return self._sessions[session_id]
-            stored = await self.store.load(session_id)
+            stored = await self.store.load(
+                session_id, principal=principal, operation="session/load"
+            )
             if stored is None:
                 raise KeyError(session_id)
+            if session_id in self._sessions:
+                return self._sessions[session_id]
             runtime = await self._make_runtime(
                 SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd)
             )
@@ -321,21 +330,23 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
         session = await self.get_session(session_id)
         await session.cancel()
 
-    def connection(self) -> PydanticAIACPAgent[AgentDepsT, OutputDataT]:
+    def connection(
+        self, principal: PrincipalT | None = None
+    ) -> PydanticAIACPAgent[PrincipalT, AgentDepsT, OutputDataT]:
         from .adapter import PydanticAIACPAgent
 
-        return PydanticAIACPAgent(self)
+        return PydanticAIACPAgent(self, principal=principal)
 
     async def close(self) -> None:
         await asyncio.gather(*(session.close() for session in tuple(self._sessions.values())))
 
 
-class AcpServer:
+class AcpServer(Generic[PrincipalT]):
     """Own registered agents and live sessions in one process and event loop."""
 
     def __init__(self) -> None:
-        self._registrations: dict[str, _RegistrationEntry] = {}
-        self._stores: list[SessionStore] = []
+        self._registrations: dict[str, _RegistrationEntry[PrincipalT]] = {}
+        self._stores: list[SessionStore[PrincipalT]] = []
         self._resolvers: list[ModelResolver] = []
         self._running = False
         self._started = False
@@ -350,7 +361,7 @@ class AcpServer:
             | Awaitable[AbstractAgent[AgentDepsT, OutputDataT]],
         ],
         deps: AgentDepsT = None,
-        session_store: SessionStore | None = None,
+        session_store: SessionStore[PrincipalT] | None = None,
         model_resolver: ModelResolver | None = None,
         session_config: SessionConfigFunc[AgentDepsT] | None = None,
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None = None,
@@ -358,14 +369,14 @@ class AcpServer:
         usage_limits: UsageLimits | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         mcp_capabilities: schema.McpCapabilities | None = None,
-    ) -> RegisteredAgent[AgentDepsT, OutputDataT]:
+    ) -> RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT]:
         if self._started:
             raise RuntimeError("register agents before starting the server")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", agent_id):
             raise ValueError("agent_id must be a safe route segment")
         if agent_id in self._registrations:
             raise ValueError(f"agent already registered: {agent_id}")
-        store = session_store if session_store is not None else InMemorySessionStore()
+        store = session_store if session_store is not None else InMemorySessionStore[PrincipalT]()
         if any(store is prior for prior in self._stores):
             raise ValueError("give each agent a separate store or explicit partition instance")
         if model_resolver is not None and any(model_resolver is prior for prior in self._resolvers):
@@ -387,7 +398,7 @@ class AcpServer:
             mcp_capabilities=mcp_capabilities,
         )
         self._registrations[agent_id] = _RegistrationEntry(
-            registration.connection, registration.close, registration._views
+            registration.connection, registration.close, registration._views, registration.store
         )
         self._stores.append(store)
         if model_resolver is not None:
@@ -401,7 +412,7 @@ class AcpServer:
     def _make_observer(self, session_id: str, history: list[ModelMessage]) -> RunObserver | None:
         return None
 
-    async def __aenter__(self) -> AcpServer:
+    async def __aenter__(self) -> AcpServer[PrincipalT]:
         if self._started:
             raise RuntimeError("server lifecycle can only be entered once")
         self._started = self._running = True
@@ -412,7 +423,11 @@ class AcpServer:
         await asyncio.gather(*(entry.close() for entry in self._registrations.values()))
 
     def mount_acp(
-        self, app: FastAPI, *, prefix: str = "/acp", authenticate: Authenticator | None = None
+        self,
+        app: FastAPI,
+        *,
+        prefix: str = "/acp",
+        authenticate: Authenticator[PrincipalT] | None = None,
     ) -> None:
         from ..fastapi import mount_acp_routes
 

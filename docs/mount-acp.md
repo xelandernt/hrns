@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from hrns.server import AcpServer, build_agent
 
-server = AcpServer()
+server = AcpServer[None]()
 coder = server.add_agent("coder", factory=lambda session: build_agent("anthropic:claude-sonnet-5-5", cwd=session.cwd))
 
 @asynccontextmanager
@@ -198,24 +198,21 @@ alongside the prompt responses for client-started turns.
 
 ## Admission and storage
 
-Both mounts accept `authenticate: Callable[[HTTPConnection], Awaitable[object | None]]`.
-It runs before admission; `None` rejects the connection. Use the same callback for
-ACP and AG-UI. All admitted identities share the registration's server scope.
+Both mounts accept an async `authenticate(HTTPConnection)` callback. Its return value
+is retained as the ACP connection's principal, or resolved for each AG-UI request.
+Returning `None` rejects authentication. The principal is passed directly to the
+registration's session store for creation, lookup, listing, and deletion.
 
-```python
-from starlette.requests import HTTPConnection
-
-async def authenticate(connection: HTTPConnection) -> object | None:
-    return "admitted" if connection.headers.get("authorization") == "Bearer token" else None
-
-server.mount_acp(app, prefix="/private/acp", authenticate=authenticate)
-```
+Implement access rules in your store. Its `load` method receives the requested
+operation, including for sessions already resident in memory. Its `list_sessions`
+method filters by principal before pagination. See [Authentication](authentication.md)
+for the complete flow, method signatures, separate operation permissions, and examples.
 
 Each registration has a separate `InMemorySessionStore` by default. A supplied store
 must be exclusively scoped to that agent. Reusing the same instance is rejected; a
 shared backend requires explicitly partitioned store instances. `StoredSession.cwd`
-is authoritative on restoration. `SessionStore` implements save/load;
-`ListableSessionStore` adds remember/list, and `DeletableSessionStore` adds delete.
+is authoritative on restoration. `SessionStore` implements create/save/load;
+`ListableSessionStore` adds list, and `DeletableSessionStore` adds delete.
 Durable storage restores committed state after restart. Tasks and queues live in memory.
 
 Model resolvers and provider routing belong to a registration. Changes via `providers/*`
@@ -231,6 +228,8 @@ run_acp_stdio(lambda: build_agent("anthropic:claude-sonnet-5-5", cwd="/srv/proje
 ```
 
 Stdio uses the same runtime and owns its lifecycle until the connection ends.
+`run_acp_stdio(..., principal=...)` accepts an identity supplied by the host and
+passes it to the session store; it performs no HTTP authentication.
 `hrns acp` and `hrns agent` use this entry point; `hrns serve` registers `agent`
 and exposes `WS /acp/agent`.
 

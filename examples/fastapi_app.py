@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import FastAPI
 from pydantic_ai.agent import AbstractAgent, Agent
@@ -48,15 +49,21 @@ from hrns.server import HrnsServer
 from hrns.server.acp import (
     AcpAttachmentConfig,
     AcpSession,
+    DeletableSessionStore,
+    InMemorySessionStore,
+    ListableSessionStore,
     ModelChoice,
     ProviderConfig,
     ProviderDescriptor,
     ProviderModelResolver,
     ProviderRoute,
     ResolvedModel,
+    SessionAccess,
     SessionContext,
+    SessionSummary,
     SettingChoice,
     SettingOption,
+    StoredSession,
     acp_filesystem,
     acp_terminal,
 )
@@ -246,12 +253,70 @@ _EXAMPLE_SKILLS = Skills(skills=(_RELEASE_NOTES, _INCIDENT_REVIEW))
 resolver = ExampleModelResolver()
 
 
-async def authenticate(connection: HTTPConnection) -> str | None:
-    """Return the caller's identity, or ``None`` to refuse the connection."""
+@dataclass(frozen=True)
+class Principal:
+    user_id: str
+    read_only: bool = False
+
+
+async def authenticate(connection: HTTPConnection) -> Principal | None:
+    """Resolve each connection's identity and permissions from its token."""
     token = connection.headers.get("authorization")
     if token == "Bearer example-token":
-        return "example-user"
+        return Principal(user_id="example-user")
+    if token == "Bearer example-readonly-token":
+        return Principal(user_id="example-user", read_only=True)
     return None
+
+
+def require_principal(principal: Principal | None) -> Principal:
+    if principal is None:
+        raise PermissionError
+    return principal
+
+
+class UserSessionStore(ListableSessionStore[Principal], DeletableSessionStore[Principal]):
+    """Process-local per-user partitions; filtering precedes pagination."""
+
+    def __init__(self) -> None:
+        self._stores: dict[str, InMemorySessionStore[Principal]] = {}
+        self._owners: dict[str, str] = {}
+
+    def _store(self, principal: Principal) -> InMemorySessionStore[Principal]:
+        return self._stores.setdefault(principal.user_id, InMemorySessionStore[Principal]())
+
+    async def create(self, session_id: str, *, cwd: str, principal: Principal | None) -> None:
+        user = require_principal(principal)
+        if user.read_only:
+            raise PermissionError
+        await self._store(user).create(session_id, cwd=cwd, principal=user)
+        self._owners[session_id] = user.user_id
+
+    async def save(self, session_id: str, session: StoredSession) -> None:
+        await self._stores[self._owners[session_id]].save(session_id, session)
+
+    async def load(
+        self, session_id: str, *, principal: Principal | None, operation: SessionAccess
+    ) -> StoredSession | None:
+        user = require_principal(principal)
+        if self._owners.get(session_id) != user.user_id:
+            return None
+        if user.read_only and operation not in {"session/load", "ag-ui/snapshot", "ag-ui/events"}:
+            raise PermissionError
+        return await self._store(user).load(session_id, principal=user, operation=operation)
+
+    async def list_sessions(
+        self, *, principal: Principal | None, cwd: str | None = None, cursor: str | None = None
+    ) -> tuple[Sequence[SessionSummary], str | None]:
+        user = require_principal(principal)
+        return await self._store(user).list_sessions(principal=user, cwd=cwd, cursor=cursor)
+
+    async def delete(self, session_id: str, *, principal: Principal | None) -> None:
+        user = require_principal(principal)
+        if user.read_only or self._owners.get(session_id) != user.user_id:
+            raise PermissionError
+        await self._store(user).delete(session_id, principal=user)
+        self._owners.pop(session_id, None)
 
 
 def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
@@ -279,10 +344,11 @@ def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
     return AcpAttachmentConfig(toolsets=toolsets)
 
 
-server = HrnsServer()
+server = HrnsServer[Principal]()
 coder = server.add_agent(
     "coder",
     factory=agent_factory,
+    session_store=UserSessionStore(),
     model_resolver=resolver,
     attachment_config=attachment_config,
 )
