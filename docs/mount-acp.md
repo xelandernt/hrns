@@ -145,6 +145,8 @@ result = await turn.result()
 print(result.stop_reason, result.output)
 
 await session.cancel()
+# Cancel by ID through the agent registration:
+await coder.cancel_session(session.session_id)
 queued = await session.pending_prompts()
 await session.resume_queue()
 await session.clear_queue()
@@ -153,6 +155,10 @@ await session.clear_queue()
 `get_session(session_id)` reuses the live session or restores it from its registration's
 store. `history()` returns committed model messages. `status()` reports
 revisioned running/waiting/idle state and the last outcome.
+
+`cancel_session(session_id)` uses the same lookup as `get_session`: it reuses the live
+session or restores saved state, and raises `KeyError` for an unknown ID. It cancels
+the active turn and pauses queued prompts, keeping the session available for reuse.
 
 Text and typed ACP prompt-content sequences are accepted. `submit` returns immediately
 with a `TurnHandle`; execution continues independently of the `result()` waiter. Results

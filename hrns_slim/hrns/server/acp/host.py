@@ -316,6 +316,11 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
             await runtime.restore(session_id, stored)
             return self._remember(runtime)
 
+    async def cancel_session(self, session_id: str) -> None:
+        """Cancel the active turn and pause queued prompts; raise KeyError if unknown."""
+        session = await self.get_session(session_id)
+        await session.cancel()
+
     def connection(self) -> PydanticAIACPAgent[AgentDepsT, OutputDataT]:
         from .adapter import PydanticAIACPAgent
 

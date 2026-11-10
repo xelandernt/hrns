@@ -103,6 +103,11 @@ errors pause remaining work; Python inspection/resume/clear are the only queue
 management API. Accepted prompts survive disconnect, their JSON-RPC associations do
 not, and no reconnect resubmits them. TUI-local queues remain separate.
 
+`RegisteredAgent.cancel_session(session_id)` resolves a session through `get_session`
+and delegates to `Session.cancel()`. It shares lookup/restoration and unknown-ID
+errors with `get_session`, cancels the active turn, and pauses queued work without
+closing the session or clearing pending prompts.
+
 `interactions.py` retains unanswered decisions while disconnected, reissues after
 attachment replay, and ignores responses from departed generations. A connected
 client without form support gets the existing unavailable-question result. Client
