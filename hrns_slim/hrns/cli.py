@@ -264,7 +264,7 @@ def _acp_command(
     from .server.acp import run_acp_stdio
     from .server.agent import build_agent
 
-    run_acp_stdio(lambda: build_agent(model, cwd=cwd))
+    run_acp_stdio(lambda _session: build_agent(model, cwd=cwd))
     return EXIT_OK
 
 
@@ -292,7 +292,7 @@ def _serve_command(
     from .server.agent import build_agent
 
     server = AcpServer()
-    server.add_agent("agent", factory=lambda: build_agent(model, cwd=cwd))
+    server.add_agent("agent", factory=lambda _session: build_agent(model, cwd=cwd))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

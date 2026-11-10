@@ -416,8 +416,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 ),
             )
 
-    async def create(self, cwd: str) -> None:
-        session_id = uuid4().hex
+    async def create(self, session_id: str, cwd: str) -> None:
         config = await self._build_config(session_id, cwd)
         choices = self._model_choices()
         self._state = SessionState(

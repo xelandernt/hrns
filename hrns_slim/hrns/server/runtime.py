@@ -358,7 +358,7 @@ def run(
     # Advertise every configured model and resolve the client's choice through this
     # entry's provider configuration. The active model stays the default.
     run_acp_stdio(
-        lambda: build_agent(
+        lambda _session: build_agent(
             resolved.model,
             cwd=cwd,
             skills=settings.skills,

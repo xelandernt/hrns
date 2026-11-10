@@ -54,6 +54,7 @@ from hrns.server.acp import (
     ProviderModelResolver,
     ProviderRoute,
     ResolvedModel,
+    SessionContext,
     SettingChoice,
     SettingOption,
     acp_filesystem,
@@ -253,7 +254,7 @@ async def authenticate(connection: HTTPConnection) -> str | None:
     return None
 
 
-def agent_factory() -> AbstractAgent[None, str]:
+def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
     # Todo emits native ACP plan updates for the client's Todos panel; AskUser
     # travels as a form elicitation whenever the client advertises one. Skills
     # advertises the two programmatic skills on ``session/new`` and expands a

@@ -7,6 +7,7 @@ import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic
 from uuid import uuid4
@@ -25,7 +26,7 @@ from .models import ModelResolver
 from .permission import PermissionPolicy
 from .presentation import ToolCallPresenter
 from .runtime import RunObserver, SessionRuntime
-from .session import AttachmentConfigFunc, SessionConfigFunc
+from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
 from .store import InMemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
@@ -228,7 +229,11 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
         self,
         server: AcpServer,
         agent_id: str,
-        factory: Callable[[], AbstractAgent[AgentDepsT, OutputDataT]],
+        factory: Callable[
+            [SessionContext],
+            AbstractAgent[AgentDepsT, OutputDataT]
+            | Awaitable[AbstractAgent[AgentDepsT, OutputDataT]],
+        ],
         *,
         deps: AgentDepsT,
         session_store: SessionStore,
@@ -256,9 +261,13 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
         self._views: dict[str, SessionView] = {}
         self._lock = asyncio.Lock()
 
-    def _make_runtime(self) -> SessionRuntime[AgentDepsT, OutputDataT]:
+    async def _make_runtime(
+        self, context: SessionContext
+    ) -> SessionRuntime[AgentDepsT, OutputDataT]:
+        result = self._factory(context)
+        agent = await result if isawaitable(result) else result
         return SessionRuntime(
-            self._factory(),
+            agent,
             deps=self._deps,
             agent_id=self.agent_id,
             session_store=self.store,
@@ -285,8 +294,11 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
 
     async def new_session(self, *, cwd: str) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
-        runtime = self._make_runtime()
-        await runtime.create(str(Path(cwd).resolve()))
+        context = SessionContext(
+            agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
+        )
+        runtime = await self._make_runtime(context)
+        await runtime.create(context.session_id, context.cwd)
         return self._remember(runtime)
 
     async def get_session(self, session_id: str) -> Session[AgentDepsT, OutputDataT]:
@@ -298,7 +310,9 @@ class RegisteredAgent(Generic[AgentDepsT, OutputDataT]):
             stored = await self.store.load(session_id)
             if stored is None:
                 raise KeyError(session_id)
-            runtime = self._make_runtime()
+            runtime = await self._make_runtime(
+                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd)
+            )
             await runtime.restore(session_id, stored)
             return self._remember(runtime)
 
@@ -325,7 +339,11 @@ class AcpServer:
         self,
         agent_id: str,
         *,
-        factory: Callable[[], AbstractAgent[AgentDepsT, OutputDataT]],
+        factory: Callable[
+            [SessionContext],
+            AbstractAgent[AgentDepsT, OutputDataT]
+            | Awaitable[AbstractAgent[AgentDepsT, OutputDataT]],
+        ],
         deps: AgentDepsT = None,
         session_store: SessionStore | None = None,
         model_resolver: ModelResolver | None = None,

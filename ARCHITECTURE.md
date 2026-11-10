@@ -69,7 +69,11 @@ not, so its `Coder` works on the server workspace instead of the client's.
 ## Server-owned sessions
 
 `AcpServer` (`server/acp/host.py`) owns factory-only registrations. A factory runs
-once for each new/restored live session. `RegisteredAgent` provides typed session
+once for each new/restored live session, receives `SessionContext(agent_id,
+session_id, cwd)`, and returns an `AbstractAgent` directly or through an awaitable.
+The registration assigns new session IDs before invoking the factory; restoration
+uses the stored ID and cwd. Factory resolution precedes `session_config`.
+`RegisteredAgent` provides typed session
 handles; each `Session` owns its agent runtime, shared FIFO, turn handles, history,
 configuration, and pending decisions. Registration freezes at startup. Explicit
 `async with server` owns shutdown: reject new work, cancel/join active work, resolve

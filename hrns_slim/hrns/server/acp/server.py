@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import acp
 from acp import schema
@@ -11,12 +11,14 @@ from pydantic_ai.agent import AbstractAgent
 
 from .host import AcpServer
 from .models import ModelResolver
-from .session import AttachmentConfigFunc, SessionConfigFunc
+from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
 from .store import SessionStore
 
 
 def run_acp_stdio(
-    factory: Callable[[], AbstractAgent[None, str]],
+    factory: Callable[
+        [SessionContext], AbstractAgent[None, str] | Awaitable[AbstractAgent[None, str]]
+    ],
     *,
     session_store: SessionStore | None = None,
     model_resolver: ModelResolver | None = None,

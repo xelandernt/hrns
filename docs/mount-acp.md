@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from hrns.server import AcpServer, build_agent
 
 server = AcpServer()
-coder = server.add_agent("coder", factory=lambda: build_agent("anthropic:claude-sonnet-5-5", cwd="/srv/project"))
+coder = server.add_agent("coder", factory=lambda session: build_agent("anthropic:claude-sonnet-5-5", cwd=session.cwd))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +34,7 @@ and output types flow through its session and turn handles.
 | Argument | Default | Purpose |
 | --- | --- | --- |
 | `agent_id` | Required | Safe route segment identifying the agent |
-| `factory` | Required | Zero-argument callable returning a fresh agent per live session |
+| `factory` | Required | Sync or async callable receiving `SessionContext` and returning a fresh `AbstractAgent` per live session |
 | `deps` | `None` | Default agent dependencies |
 | `session_store` | Separate `InMemorySessionStore` | Persistence scoped to this registration |
 | `model_resolver` | `None` | Model choices, provider routing, and session settings |
@@ -52,6 +52,23 @@ and output types flow through its session and turn handles.
 | `app` | Required | Application receiving the route |
 | `prefix` | `"/acp"` | Route prefix; the endpoint is `{prefix}/{agent_id}` |
 | `authenticate` | `None` | Async admission callback receiving `HTTPConnection`; `None` admits all connections |
+
+`factory` receives `SessionContext(agent_id, session_id, cwd)` before
+`session_config` runs. For a new session, `cwd` is an absolute resolved path; a
+restored session uses its stored ID and cwd. The factory runs once per new or
+restored live session and may be synchronous or asynchronous:
+
+```python
+from pydantic_ai.agent import AbstractAgent
+from hrns.server.acp import SessionContext
+
+async def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
+    return build_agent("anthropic:claude-sonnet-5-5", cwd=session.cwd)
+
+coder = server.add_agent("coder", factory=agent_factory)
+```
+
+`run_acp_stdio(factory, ...)` accepts the same factory contract.
 
 `session_config` receives `SessionContext(agent_id, session_id, cwd)` and returns
 `AcpSessionConfig(deps=..., capabilities=..., toolsets=..., workspace=...)`.

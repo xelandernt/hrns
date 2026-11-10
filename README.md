@@ -57,7 +57,7 @@ from fastapi import FastAPI
 from hrns.server import HrnsServer, build_agent
 
 server = HrnsServer()
-coder = server.add_agent("coder", factory=lambda: build_agent("anthropic:claude-sonnet-5-5", cwd="/srv/project"))
+coder = server.add_agent("coder", factory=lambda session: build_agent("anthropic:claude-sonnet-5-5", cwd=session.cwd))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
