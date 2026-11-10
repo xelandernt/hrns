@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from pydantic_ai.messages import ModelMessage
+from starlette.requests import HTTPConnection
 from starlette.responses import StreamingResponse
 
 from .acp.host import AcpServer
@@ -25,8 +26,10 @@ class HrnsServer(AcpServer):
 
         from .fastapi import authorize
 
-        async def observation(request: Request, agent_id: str, session_id: str) -> Observation:
-            if not await authorize(request, authenticate):
+        async def observation(
+            connection: HTTPConnection, agent_id: str, session_id: str
+        ) -> Observation:
+            if not await authorize(connection, authenticate):
                 raise HTTPException(401, "Not authenticated")
             if not self._running:
                 raise HTTPException(503, "Server is not running")
@@ -39,13 +42,17 @@ class HrnsServer(AcpServer):
         path = prefix.rstrip("/") + "/{agent_id}/sessions/{session_id}"
 
         @app.get(path, description="Read-only AG-UI snapshot. Does not execute an agent.")
-        async def snapshot(request: Request, agent_id: str, session_id: str) -> dict[str, object]:
-            publisher = await observation(request, agent_id, session_id)
+        async def snapshot(
+            connection: HTTPConnection, agent_id: str, session_id: str
+        ) -> dict[str, object]:
+            publisher = await observation(connection, agent_id, session_id)
             return publisher.snapshot()
 
         @app.get(path + "/events", description="Read-only AG-UI SSE. Accepts no client mutations.")
-        async def events(request: Request, agent_id: str, session_id: str) -> StreamingResponse:
-            publisher = await observation(request, agent_id, session_id)
+        async def events(
+            connection: HTTPConnection, agent_id: str, session_id: str
+        ) -> StreamingResponse:
+            publisher = await observation(connection, agent_id, session_id)
 
             async def stream():
                 async with publisher.subscribe() as subscription:

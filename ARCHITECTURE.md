@@ -133,7 +133,8 @@ AG-UI APIs (minimum 2.57.0, exercised offline at that version).
 `mount_ag_ui` independently mounts GET snapshot and SSE routes under
 `{prefix}/{agent_id}/sessions/{session_id}`. They observe resident sessions and never
 start execution. HTTP and WebSocket admission use the same `HTTPConnection` callback
-contract; all admitted identities have equal server scope. Read-only semantics are
+contract; AG-UI handlers accept `HTTPConnection` and pass it to the shared authorization
+helper. All admitted identities have equal server scope. Read-only semantics are
 application/OpenAPI metadata, not an invented AG-UI capability; mutations return 405.
 
 Each native run passes through one `AGUIEventStream` converter and encoder, with
