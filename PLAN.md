@@ -704,6 +704,9 @@ Verification performed (disposable scripts outside the repository):
   TypeScript handshake against uvicorn.
 - ACP prompt plus Loro contribution in one execution, origin echo suppression, replay,
   and AG-UI snapshots containing captured user messages exactly once.
+- ACP prompt/cancel acceptance race with a deliberately slow SQLite save (10/10 runs
+  returned `cancelled` with no ready ACP contribution left); paused prompts reject
+  instead of hanging.
 - T16 combined exercise: two Node/`loro-crdt` replicas and an attached ACP client in
   one SQLite-backed session; concurrent `alpha`/`beta` edits during an approval wait,
   a Loro answer winning over ACP, a second execution for late input, all four user

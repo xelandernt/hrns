@@ -186,6 +186,17 @@ class Session(Generic[AgentDepsT, OutputDataT]):
             skills=skills,
             origin="acp" if origin is not None else "python",
         )
+        if self._paused or self._closed:
+            # Cancellation may have arrived while acceptance was being persisted.
+            # Do not leave an ACP prompt waiter (or a cancelled contribution) behind.
+            await self._runtime.coordinator.cancel(contribution.id)
+            settled = TurnHandle[OutputDataT](
+                contribution.id,
+                blocks,
+                asyncio.get_running_loop().create_future(),
+            )
+            settled._future.set_result(TurnResult("cancelled"))
+            return settled
         handle = TurnHandle[OutputDataT](
             contribution.id,
             blocks,
