@@ -13,6 +13,7 @@ that is never consumed resolves cancelled.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic
@@ -318,6 +319,11 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._closed = True
         await self.cancel()
         await self.clear_queue()
+        ingest = self._runtime._ingest_task
+        if ingest is not None and not ingest.done():
+            ingest.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ingest
         if self._sync is not None:
             await self._sync.close()
             self._sync = None

@@ -214,12 +214,13 @@ tools/workspace stay configured across attachments.
 
 The advertised `_hrns/session/state` notification and `hrns/session/state` load metadata
 synchronize server-started turns. They carry `sessionId`, `revision`, `status`,
-`activeTurnId`, `lastOutcome`, and `lastUsage`. The existing client handles these
+`activeTurnId` (the first captured contribution in the active execution),
+`lastOutcome`, and `lastUsage`. The existing client handles these
 alongside the prompt responses for client-started turns.
 
 ## Admission and storage
 
-Both mounts accept an async `authenticate(HTTPConnection)` callback. Its return value
+All mounts accept an async `authenticate(HTTPConnection)` callback. Its return value
 is retained as the ACP connection's principal, or resolved for each AG-UI request.
 Returning `None` rejects authentication. The principal is passed directly to the
 registration's session store for creation, lookup, listing, and deletion.

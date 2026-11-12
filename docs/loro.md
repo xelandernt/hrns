@@ -79,7 +79,8 @@ containers are fixed names; never repurpose one.
 
 A contribution map has `id`, `author` (JSON), `state`, `origin`, `created_at`,
 `blocks`, `skills`, optional `received_seq`/`consumed_seq`/`capture_version`, and a
-`text` container. `state` is one of `draft`, `ready`, `captured`, `delivered`,
+`text` container. `blocks` is an optional JSON array of ACP prompt-content blocks
+for non-text input; text-only clients leave it `"[]"`. `state` is one of `draft`, `ready`, `captured`, `delivered`,
 `cancelled`, or `failed`. Structured fields (`author`, `blocks`, `skills`, display
 `payload`, interaction `request`/`response`) are JSON *strings* in the map, because a
 Loro map stores scalars; parse them in the client.
