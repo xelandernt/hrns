@@ -144,6 +144,8 @@ class InputCoordinator:
         await self._persist()
 
     async def cancel_ready(self) -> list[str]:
+        if self._document.poisoned:
+            return []
         cancelled = self._document.discard_inputs({"ready"})
         if cancelled:
             await self._persist()

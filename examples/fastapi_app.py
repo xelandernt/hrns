@@ -366,7 +366,7 @@ def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
     server tools. Loro-only participants still have the server tools.
     """
     toolsets = [
-        PrefixedToolset(toolset, "client_")
+        PrefixedToolset(toolset, "client")
         for toolset in (acp_filesystem(session), acp_terminal(session))
         if toolset is not None
     ]

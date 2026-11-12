@@ -186,7 +186,15 @@ server closes a peer that sends a frame over 4 MiB, more than 128 queued frames,
 an unsupported schema, or a peer ID already connected: use close code 1008 for a
 contract violation, 1013 for overflow, and 1011 for a persistence failure. A
 reconnect always resynchronizes from version vectors rather than replaying a delta
-log.
+log. A snapshot bootstrap is sent in 256 KiB chunks; with a 128-frame per-peer queue,
+the practical bootstrap ceiling is about 32 MiB before a slow peer is disconnected.
+The oversize fallback sends the whole snapshot, so very large updates cost bandwidth
+rather than being split incrementally.
+
+An update that imports but violates the schema or session identity poisons the live
+document: persistence and dispatch stop, the offending peer is closed, and the last
+good checkpoint remains in the store. Restarting from that checkpoint is the recovery
+path; there is no in-process rollback.
 
 ## Minimal TypeScript client
 

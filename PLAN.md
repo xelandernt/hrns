@@ -731,6 +731,10 @@ Observed limitations, reported rather than hidden:
 - Checkpoints export a full snapshot on each persistence boundary and imported updates
   are persisted individually. Batching/compaction and an operation index are deferred;
   document size and write frequency should be measured for very long sessions.
+- A document poisoned by a schema/identity-changing import stops persisting and
+  dispatching; recovery is a restart from the last good checkpoint. Snapshot
+  bootstrap is bounded to roughly 32 MiB by the peer queue, and an oversized update
+  is replaced by a full snapshot fan-out rather than an incremental split.
 
 An independent review after implementation found and this change fixed: the example's
 duplicate ACP/server tool names (ACP tools now use a `client_` prefix), interaction

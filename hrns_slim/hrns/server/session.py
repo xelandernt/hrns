@@ -101,7 +101,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
             lifecycle = "waiting" if self._runtime.interactions.waiting else "running"
         else:
             lifecycle = "idle"
-        active = self._active.turn_id if self._active else self._active_contribution_id
+        active = self._active_contribution_id or (self._active.turn_id if self._active else None)
         return {
             "sessionId": self.session_id,
             "revision": self._revision,
@@ -306,6 +306,11 @@ class Session(Generic[AgentDepsT, OutputDataT]):
             if self._worker is not None:
                 await asyncio.shield(self._worker)
         await self._runtime.cancel_interactions("execution cancelled")
+        # A cancelled ACP prompt will not be echoed to a future attachment.
+        for contribution_id in list(self._origins):
+            contribution = self._runtime.document.contribution(contribution_id)
+            if contribution is None or contribution.state != "captured":
+                self._origins.pop(contribution_id, None)
         await self._runtime.coordinator.interrupt_orphans()
 
     def start_if_ready(self) -> None:
@@ -337,19 +342,22 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._hooks.require_running()
         if self._closed:
             raise RuntimeError("session is closed")
+        if self._execution is not None and not self._paused:
+            return
         self._paused = False
         await self._runtime.coordinator.interrupt_orphans()
         self._runtime.resume_document()
         self._start_worker()
         self._publish()
 
-    async def clear_queue(self) -> None:
+    async def clear_queue(self) -> tuple[str, ...]:
         cancelled = await self._runtime.coordinator.cancel_ready()
         for contribution_id in cancelled:
             self._origins.pop(contribution_id, None)
             handle = self._accepted.pop(contribution_id, None)
             if handle is not None and not handle._future.done():
                 handle._future.set_result(TurnResult("cancelled"))
+        return tuple(cancelled)
 
     async def close(self) -> None:
         async with self._hooks.lock:

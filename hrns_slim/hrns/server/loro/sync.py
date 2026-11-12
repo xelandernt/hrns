@@ -189,6 +189,14 @@ class SessionSync:
         before = self._document.session_metadata()
         try:
             self._document.import_update(data, origin=f"peer:{peer.peer_id}")
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # Invalid bytes must not wedge a healthy document; Loro may raise a bare
+            # BaseException for malformed payloads.
+            await self._fail(peer, CLOSE_SCHEMA, "update could not be imported")
+            return
+        try:
             after = self._document.validate()
         except Exception:
             self._document.mark_poisoned()

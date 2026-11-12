@@ -126,7 +126,7 @@ def attachment_tools(attachment: AcpSession) -> AcpAttachmentConfig[None]:
 `client_io = "read"`, `write_file` falls back to a local `FileSystem` bounded by
 the session `cwd` instead of the client. `acp_filesystem` defines `read_file` and
 `write_file`, which collide with `Coder`'s tools, so either wrap the ACP toolset in
-`PrefixedToolset(toolset, "client_")` (as `examples/fastapi_app.py` does), or install
+`PrefixedToolset(toolset, "client")` (as `examples/fastapi_app.py` does), or install
 it on an agent without `Coder`.
 
 ### Dispatch

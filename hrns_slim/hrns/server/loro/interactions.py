@@ -9,6 +9,7 @@ check-and-write against the pending state.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -16,6 +17,7 @@ from .document import SessionDocument
 from .models import InteractionKind, InteractionRecord
 
 Validator = Callable[[Mapping[str, object]], dict[str, object]]
+_logger = logging.getLogger(__name__)
 
 _APPROVAL_OPTIONS = {"allow_once", "allow_always", "reject_once", "reject_always", "cancel"}
 _QUESTION_ACTIONS = {"accept", "decline", "cancel"}
@@ -81,7 +83,7 @@ class InteractionService:
     ) -> InteractionRecord:
         record = self._document.create_interaction(kind=kind, request=request)
         self._validators[record.id] = validator
-        await self._persist()
+        await self._save()
         self._on_change()
         return record
 
@@ -103,7 +105,7 @@ class InteractionService:
             return False
         if not self._document.resolve_interaction(interaction_id, validated, resolved_by=actor):
             return False
-        await self._persist()
+        await self._save(interaction_id)
         self._signal(interaction_id)
         self._on_change()
         return True
@@ -131,7 +133,7 @@ class InteractionService:
                 continue
             accepted.append(record.id)
         if accepted:
-            await self._persist()
+            await self._save(*accepted)
             for interaction_id in accepted:
                 self._signal(interaction_id)
             self._on_change()
@@ -154,7 +156,7 @@ class InteractionService:
             interaction_id, state="cancelled", detail=detail
         )
         if cancelled:
-            await self._persist()
+            await self._save(interaction_id)
             self._signal(interaction_id)
             self._on_change()
         return cancelled
@@ -162,11 +164,23 @@ class InteractionService:
     async def cancel_pending(self, *, detail: str, state: str = "cancelled") -> list[str]:
         cancelled = self._document.cancel_pending_interactions(state=state, detail=detail)
         if cancelled:
-            await self._persist()
+            await self._save(*cancelled)
             for interaction_id in cancelled:
                 self._signal(interaction_id)
             self._on_change()
         return cancelled
+
+    async def _save(self, *interaction_ids: str) -> None:
+        """Persist an acceptance; a poisoned document is intentionally not written."""
+        if self._document.poisoned:
+            return
+        try:
+            await self._persist()
+        except Exception:
+            _logger.exception(
+                "failed to persist interaction state %s; waking waiters anyway",
+                ", ".join(interaction_ids) or "-",
+            )
 
     def _signal(self, interaction_id: str) -> None:
         waiter = self._waiters.pop(interaction_id, None)
