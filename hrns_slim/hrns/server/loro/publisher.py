@@ -9,6 +9,7 @@ are projections: they never replace native model history.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from acp import schema
@@ -90,11 +91,11 @@ class DocumentPublisher:
                 await self._flush_text()
                 self._simple_record("title", update, status="")
 
-    async def record_user(self, text: str, *, acp: dict[str, object] | None = None) -> None:
+    async def record_user(self, text: str, *, acp: Sequence[dict[str, object]] = ()) -> None:
         """Record a captured contribution as a user display item."""
         async with self._lock:
             await self._flush_text()
-            payload: dict[str, object] = {"acp": [acp]} if acp is not None else {"acp": []}
+            payload: dict[str, object] = {"acp": list(acp)}
             self._document.start_display("user", payload, status="complete", text=text)
 
     async def record_error(self, message: str) -> None:

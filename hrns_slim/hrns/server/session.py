@@ -4,24 +4,27 @@ A live session owns its native execution. ACP and Python are interfaces to it;
 neither owns the executor. This module deliberately knows nothing about an
 outbound ACP client, so a Python-created session can run before any attachment
 exists and the same session can attach or replay later.
+
+One handle belongs to one contribution, not to a whole "turn": an execution that
+captures several contributions completes all of their handles. A contribution
+that is never consumed resolves cancelled.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic
-from uuid import uuid4
 
 from acp import schema
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 
-from .acp.content import PromptContentBlock
+from .acp.content import PromptContentBlock, skill_references
 from .acp.runtime import RunObserver, SessionRuntime
+from .loro.models import Author, Contribution, InteractionRecord
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,8 @@ class TurnResult(Generic[OutputDataT]):
 
 @dataclass(frozen=True)
 class TurnHandle(Generic[OutputDataT]):
+    """One contribution's acceptance/consumption receipt."""
+
     turn_id: str
     prompt: tuple[PromptContentBlock, ...]
     _future: asyncio.Future[TurnResult[OutputDataT]]
@@ -40,12 +45,6 @@ class TurnHandle(Generic[OutputDataT]):
     async def result(self) -> TurnResult[OutputDataT]:
         """Wait without transferring ownership of execution to the waiter."""
         return await asyncio.shield(self._future)
-
-
-@dataclass(frozen=True)
-class _QueuedTurn(Generic[OutputDataT]):
-    handle: TurnHandle[OutputDataT]
-    origin: object | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,16 +75,18 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._hooks = hooks
         self.session_id = runtime.state.session_id
         self.cwd = runtime.state.cwd
-        self._queue: deque[_QueuedTurn[OutputDataT]] = deque()
+        self._accepted: dict[str, TurnHandle[OutputDataT]] = {}
         self._worker: asyncio.Task[None] | None = None
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
+        self._captured: set[str] = set()
         self._paused = runtime.restored_interrupted
         self._closed = False
         self._revision = 0
         self._last_outcome: str | None = None
         self._last_usage: dict[str, object] | None = None
         runtime.on_state = self._publish
+        runtime.on_capture = self._note_capture
 
     def status(self) -> dict[str, object]:
         return {
@@ -106,11 +107,21 @@ class Session(Generic[AgentDepsT, OutputDataT]):
     def history(self) -> list[ModelMessage]:
         return list(self._runtime.state.history)
 
-    async def submit(self, prompt: str | Sequence[PromptContentBlock]) -> TurnHandle[OutputDataT]:
-        return await self._accept(prompt)
+    async def submit(
+        self,
+        prompt: str | Sequence[PromptContentBlock],
+        *,
+        author: Author | None = None,
+    ) -> TurnHandle[OutputDataT]:
+        """Accept a ready contribution and return its receipt."""
+        return await self._accept(prompt, author=author)
 
     async def _accept(
-        self, prompt: str | Sequence[PromptContentBlock], origin: object | None = None
+        self,
+        prompt: str | Sequence[PromptContentBlock],
+        origin: object | None = None,
+        *,
+        author: Author | None = None,
     ) -> TurnHandle[OutputDataT]:
         self._hooks.require_running()
         if self._closed:
@@ -118,29 +129,63 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         blocks = (
             (schema.TextContentBlock(text=prompt),) if isinstance(prompt, str) else tuple(prompt)
         )
+        skills = skill_references(blocks)
+        if skills:
+            await self._runtime._resolve_skills(blocks)
+        text = "\n".join(
+            block.text for block in blocks if isinstance(block, schema.TextContentBlock)
+        )
+        if author is None:
+            author = (
+                Author(id="acp", label="ACP client", kind="acp")
+                if origin is not None
+                else Author(id="python", label="Python", kind="python")
+            )
+        contribution = await self._runtime.coordinator.accept(
+            author=author,
+            text=text,
+            blocks=[
+                block.model_dump(mode="json", by_alias=True, exclude_none=True) for block in blocks
+            ],
+            skills=skills,
+            origin="acp" if origin is not None else "python",
+        )
         handle = TurnHandle[OutputDataT](
-            uuid4().hex, blocks, asyncio.get_running_loop().create_future()
+            contribution.id,
+            blocks,
+            asyncio.get_running_loop().create_future(),
         )
         # Consume unobserved failures without changing what result() raises.
         handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        self._queue.append(_QueuedTurn(handle, origin))
+        self._accepted[contribution.id] = handle
         self._start_worker()
         return handle
 
+    def _note_capture(self, contributions: tuple[Contribution, ...]) -> None:
+        for contribution in contributions:
+            self._captured.add(contribution.id)
+            if self._active is None:
+                self._active = self._accepted.get(contribution.id)
+        self._publish()
+
     def _start_worker(self) -> None:
-        if not self._paused and self._queue and self._worker is None:
+        if (
+            not self._paused
+            and not self._closed
+            and self._worker is None
+            and self._runtime.coordinator.eligible()
+        ):
             self._worker = asyncio.create_task(self._drain())
 
     async def _drain(self) -> None:
         try:
-            while self._queue and not self._paused and not self._closed:
-                queued = self._queue.popleft()
-                handle = queued.handle
-                self._active = handle
-                self._runtime.last_output = None
-                self._runtime.prompt_origin = queued.origin
+            while not self._paused and not self._closed:
+                if not self._runtime.coordinator.eligible():
+                    break
+                self._captured.clear()
+                self._active = None
                 self._publish()
-                task = asyncio.create_task(self._runtime.execute(list(handle.prompt)))
+                task = asyncio.create_task(self._runtime.execute())
                 self._execution = task
                 try:
                     response = await task
@@ -150,21 +195,21 @@ class Session(Generic[AgentDepsT, OutputDataT]):
                         if response.usage
                         else None
                     )
-                    if response.stop_reason == "cancelled":
-                        self._paused = True
-                    handle._future.set_result(
+                    self._resolve_captured(
                         TurnResult(response.stop_reason, self._runtime.last_output, response.usage)
                     )
+                    if response.stop_reason == "cancelled":
+                        self._paused = True
                 except asyncio.CancelledError:
                     self._last_outcome = "cancelled"
                     self._last_usage = None
+                    self._fail_captured(None)
                     self._paused = True
-                    handle._future.set_result(TurnResult("cancelled"))
                 except Exception as exc:
                     self._last_outcome = "error"
                     self._last_usage = None
+                    self._fail_captured(exc)
                     self._paused = True
-                    handle._future.set_exception(exc)
                 finally:
                     self._active = None
                     self._execution = None
@@ -172,6 +217,39 @@ class Session(Generic[AgentDepsT, OutputDataT]):
                     self._publish()
         finally:
             self._worker = None
+            if not self._paused and not self._closed and self._runtime.coordinator.eligible():
+                self._start_worker()
+
+    def _resolve_captured(self, result: TurnResult[OutputDataT]) -> None:
+        for contribution_id in self._captured:
+            handle = self._accepted.pop(contribution_id, None)
+            if handle is not None and not handle._future.done():
+                handle._future.set_result(result)
+        self._captured.clear()
+
+    def _fail_captured(self, error: Exception | None) -> None:
+        for contribution_id in self._captured:
+            handle = self._accepted.pop(contribution_id, None)
+            if handle is None or handle._future.done():
+                continue
+            if error is None:
+                handle._future.set_result(TurnResult("cancelled"))
+            else:
+                handle._future.set_exception(error)
+        self._captured.clear()
+
+    async def answer_interaction(
+        self,
+        interaction_id: str,
+        response: Mapping[str, object],
+        *,
+        actor: str = "loro",
+    ) -> bool:
+        """Accept the first valid answer from any interface."""
+        return await self._runtime.answer_interaction(interaction_id, response, actor=actor)
+
+    async def pending_interactions(self) -> tuple[InteractionRecord, ...]:
+        return tuple(self._runtime._interaction_service.pending())
 
     async def cancel(self) -> None:
         self._paused = True
@@ -179,9 +257,18 @@ class Session(Generic[AgentDepsT, OutputDataT]):
             self._execution.cancel()
             if self._worker is not None:
                 await asyncio.shield(self._worker)
+        await self._runtime.cancel_interactions("execution cancelled")
+        await self._runtime.coordinator.interrupt_orphans()
 
     async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
-        return tuple(queued.handle for queued in self._queue)
+        return tuple(
+            handle
+            for contribution_id, handle in self._accepted.items()
+            if (
+                (contribution := self._runtime.document.contribution(contribution_id)) is not None
+                and contribution.state == "ready"
+            )
+        )
 
     async def resume_queue(self) -> None:
         self._hooks.require_running()
@@ -192,8 +279,11 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._start_worker()
 
     async def clear_queue(self) -> None:
-        while self._queue:
-            self._queue.popleft().handle._future.set_result(TurnResult("cancelled"))
+        cancelled = await self._runtime.coordinator.cancel_ready()
+        for contribution_id in cancelled:
+            handle = self._accepted.pop(contribution_id, None)
+            if handle is not None and not handle._future.done():
+                handle._future.set_result(TurnResult("cancelled"))
 
     async def close(self) -> None:
         async with self._hooks.lock:

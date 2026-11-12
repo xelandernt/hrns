@@ -301,6 +301,10 @@ class SessionDocument:
             blocks = _JSON_BLOCKS.validate_json(_string(entry, "blocks") or "[]")
         except ValueError:
             blocks = ()
+        try:
+            skills = _JSON_STRING_LIST.validate_json(_string(entry, "skills") or "[]")
+        except ValueError:
+            skills = ()
         body = _child_text(entry, "text")
         return Contribution(
             id=_string(entry, "id") or "",
@@ -308,6 +312,7 @@ class SessionDocument:
             state=_literal(_CONTRIBUTION_STATE, _string(entry, "state"), "draft"),
             text=body.to_string() if body is not None else "",
             blocks=blocks,
+            skills=skills,
             origin=_string(entry, "origin") or "python",
             created_at=_integer(entry, "created_at") or 0,
             received_seq=_integer(entry, "received_seq"),
@@ -332,6 +337,7 @@ class SessionDocument:
         author: Author,
         text: str = "",
         blocks: Sequence[dict[str, object]] = (),
+        skills: Sequence[str] = (),
         origin: str = "python",
         state: ContributionState = "ready",
         contribution_id: str | None = None,
@@ -344,6 +350,7 @@ class SessionDocument:
         entry.insert("origin", origin)
         entry.insert("created_at", now_ms())
         entry.insert("blocks", _JSON_BLOCKS.dump_json(tuple(blocks)).decode("utf-8"))
+        entry.insert("skills", _JSON_STRING_LIST.dump_json(tuple(skills)).decode("utf-8"))
         body = _container_text(entry.insert_container("text", LoroText()))
         if text:
             body.insert(0, text)

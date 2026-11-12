@@ -65,6 +65,7 @@ class Contribution(BaseModel):
     state: ContributionState
     text: str = ""
     blocks: tuple[dict[str, object], ...] = ()
+    skills: tuple[str, ...] = ()
     origin: str = "python"
     created_at: int = 0
     #: Server-assigned arrival order; client clocks never order execution.

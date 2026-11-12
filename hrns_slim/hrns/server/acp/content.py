@@ -52,3 +52,22 @@ def prompt_blocks_to_user_content(blocks: Sequence[PromptContentBlock]) -> list[
             label = block.title or block.name
             content.append(f"{label} ({block.uri})" if label else block.uri)
     return content
+
+
+def skill_references(blocks: Sequence[PromptContentBlock]) -> tuple[str, ...]:
+    """Skill ids a client attached to prompt blocks, in first-seen order."""
+    ids: list[str] = []
+    for block in blocks:
+        meta = block.field_meta
+        if not meta:
+            continue
+        payload = meta.get("hrns/skills")
+        if not isinstance(payload, list):
+            continue
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            skill_id = entry.get("id")
+            if isinstance(skill_id, str) and skill_id and skill_id not in ids:
+                ids.append(skill_id)
+    return tuple(ids)
