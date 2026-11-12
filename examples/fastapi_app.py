@@ -25,8 +25,14 @@ writes ``$release-notes`` in the composer.
 The agent also installs the ACP client filesystem and terminal toolsets. A client
 that connects with ``client_io = "all"`` (the terminal's default) gives it
 ``read_file``, ``write_file``, and ``run_command`` against the client's machine;
-``"read"`` advertises only reads, and ``"off"`` gives it no client tools. This
-example has no server-side ``Coder``, so those are its only file and command tools.
+``"read"`` advertises only reads, and ``"off"`` gives it no client tools. A
+server-side ``Coder``/workspace is installed too, so a participant who joins only
+through Loro still has file tools in the server workspace without any ACP client.
+
+``/loro`` mounts the session-document API independently of ``/acp`` and
+``/ag-ui``: create/list/read/delete over HTTP, then one WebSocket per replica to
+synchronize pending input and observe output. A TypeScript client can start a
+session there without an ACP bootstrap connection.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI
 from pydantic_ai.agent import AbstractAgent, Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -67,7 +74,7 @@ from hrns.server.acp import (
     acp_filesystem,
     acp_terminal,
 )
-from hrns.server.capabilities import AskUser, Skills, Todo
+from hrns.server.capabilities import AskUser, Coder, Skills, Todo
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
@@ -307,7 +314,13 @@ class UserSessionStore(ListableSessionStore[Principal], DeletableSessionStore[Pr
         user = require_principal(principal)
         if self._owners.get(session_id) != user.user_id:
             return None
-        if user.read_only and operation not in {"session/load", "ag-ui/snapshot", "ag-ui/events"}:
+        if user.read_only and operation not in {
+            "session/load",
+            "ag-ui/snapshot",
+            "ag-ui/events",
+            "loro/snapshot",
+            "loro/list",
+        }:
             raise PermissionError
         return await self._store(user).load(session_id, principal=user, operation=operation)
 
@@ -330,7 +343,15 @@ def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
     # travels as a form elicitation whenever the client advertises one. Skills
     # advertises the two programmatic skills on ``session/new`` and expands a
     # ``$release-notes`` reference without a model round trip.
-    return Agent(capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS])
+    return Agent(
+        capabilities=[
+            LocalWorkspace(session.cwd),
+            Coder(),
+            Todo(),
+            AskUser(),
+            _EXAMPLE_SKILLS,
+        ]
+    )
 
 
 def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
@@ -369,6 +390,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="hrns example", lifespan=lifespan)
 server.mount_acp(app, prefix="/acp", authenticate=authenticate)
 server.mount_ag_ui(app, prefix="/ag-ui", authenticate=authenticate)
+server.mount_loro(app, prefix="/loro", authenticate=authenticate)
 
 
 if __name__ == "__main__":

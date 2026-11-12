@@ -46,7 +46,6 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolCallPart,
     ToolReturnPart,
-    UserContent,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.output import OutputDataT, OutputSpec
@@ -234,10 +233,12 @@ class RunObserver(Protocol):
         self,
         stream: AsyncIterator[AgentStreamEvent | AgentRunResultEvent[ObservedOutputT]],
         history: list[ModelMessage],
-        user_content: list[UserContent] | None,
+        input_messages: Sequence[ModelMessage],
         emit: Callable[[AgentStreamEvent], Awaitable[None]],
         run_id: str,
     ) -> AgentRunResult[ObservedOutputT]: ...
+
+    def injected(self, messages: Sequence[ModelMessage]) -> None: ...
 
     def state_changed(self, state: dict[str, object]) -> None: ...
 
@@ -312,6 +313,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         )
         self.on_capture: Callable[[tuple[Contribution, ...]], None] = lambda contributions: None
         self._active_turn: _TurnState | None = None
+        self._observer_input: Sequence[ModelMessage] = ()
         #: Messages already written to the document, so persistence stays append-only.
         self._history_cache: list[ModelMessage] = []
         #: True when the session was restored from interrupted work and must stay paused.
@@ -864,7 +866,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self.state.invoked_skills.update(captured.skills)
         try:
             injections = await self._injections(captured)
-            self.state.history.extend(messages_for(captured, injections))
+            messages = messages_for(captured, injections)
+            self._observer_input = messages
+            self.state.history.extend(messages)
             await self._publisher.begin_turn(active_contribution_id=captured.contributions[0].id)
             await self._record_captured(captured)
             await self._coordinator.delivered(captured)
@@ -887,12 +891,15 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             return []
         self.state.invoked_skills.update(captured.skills)
         injections = await self._injections(captured)
+        messages = messages_for(captured, injections)
         await self._record_captured(captured)
+        if self.observer is not None:
+            self.observer.injected(messages)
         if self._active_turn is not None:
             for contribution in captured.contributions:
                 await self._emit_captured_user(self._active_turn, contribution)
         await self._coordinator.delivered(captured)
-        return messages_for(captured, injections)
+        return messages
 
     async def _injections(self, captured: CapturedInput) -> dict[str, list[str]]:
         injections: dict[str, list[str]] = {}
@@ -976,6 +983,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
+        observer_input: Sequence[ModelMessage] = self._observer_input
+        self._observer_input = ()
         try:
             while True:
                 result = None
@@ -1017,8 +1026,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
                         if self.observer is not None:
                             result = await self.observer.consume(
-                                stream, history, None, emit, native_run_id
+                                stream, history, observer_input, emit, native_run_id
                             )
+                            observer_input = ()
                         else:
                             async for event in stream:
                                 if isinstance(event, AgentRunResultEvent):

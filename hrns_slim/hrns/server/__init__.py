@@ -7,9 +7,16 @@ if TYPE_CHECKING:
 
 from .acp import AcpServer, RegisteredAgent, Session, TurnHandle, TurnResult, run_acp_stdio
 from .agent import build_agent
+from .loro import Author, DocumentCheckpoint, InMemoryDocumentStore, SessionDocument
+from .loro.sqlite import SQLiteDocumentStore
 
 __all__ = [
     "AcpServer",
+    "Author",
+    "DocumentCheckpoint",
+    "InMemoryDocumentStore",
+    "SQLiteDocumentStore",
+    "SessionDocument",
     "HrnsServer",
     "RegisteredAgent",
     "Session",

@@ -17,9 +17,25 @@ from .models import (
     SchemaVersionError,
     SessionMetadata,
 )
+from .store import (
+    DeletableSessionStore,
+    DocumentCheckpoint,
+    InMemoryDocumentStore,
+    ListableSessionStore,
+    SessionAccess,
+    SessionStore,
+    SessionSummary,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
+    "DeletableSessionStore",
+    "DocumentCheckpoint",
+    "InMemoryDocumentStore",
+    "ListableSessionStore",
+    "SessionAccess",
+    "SessionStore",
+    "SessionSummary",
     "Author",
     "Consumption",
     "Contribution",
