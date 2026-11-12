@@ -5,8 +5,10 @@ ACP, and any number of synchronized TypeScript replicas participate in the same
 conversation while one server process owns the agent and executes it. Mounting ACP
 is optional, and so is mounting Loro: both are interfaces to the same session.
 
-The server extra installs the Python SDK (`loro>=1.17.1,<2`). Client-only installs
-never import the server SDK.
+The server extra installs the Python SDK (`loro>=1.17.1,<2`). It ships PyO3 wheels
+for CPython 3.11+ on the usual macOS, Linux, and Windows platforms; the verified
+combination for this documentation is CPython 3.14 on macOS arm64 with
+`loro-crdt` 1.17.0 on Node 26. Client-only installs never import the server SDK.
 
 ```python
 from contextlib import asynccontextmanager
