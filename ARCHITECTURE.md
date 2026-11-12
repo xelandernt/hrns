@@ -249,8 +249,16 @@ Deferred decisions split a turn into native runs; session-level `STATE_SNAPSHOT`
 reports waiting without claiming application-turn completion. No request adapter or
 `RunAgentInput` is mounted.
 
-A join atomically captures an AG-UI message baseline plus the current-run converted
-prefix and installs its live queue on the event loop. History conversion uses
+A join atomically captures the current-run converted prefix and installs its live
+queue on the event loop. Each native run starts with `RUN_STARTED`, then its message
+baseline and session state, followed by converted events. The final reconciled message
+snapshot precedes `RUN_FINISHED` or `RUN_ERROR`; no snapshots escape that run boundary.
+Active subscribers replay this same sequence before reading their live queue. Idle
+joins receive messages and state within a short observation-only `RUN_STARTED` /
+`RUN_FINISHED` envelope with a fresh run ID. Idle state updates use the same envelopes;
+these protocol runs hydrate observers and never execute an agent.
+
+History conversion uses
 `AGUIAdapter.dump_messages`; observer-only response-order/tool-call identity tables
 reconcile live IDs with dumped messages. Completed display history is cached. Native
 cancellation snapshots preserve partial display without committing it to model
