@@ -186,9 +186,12 @@ class Session(Generic[AgentDepsT, OutputDataT]):
             skills=skills,
             origin="acp" if origin is not None else "python",
         )
-        if self._paused or self._closed:
-            # Cancellation may have arrived while acceptance was being persisted.
-            # Do not leave an ACP prompt waiter (or a cancelled contribution) behind.
+        if self._closed:
+            await self._runtime.coordinator.cancel(contribution.id)
+            raise RuntimeError("session is closed")
+        if origin is not None and self._paused:
+            # ACP cancellation may have arrived while acceptance was being persisted.
+            # Do not leave a prompt waiter (or a cancelled contribution) behind.
             await self._runtime.coordinator.cancel(contribution.id)
             settled = TurnHandle[OutputDataT](
                 contribution.id,

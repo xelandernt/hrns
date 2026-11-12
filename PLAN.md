@@ -706,7 +706,8 @@ Verification performed (disposable scripts outside the repository):
   and AG-UI snapshots containing captured user messages exactly once.
 - ACP prompt/cancel acceptance race with a deliberately slow SQLite save (10/10 runs
   returned `cancelled` with no ready ACP contribution left); paused prompts reject
-  instead of hanging.
+  instead of hanging. A programmatic `submit` while paused remains pending and runs
+  after `resume_queue()`, while Loro-authored ready input behaves the same way.
 - T16 combined exercise: two Node/`loro-crdt` replicas and an attached ACP client in
   one SQLite-backed session; concurrent `alpha`/`beta` edits during an approval wait,
   a Loro answer winning over ACP, a second execution for late input, all four user
