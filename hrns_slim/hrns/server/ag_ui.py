@@ -8,12 +8,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TypeVar
+from uuid import uuid4
 
 from ag_ui.core import (
     BaseEvent,
     Message,
     MessagesSnapshotEvent,
     RunErrorEvent,
+    RunFinishedEvent,
+    RunStartedEvent,
     StateSnapshotEvent,
     TextMessageStartEvent,
     ToolCallResultEvent,
@@ -87,7 +90,18 @@ class Observation:
 
     def state_changed(self, state: dict[str, object]) -> None:
         self._state = dict(state)
-        self._publish(StateSnapshotEvent(snapshot={"hrns": self._state, "readOnly": True}))
+        event = StateSnapshotEvent(snapshot={"hrns": self._state, "readOnly": True})
+        for update in (event,) if self._active else self._snapshot_run(event):
+            self._publish(update)
+
+    def _snapshot_run(self, *events: BaseEvent) -> tuple[BaseEvent, ...]:
+        """Hydrate observers within a protocol run without executing an agent."""
+        run_id = str(uuid4())
+        return (
+            RunStartedEvent(thread_id=self.session_id, run_id=run_id),
+            *events,
+            RunFinishedEvent(thread_id=self.session_id, run_id=run_id),
+        )
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -103,17 +117,23 @@ class Observation:
     @asynccontextmanager
     async def subscribe(self) -> AsyncIterator[AsyncIterator[str]]:
         subscriber = _Subscriber(asyncio.Queue(maxsize=self._queue_size))
-        baseline = list(self._baseline if self._active else self._messages)
-        replay = tuple(self._prefix) if self._active else ()
-        state = self._encode(StateSnapshotEvent(snapshot={"hrns": self._state, "readOnly": True}))
+        replay = (
+            tuple(self._prefix)
+            if self._active
+            else tuple(
+                self._encode(event)
+                for event in self._snapshot_run(
+                    MessagesSnapshotEvent(messages=list(self._messages)),
+                    StateSnapshotEvent(snapshot={"hrns": self._state, "readOnly": True}),
+                )
+            )
+        )
         if not self._closed:
             self._subscribers.add(subscriber)
         else:
             subscriber.queue.put_nowait(None)
 
         async def events() -> AsyncIterator[str]:
-            yield self._encode(MessagesSnapshotEvent(messages=baseline))
-            yield state
             for encoded in replay:
                 yield encoded
             while True:
@@ -148,13 +168,12 @@ class Observation:
         self._messages.extend(input_messages)
         self._baseline = list(self._messages)
         self._prefix = []
-        self._active = False
-        self._publish(MessagesSnapshotEvent(messages=list(self._baseline)))
         self._active = True
         converter = AGUIEventStream(thread_id=self.session_id, run_id=run_id)
         result: AgentRunResult[OutputT] | None = None
         # Native response order supplies identity association, without reducing deltas.
         failure: Exception | None = None
+        terminal: RunFinishedEvent | RunErrorEvent | None = None
         response_index = -1
         assistant_ids: dict[int, deque[str]] = defaultdict(deque)
         reasoning_ids: dict[int, deque[str]] = defaultdict(deque)
@@ -194,14 +213,20 @@ class Observation:
                         dumped.id = tool_ids[dumped.tool_call_id]
                     appended.append(dumped)
             self._messages.extend(appended)
+            # Reconcile persisted messages before closing the protocol run.
+            self._publish(MessagesSnapshotEvent(messages=list(self._messages)))
+            if terminal is not None:
+                self._publish(terminal)
             self._active = False
             self._prefix = []
             self._baseline = list(self._messages)
-            self._publish(MessagesSnapshotEvent(messages=list(self._messages)))
 
         self._finish_pending = finish
         try:
             async for event in converter.transform_stream(native()):
+                if isinstance(event, (RunFinishedEvent, RunErrorEvent)):
+                    terminal = event
+                    continue
                 if isinstance(event, TextMessageStartEvent):
                     if event.message_id not in assistant_ids[response_index]:
                         assistant_ids[response_index].append(event.message_id)
@@ -215,12 +240,21 @@ class Observation:
                     if isinstance(message_id, str):
                         reasoning_ids[response_index].append(message_id)
                 self._publish(event)
+                if isinstance(event, RunStartedEvent):
+                    self._publish(MessagesSnapshotEvent(messages=list(self._baseline)))
+                    self._publish(
+                        StateSnapshotEvent(snapshot={"hrns": self._state, "readOnly": True})
+                    )
             if failure is not None:
                 raise failure
             assert result is not None, "native stream must produce a result"
             return result
         except asyncio.CancelledError:
-            self._publish(RunErrorEvent(message="Run cancelled", code="CANCELLED"))
+            terminal = RunErrorEvent(message="Run cancelled", code="CANCELLED")
+            raise
+        except Exception as exc:
+            if terminal is None:
+                terminal = RunErrorEvent(message=str(exc))
             raise
         finally:
             if result is not None:
