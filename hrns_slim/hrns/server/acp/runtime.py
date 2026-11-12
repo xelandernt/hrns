@@ -916,7 +916,11 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 )
                 for block in acp_blocks(contribution)
             ]
-            await self._publisher.record_user(contribution.text, acp=acp_updates)
+            await self._publisher.record_user(
+                contribution.text,
+                acp=acp_updates,
+                author=contribution.author,
+            )
 
     async def _emit_captured_user(self, turn: _TurnState, contribution: Contribution) -> None:
         for block in acp_blocks(contribution):

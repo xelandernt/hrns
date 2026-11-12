@@ -24,6 +24,8 @@ agent = build_agent("anthropic:claude-sonnet-5-5")
   served, the agent side, and catalog polling and consumer retries.
 - [Agent servers](mount-acp.md) — registration, hosting, sessions, authentication,
   stores, and model/provider routing.
+- [Loro sessions](loro.md) — shared session documents, capture boundaries,
+  interactions, persistence, the sync protocol, and a TypeScript client.
 - [AG-UI observation](ag_ui.md) — read-only snapshots and live event streams.
 
 ## Run ACP over stdio

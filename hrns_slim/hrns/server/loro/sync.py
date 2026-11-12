@@ -15,6 +15,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from loro import VersionVector
+
 from .document import SessionDocument
 from .protocol import (
     CLOSE_OVERFLOW,
@@ -142,12 +144,16 @@ class SessionSync:
                 self._send(peer, frame)
             return
         try:
-            version = base64.b64decode(payload.vv)
+            version = VersionVector.decode(base64.b64decode(payload.vv))
         except ValueError:
             await self._fail(peer, CLOSE_SCHEMA, "version vector is not base64")
             return
+        if version == VersionVector():
+            for frame in snapshot_frames(self._document.snapshot()):
+                self._send(peer, frame)
+            return
         try:
-            update = self._document.export_updates(version)
+            update = self._document.export_updates(version.encode())
         except Exception:
             await self._fail(peer, CLOSE_SCHEMA, "version vector is not known to this document")
             return

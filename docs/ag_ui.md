@@ -45,7 +45,15 @@ OpenAPI and application metadata (`readOnly: true`) describe the endpoint contra
 ## Events and replay
 
 The publisher converts each native run once using `AGUIEventStream.transform_stream`
-and its encoder. The same native events also feed ACP.
+and its encoder. The same native events also feed ACP and the session document, so
+AG-UI observes the same execution that Loro clients see; it never starts a second run.
+
+Input captured at a model boundary is published exactly once: before a run it is part
+of the message baseline, and input captured mid-run is injected as a user message on
+the live stream. A late subscriber receives the same identities in the snapshot and
+current-run prefix. Partial assistant display after interruption is not committed to
+native history and does not produce a false completion event; the session document
+keeps that partial text for Loro clients.
 
 A subscription receives `MESSAGES_SNAPSHOT`, `STATE_SNAPSHOT`, the current native run's
 event prefix, and live events. Snapshot and subscriber installation happen atomically

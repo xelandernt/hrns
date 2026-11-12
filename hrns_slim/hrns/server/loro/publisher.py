@@ -17,7 +17,7 @@ from acp import schema
 from hrns.server.acp.session import SessionUpdate
 
 from .document import DisplaySlot, SessionDocument
-from .models import DisplayKind, LifecycleStatus
+from .models import Author, DisplayKind, LifecycleStatus
 
 #: Flush buffered streamed text after this many characters.
 _TEXT_FLUSH_THRESHOLD = 1024
@@ -91,11 +91,19 @@ class DocumentPublisher:
                 await self._flush_text()
                 self._simple_record("title", update, status="")
 
-    async def record_user(self, text: str, *, acp: Sequence[dict[str, object]] = ()) -> None:
+    async def record_user(
+        self,
+        text: str,
+        *,
+        acp: Sequence[dict[str, object]] = (),
+        author: Author | None = None,
+    ) -> None:
         """Record a captured contribution as a user display item."""
         async with self._lock:
             await self._flush_text()
             payload: dict[str, object] = {"acp": list(acp)}
+            if author is not None:
+                payload["author"] = author.model_dump(mode="json")
             self._document.start_display("user", payload, status="complete", text=text)
 
     async def record_error(self, message: str) -> None:
