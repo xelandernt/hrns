@@ -1,5 +1,28 @@
 # Architecture
 
+## Planned shared sessions with Loro (not implemented)
+
+The current proposal and implementation checklist are in [PLAN.md](PLAN.md).
+Every native agent session will use a Python Loro document as its canonical state,
+with one server process owning execution. Python, ACP, and synchronized TypeScript
+Loro replicas will access that same session; no internal ACP bridge is needed.
+ACP and Loro mounts will be independently selectable, and AG-UI remains read-only.
+
+The document separates collaboratively editable pending input, captured consumed
+versions, lossless native model history, display content, and pending interactions.
+Ready input joins before a subsequent model request after current work finishes;
+corrections to consumed input are new contributions. Questions and approvals use
+one server acceptance path. Admitted writers are trusted across the entire
+document; field ownership is conventional, while admission/access decisions stay
+outside mutable CRDT fields.
+
+The proposed store contract persists Loro checkpoints, including pending imports,
+with in-memory and opt-in SQLite implementations. Restart restores conversation
+state and pauses interrupted work without replaying uncertain tool side effects.
+Public Pydantic AI input-injection timing and exact contracts must be verified in
+the first implementation task. The sections below describe the existing system;
+update them as the planned slices land.
+
 ## Distribution packages
 
 `hrns` is the default distribution: a metadata-only wrapper depending on the same
