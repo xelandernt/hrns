@@ -58,17 +58,18 @@ its agent scope. The principal is passed directly to these methods:
 
 | Method | Contract |
 | --- | --- |
-| `create(session_id, *, cwd, principal)` | Check permission to create and establish ownership/persistence for the assigned ID before the agent factory runs. Raise `PermissionError` to reject creation. |
-| `load(session_id, *, principal, operation)` | Fetch an accessible stored session and check permission for this operation. Return `StoredSession`, return `None` to hide it, or raise `PermissionError` to reject access. |
+| `create(session_id, *, checkpoint, principal)` | Check permission to create and establish ownership/persistence for the assigned ID before the agent factory runs. `checkpoint` carries cwd and the initial snapshot. Raise `PermissionError` to reject creation. |
+| `load(session_id, *, principal, operation)` | Fetch an accessible stored session and check permission for this operation. Return `DocumentCheckpoint`, return `None` to hide it, or raise `PermissionError` to reject access. |
 | `list_sessions(*, principal, cwd=None, cursor=None)` | Query sessions visible to the principal, filter before pagination, and return `(summaries, next_cursor)`. |
 | `delete(session_id, *, principal)` | Delete using the same permission rules as `load(..., operation="session/delete")`. |
-| `save(session_id, session)` | Persist state from the trusted runtime, using the ownership established at creation. |
+| `save(session_id, checkpoint)` | Persist a document checkpoint from the trusted runtime, using the ownership established at creation. |
 
 `SessionStore[Principal]` requires create/save/load. Implement
 `ListableSessionStore[Principal]` to advertise listing and
 `DeletableSessionStore[Principal]` to support deletion. The default
-`InMemorySessionStore` accepts every principal and provides unrestricted access;
-use an application store to enforce ownership or roles.
+`InMemoryDocumentStore` accepts every principal and provides unrestricted access;
+use an application store to enforce ownership or roles. `SQLiteDocumentStore` adds
+durable checkpoints with an optional `authorize` callback.
 
 `save` has no connection principal. Runs belong to server-owned sessions and can
 continue after an ACP disconnect. Runtime saves retain the ownership and access rules
@@ -96,12 +97,13 @@ authenticate_user: Authenticator[Principal] = authenticate
 ```
 
 Registration, session, and adapter types retain that principal parameter:
-`RegisteredAgent[Principal, Deps, Output]`, `Session[Principal, Deps, Output]`, and
-`PydanticAIACPAgent[Principal, Deps, Output]`. A store or authenticator accepting a
-different principal type does not satisfy the server's type contract. For a fully
-anonymous server, use `AcpServer[None]()` or `HrnsServer[None]()` and
-`InMemorySessionStore[None]`. The runtime's `SessionPersistence` interface exposes
-only trusted saves, so connection identity does not enter background persistence.
+`RegisteredAgent[Principal, Deps, Output]` and
+`PydanticAIACPAgent[Principal, Deps, Output]`; a live `Session[Deps, Output]` is
+transport-independent. A store or authenticator accepting a different principal type
+does not satisfy the server's type contract. For a fully anonymous server, use
+`AcpServer[None]()` or `HrnsServer[None]()` and `InMemoryDocumentStore[None]`. The
+runtime's `CheckpointPersistence` interface exposes only trusted saves, so connection
+identity does not enter background persistence.
 
 ## Separate permissions per operation
 
@@ -121,6 +123,14 @@ the same data again.
 | `document/didOpen`, `document/didChange`, `document/didClose`, `document/didSave`, `document/didFocus` | Before updating session document state. |
 | `ag-ui/snapshot` | Before reading an AG-UI snapshot. |
 | `ag-ui/events` | Before opening an AG-UI event stream. |
+| `loro/snapshot` | Before returning a session's metadata or document snapshot. |
+| `loro/list` | Before enumerating stored sessions over HTTP. |
+| `loro/sync` | Before opening a document WebSocket; necessarily includes imports and writes. |
+| `loro/write` | Before creating a session, and before the HTTP resume/clear operations. |
+
+A store cannot express "read-only sync" through `loro/sync` alone: a replica that may
+connect can also contribute. Deny `loro/sync` for read-only principals and use
+`loro/snapshot` for inspection.
 
 Creation, listing, and deletion also receive the principal through their dedicated
 store methods. A listing query can return all visible sessions while `load` permits
@@ -141,7 +151,8 @@ async def load(
     if self._owners.get(session_id) != user.user_id:
         return None
     if user.read_only and operation not in {
-        "session/load", "ag-ui/snapshot", "ag-ui/events"
+        "session/load", "ag-ui/snapshot", "ag-ui/events",
+        "loro/snapshot", "loro/list",
     }:
         raise PermissionError
     return await self._store(user).load(

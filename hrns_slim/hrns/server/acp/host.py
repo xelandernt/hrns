@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic
@@ -14,7 +15,6 @@ from uuid import uuid4
 
 import acp
 from acp import schema
-from acp.interfaces import Client
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.output import OutputDataT
@@ -22,200 +22,30 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
 from .._types import PrincipalT
-from .content import PromptContentBlock
+from ..loro.document import SessionDocument
+from ..loro.registration import LoroRegistration
+from ..loro.store import (
+    DeletableSessionStore,
+    DocumentCheckpoint,
+    ListableSessionStore,
+    SessionAccess,
+    SessionSummary,
+)
+from ..session import Session, SessionHooks, SessionView
 from .models import ModelResolver
 from .permission import PermissionPolicy
 from .presentation import ToolCallPresenter
 from .runtime import RunObserver, SessionRuntime
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
-from .store import InMemorySessionStore, SessionStore
+from .store import InMemoryDocumentStore, SessionStore
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from ..fastapi import Authenticator
     from .adapter import PydanticAIACPAgent
-
-
-@dataclass(frozen=True)
-class TurnResult(Generic[OutputDataT]):
-    stop_reason: schema.StopReason
-    output: OutputDataT | None = None
-    usage: schema.Usage | None = None
-
-
-@dataclass(frozen=True)
-class TurnHandle(Generic[OutputDataT]):
-    turn_id: str
-    prompt: tuple[PromptContentBlock, ...]
-    _future: asyncio.Future[TurnResult[OutputDataT]]
-
-    async def result(self) -> TurnResult[OutputDataT]:
-        """Wait without transferring ownership of execution to the waiter."""
-        return await asyncio.shield(self._future)
-
-
-@dataclass(frozen=True)
-class _QueuedTurn(Generic[OutputDataT]):
-    handle: TurnHandle[OutputDataT]
-    origin: Client | None
-
-
-@dataclass(frozen=True)
-class SessionView:
-    history: Callable[[], list[ModelMessage]]
-    status: Callable[[], dict[str, object]]
-    observer: RunObserver | None
-
-
-class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
-    def __init__(
-        self,
-        registration: RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT],
-        runtime: SessionRuntime[AgentDepsT, OutputDataT],
-    ) -> None:
-        self._registration = registration
-        self._runtime = runtime
-        self.session_id = runtime.state.session_id
-        self.cwd = runtime.state.cwd
-        self._queue: deque[_QueuedTurn[OutputDataT]] = deque()
-        self._worker: asyncio.Task[None] | None = None
-        self._active: TurnHandle[OutputDataT] | None = None
-        self._execution: asyncio.Task[schema.PromptResponse] | None = None
-        self._paused = False
-        self._closed = False
-        self._revision = 0
-        self._last_outcome: str | None = None
-        self._last_usage: dict[str, object] | None = None
-        runtime.on_state = self._publish
-
-    def status(self) -> dict[str, object]:
-        return {
-            "sessionId": self.session_id,
-            "revision": self._revision,
-            "status": ("waiting" if self._runtime.interactions.waiting else "running")
-            if self._active is not None
-            else "idle",
-            "activeTurnId": self._active.turn_id if self._active else None,
-            "lastOutcome": self._last_outcome,
-            "lastUsage": self._last_usage,
-        }
-
-    def _publish(self) -> None:
-        self._revision += 1
-        self._runtime.publish_state(self.status())
-
-    def history(self) -> list[ModelMessage]:
-        return list(self._runtime.state.history)
-
-    async def submit(self, prompt: str | Sequence[PromptContentBlock]) -> TurnHandle[OutputDataT]:
-        return await self._accept(prompt)
-
-    async def _accept(
-        self, prompt: str | Sequence[PromptContentBlock], origin: Client | None = None
-    ) -> TurnHandle[OutputDataT]:
-        self._registration._server._require_running()
-        if self._closed:
-            raise RuntimeError("session is closed")
-        blocks = (
-            (schema.TextContentBlock(text=prompt),) if isinstance(prompt, str) else tuple(prompt)
-        )
-        handle = TurnHandle[OutputDataT](
-            uuid4().hex, blocks, asyncio.get_running_loop().create_future()
-        )
-        # Consume unobserved failures without changing what result() raises.
-        handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        self._queue.append(_QueuedTurn(handle, origin))
-        self._start_worker()
-        return handle
-
-    def _start_worker(self) -> None:
-        if not self._paused and self._queue and self._worker is None:
-            self._worker = asyncio.create_task(self._drain())
-
-    async def _drain(self) -> None:
-        try:
-            while self._queue and not self._paused and not self._closed:
-                queued = self._queue.popleft()
-                handle = queued.handle
-                self._active = handle
-                self._runtime.last_output = None
-                self._runtime.prompt_origin = queued.origin
-                self._publish()
-                task = asyncio.create_task(self._runtime.execute(list(handle.prompt)))
-                self._execution = task
-                try:
-                    response = await task
-                    self._last_outcome = response.stop_reason
-                    self._last_usage = (
-                        response.usage.model_dump(mode="json", by_alias=True, exclude_none=True)
-                        if response.usage
-                        else None
-                    )
-                    if response.stop_reason == "cancelled":
-                        self._paused = True
-                    handle._future.set_result(
-                        TurnResult(response.stop_reason, self._runtime.last_output, response.usage)
-                    )
-                except asyncio.CancelledError:
-                    self._last_outcome = "cancelled"
-                    self._last_usage = None
-                    self._paused = True
-                    handle._future.set_result(TurnResult("cancelled"))
-                except Exception as exc:
-                    self._last_outcome = "error"
-                    self._last_usage = None
-                    self._paused = True
-                    handle._future.set_exception(exc)
-                finally:
-                    self._active = None
-                    self._execution = None
-                    self._runtime.prompt_origin = None
-                    self._publish()
-        finally:
-            self._worker = None
-
-    async def cancel(self) -> None:
-        self._paused = True
-        if self._execution is not None:
-            self._execution.cancel()
-            if self._worker is not None:
-                await asyncio.shield(self._worker)
-
-    async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
-        return tuple(queued.handle for queued in self._queue)
-
-    async def resume_queue(self) -> None:
-        self._registration._server._require_running()
-        if self._closed:
-            raise RuntimeError("session is closed")
-        self._paused = False
-        self._start_worker()
-
-    async def clear_queue(self) -> None:
-        while self._queue:
-            self._queue.popleft().handle._future.set_result(TurnResult("cancelled"))
-
-    async def close(self) -> None:
-        async with self._registration._lock:
-            await self._close()
-
-    async def _close(self) -> None:
-        self._closed = True
-        await self.cancel()
-        await self.clear_queue()
-        async with self._runtime._persist_lock:
-            pass
-        delivery = self._runtime._delivery
-        self._runtime.detach()
-        if delivery is not None:
-            await asyncio.gather(delivery, return_exceptions=True)
-        if self._worker is not None:
-            await asyncio.shield(self._worker)
-        if self._runtime.observer is not None:
-            self._runtime.observer.close()
-        self._registration._sessions.pop(self.session_id, None)
-        self._registration._views.pop(self.session_id, None)
 
 
 @dataclass
@@ -259,12 +89,12 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._usage_limits = usage_limits
         self._tool_presenter = tool_presenter
         self.mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
-        self._sessions: dict[str, Session[PrincipalT, AgentDepsT, OutputDataT]] = {}
+        self._sessions: dict[str, Session[AgentDepsT, OutputDataT]] = {}
         self._views: dict[str, SessionView] = {}
         self._lock = asyncio.Lock()
 
     async def _make_runtime(
-        self, context: SessionContext
+        self, context: SessionContext, document: SessionDocument
     ) -> SessionRuntime[AgentDepsT, OutputDataT]:
         result = self._factory(context)
         agent = await result if isawaitable(result) else result
@@ -273,6 +103,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
             deps=self._deps,
             agent_id=self.agent_id,
             session_store=self.store,
+            document=document,
             model_resolver=self.resolver,
             session_config=self._session_config,
             attachment_config=self._attachment_config,
@@ -283,57 +114,115 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
 
     def _remember(
         self, runtime: SessionRuntime[AgentDepsT, OutputDataT]
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
-        session = Session(self, runtime)
+        hooks = SessionHooks(
+            require_running=self._server._require_running,
+            lock=self._lock,
+            forget=self._forget,
+        )
+        session = Session(runtime, hooks)
         runtime.observer = self._server._make_observer(session.session_id, session.history())
         session._publish()
         self._sessions[session.session_id] = session
         self._views[session.session_id] = SessionView(
             session.history, session.status, runtime.observer
         )
+        session.start_if_ready()
         return session
+
+    def _forget(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+        self._views.pop(session_id, None)
 
     async def new_session(
         self, *, cwd: str, principal: PrincipalT | None = None
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
         context = SessionContext(
             agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
         )
-        await self.store.create(context.session_id, cwd=context.cwd, principal=principal)
-        runtime = await self._make_runtime(context)
+        document = SessionDocument.create(
+            agent_id=self.agent_id, session_id=context.session_id, cwd=context.cwd
+        )
+        await self.store.create(
+            context.session_id,
+            checkpoint=DocumentCheckpoint(
+                session_id=context.session_id,
+                agent_id=self.agent_id,
+                cwd=context.cwd,
+                snapshot=document.snapshot(),
+                pending=document.pending_updates(),
+                schema_version=document.schema_version,
+                updated_at=datetime.now(UTC),
+            ),
+            principal=principal,
+        )
+        runtime = await self._make_runtime(context, document)
         await runtime.create(context.session_id, context.cwd)
         return self._remember(runtime)
 
     async def get_session(
-        self, session_id: str, *, principal: PrincipalT | None = None
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+        self,
+        session_id: str,
+        *,
+        principal: PrincipalT | None = None,
+        operation: SessionAccess = "session/load",
+    ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
         async with self._lock:
             self._server._require_running()
-            stored = await self.store.load(
-                session_id, principal=principal, operation="session/load"
-            )
+            stored = await self.store.load(session_id, principal=principal, operation=operation)
             if stored is None:
                 raise KeyError(session_id)
             if session_id in self._sessions:
                 return self._sessions[session_id]
+            document = SessionDocument.restore(stored.snapshot, stored.pending)
             runtime = await self._make_runtime(
-                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd)
+                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd),
+                document,
             )
             await runtime.restore(session_id, stored)
             return self._remember(runtime)
 
     async def cancel_session(self, session_id: str) -> None:
         """Cancel the active turn and pause queued prompts; raise KeyError if unknown."""
-        session = await self.get_session(session_id)
+        session = await self.get_session(session_id, operation="session/cancel")
         await session.cancel()
 
     async def close_session(self, session_id: str) -> None:
         """Close the session, preserving stored history; raise KeyError if unknown."""
-        session = await self.get_session(session_id)
+        session = await self.get_session(session_id, operation="session/close")
         await session.close()
+
+    async def list_sessions(
+        self,
+        *,
+        principal: PrincipalT | None = None,
+        cwd: str | None = None,
+        cursor: str | None = None,
+    ) -> tuple[Sequence[SessionSummary], str | None]:
+        store = self.store
+        if not isinstance(store, ListableSessionStore):
+            raise NotImplementedError("this registration's store cannot list sessions")
+        return await store.list_sessions(principal=principal, cwd=cwd, cursor=cursor)
+
+    async def delete_session(self, session_id: str, *, principal: PrincipalT | None = None) -> None:
+        """Delete a live or stored session; raise KeyError if unknown."""
+        self._server._require_running()
+        async with self._lock:
+            stored = await self.store.load(
+                session_id, principal=principal, operation="session/delete"
+            )
+            if stored is None:
+                raise KeyError(session_id)
+            store = self.store
+            if not isinstance(store, DeletableSessionStore):
+                raise NotImplementedError("this registration's store cannot delete sessions")
+            session = self._sessions.get(session_id)
+            if session is not None:
+                await session._close()
+            await store.delete(session_id, principal=principal)
 
     def connection(
         self, principal: PrincipalT | None = None
@@ -351,6 +240,7 @@ class AcpServer(Generic[PrincipalT]):
 
     def __init__(self) -> None:
         self._registrations: dict[str, _RegistrationEntry[PrincipalT]] = {}
+        self._loro: dict[str, LoroRegistration[PrincipalT]] = {}
         self._stores: list[SessionStore[PrincipalT]] = []
         self._resolvers: list[ModelResolver] = []
         self._running = False
@@ -381,7 +271,7 @@ class AcpServer(Generic[PrincipalT]):
             raise ValueError("agent_id must be a safe route segment")
         if agent_id in self._registrations:
             raise ValueError(f"agent already registered: {agent_id}")
-        store = session_store if session_store is not None else InMemorySessionStore[PrincipalT]()
+        store = session_store if session_store is not None else InMemoryDocumentStore[PrincipalT]()
         if any(store is prior for prior in self._stores):
             raise ValueError("give each agent a separate store or explicit partition instance")
         if model_resolver is not None and any(model_resolver is prior for prior in self._resolvers):
@@ -405,6 +295,33 @@ class AcpServer(Generic[PrincipalT]):
         self._registrations[agent_id] = _RegistrationEntry(
             registration.connection, registration.close, registration._views, registration.store
         )
+        list_sessions = (
+            (
+                lambda principal, cwd, cursor: registration.list_sessions(
+                    principal=principal, cwd=cwd, cursor=cursor
+                )
+            )
+            if isinstance(store, ListableSessionStore)
+            else None
+        )
+        delete_session = (
+            (
+                lambda session_id, principal: registration.delete_session(
+                    session_id, principal=principal
+                )
+            )
+            if isinstance(store, DeletableSessionStore)
+            else None
+        )
+        loro: LoroRegistration[PrincipalT] = LoroRegistration(
+            create=lambda cwd, principal: registration.new_session(cwd=cwd, principal=principal),
+            get=lambda session_id, principal, operation: registration.get_session(
+                session_id, principal=principal, operation=operation
+            ),
+            list=list_sessions,
+            delete=delete_session,
+        )
+        self._loro[agent_id] = loro
         self._stores.append(store)
         if model_resolver is not None:
             self._resolvers.append(model_resolver)
@@ -425,7 +342,24 @@ class AcpServer(Generic[PrincipalT]):
 
     async def __aexit__(self, *exc: object) -> None:
         self._running = False
-        await asyncio.gather(*(entry.close() for entry in self._registrations.values()))
+        results = await asyncio.gather(
+            *(entry.close() for entry in self._registrations.values()),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.exception("failed to close an agent registration", exc_info=result)
+
+    def mount_loro(
+        self,
+        app: FastAPI,
+        *,
+        prefix: str = "/loro",
+        authenticate: Authenticator[PrincipalT] | None = None,
+    ) -> None:
+        from ..loro.routes import mount_loro_routes
+
+        mount_loro_routes(self, app, prefix=prefix, authenticate=authenticate)
 
     def mount_acp(
         self,

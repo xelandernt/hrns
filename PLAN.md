@@ -1,4 +1,771 @@
-# ACP server API and read-only AG-UI observation
+# Implementation plan: Shared native agent sessions with Loro
+
+Status: implemented and validated offline; human review of the new contracts is pending. Scope established through the interview
+and idea-refinement discussion on 2026-11-12.
+
+This is the current plan and task-list target, as requested. All Loro tasks and
+checkpoints are recorded here, rather than in a second checklist. The previous
+ACP/AG-UI plan and its implementation record remain below, unchanged; its open
+human-review item remains in `tasks/todo.md`. That item is not implicitly approved
+or superseded by this work.
+
+## Outcome
+
+Multiple TypeScript clients synchronize their Loro document replicas with a
+Python server and participate in one native Pydantic AI agent's ongoing work.
+Every session uses Loro internally, including sessions accessed only through ACP.
+Python calls, one attached ACP client, and many Loro clients share one executor
+and one durable session record. Exposing ACP and Loro endpoints is independent;
+there is no internal ACP connection between Loro and the native agent.
+
+Clients collaboratively edit pending input and explicitly mark it ready. The
+agent always finishes its current model request and associated tool execution;
+before the next model request, the server captures all eligible input together,
+with authors and server-assigned consumption order. A captured version is what
+the agent receives. Corrections to consumed input are new messages. Participants
+can answer agent questions and approvals through either interface.
+
+## Scope and decisions
+
+- One process/worker owns live sessions and execution. Multiple client replicas do
+  not create multiple agents or model runs.
+- Native agents only. No external ACP agent bridge, daemon registry, Loro Streams,
+  Flock, or general-purpose `loro-repo` replacement.
+- One Loro document per session, with separate structures for pending input,
+  consumed versions, native model history, display content, and interactions.
+  Native history retains tool calls/results and model metadata; a display
+  transcript cannot replace it. No event-sourcing framework or comprehensive
+  journal of every internal callback is required.
+- Loro is a server dependency. Mounting its synchronization endpoint is optional;
+  client-only installs must not import the server SDK. AG-UI remains optional and
+  read-only, observing the same executor.
+- Admitted writers are trusted to edit the entire document. Ownership of output,
+  execution records, and consumed versions is an application convention, not a
+  field-level security guarantee. Arbitrary historical edits do not themselves
+  request execution or rerun completed work.
+- Admission and per-session authorization stay outside mutable document fields.
+  Retain application-owned principal types and registration partitions. Loro peer
+  IDs and client-supplied author labels are not authenticated identities.
+- Provide a typed Python integration plus a mountable WebSocket synchronization
+  endpoint. Publish the document and wire contracts for the TypeScript Loro SDK;
+  a UI application and a published TypeScript client package are not required.
+- Recommended persistence: a document-store protocol, an in-memory implementation
+  for process-local usage, and an opt-in SQLite implementation for durable usage.
+  A single-process deployment does not need a network database. Store metadata
+  supports listing without opening every document.
+- Persist document data before acknowledging durability. Preserve pending imports
+  as well as integrated state. Transport delivery, durable storage, and actual
+  model consumption are distinct acknowledgments.
+- Restore conversations and pending input after restart. Mark interrupted work
+  explicitly and pause execution until an explicit resume; do not automatically
+  rerun uncertain tool side effects or claim exactly-once model/tool execution.
+- No backwards-compatibility requirement: replace the JSON `StoredSession`
+  persistence path and update repository callers rather than maintain two sources
+  of truth or compatibility aliases. No migration of existing stored sessions is
+  included.
+- No new tests. Verification uses focused manual/offline exercises and existing
+  lint, type, build, and documentation commands. Avoid `Any`, casts, and ignore
+  comments. Planning does not authorize implementation in this turn.
+
+Planned architecture decisions are also recorded, explicitly as proposals, in
+`ARCHITECTURE.md`. Update that file with the implemented result as slices land.
+
+## Existing integration points
+
+| Location | Current responsibility | Planned change |
+| --- | --- | --- |
+| `server/acp/host.py` | Registrations, one executor, FIFO, turn handles | Share session ownership across interfaces; document-backed scheduling |
+| `server/acp/runtime.py` | Native execution, ACP rendering, interaction callbacks | Separate native execution from transport delivery; add input consumption boundary |
+| `server/acp/session.py` | Model history, transcript, settings, attachment documents | Distinguish durable session state from connection-owned editor state |
+| `server/acp/store.py` | `StoredSession` persistence and principal-aware access | Replace persistence payload with Loro checkpoints, retain authorization semantics |
+| `server/acp/interactions.py` | Wait for one attached ACP client | Session-owned interaction records resolved by ACP or Loro |
+| `server/acp/adapter.py` | ACP requests, attachment, replay | Translate ACP into the same document-backed session operations |
+| `server/ag_ui.py`, `server/host.py` | Native event conversion and read-only mounts | Preserve one native stream and observer lifecycle alongside Loro |
+| `server/fastapi.py` | ACP authentication and transport | Reuse connection authentication conventions for independent Loro routes |
+
+Paths in this table are relative to `hrns_slim/hrns/`.
+
+## Behavioral contract
+
+### Input and execution
+
+1. A stable input ID identifies a contribution. Drafts do not execute. Ready input
+   is eligible for the next consumption boundary, not an instruction to interrupt.
+2. At that boundary, synchronously select all eligible input currently integrated
+   on the server, capture its content/version and author, and assign monotonic
+   consumption sequence numbers. Persist that decision before model dispatch.
+   Cross-client send time and CRDT list order alone do not define execution order.
+3. Changes arriving after capture cannot modify the captured content. Late edits
+   remain visible but need a new ready contribution to affect future context.
+   A client's local offline edit cannot retroactively change an earlier request.
+4. Preserve separate states for draft/ready, captured, delivered to native history,
+   and interrupted/failed. Do not equate enqueue acceptance with model consumption.
+   Stable receipts prevent normal reconnect/replay from dispatching input twice.
+5. An idle session starts from ready input. Input arriving during the apparent
+   final response must cause another request or a subsequent execution after that
+   response finishes. A serialized finish/start handoff prevents stranded input
+   and concurrent executors. A paused session stays paused until explicit resume.
+6. Questions and approvals resolve by the first valid answer accepted by the
+   server for a pending interaction ID. Later answers cannot repeat a tool.
+   A CRDT last-writer-wins field alone does not implement this rule.
+7. An explicit cancel remains available; ordinary input never cancels work.
+   Disconnect removes only connection-owned resources. Close/shutdown owns task
+   cancellation, final persistence, and waiter/subscriber cleanup.
+
+### Python and ACP contracts to finalize in T1
+
+Keep explicit concepts for a contribution's acceptance/consumption receipt and an
+execution's result handle. Do not pretend every mid-run contribution starts a
+separate turn. Define how `Session.submit`, `TurnHandle`, pending-input inspection,
+resume/clear, and ACP prompt responses map to these concepts, then update callers
+directly. All transports must use the same acceptance and consumption operations;
+do not retain an independent ACP FIFO with conflicting ordering rules.
+
+Retain at most one ACP attachment, including generation checks for its MCP,
+filesystem, and terminal resources. ACP is an interface to the native session,
+not the owner of shared execution. Loro clients do not implicitly supply client
+tools. ACP responses complete at the documented execution boundary even if Loro
+participants contribute additional input during that execution.
+
+## Feasibility evidence and first gate
+
+The installed Pydantic AI source exposes public `AgentRun.enqueue` and
+`RunContext.enqueue`, a `before_model_request` capability hook, and
+`EnqueuedMessagesEvent`. Current upstream documentation describes `asap` input
+delivery at the next request, or continuation if the run would otherwise finish.
+This is a strong candidate, not a completed compatibility verification.
+
+The current runtime uses `run_stream_events`, while external `AgentRun.enqueue`
+is documented with `agent.iter()`. T1 must establish a supported streaming path
+and verify availability at the selected minimum dependency version. Do not import
+private drain/queue internals. Also prove that pending text can remain editable
+until capture: eagerly copying it into an upstream queue at network arrival would
+freeze it too early. Prefer a request-boundary capability or a supported public
+enqueue/dequeue strategy after examining its exact timing and history semantics.
+
+Sources to consult and pin during implementation:
+
+- [Pydantic AI message injection](https://pydantic.dev/docs/ai/core-concepts/message-history/#injecting-messages-mid-run).
+- [Pydantic AI AgentRun API](https://pydantic.dev/docs/ai/api/pydantic-ai/run/).
+- [Pydantic AI capabilities](https://pydantic.dev/docs/ai/capabilities/overview/).
+- [Official Python Loro bindings](https://github.com/loro-dev/loro-py).
+- [Loro synchronization](https://www.loro.dev/docs/tutorial/sync) and
+  [API reference](https://www.loro.dev/docs/api/js).
+- `REPORT.md`, especially sections 6–9 and 14, as prior investigation rather than
+  a guarantee for different SDK versions.
+
+## Dependency order
+
+T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8 → T9 → T10 → T11 → T12 → T13 → T14 → T15 → T16.
+
+This conservative implementation order keeps runtime and document changes
+sequential. T10's wire contract is fixed in T1, and T11 builds on its transport
+engine. No delegated agent work is required. Independent documentation or SDK
+exercises could be done separately after contracts stabilize, but shared runtime,
+schema, and persistence edits should stay sequential.
+
+## Tasks
+
+### T1 — Prove native input delivery
+
+**Description:** Resolve the highest-risk integration before restructuring state.
+Manually exercise public Pydantic AI injection and Python/TypeScript Loro exchange;
+write down exact input, handle, storage, schema, and transport contracts.
+
+**Acceptance criteria:**
+- [x] A controlled native run receives two authors' input after an in-flight tool
+  finishes, retains it in native history, and continues after final-response input.
+- [x] Editable input is captured at the documented boundary; supported public APIs,
+  minimum SDK versions, Unicode offsets, pending-import persistence, and Python/JS
+  binary exchange are verified without private upstream imports.
+- [x] This plan and `ARCHITECTURE.md` record concrete handle semantics, checkpoint
+  types, route/frame shapes, and dependency versions; a material gap is reported
+  before dependent implementation rather than hidden behind a speculative API.
+
+**Verification:** Manual/offline exercises against controlled model output and
+two SDK replicas; record results and versions in this plan. No test files.
+**Dependencies:** None.
+**Files likely touched:** `PLAN.md`, `ARCHITECTURE.md`.
+**Estimated scope:** Small, 2 documentation files; disposable feasibility work.
+
+**T1 evidence (2026-11-12).** Versions exercised: `pydantic-ai-slim` 2.57.0,
+`loro` 1.17.1 (CPython 3.14.5, macOS arm64), `loro-crdt` 1.17.0 (Node 26.7.0).
+Disposable scripts were kept outside the repository.
+
+Capture point and handle semantics resolved:
+
+- A per-run `AbstractCapability.before_model_request` hook is the capture
+  boundary. It reads eligible contributions from the session document at the
+  instant of the model request, then sets `request_context.messages` to a new
+  list ending in the captured `ModelRequest`s and extends `RunContext.messages`
+  with the same objects. That assignment form is not deprecated; the upstream
+  pending-message drain capability uses the same pair of writes. No private
+  drain or queue imports are used.
+- A run started from idle pre-captures ready input into `message_history` before
+  dispatch, so the first request sees it and history records it. The hook still
+  runs at every request, including requests after a tool result. A run started
+  from a deferred-tool continuation passes `run_input=None`; history ends in a
+  tool-return request, so the model is still called.
+- `agent.run_stream_events(None, message_history=...)` supports the hook. A
+  controlled streaming run with a tool call produced two capture boundaries:
+  the injected messages reached the model, appeared in
+  `result.all_messages()`, and retained per-message `metadata` (author and
+  stable contribution id). `FunctionModel` needs `stream_function` for the
+  streamed path; this is a test-double property only.
+- Input arriving after an apparent final response is not injected by the ended
+  run. The scheduler starts a subsequent execution whose pre-capture includes
+  it. That is the documented continuation behavior; no upstream
+  `priority="asap"` queue is used, because enqueuing at network arrival would
+  freeze pending text before the boundary and choose a different capture rule.
+- `TurnHandle` is tied to a contribution's consumption record, not to one
+  "turn". One execution can complete several handles when it captures several
+  contributions. A handle that is never consumed resolves cancelled; waiting on
+  a handle never owns execution. ACP `session/prompt` waits on its handle, so
+  its response completes when the execution that consumed it reaches an
+  outcome, even if other participants contributed during that execution.
+
+Loro contracts resolved:
+
+- Python and JavaScript exchange snapshots and updates in both directions;
+  scalar `status` and `LoroText` content with non-BMP emoji converged
+  (`he😀llo` → `🦀:he😀llo`). `doc.import_()` is the Python import; imported
+  updates do not fire `subscribe_local_update`, so broadcasting local updates
+  cannot echo an import. A callback must return `True` to stay subscribed.
+- Python `LoroText` indices are Unicode code points (`len_unicode`), JavaScript
+  positions are UTF-16 (`len_utf16`). Server-produced streamed text is
+  append-only via `push_str`; clients own pending-input text. Server-created
+  input inserts its whole text once into an empty container. Documented offsets
+  are code points.
+- Checkpoint contract: `snapshot = doc.export(ExportMode.Snapshot())`,
+  `pending = doc.export_pending_updates()`, `version = doc.oplog_vv.encode()`,
+  `frontiers = doc.oplog_frontiers.encode()`. Restore imports the snapshot and
+  then the pending bytes. `ImportStatus.pending` identifies retained pending
+  imports. Version vectors implement `encode()`/`VersionVector.decode()` and can
+  drive `ExportMode.Updates(vv)` for either direction.
+- Minimum pinned versions: `loro>=1.17.1,<2` (server extra) and
+  `loro-crdt@1.17.0` for the documented TypeScript example.
+
+Wire contract fixed here for T10/T11:
+
+| Frame | Tag | Payload |
+| --- | --- | --- |
+| `version` | `0x01` | UTF-8 JSON `{"schemaVersion":1,"vv":"<base64>","sessionId":"…"}` |
+| `update` | `0x02` | raw Loro update bytes, one coalesced update per frame, ≤ 4 MiB |
+| `snapshot` | `0x03` | `u32 chunkIndex`, `u32 chunkCount`, raw snapshot bytes, ≤ 256 KiB per chunk |
+| `ack` | `0x04` | UTF-8 JSON `{"durable":true,"seq":N}` after the checkpoint is saved |
+| `error` | `0x05` | UTF-8 JSON `{"code":"…","message":"…"}` |
+
+Handshake: the server sends `version` on accept; the client replies with
+`version`. Each side then sends `snapshot` chunks (first join) or `update`
+frames computed from the peer's version vector. Live changes are `update`
+frames carrying only local updates. Imported updates are persisted before an
+`ack` is sent. Frame and peer-queue limits are 4 MiB and 128 frames; overflow
+closes that peer (code 1013) and relies on reconnect resynchronization. Schema
+version other than 1 closes with an `error` frame and code 1008.
+
+### T2 — Establish a transport-independent session boundary
+
+**Description:** Move native ownership behind a server session interface while
+keeping ACP behavior working through its adapter. Avoid a wholesale directory
+reorganization: extract only the boundaries needed by the next slices.
+
+**Acceptance criteria:**
+- [x] A Python-created session runs without an ACP client; the same session can
+  attach/replay through ACP without constructing a second agent.
+- [x] Core event and pending-interaction interfaces do not require an outbound ACP
+  client; connection resources remain attachment-owned.
+- [x] Registration/output/dependency/principal typing remains intact; existing
+  entry points remain usable after this slice.
+
+**Verification:** Focused Python/ACP create-run-attach-disconnect exercise; `just lint`.
+**Dependencies:** T1.
+**Files likely touched:** `server/acp/host.py`, `server/acp/runtime.py`,
+`server/acp/session.py`, `server/acp/adapter.py`, `server/session.py` (new).
+**Estimated scope:** Medium, up to 5 files. Paths hereafter use the same server prefix.
+
+### Checkpoint A — Execution boundary
+
+- [x] T1–T2 acceptance criteria and focused verification pass.
+- [x] Input injection uses supported APIs with a documented capture point.
+- [x] Review the resolved contracts before schema and persistence implementation.
+
+### T3 — Represent one session in Loro
+
+**Description:** Add the Python SDK and a typed session-document domain layer for
+creation, reading, subscriptions, and validated local writes.
+
+**Acceptance criteria:**
+- [x] A new document represents pending inputs, consumption records, native
+  history, display content, settings/todos/skills, lifecycle, and interactions.
+- [x] Stable IDs, schema version, container identities, and author representation
+  are documented; streaming/coedited text uses text containers, opaque native
+  records use lossless typed serialization, and metadata uses scalar fields.
+- [x] Concurrent creation and text edits converge across Python/TypeScript;
+  secrets and connection-owned resources are not serialized into the document.
+
+**Verification:** Manual concurrent SDK edits including emoji; `just lint`.
+**Dependencies:** T2.
+**Files likely touched:** `server/loro/document.py`, `server/loro/models.py`,
+`server/loro/__init__.py` (new), `hrns_slim/pyproject.toml`, `uv.lock`.
+**Estimated scope:** Medium, 5 files.
+
+### T4 — Replace session persistence with document checkpoints
+
+**Description:** Make document checkpoints the canonical store payload while
+retaining principal-aware creation/access/list/delete and registration partitioning.
+Provide a document-backed in-memory implementation for existing lightweight use.
+
+**Acceptance criteria:**
+- [x] Store/load round-trips integrated state plus pending imports, schema version,
+  and metadata through one checkpoint contract; JSON `StoredSession` is replaced
+  as the storage payload. Any transitional wire-facing view is derived from the
+  document and cannot become a second persistence path.
+- [x] Session authorization still runs before resident lookup and restoration;
+  trusted runtime saves remain independent of client connections.
+- [x] There is one runtime source of truth; native-history caches are derived
+  from the document rather than independently writable persisted histories.
+
+**Verification:** Manual restore, principal-denial, and per-agent partition checks;
+`just lint`.
+**Dependencies:** T3.
+**Files likely touched:** `server/acp/store.py`, `server/acp/host.py`,
+`server/acp/runtime.py`, `server/loro/store.py`, `examples/fastapi_app.py`.
+**Estimated scope:** Medium, 5 files.
+
+### Checkpoint B — Canonical state
+
+- [x] T3–T4 acceptance criteria pass; `just check` passes.
+- [x] ACP-only and Python-only sessions use Loro internally.
+- [x] No separate mutable JSON persistence path or compatibility shim remains.
+
+### T5 — Persist sessions in SQLite
+
+**Description:** Implement opt-in durable document storage with lightweight session
+metadata, atomic checkpoints, and explicit recovery behavior.
+
+**Acceptance criteria:**
+- [x] SQLite atomically stores a snapshot and pending imports, with agent/session
+  partitioning and metadata-backed listing; deletion handles live and stored state.
+- [x] A fresh process restores native context, pending inputs, and published partial
+  display; interrupted execution is marked and paused rather than replayed.
+- [x] Persistence failures prevent durability acknowledgment or new model dispatch;
+  graceful shutdown flushes state without losing pending operations.
+
+**Verification:** Manual close/reopen and interrupted-checkpoint scenarios on a
+temporary database; `just lint`.
+**Dependencies:** T4.
+**Files likely touched:** `server/loro/sqlite.py`, `server/loro/store.py`,
+`server/loro/__init__.py`.
+**Estimated scope:** Medium, 3 files.
+
+### T6 — Publish one native run into the document
+
+**Description:** Make a Python-submitted prompt produce document-backed live output,
+native context, tool records, and lifecycle without requiring a sync endpoint.
+
+**Acceptance criteria:**
+- [x] Text/reasoning and tool activity update stable records from one native event
+  stream; batching bounds write frequency and flushes at lifecycle boundaries.
+- [x] Completed native messages round-trip losslessly; partial display survives
+  interruption without being presented as completed model history.
+- [x] Settings, todos, invoked skills, and usage remain session-scoped; document
+  subscriptions cannot block execution or cause an output-to-input feedback loop.
+
+**Verification:** Manual streamed text/tool run, typed output, deferred run, and
+cancellation; inspect reopened document; `just lint`.
+**Dependencies:** T5.
+**Files likely touched:** `server/acp/runtime.py`, `server/acp/session.py`,
+`server/loro/document.py`, `server/loro/publisher.py`, `server/session.py`.
+**Estimated scope:** Medium, 5 files.
+
+### Checkpoint C — Durable single-client flow
+
+- [x] T5–T6 acceptance criteria pass; `just check` passes.
+- [x] One native execution publishes live content and restores full conversation context.
+- [x] Interrupted work is distinguishable from completed work without automatic replay.
+
+### T7 — Consume collaborative input at model boundaries
+
+**Description:** Connect eligible document input to the public native mechanism
+proved in T1, preserving editable drafts until the capture boundary.
+
+**Acceptance criteria:**
+- [x] Each boundary captures all integrated ready messages with stable IDs,
+  authors, frozen content/version, and server-assigned order before dispatch.
+- [x] Native delivery is reconciled to consumption receipts; duplicate imports,
+  unrelated document edits, and late pending-text edits cannot redeliver input.
+- [x] New input never cancels a running model/tool step; corrections to consumed
+  input are separate contributions and tool-call/result ordering remains valid.
+
+**Verification:** Manual two-replica contributions during a controlled tool call,
+edit-before/edit-after capture, duplicate delivery, and model-failure scenarios;
+`just lint`.
+**Dependencies:** T6.
+**Files likely touched:** `server/loro/input.py`, `server/loro/document.py`,
+`server/acp/runtime.py`, `server/session.py`.
+**Estimated scope:** Medium, 4 files.
+
+### T8 — Schedule idle and finishing sessions
+
+**Description:** Use one scheduler for document-backed input and explicit execution
+handles, including the race between final output and newly ready input.
+
+**Acceptance criteria:**
+- [x] Ready input starts an idle session; input arriving at run completion is
+  consumed by a continuation or the next execution without stranded work.
+- [x] Single-owner scheduling survives detach/reconnect; pause/cancel/resume/clear
+  use the same pending records and every handle reaches a documented outcome.
+- [x] Restored sessions remain paused; resume reconciles captured-but-interrupted
+  input explicitly without silently repeating uncertain tool execution.
+
+**Verification:** Manual idle/start/finish races, deferred wait, cancellation,
+shutdown, and restored resume; `just lint`.
+**Dependencies:** T7.
+**Files likely touched:** `server/acp/host.py`, `server/session.py`,
+`server/loro/input.py`, `server/acp/runtime.py`.
+**Estimated scope:** Medium, 4 files.
+
+### Checkpoint D — Ongoing participation
+
+- [x] T7–T8 acceptance criteria pass; `just check` passes.
+- [x] Two document replicas influence ongoing work without cancelling a step.
+- [x] No input is stranded at completion or duplicated by reconnect; consumed
+  versions remain the versions used by the model.
+
+### T9 — Resolve session-owned interactions
+
+**Description:** Store pending questions and approvals as session domain records,
+with one server acceptance path independent of transport.
+
+**Acceptance criteria:**
+- [x] Pending requests include stable IDs and validation data; an eligible Loro
+  answer resolves the request without an ACP attachment.
+- [x] The server records the first accepted valid answer; duplicate, conflicting,
+  stale, or cancelled answers do not resolve another request or repeat a tool.
+- [x] Disconnect retains pending interactions; cancel invalidates them; restart
+  exposes interrupted decisions without claiming a live continuation exists.
+
+**Verification:** Manual conflicting approval/question answers, unavailable client,
+detach, cancel, and restoration scenarios; `just lint`.
+**Dependencies:** T8.
+**Files likely touched:** `server/acp/interactions.py`, `server/acp/runtime.py`,
+`server/loro/interactions.py`, `server/loro/document.py`.
+**Estimated scope:** Medium, 4 files.
+
+### T10 — Synchronize replicas through a bounded transport engine
+
+**Description:** Implement transport-neutral peer synchronization using the frame
+contract fixed in T1. This slice supports connected peers without HTTP routing.
+
+**Acceptance criteria:**
+- [x] Initial join atomically captures synchronization state and subscribes to
+  later changes; version-vector exchange reconciles local offline updates and
+  server changes in both directions without an echo loop.
+- [x] Updates are durably persisted before a durability acknowledgment; pending
+  imports are retained and trigger dependency catch-up rather than execution.
+- [x] Frame/update limits and bounded peer queues protect execution from slow
+  peers; reconnect resynchronizes instead of silently losing deltas. Snapshot
+  bootstrap has an explicit size/chunk policy and peer-ID collision policy.
+
+**Verification:** Manual two-peer exchange, out-of-order imports, duplicate updates,
+reconnect with unsent edits, and slow-peer overflow; `just lint`.
+**Dependencies:** T9.
+**Files likely touched:** `server/loro/protocol.py`, `server/loro/sync.py`,
+`server/loro/store.py`, `server/loro/document.py`.
+**Estimated scope:** Medium, 4 files.
+
+### Checkpoint E — Shared state and decisions
+
+- [x] T9–T10 acceptance criteria pass; `just check` passes.
+- [x] Conflicting interaction answers produce one accepted result.
+- [x] Python/TypeScript replicas converge after reconnect without blocking execution.
+
+### T11 — Mount authenticated Loro sessions
+
+**Description:** Expose `mount_loro(app, prefix=..., authenticate=...)` with a
+per-session WebSocket and a minimal session creation/discovery surface so a
+TypeScript-only client can start or join without first connecting over ACP.
+
+**Acceptance criteria:**
+- [x] The documented lifecycle routes and WebSocket under the chosen agent/session
+  namespace reuse canonical registrations and synchronized session restoration.
+- [x] Authentication uses `HTTPConnection`; session access operations distinguish
+  read/sync/write/create/list as needed and are checked before exposing content.
+- [x] Joining and importing through the route uses T10; disconnect does not cancel
+  accepted work, and shutdown closes peers and flushes persistence.
+
+**Verification:** Manual local WebSocket/HTTP create, join, list, denied access,
+unknown-session, reconnect, and shutdown with two SDK clients; `just lint`.
+**Dependencies:** T10.
+**Files likely touched:** `server/loro/routes.py`, `server/acp/host.py`,
+`server/acp/store.py`, `server/fastapi.py`.
+**Estimated scope:** Medium, 4 files.
+
+### T12 — Participate in one session through ACP and Loro
+
+**Description:** Complete ACP translation into shared input and interaction
+operations, using the handle/response semantics resolved in T1.
+
+**Acceptance criteria:**
+- [x] An ACP prompt enters the same document-backed path as Loro/Python input;
+  ACP and Loro clients observe one output and consistent execution outcomes.
+- [x] ACP questions/approvals share T9 request IDs and acceptance, including a
+  Loro answer winning while an ACP request is outstanding and vice versa.
+- [x] Replay and origin suppression show each message once; one-attachment and
+  generation-bound client-tool rules remain intact without gating Loro interaction
+  on ACP capabilities or disconnecting native work when ACP leaves.
+
+**Verification:** Manual combined ACP plus two Loro clients, raced interaction
+answers, mid-run join, and lost client-tool result; `just lint`.
+**Dependencies:** T11.
+**Files likely touched:** `server/acp/adapter.py`, `server/acp/runtime.py`,
+`server/acp/interactions.py`, `server/acp/host.py`, `server/acp/session.py`.
+**Estimated scope:** Medium, 5 files.
+
+### Checkpoint F — Both public interfaces
+
+- [x] T11–T12 acceptance criteria pass; `just check` passes.
+- [x] TypeScript-only clients can create/join without an ACP bootstrap connection.
+- [x] One ACP client and multiple Loro clients participate in one native executor.
+
+### T13 — Preserve AG-UI and session lifecycle
+
+**Description:** Keep existing read-only observers and settings consistent with
+live contributions, while completing cancellation, deletion, and recovery cleanup.
+
+**Acceptance criteria:**
+- [x] AG-UI converts the same single native stream; injected messages appear once,
+  with correct identities and no false completion during continuation/approval.
+- [x] Snapshot/replay agrees with persisted native context and partial display;
+  settings and provider changes retain their documented scope and timing.
+- [x] Close/delete/shutdown resolves handles and subscriptions; restore marks
+  interrupted runs and obsolete interactions without resurrecting client tools.
+
+**Verification:** Manual combined AG-UI/ACP/Loro observation during continuation,
+cancel, settings changes, close/delete, and reopen; `just lint`.
+**Dependencies:** T12.
+**Files likely touched:** `server/ag_ui.py`, `server/host.py`,
+`server/acp/host.py`, `server/acp/runtime.py`, `server/loro/sync.py`.
+**Estimated scope:** Medium, 5 files.
+
+### T14 — Expose the integration through shipped entry points
+
+**Description:** Finalize public exports, stdio/CLI runtime wiring, and a concrete
+FastAPI example with native server tools and opt-in durable storage.
+
+**Acceptance criteria:**
+- [x] Public Python exports and existing launchers use the canonical Loro session
+  core; server-only imports do not leak into client-only installations.
+- [x] The example mounts ACP and Loro independently and uses server-side tools so
+  Loro-only participation does not depend on an ACP client's filesystem.
+- [x] Full/slim package dependency resolution and the optional AG-UI extra work;
+  platform/Python requirements of the pinned Loro wheel are documented.
+
+**Verification:** CLI help, stdio startup, example import/startup, install-matrix
+inspection, and `just check`.
+**Dependencies:** T13.
+**Files likely touched:** `server/__init__.py`, `server/acp/server.py`,
+`server/runtime.py`, `examples/fastapi_app.py`, `hrns_slim/pyproject.toml`.
+**Estimated scope:** Medium, 5 files.
+
+### Checkpoint G — Shipped integration
+
+- [x] T13–T14 acceptance criteria pass; packaging/build checks pass.
+- [x] Existing ACP and read-only AG-UI flows remain usable with the shared core.
+- [x] Restart limits and trusted-writer behavior match the documented contract.
+
+### T15 — Document the session and wire contracts
+
+**Description:** Publish implementable Python/TypeScript integration instructions
+and update architecture to describe the implemented state rather than the proposal.
+
+**Acceptance criteria:**
+- [x] Documentation specifies root/container types, IDs, readiness, capture,
+  author/order semantics, interaction resolution, frame encodings, handshake,
+  acknowledgments, errors, limits, reconnect, and schema-version rejection.
+- [x] A minimal TypeScript Loro SDK example creates/joins, edits pending input,
+  marks it ready, receives output, and answers a request; no full UI is required.
+- [x] Python persistence/mount examples and `ARCHITECTURE.md` explain one-server
+  ownership, trusted writers, native history vs display, and restart semantics.
+
+**Verification:** Follow both language examples against the server and run
+`just docs-build`; check cross-links and public signatures.
+**Dependencies:** T14.
+**Files likely touched:** `docs/loro.md`, `docs/mount-acp.md`,
+`docs/ag_ui.md`, `ARCHITECTURE.md`, `zensical.toml`.
+**Estimated scope:** Medium, 5 files.
+
+### T16 — Validate the complete collaborative flow
+
+**Description:** Perform the final combined exercise, update package READMEs and
+record implementation evidence and remaining limitations in this plan.
+
+**Acceptance criteria:**
+- [x] Two TypeScript replicas and an ACP client share a session: concurrent edits,
+  ongoing corrections, questions/approvals, final-response input, offline reconnect,
+  cancellation, and process restart satisfy this plan's behavioral contract.
+- [x] Native tool context, todos/skills/settings, response identities, and partial
+  display survive the appropriate boundaries; slow peers do not delay execution.
+- [x] Final lint/type/build/docs gates pass; no tests, compatibility layer,
+  external-agent bridge, client UI, or distributed runtime was added.
+
+**Verification:** Focused combined manual/offline exercise, `just check`, and
+`just docs-build`. Record SDK versions, scenarios, and observed limitations here;
+do not add a new automated test suite or repeat successful gates without cause.
+**Dependencies:** T15.
+**Files likely touched:** `PLAN.md`, `README.md`, `hrns_slim/README.md`,
+`examples/README.md`, `ARCHITECTURE.md`.
+**Estimated scope:** Medium, 5 documentation files.
+
+### Checkpoint H — Complete
+
+- [x] T15–T16 acceptance criteria pass; final evidence and limitations are recorded.
+- [x] All confirmed requirements are implemented and ready for human review.
+- [ ] Human review of the new session, persistence, and synchronization contracts.
+
+## Risks and mitigations
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Upstream injection freezes input too early or omits native history | High | T1 verifies capture timing and persistent history through public APIs before refactoring |
+| Crash between capture, model dispatch, and delivery recording | High | Persist explicit stages; pause uncertain work on restart; do not promise exactly-once side effects |
+| Whole-document writes alter execution records or spoof author labels | Accepted constraint | Treat writers as trusted, derive authority from admission, document that field ownership is conventional |
+| Full snapshots omit unintegrated imports | High | Atomically preserve snapshot plus pending bytes; reconcile dependencies on reconnect |
+| Streaming creates excessive operations or disk writes | Medium | Batch output, measure document growth, flush at boundaries; defer destructive compaction |
+| Multiple sources trigger duplicate dispatch or answers | High | Stable contribution/request IDs, serialized acceptance, durable receipts, one scheduler |
+| ACP result semantics conflict with mid-run contributions | High | Resolve handle/execution semantics in T1; update callers directly instead of adding a second queue |
+| Runtime refactor duplicates event conversion | Medium | One native stream with composed publishers; AG-UI identity and deferred-run verification |
+| Client SDK/runtime versions diverge | Medium | Pin verified versions, reject unsupported schemas, publish a minimal wire contract |
+
+## Remaining decisions and defaults
+
+- T1 fixes exact public types and route/frame names; examples such as
+  `mount_loro` describe intent until signatures are verified.
+- Default persistence is process-local unless an application supplies SQLite or
+  another document-store implementation. Durable acknowledgments only claim the
+  configured backend's guarantees. If applications need another backend, implement
+  the same protocol rather than another session representation.
+- Restored interrupted work remains paused. Ordinary ready input on a healthy idle
+  live session starts automatically. An explicit resume must define disposition of
+  uncertain captured input without repeating side effects silently.
+- Presence/cursors, attachments/blob storage, historical forks, automatic compaction,
+  and TypeScript SDK packaging are deferred; basic synchronization needs none of them.
+- No feature implementation starts as part of writing this plan.
+
+## Implementation record
+
+T1–T15 are implemented against Pydantic AI 2.57.0, `loro` 1.17.1, and
+`loro-crdt` 1.17.0 (Node 26.7.0). T16 evidence and limitations are recorded after
+the final combined exercise below. No tests were added.
+
+Concrete contracts:
+
+- `Session[Deps, Output]` (`server/session.py`) owns scheduling and handles.
+  `TurnHandle` is tied to one contribution's consumption record. `SessionRuntime`
+  is transport-independent native execution; ACP is an interface through
+  `PydanticAIACPAgent`.
+- `SessionDocument` (`server/loro/document.py`) implements schema version 1 with
+  `meta`, `lifecycle`, `settings`, `inputs`, `consumption`, `history`, `display`,
+  and `interactions`. `InputCapture` (`server/loro/input.py`) is the single capture
+  boundary; `DocumentPublisher` (`server/loro/publisher.py`) projects the native
+  stream; `InteractionService` (`server/loro/interactions.py`) accepts the first
+  valid answer from any interface.
+- `DocumentCheckpoint` plus `SessionStore`/`ListableSessionStore`/
+  `DeletableSessionStore` in `server/loro/store.py`; `InMemoryDocumentStore` is the
+  default and `SQLiteDocumentStore` is opt-in. `server/acp/store.py` retains only
+  ACP-facing re-exports and the transcript title helper.
+- `SessionSync` (`server/loro/sync.py`) and the frame codec
+  (`server/loro/protocol.py`) exchange version vectors, snapshots/updates, bounded
+  peer queues, persistence-before-ack, fan-out, and close codes 1008/1013/1011.
+- `mount_loro` adds `POST/GET/DELETE {prefix}/{agent_id}/sessions...` and
+  `WS .../{session_id}/sync`; `AcpServer.get_session/list_sessions/delete_session`
+  carry the requested `SessionAccess` operation.
+
+Verification performed (disposable scripts outside the repository):
+
+- Native streaming capture with two authors across a tool call; author metadata
+  retained in native history; final-response input consumed by a later execution.
+- Python/JS snapshot and update exchange, including non-BMP emoji, version vectors,
+  and pending imports (`export_pending_updates`).
+- Principal-aware in-memory and SQLite create/load/list/delete, restore, partition
+  denial, interrupted restore paused, and creation failure when durability fails.
+- Live display publication, flushes at boundaries, cancellation leaving partial
+  display but no completed model response, and lossless history round-trip.
+- Two-author mid-tool capture, frozen content after capture, duplicate idempotence,
+  clear/cancel, and idle/start/finish scheduling across three executions.
+- Loro-only and ACP-plus-Loro answers to the same approval/question, including an
+  answer written as a document `response` (server ingests and resolves it), with the
+  first accepted answer winning and later answers rejected; restart marks pending
+  obsolete.
+- Version-vector join, snapshot bootstrap, bidirectional fan-out, duplicate delivery,
+  offline reconnect, peer-ID collision, and slow-peer overflow close 1013.
+- HTTP create/list/read/delete, 401/403/404 paths, WebSocket join and ack, Loro-authored
+  input starting a run, and a real Node/`loro-crdt` client following the documented
+  TypeScript handshake against uvicorn.
+- ACP prompt plus Loro contribution in one execution, origin echo suppression, replay,
+  and AG-UI snapshots containing captured user messages exactly once.
+- ACP prompt/cancel acceptance race with a deliberately slow SQLite save (10/10 runs
+  returned `cancelled` with no ready ACP contribution left); paused prompts reject
+  instead of hanging. A programmatic `submit` while paused remains pending and runs
+  after `resume_queue()`, while Loro-authored ready input behaves the same way.
+- T16 combined exercise: two Node/`loro-crdt` replicas and an attached ACP client in
+  one SQLite-backed session; concurrent `alpha`/`beta` edits during an approval wait,
+  a Loro answer winning over ACP, a second execution for late input, all four user
+  texts in order, AG-UI showing each once, then restart restoring history as
+  `interrupted`/paused. `just check` and `just docs-build` pass.
+
+Observed limitations, reported rather than hidden:
+
+- One process owns execution. Multiple workers/fan-out, presence, cursors, and
+  TypeScript SDK packaging are outside this implementation.
+- Restored interrupted work is paused and orphaned captures are failed, not replayed.
+  Exactly-once model/tool execution is not claimed.
+- `SessionSync` accepts one snapshot per peer connection and closes on malformed
+  frames; there is no resumable chunk cursor across a dropped snapshot transfer.
+- Loro clients are trusted across the document. `author` labels and peer IDs are not
+  authentication; authentication and operation checks remain in the application.
+- The AG-UI converter publishes captured input once, but partial assistant display
+  after an interruption is not added to AG-UI native history (by design); Loro clients
+  retain it as display content.
+- Pydantic AI may merge adjacent captured `ModelRequest`s when a later execution
+  starts. Text content and order remain correct, but when two or more contributions
+  are merged, their application metadata is dropped (only the reserved framework
+  namespace survives). The immutable `consumption` records and user display records
+  are the authoritative per-contribution author/order source; UIs should read those
+  rather than message metadata.
+- Checkpoints export a full snapshot on each persistence boundary and imported updates
+  are persisted individually. Batching/compaction and an operation index are deferred;
+  document size and write frequency should be measured for very long sessions.
+- A document poisoned by a schema/identity-changing import stops persisting and
+  dispatching; recovery is a restart from the last good checkpoint. Snapshot
+  bootstrap is bounded to roughly 32 MiB by the peer queue, and an oversized update
+  is replaced by a full snapshot fan-out rather than an incremental split.
+
+An independent review after implementation found and this change fixed: the example's
+duplicate ACP/server tool names (ACP tools now use a `client_` prefix), interaction
+dispatch hangs on client errors, orphaned captures not reconciled on restore, mid-run
+captures lost from history on cancellation, idle restored ready input not starting,
+status reporting for Loro input/paused sessions, per-execution ACP echo suppression,
+acceptance persistence leaving a ready contribution, client-owned settings ambiguity,
+oversized snapshot fan-out, silent execution failures, and missing Loro `resume`/`clear`
+routes. The lockfile was regenerated with the repository's newer uv format and now
+differs only by the `loro` dependency. Remaining documented limitations are the
+upstream adjacent-request metadata merge and the absence of automated tests.
+
+A second gatekeeping review found and this change fixed: ACP prompts hanging while a
+session is paused, a `clear`/start race pausing the session, lost wakeups when a second
+document answer arrived during interaction persistence, and an invalid ACP permission
+option leaving the interaction pending. ACP `session/prompt` now rejects while paused,
+`cancel` resolves not-yet-captured ACP prompt handles and cancels those contributions,
+empty capture returns no execution instead of a cancellation, interaction ingestion
+coalesces pending schedules, and invalid client answers fail the dispatch. Native
+history metadata wording now matches Pydantic AI's merge behavior.
+
+The historical record below belongs to the previous ACP/AG-UI implementation.
+
+---
+
+# Previous plan: ACP server API and read-only AG-UI observation
 
 Status: implemented; offline validation completed. Human review pending.
 Task checklist: [tasks/todo.md](tasks/todo.md).

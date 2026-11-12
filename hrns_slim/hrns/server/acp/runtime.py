@@ -7,8 +7,9 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from inspect import isawaitable
 from typing import Generic, Protocol, TypeAlias, TypeVar
@@ -18,6 +19,7 @@ import acp
 import anyio
 from acp import schema
 from acp.interfaces import Client
+from pydantic import TypeAdapter
 from pydantic_ai import (
     DeferredToolRequests,
     DeferredToolResults,
@@ -44,7 +46,6 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolCallPart,
     ToolReturnPart,
-    UserContent,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.output import OutputDataT, OutputSpec
@@ -71,8 +72,19 @@ from hrns.server.capabilities import (
 from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 
+from ..loro.document import SessionDocument
+from ..loro.input import CapturedInput, InputCapture, InputCoordinator, acp_blocks, messages_for
+from ..loro.interactions import (
+    APPROVAL_OPTIONS,
+    InteractionService,
+    validate_approval,
+    validate_question,
+)
+from ..loro.models import Contribution, InteractionRecord
+from ..loro.publisher import DocumentPublisher
+from ..loro.store import CheckpointPersistence, DocumentCheckpoint
 from . import updates
-from .content import PromptContentBlock, prompt_blocks_to_user_content
+from .content import PromptContentBlock, skill_references
 from .elicitation import (
     ASK_USER_UNAVAILABLE,
     ask_user_message,
@@ -104,11 +116,7 @@ from .session import (
     SessionUpdate,
     apply_content_changes,
 )
-from .store import (
-    SessionPersistence,
-    StoredSession,
-    title_from_updates,
-)
+from .store import title_from_updates
 from .toolsets import AttachmentToolset
 
 _logger = logging.getLogger(__name__)
@@ -126,30 +134,7 @@ ConfigOptions: TypeAlias = list[
     schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean
 ]
 
-
-def _skill_references(prompt: Sequence[PromptContentBlock]) -> tuple[str, ...]:
-    """Skill ids a client attached to the prompt blocks, in first-seen order.
-
-    A person's ``$skill`` reference travels in the text block's ``_meta`` under
-    :data:`SKILLS_META_KEY`: a list of ``{"id": ..., "mention": {...}}`` objects. The
-    mention is display information for the client; the server acts on the id and does
-    not read the prompt text.
-    """
-    ids: list[str] = []
-    for block in prompt:
-        meta = block.field_meta
-        if not meta:
-            continue
-        payload = meta.get(SKILLS_META_KEY)
-        if not isinstance(payload, list):
-            continue
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            skill_id = entry.get("id")
-            if isinstance(skill_id, str) and skill_id and skill_id not in ids:
-                ids.append(skill_id)
-    return tuple(ids)
+_ACP_UPDATE = TypeAdapter(SessionUpdate)
 
 
 def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
@@ -253,10 +238,12 @@ class RunObserver(Protocol):
         self,
         stream: AsyncIterator[AgentStreamEvent | AgentRunResultEvent[ObservedOutputT]],
         history: list[ModelMessage],
-        user_content: list[UserContent] | None,
+        input_messages: Sequence[ModelMessage],
         emit: Callable[[AgentStreamEvent], Awaitable[None]],
         run_id: str,
     ) -> AgentRunResult[ObservedOutputT]: ...
+
+    def injected(self, messages: Sequence[ModelMessage]) -> None: ...
 
     def state_changed(self, state: dict[str, object]) -> None: ...
 
@@ -316,11 +303,28 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         agent_id: str = "agent",
         permission_policy: PermissionPolicy | None = None,
         tool_presenter: ToolCallPresenter | None = None,
-        session_store: SessionPersistence,
+        session_store: CheckpointPersistence,
+        document: SessionDocument,
         model_resolver: ModelResolver | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> None:
         self._agent = agent
+        self._document = document
+        self._publisher = DocumentPublisher(document)
+        self._coordinator = InputCoordinator(
+            document,
+            persist=self._persist_strict,
+            on_capture=self._capture_notice,
+        )
+        self.on_capture: Callable[[tuple[Contribution, ...]], None] = lambda contributions: None
+        self._active_turn: _TurnState | None = None
+        self._observer_input: Sequence[ModelMessage] = ()
+        self._ingest_task: asyncio.Task[None] | None = None
+        self._ingest_pending = False
+        #: Messages already written to the document, so persistence stays append-only.
+        self._history_cache: list[ModelMessage] = []
+        #: True when the session was restored from interrupted work and must stay paused.
+        self.restored_interrupted = False
         self.last_output: OutputDataT | None = None
         self._deps = deps
         self._session_config = session_config
@@ -330,11 +334,16 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self.on_state: Callable[[], None] = lambda: None
         self.live_updates: list[SessionUpdate] = []
         self.interactions = Interactions()
+        self._interaction_service = InteractionService(
+            document,
+            persist=self._persist_strict,
+            on_change=self._interaction_changed,
+        )
         self._delivery: asyncio.Task[None] | None = None
         self._outbox: asyncio.Queue[SessionUpdate | dict[str, object]] | None = None
         self._attachment_lock = asyncio.Lock()
         self._attachment_generation = 0
-        self.prompt_origin: Client | None = None
+        self.prompt_origin: object | None = None
         self.attachment_toolsets: Sequence[AbstractToolset[AgentDepsT]] = ()
         self._permission_policy = permission_policy or default_permission_scope
         self._tool_presenter = tool_presenter or default_coding_presenter
@@ -370,7 +379,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def _resolve_skills(self, prompt: Sequence[PromptContentBlock]) -> tuple[SkillInfo, ...]:
         """Validate the skill references a prompt carries, or reject the prompt."""
-        ids = _skill_references(prompt)
+        ids = skill_references(prompt)
         if not ids:
             return ()
         skills = self._skills
@@ -412,46 +421,131 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def create(self, session_id: str, cwd: str) -> None:
         config = await self._build_config(session_id, cwd)
-        choices = self._model_choices()
-        self._state = SessionState(
-            session_id=session_id,
-            config=config,
-            cwd=cwd,
-            model=choices[0].model_id if choices else None,
-        )
-        await self._persist(self.state)
+        self._state = self._state_from_document(session_id, cwd, config)
+        self._history_cache = list(self._state.history)
+        await self._persist(self.state, strict=True)
 
-    async def restore(self, session_id: str, stored: StoredSession) -> None:
-        config = await self._build_config(session_id, stored.cwd)
-        self._state = SessionState(
-            session_id=session_id,
-            config=config,
-            cwd=stored.cwd,
-            history=list(stored.messages),
-            transcript=list(stored.updates),
-            model=stored.model,
-            setting_selections=dict(stored.setting_selections),
-            todos=TodoStore(items=stored.todos),
-            invoked_skills=set(stored.skills),
-        )
+    async def restore(self, session_id: str, checkpoint: DocumentCheckpoint) -> None:
+        config = await self._build_config(session_id, checkpoint.cwd)
+        self._state = self._state_from_document(session_id, checkpoint.cwd, config)
+        self._history_cache = list(self._state.history)
         self._title = title_from_updates(self.state.transcript)
+        await self._coordinator.interrupt_orphans()
+        lifecycle = self._document.lifecycle()
+        if lifecycle.status in ("running", "waiting") or lifecycle.resume_required:
+            # Never replay uncertain model requests or tool side effects after a restart.
+            self.restored_interrupted = True
+            self._document.cancel_pending_interactions(
+                state="obsolete", detail="server restarted during execution"
+            )
+            self._document.set_lifecycle_status("interrupted")
+            self._document.set_resume_required(True)
+            self._document.set_active_contribution(None)
+            self._document.commit_lifecycle()
         if self._reconcile_setting_selections(self.state):
             await self._persist(self.state)
 
-    async def _persist(self, state: SessionState[AgentDepsT]) -> None:
-        """Save a session's committed state, if a store is configured."""
+    def resume_document(self) -> None:
+        """Leave an interrupted/paused execution from the document's point of view."""
+        self.restored_interrupted = False
+        self._document.set_resume_required(False)
+        self._document.set_lifecycle_status("idle")
+        self._document.set_active_contribution(None)
+        self._document.commit_lifecycle()
+
+    def _state_from_document(
+        self, session_id: str, cwd: str, config: AcpSessionConfig[AgentDepsT]
+    ) -> SessionState[AgentDepsT]:
+        settings = self._document.settings()
+        choices = self._model_choices()
+        model = settings.model or (choices[0].model_id if choices else None)
+        state = SessionState(
+            session_id=session_id,
+            config=config,
+            cwd=cwd,
+            history=self._document.history_messages(),
+            transcript=self._transcript_from_document(),
+            model=model,
+            setting_selections=dict(settings.setting_selections),
+            todos=TodoStore(items=settings.todos),
+            invoked_skills=set(settings.skills),
+            cost=Decimal(settings.cost) if settings.cost is not None else None,
+        )
+        if settings.model != model:
+            self._document.set_model(model)
+        return state
+
+    def _transcript_from_document(self) -> list[SessionUpdate]:
+        """Derive the ACP replay view from display records, never a second store."""
+        updates: list[SessionUpdate] = []
+        for record in self._document.display_records():
+            raw_list = record.payload.get("acp")
+            if not isinstance(raw_list, list):
+                continue
+            for raw in raw_list:
+                if not isinstance(raw, dict):
+                    continue
+                candidate = raw
+                if record.kind in ("user", "assistant", "thinking") and len(raw_list) == 1:
+                    content = candidate.get("content")
+                    if isinstance(content, dict):
+                        rebuilt = dict(content)
+                        rebuilt["text"] = record.text
+                        candidate = {**candidate, "content": rebuilt}
+                try:
+                    updates.append(_ACP_UPDATE.validate_python(candidate))
+                except ValueError:
+                    continue
+        return updates
+
+    def _sync_document(self, state: SessionState[AgentDepsT]) -> None:
+        """Mirror the canonical runtime state into the document before saving."""
+        settings = self._document.settings()
+        if settings.model != state.model:
+            self._document.set_model(state.model)
+        if settings.setting_selections != state.setting_selections:
+            self._document.set_setting_selections(dict(state.setting_selections))
+        cost = str(state.cost) if state.cost is not None else None
+        if settings.cost != cost:
+            self._document.set_cost(cost)
+        if settings.todos != state.todos.items:
+            self._document.set_todos(state.todos.items)
+        skills = tuple(sorted(state.invoked_skills))
+        if settings.skills != skills:
+            self._document.set_skills(skills)
+        if self._history_cache == state.history:
+            return
+        if (
+            len(self._history_cache) <= len(state.history)
+            and state.history[: len(self._history_cache)] == self._history_cache
+        ):
+            self._document.append_history(state.history[len(self._history_cache) :])
+        else:
+            self._document.replace_history(state.history)
+        self._history_cache = list(state.history)
+
+    async def _persist(self, state: SessionState[AgentDepsT], *, strict: bool = False) -> None:
+        """Save one durable document checkpoint, if a store is configured.
+
+        ``strict`` callers treat a store failure as their own failure: they must
+        not acknowledge durability or dispatch work whose capture is not durable.
+        """
         async with self._persist_lock:
             try:
+                if self._document.poisoned:
+                    raise RuntimeError("the session document was poisoned by an invalid import")
+                self._sync_document(state)
                 await self._session_store.save(
                     state.session_id,
-                    StoredSession(
+                    DocumentCheckpoint(
+                        session_id=state.session_id,
+                        agent_id=self.agent_id,
                         cwd=state.cwd,
-                        messages=list(state.history),
-                        updates=list(state.transcript),
-                        model=state.model,
-                        setting_selections=dict(state.setting_selections),
-                        todos=state.todos.items,
-                        skills=tuple(sorted(state.invoked_skills)),
+                        snapshot=self._document.snapshot(),
+                        pending=self._document.pending_updates(),
+                        schema_version=self._document.schema_version,
+                        updated_at=datetime.now(UTC),
+                        title=self._document.title(),
                     ),
                 )
             except Exception:
@@ -459,6 +553,65 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     "failed to persist ACP session %s; durable state is now behind",
                     state.session_id,
                 )
+                if strict:
+                    raise
+
+    def _interaction_changed(self) -> None:
+        self.interactions.waiting = self._interaction_service.waiting
+        self.on_state()
+
+    def schedule_interaction_ingest(self) -> None:
+        """Check for answers a Loro client wrote directly into the document."""
+        self._ingest_pending = True
+        if self._ingest_task is not None and not self._ingest_task.done():
+            return
+        self._ingest_task = asyncio.create_task(self._ingest_interactions())
+
+    async def _ingest_interactions(self) -> None:
+        try:
+            while True:
+                self._ingest_pending = False
+                await self._interaction_service.ingest()
+                if not self._ingest_pending:
+                    return
+        except Exception:
+            _logger.exception("failed to ingest interaction answers from the document")
+
+    async def answer_interaction(
+        self, interaction_id: str, response: Mapping[str, object], *, actor: str
+    ) -> bool:
+        return await self._interaction_service.resolve(interaction_id, response, actor=actor)
+
+    async def cancel_interactions(self, detail: str) -> list[str]:
+        return await self._interaction_service.cancel_pending(detail=detail)
+
+    async def report_error(self, error: Exception) -> None:
+        """Make an execution failure visible without a transport handle."""
+        _logger.exception("session %s execution failed: %s", self.state.session_id, error)
+        try:
+            await self._publisher.record_error(str(error))
+            self._document.set_last_outcome("error")
+            self._document.commit_lifecycle()
+        except Exception:
+            _logger.exception("failed to publish the execution error for %s", self.state.session_id)
+
+    async def _persist_strict(self) -> None:
+        if self._state is not None:
+            await self._persist(self._state, strict=True)
+
+    def _capture_notice(self, contributions: tuple[Contribution, ...]) -> None:
+        self.on_capture(contributions)
+
+    async def flush(self) -> None:
+        """Persist the canonical state at lifecycle boundaries."""
+        if self._document.poisoned:
+            _logger.error(
+                "not persisting poisoned session %s; the last checkpoint is intact",
+                self.state.session_id,
+            )
+            return
+        if self._state is not None:
+            await self._persist(self._state, strict=True)
 
     def _model_option(
         self, current_model_id: str | None
@@ -606,6 +759,14 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             raise RuntimeError("session has not been configured")
         return self._state
 
+    @property
+    def document(self) -> SessionDocument:
+        return self._document
+
+    @property
+    def coordinator(self) -> InputCoordinator:
+        return self._coordinator
+
     async def attach(
         self,
         conn: Client,
@@ -735,35 +896,126 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             self._outbox.put_nowait(update)
 
     async def _deliver_update(self, update: SessionUpdate) -> None:
+        await self._publisher.publish(update)
         self._enqueue(update)
 
     def _client_toolset(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         return CombinedToolset(list(self.attachment_toolsets)) if self.attachment_toolsets else None
 
-    async def execute(self, prompt: list[PromptContentBlock]) -> schema.PromptResponse:
-        skills = await self._resolve_skills(prompt)
+    async def execute(self) -> schema.PromptResponse | None:
+        captured = await self._coordinator.capture()
+        if not captured.contributions:
+            # Another participant cleared the ready input after the scheduler's
+            # eligibility check; this is not an explicit cancellation.
+            return None
+        self.state.invoked_skills.update(captured.skills)
         try:
-            return await self._run_turn(
-                self.state, prompt, prompt_blocks_to_user_content(prompt), skills
-            )
+            injections = await self._injections(captured)
+            messages = messages_for(captured, injections)
+            self._observer_input = messages
+            self.state.history.extend(messages)
+            await self._publisher.begin_turn(active_contribution_id=captured.contributions[0].id)
+            await self._record_captured(captured)
+            await self._coordinator.delivered(captured)
+            return await self._run_turn(self.state, captured)
         except _TurnCancelled:
+            with anyio.CancelScope(shield=True):
+                await self._publisher.interrupt()
             return schema.PromptResponse(stop_reason="cancelled")
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await self._publisher.interrupt()
+            raise
         finally:
             self.live_updates = []
+
+    async def capture_boundary(self) -> list[ModelMessage]:
+        """Capture input at one model request, including input that arrived mid-run."""
+        captured = await self._coordinator.capture()
+        if not captured.contributions:
+            return []
+        self.state.invoked_skills.update(captured.skills)
+        injections = await self._injections(captured)
+        messages = messages_for(captured, injections)
+        # Persist the captured messages in native history at the boundary; on
+        # cancellation or error the end-of-run assignment never runs.
+        self.state.history.extend(messages)
+        await self._record_captured(captured)
+        if self.observer is not None:
+            self.observer.injected(messages)
+        if self._active_turn is not None:
+            for contribution in captured.contributions:
+                await self._emit_captured_user(self._active_turn, contribution)
+        await self._coordinator.delivered(captured)
+        return messages
+
+    async def _injections(self, captured: CapturedInput) -> dict[str, list[str]]:
+        injections: dict[str, list[str]] = {}
+        for contribution in captured.contributions:
+            if contribution.skills:
+                injections[contribution.id] = await self._skill_injections(contribution.skills)
+        return injections
+
+    async def _record_captured(self, captured: CapturedInput) -> None:
+        for contribution in captured.contributions:
+            acp_updates = [
+                updates.update_user_message(block).model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                )
+                for block in acp_blocks(contribution)
+            ]
+            await self._publisher.record_user(
+                contribution.text,
+                acp=acp_updates,
+                author=contribution.author,
+            )
+
+    async def _emit_captured_user(self, turn: _TurnState, contribution: Contribution) -> None:
+        for block in acp_blocks(contribution):
+            update = updates.update_user_message(block)
+            turn.updates.append(update)
+            if (
+                contribution.origin == "acp"
+                and self.prompt_origin is not None
+                and self._conn is self.prompt_origin
+            ):
+                continue
+            self._enqueue(update)
+
+    async def _skill_injections(self, ids: Sequence[str]) -> list[str]:
+        capability = self._skills
+        if not ids or capability is None:
+            return []
+        catalog = {info.id: info for info in await capability.metadata()}
+        injections: list[str] = []
+        for skill_id in ids:
+            if skill_id not in catalog:
+                continue
+            injections.append(
+                f'<skill_content name="{skill_id}">\n'
+                f"{await capability.instructions(skill_id)}\n"
+                "</skill_content>"
+            )
+        return injections
+
+    async def _skill_infos(self, ids: Sequence[str]) -> tuple[SkillInfo, ...]:
+        capability = self._skills
+        if not ids or capability is None:
+            return ()
+        catalog = {info.id: info for info in await capability.metadata()}
+        return tuple(catalog[skill_id] for skill_id in ids if skill_id in catalog)
 
     async def _run_turn(
         self,
         state: SessionState[AgentDepsT],
-        prompt: list[PromptContentBlock],
-        user_content: list[UserContent],
-        skills: Sequence[SkillInfo] = (),
+        captured_input: CapturedInput,
     ) -> schema.PromptResponse:
+        skills = await self._skill_infos(captured_input.skills)
         history = state.history
         config = state.config
         usage = RunUsage()
         stop_reason: schema.StopReason = "end_turn"
         deferred_results: DeferredToolResults | None = None
-        run_input: list[UserContent] | None = user_content
         output_type: OutputSpec[OutputDataT | DeferredToolRequests] = [
             self._agent.output_type,
             DeferredToolRequests,
@@ -775,29 +1027,16 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             known_non_approval_names=self._known_non_approval_names(config),
         )
         self.live_updates = turn.updates
-        for block in prompt:
-            update = updates.update_user_message(block)
-            if self._conn is self.prompt_origin and self.prompt_origin is not None:
-                turn.updates.append(update)
-            else:
-                await self._send_update(turn, update)
-        capability = self._skills
-        if skills and capability is not None:
-            # Add invoked instructions as user content and keep the skills active
-            # for the session so their bundled-file tools are available.
-            state.invoked_skills.update(info.id for info in skills)
-            injected = [
-                f'<skill_content name="{info.id}">\n'
-                f"{await capability.instructions(info.id)}\n"
-                "</skill_content>"
-                for info in skills
-            ]
-            user_content = [*injected, *user_content]
-            run_input = user_content
+        self._active_turn = turn
+        for contribution in captured_input.contributions:
+            await self._emit_captured_user(turn, contribution)
+        if skills:
             await self._announce_skills(turn, skills)
 
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
+        observer_input: Sequence[ModelMessage] = self._observer_input
+        self._observer_input = ()
         try:
             while True:
                 result = None
@@ -809,14 +1048,17 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     capture_run_messages() as captured,
                 ):
                     async with self._agent.run_stream_events(
-                        run_input,
+                        None,
                         message_history=history,
                         conversation_id=state.session_id,
                         run_id=native_run_id,
                         deferred_tool_results=deferred_results,
                         output_type=output_type,
                         deps=config.deps,
-                        capabilities=config.capabilities,
+                        capabilities=[
+                            *(config.capabilities or ()),
+                            InputCapture(self.capture_boundary),
+                        ],
                         toolsets=[
                             *(config.toolsets or ()),
                             DynamicToolset(self._client_toolset, per_run_step=True),
@@ -836,8 +1078,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
                         if self.observer is not None:
                             result = await self.observer.consume(
-                                stream, history, run_input, emit, native_run_id
+                                stream, history, observer_input, emit, native_run_id
                             )
+                            observer_input = ()
                         else:
                             async for event in stream:
                                 if isinstance(event, AgentRunResultEvent):
@@ -860,7 +1103,6 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     finally:
                         self.interactions.waiting = False
                         self.on_state()
-                    run_input = None
                     continue
                 if output is not None and not isinstance(output, str):
                     await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
@@ -868,6 +1110,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 stop_reason = _finish_reason_to_stop_reason(result.response.finish_reason)
                 break
         except (asyncio.CancelledError, _TurnCancelled) as exc:
+            self._active_turn = None
             if self.observer is not None:
                 interrupted = RunCancelled.from_cancellation(exc)
                 self.observer.interrupted(
@@ -878,6 +1121,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 await self._persist_interrupted_todos(state, turn)
             raise
         except UsageLimitExceeded as exc:
+            self._active_turn = None
             if self.observer is not None:
                 self.observer.interrupted(captured)
             await self._fail_outstanding_tool_calls(turn, record=True)
@@ -889,6 +1133,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 history = _committable_history(captured, turn.started)
             stop_reason = _usage_limit_stop_reason(exc)
         except Exception:
+            self._active_turn = None
             if self.observer is not None:
                 self.observer.interrupted(captured)
             await self._fail_outstanding_tool_calls(turn)
@@ -903,6 +1148,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         state.transcript.extend(turn.updates)
         self.live_updates = []
         await self._announce_title(state)
+        self._active_turn = None
+        await self._publisher.end_turn(stop_reason)
         try:
             await self._persist(state)
         except asyncio.CancelledError:
@@ -1183,39 +1430,143 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             resolved[call.tool_call_id] = await self._ask_user(turn, call)
         return resolved
 
-    async def _ask_user(self, turn: _TurnState, call: ToolCallPart) -> object:
-        """Put one ``ask_user_question`` call to the client as a form elicitation."""
-        request = HarnessAskUserRequest.from_tool_call(call)
+    async def _await_interaction(
+        self, interaction_id: str, dispatch: asyncio.Task[None]
+    ) -> InteractionRecord:
+        """Wait for an answer while supervising the ACP dispatch.
 
-        await self._update_status(turn, call.tool_call_id, "pending")
+        A failed client request must not leave the interaction permanently pending:
+        cancel it, then surface the error to the caller.
+        """
+        wait_task = asyncio.create_task(self._interaction_service.wait(interaction_id))
         try:
+            done, _ = await asyncio.wait({dispatch, wait_task}, return_when=asyncio.FIRST_COMPLETED)
+            if dispatch in done:
+                error = dispatch.exception()
+                if error is not None:
+                    await self._interaction_service.cancel(
+                        interaction_id, detail=f"client request failed: {error}"
+                    )
+                    raise error
+                record = self._document.interaction(interaction_id)
+                if record is None or record.state == "pending":
+                    await self._interaction_service.cancel(
+                        interaction_id,
+                        detail="client dispatch ended without an accepted answer",
+                    )
+                    raise acp.RequestError.internal_error(
+                        {"reason": "client dispatch ended without an answer"}
+                    )
+            return await wait_task
+        finally:
+            for task in (dispatch, wait_task):
+                if not task.done():
+                    task.cancel()
+            for task in (dispatch, wait_task):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
-            async def ask(conn: Client) -> schema.CreateElicitationResponse:
-                if not self._supports_form_elicitation():
-                    raise acp.RequestError.method_not_found("elicitation/create")
-                return await conn.create_elicitation(
-                    message=ask_user_message(request.questions),
-                    mode=schema.ElicitationFormSessionMode(
-                        session_id=turn.session_id,
-                        tool_call_id=call.tool_call_id,
-                        requested_schema=build_ask_user_schema(request.questions),
-                    ),
+    async def _ask_user(self, turn: _TurnState, call: ToolCallPart) -> object:
+        """Put one ``ask_user_question`` call to ACP and/or Loro participants."""
+        request = HarnessAskUserRequest.from_tool_call(call)
+        form = build_ask_user_schema(request.questions)
+        record = await self._interaction_service.create(
+            kind="question",
+            request={
+                "message": ask_user_message(request.questions),
+                "toolCallId": call.tool_call_id,
+                "schema": form.model_dump(mode="json", by_alias=True, exclude_none=True),
+                "questions": [
+                    question.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for question in request.questions
+                ],
+            },
+            validator=validate_question,
+        )
+        await self._update_status(turn, call.tool_call_id, "pending")
+
+        async def ask(conn: Client) -> None:
+            if not self._supports_form_elicitation():
+                await self._interaction_service.resolve(
+                    record.id, {"action": "decline", "content": {}}, actor="acp"
+                )
+                return
+            response = await conn.create_elicitation(
+                message=ask_user_message(request.questions),
+                mode=schema.ElicitationFormSessionMode(
+                    session_id=turn.session_id,
+                    tool_call_id=call.tool_call_id,
+                    requested_schema=form,
+                ),
+            )
+            if isinstance(response, schema.AcceptElicitationResponse):
+                await self._interaction_service.resolve(
+                    record.id,
+                    {"action": "accept", "content": dict(response.content or {})},
+                    actor="acp",
+                )
+            elif isinstance(response, schema.DeclineElicitationResponse):
+                await self._interaction_service.resolve(
+                    record.id, {"action": "decline", "content": {}}, actor="acp"
+                )
+            else:
+                await self._interaction_service.resolve(
+                    record.id, {"action": "cancel", "content": {}}, actor="acp"
                 )
 
-            response = await self.interactions.request(ask)
+        dispatch = asyncio.create_task(self.interactions.request(ask))
+        try:
+            resolved = await self._await_interaction(record.id, dispatch)
         except acp.RequestError as exc:
-            _logger.info("client rejected an ask-user elicitation: %s", exc)
+            _logger.info("client could not present an ask-user elicitation: %s", exc)
             await self._update_status(turn, call.tool_call_id, "in_progress")
             return ASK_USER_UNAVAILABLE
-        return ask_user_tool_result(request, ask_user_response(response, request))
+        action = resolved.response.get("action") if resolved.response else None
+        await self._update_status(turn, call.tool_call_id, "in_progress")
+        if action == "accept":
+            content = resolved.response.get("content") if resolved.response else None
+            accepted = schema.AcceptElicitationResponse(
+                content=dict(content) if isinstance(content, Mapping) else {}
+            )
+            return ask_user_tool_result(request, ask_user_response(accepted, request))
+        if self._conn is not None and not self._supports_form_elicitation():
+            return ASK_USER_UNAVAILABLE
+        return ask_user_tool_result(
+            request, ask_user_response(schema.DeclineElicitationResponse(), request)
+        )
 
     async def _request_permission(
         self, turn: _TurnState, state: SessionState[AgentDepsT], call: ToolCallPart, scope: Hashable
     ) -> bool | ToolDenied:
         fields = self._tool_call_fields(call, turn.cwd, default_kind="execute")
+        record = await self._interaction_service.create(
+            kind="approval",
+            request={
+                "toolCallId": call.tool_call_id,
+                "title": fields.title,
+                "kind": fields.kind,
+                "content": [
+                    item.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for item in fields.content or ()
+                ],
+                "locations": [
+                    location.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for location in fields.locations or ()
+                ],
+                "rawInput": bounded_jsonable(call.args),
+                "options": [
+                    "allow_once",
+                    "allow_always",
+                    "reject_once",
+                    "reject_always",
+                    "cancel",
+                ],
+            },
+            validator=validate_approval,
+        )
 
-        async def ask(conn: Client) -> schema.RequestPermissionResponse:
-            return await conn.request_permission(
+        async def ask(conn: Client) -> None:
+            response = await conn.request_permission(
                 session_id=turn.session_id,
                 tool_call=schema.ToolCallUpdate(
                     tool_call_id=call.tool_call_id,
@@ -1241,16 +1592,29 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     ),
                 ],
             )
+            option = (
+                "cancel"
+                if isinstance(response.outcome, schema.DeniedOutcome)
+                else response.outcome.option_id
+            )
+            if option not in APPROVAL_OPTIONS:
+                raise acp.RequestError.invalid_params(
+                    {"option_id": option, "reason": "not an offered permission option"}
+                )
+            await self._interaction_service.resolve(record.id, {"option": option}, actor="acp")
 
-        response = await self.interactions.request(ask)
-        outcome = response.outcome
-        if isinstance(outcome, schema.DeniedOutcome):
+        dispatch = asyncio.create_task(self.interactions.request(ask))
+        resolved = await self._await_interaction(record.id, dispatch)
+        option = resolved.response.get("option") if resolved.response else None
+        if option == "cancel":
             raise _TurnCancelled
-        if outcome.option_id == "allow_always":
+        if option == "allow_always":
             state.always_allow.add(scope)
-        elif outcome.option_id == "reject_always":
+            return True
+        if option == "reject_always":
             state.always_reject.add(scope)
-        if outcome.option_id in ("allow_once", "allow_always"):
+            return ToolDenied("Rejected by the client.")
+        if option == "allow_once":
             return True
         return ToolDenied("Rejected by the client.")
 

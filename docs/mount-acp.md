@@ -36,7 +36,7 @@ and output types flow through its session and turn handles.
 | `agent_id` | Required | Safe route segment identifying the agent |
 | `factory` | Required | Sync or async callable receiving `SessionContext` and returning a fresh `AbstractAgent` per live session |
 | `deps` | `None` | Default agent dependencies |
-| `session_store` | Separate `InMemorySessionStore` | Persistence scoped to this registration |
+| `session_store` | Separate `InMemoryDocumentStore` | Loro checkpoint persistence scoped to this registration |
 | `model_resolver` | `None` | Model choices, provider routing, and session settings |
 | `session_config` | `None` | Per-session dependencies, capabilities, toolsets, and workspace |
 | `attachment_config` | `None` | Client toolsets (MCP, filesystem, terminal) configured on each ACP attachment |
@@ -45,7 +45,10 @@ and output types flow through its session and turn handles.
 | `tool_presenter` | `None` | Tool-call presentation for ACP updates |
 | `mcp_capabilities` | `None` | Advertised client MCP transports; requires `attachment_config` |
 
-`server.mount_acp(app, ...)` adds the WebSocket route:
+`server.mount_acp(app, ...)` adds the WebSocket route. To expose the same
+sessions to synchronized Loro replicas, call `server.mount_loro(app, prefix="/loro",
+authenticate=...)` independently; see [Loro sessions](loro.md). Neither mount
+requires the other.
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
@@ -122,9 +125,9 @@ def attachment_tools(attachment: AcpSession) -> AcpAttachmentConfig[None]:
 `acp_terminal` returns `None` unless it advertises terminal support. With
 `client_io = "read"`, `write_file` falls back to a local `FileSystem` bounded by
 the session `cwd` instead of the client. `acp_filesystem` defines `read_file` and
-`write_file`, which collide with `Coder`'s tools, so install it on an agent without
-`Coder`, or rename/filter one side. `examples/fastapi_app.py` is a working example
-that has no `Coder`.
+`write_file`, which collide with `Coder`'s tools, so either wrap the ACP toolset in
+`PrefixedToolset(toolset, "client")` (as `examples/fastapi_app.py` does), or install
+it on an agent without `Coder`.
 
 ### Dispatch
 
@@ -156,8 +159,10 @@ await coder.close_session(session.session_id)
 ```
 
 `get_session(session_id)` reuses the live session or restores it from its registration's
-store. `history()` returns committed model messages. `status()` reports
-revisioned running/waiting/idle state and the last outcome.
+store. `history()` returns committed model messages. `status()` reports revisioned
+running/waiting/paused/idle state and the last outcome; `activeTurnId` is the first
+captured contribution in the active execution, including Loro-only input. Restored
+ready input starts automatically unless the session was interrupted.
 
 `cancel_session(session_id)` uses the same lookup as `get_session`: it reuses the live
 session or restores saved state, and raises `KeyError` for an unknown ID. It cancels
@@ -173,17 +178,30 @@ with a `TurnHandle`; execution continues independently of the `result()` waiter.
 carry the typed output, ACP stop reason, and usage. Runtime errors raise from `result()`;
 cancelled or discarded work returns a cancelled outcome.
 
-Python and ACP prompts share one FIFO, with one active turn. Follow-ups enter history
-only when started. Cancellation pauses the queue; errors also pause it. New submissions
-stay queued while paused. `pending_prompts`, `resume_queue`, and `clear_queue` are
-Python APIs. Clear resolves pending handles as cancelled. The terminal also keeps its
-own local drafts and queue.
+Python, ACP, and Loro input share one capture boundary. A `submit` call creates a
+ready contribution in the session document and returns a `TurnHandle` associated with
+that contribution. At the next model request the server freezes every ready
+contribution, assigns consumption order, persists the decision, and delivers it. A run
+that captures several contributions completes all their handles. Input arriving while a
+tool is running joins the following request in the same execution; late input starts a
+subsequent execution after the current one finishes. A cancelled or discarded handle
+returns a cancelled outcome; an unconsumed contribution resolves cancelled.
+
+Cancellation pauses execution; errors also pause it and publish a display error record.
+Ready contributions stay pending while paused. `pending_prompts` returns handles for
+still-ready contributions; `resume_queue()` continues and `clear_queue()` cancels them.
+Loro-only participants use `POST .../resume` and `POST .../clear` for the same
+operations. The terminal also keeps its own local drafts and queue. See
+[Loro sessions](loro.md) for the document contract.
 
 ## ACP attachment and lifecycle
 
 One ACP client may attach to a session. `session/new` creates and attaches;
 `session/load` reuses the live agent and replays completed plus active-turn ACP updates
-before responding. The current owner may reload the same session on its connection.
+before responding. While a session is paused (after a cancel, a runtime error, or an
+interrupted restore), `session/prompt` is rejected with `invalid_params` instead of
+waiting forever; resume it with Python `resume_queue()` or
+`POST {loro_prefix}/{agent_id}/sessions/{session_id}/resume`. The current owner may reload the same session on its connection.
 Loading must use the session's stored cwd. Another attached client
 receives an attachment conflict.
 
@@ -194,19 +212,24 @@ Server shutdown rejects new work, cancels/joins active execution, and resolves q
 handles. Use one process/worker: running tasks, decisions, queues, and subscriptions live
 in the server process.
 
-Permissions and questions wait for an ACP client, then are issued after
-attachment replay. Disconnect retains the decision and invalidates old replies.
-A connected client lacking form elicitation gets the existing unavailable-question
-outcome. Server-side tools/workspace stay configured across attachments.
+Permissions and questions are session-owned records. An ACP client is asked after
+attachment replay, but a Loro participant may answer the same request without an ACP
+connection. The first valid answer wins and later answers change nothing. Disconnect
+retains the decision and invalidates old replies. A connected client lacking form
+elicitation gets the existing unavailable-question outcome. A non-connection client
+error cancels that interaction and aborts the turn, which pauses the session; only a
+connection loss preserves the request for a later attachment. Server-side
+tools/workspace stay configured across attachments.
 
 The advertised `_hrns/session/state` notification and `hrns/session/state` load metadata
 synchronize server-started turns. They carry `sessionId`, `revision`, `status`,
-`activeTurnId`, `lastOutcome`, and `lastUsage`. The existing client handles these
+`activeTurnId` (the first captured contribution in the active execution),
+`lastOutcome`, and `lastUsage`. The existing client handles these
 alongside the prompt responses for client-started turns.
 
 ## Admission and storage
 
-Both mounts accept an async `authenticate(HTTPConnection)` callback. Its return value
+All mounts accept an async `authenticate(HTTPConnection)` callback. Its return value
 is retained as the ACP connection's principal, or resolved for each AG-UI request.
 Returning `None` rejects authentication. The principal is passed directly to the
 registration's session store for creation, lookup, listing, and deletion.
@@ -216,12 +239,17 @@ operation, including for sessions already resident in memory. Its `list_sessions
 method filters by principal before pagination. See [Authentication](authentication.md)
 for the complete flow, method signatures, separate operation permissions, and examples.
 
-Each registration has a separate `InMemorySessionStore` by default. A supplied store
+Each registration has a separate `InMemoryDocumentStore` by default. A supplied store
 must be exclusively scoped to that agent. Reusing the same instance is rejected; a
-shared backend requires explicitly partitioned store instances. `StoredSession.cwd`
-is authoritative on restoration. `SessionStore` implements create/save/load;
-`ListableSessionStore` adds list, and `DeletableSessionStore` adds delete.
-Durable storage restores committed state after restart. Tasks and queues live in memory.
+shared backend requires explicitly partitioned store instances. A
+`DocumentCheckpoint` carries the Loro snapshot, pending imports, schema version, cwd,
+title, and update time; `DocumentCheckpoint.cwd` is authoritative on restoration.
+`SessionStore` implements create/save/load; `ListableSessionStore` adds list, and
+`DeletableSessionStore` adds delete. `SQLiteDocumentStore` is the opt-in durable
+implementation. Durable storage restores native history, pending input, settings, and
+partial display after restart. A session that was running is restored paused and
+marked interrupted; it is never replayed automatically. Live tasks, queues, and
+subscriptions remain process-local.
 
 Model resolvers and provider routing belong to a registration. Changes via `providers/*`
 notify all affected live sessions of that agent. Register a distinct resolver for each

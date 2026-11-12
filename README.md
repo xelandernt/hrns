@@ -4,10 +4,14 @@
   <img src="https://raw.githubusercontent.com/xelandernt/hrns/main/docs/assets/hrns.svg" alt="hrns logo" width="128" height="128">
 </p>
 
-[Pydantic AI](https://ai.pydantic.dev/) agents with server-owned conversations, ACP interaction, and read-only AG-UI streams.
+[Pydantic AI](https://ai.pydantic.dev/) agents with server-owned conversations,
+ACP interaction, synchronized [Loro](https://loro.dev) session documents, and
+read-only AG-UI streams.
 
 hrns builds a Pydantic AI `Agent` from capabilities and exposes it over **ACP**,
-for terminals and editors.
+for terminals and editors. Every native session is backed by one Loro document, so
+Python, ACP, and TypeScript replicas can share pending input and live output while
+one server process owns execution.
 
 ## Install
 
@@ -71,12 +75,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 server.mount_acp(app, prefix="/acp")
 server.mount_ag_ui(app, prefix="/ag-ui")
+server.mount_loro(app, prefix="/loro")
 ```
 
 Install observation support with `pip install 'hrns[ag-ui]'`.
 Use `AcpServer` when only ACP is needed. Register multiple factories under different
-agent IDs. One ACP client may interact with a session while any number of AG-UI clients
-observe it. Execution survives client disconnects.
+agent IDs. One ACP client may interact with a session while any number of AG-UI
+clients observe it and Loro replicas synchronize it. Execution survives client
+disconnects. Each mount is independent: a TypeScript-only client can create a
+session at `/loro` without ever opening ACP.
 
 Inside the server lifecycle, start work directly:
 
@@ -86,11 +93,16 @@ turn = await session.submit("Investigate the deployment failure")
 result = await turn.result()
 ```
 
-Follow-ups share a FIFO with ACP prompts. Cancellation and failures pause it;
-`pending_prompts()`, `resume_queue()`, and `clear_queue()` are Python-only controls.
-Permissions/questions wait for an ACP attachment. See [agent servers](docs/mount-acp.md)
-for configuration, authentication, stores, and model/provider routing, and
-[AG-UI observation](docs/ag_ui.md) for read-only snapshots and SSE replay.
+Drafts are collaborative; execution is not. At each model request the server
+freezes every ready contribution, assigns order, persists the decision, and only then
+dispatches it. Input arriving during a tool call joins the next request; input arriving
+during the final response starts a subsequent execution. A `TurnHandle` belongs to one
+contribution, and one execution can complete several. Cancellation and failures pause
+execution; `pending_prompts()`, `resume_queue()`, and `clear_queue()` are Python-only
+controls. Questions and approvals are session-owned and can be answered through ACP or
+Loro. See [agent servers](docs/mount-acp.md) for configuration, authentication, stores,
+and model/provider routing, [Loro sessions](docs/loro.md) for the document and wire
+contracts, and [AG-UI observation](docs/ag_ui.md) for read-only snapshots and SSE replay.
 
 ```sh
 hrns connect --server ws://127.0.0.1:8000/acp/coder

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TypeVar
@@ -18,6 +18,8 @@ from ag_ui.core import (
     RunFinishedEvent,
     RunStartedEvent,
     StateSnapshotEvent,
+    TextMessageContentEvent,
+    TextMessageEndEvent,
     TextMessageStartEvent,
     ToolCallResultEvent,
     ToolCallStartEvent,
@@ -25,11 +27,8 @@ from ag_ui.core import (
 from pydantic_ai.messages import (
     AgentStreamEvent,
     ModelMessage,
-    ModelRequest,
     ModelResponse,
     PartStartEvent,
-    UserContent,
-    UserPromptPart,
 )
 from pydantic_ai.run import AgentRunResult, AgentRunResultEvent
 from pydantic_ai.ui.ag_ui import AGUIAdapter, AGUIEventStream
@@ -151,21 +150,29 @@ class Observation:
         finally:
             self._subscribers.discard(subscriber)
 
+    def injected(self, messages: Sequence[ModelMessage]) -> None:
+        """Publish input captured mid-run once, with stable message identities."""
+        dumped = AGUIAdapter.dump_messages(list(messages))
+        self._messages.extend(dumped)
+        for message in dumped:
+            content = getattr(message, "content", None)
+            if message.role != "user" or not isinstance(content, str):
+                continue
+            self._publish(TextMessageStartEvent(message_id=message.id, role="user"))
+            self._publish(TextMessageContentEvent(message_id=message.id, delta=content))
+            self._publish(TextMessageEndEvent(message_id=message.id))
+
     async def consume(
         self,
         stream: AsyncIterator[AgentStreamEvent | AgentRunResultEvent[OutputT]],
         history: list[ModelMessage],
-        user_content: list[UserContent] | None,
+        input_messages: Sequence[ModelMessage],
         emit: Callable[[AgentStreamEvent], Awaitable[None]],
         run_id: str,
     ) -> AgentRunResult[OutputT]:
-        # Dump input once; its eventual native request reuses these message IDs.
-        input_messages = (
-            AGUIAdapter.dump_messages([ModelRequest(parts=[UserPromptPart(content=user_content)])])
-            if user_content
-            else []
-        )
-        self._messages.extend(input_messages)
+        # Input captured before this run is already in history; publish it now so
+        # late observers see it in the baseline and event prefix exactly once.
+        self._messages.extend(AGUIAdapter.dump_messages(list(input_messages)))
         self._baseline = list(self._messages)
         self._prefix = []
         self._active = True
@@ -197,14 +204,12 @@ class Observation:
         def finish(messages: list[ModelMessage]) -> None:
             appended: list[Message] = []
             response_index = -1
-            user_ids = deque(message.id for message in input_messages)
             for message in messages[len(history) :]:
                 if isinstance(message, ModelResponse):
                     response_index += 1
                 for dumped in AGUIAdapter.dump_messages([message]):
-                    if dumped.role == "user" and user_ids:
-                        dumped.id = user_ids.popleft()
-                        continue  # Input is already in the baseline.
+                    if dumped.role == "user":
+                        continue  # Published once when it was captured.
                     if dumped.role == "assistant" and assistant_ids[response_index]:
                         dumped.id = assistant_ids[response_index].popleft()
                     elif dumped.role == "reasoning" and reasoning_ids[response_index]:

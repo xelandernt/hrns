@@ -20,7 +20,7 @@ from .host import RegisteredAgent, Session
 from .models import ModelChoice
 from .runtime import ConfigOptions
 from .session import McpServers
-from .store import DeletableSessionStore, ListableSessionStore, SessionAccess, StoredSession
+from .store import DeletableSessionStore, DocumentCheckpoint, ListableSessionStore, SessionAccess
 
 
 class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]):
@@ -36,7 +36,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self._model_resolver = registration.resolver
         self._conn: Client | None = None
         self._client_capabilities: schema.ClientCapabilities | None = None
-        self._sessions: dict[str, Session[PrincipalT, AgentDepsT, OutputDataT]] = {}
+        self._sessions: dict[str, Session[AgentDepsT, OutputDataT]] = {}
         self._name = registration.agent_id
         self._version = "0.1.0"
         self._mcp_capabilities = registration.mcp_capabilities
@@ -54,7 +54,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
                 session._runtime.detach()
         self._sessions.clear()
 
-    async def _load(self, session_id: str, operation: SessionAccess) -> StoredSession:
+    async def _load(self, session_id: str, operation: SessionAccess) -> DocumentCheckpoint:
         try:
             stored = await self._session_store.load(
                 session_id, principal=self._principal, operation=operation
@@ -67,7 +67,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
 
     async def _session(
         self, session_id: str, operation: SessionAccess
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         await self._load(session_id, operation)
         session = self._sessions.get(session_id)
         if session is None or session._closed or session._runtime._conn is not self._conn:
@@ -77,7 +77,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         return session
 
     async def _attach(
-        self, session: Session[PrincipalT, AgentDepsT, OutputDataT], mcp_servers: McpServers
+        self, session: Session[AgentDepsT, OutputDataT], mcp_servers: McpServers
     ) -> None:
         if self._conn is None:
             raise RuntimeError("ACP connection has not initialized")
@@ -140,6 +140,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self, session_id: str, prompt: list[PromptContentBlock], **kwargs: object
     ) -> schema.PromptResponse:
         session = await self._session(session_id, "session/prompt")
+        if session.paused:
+            raise acp.RequestError.invalid_params(
+                {
+                    "reason": "session is paused; resume it through Python or the Loro "
+                    "resume route before prompting"
+                }
+            )
         handle = await session._accept(prompt, self._conn)
         result = await handle.result()
         return schema.PromptResponse(stop_reason=result.stop_reason, usage=result.usage)

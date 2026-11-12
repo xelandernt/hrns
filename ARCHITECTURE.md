@@ -1,5 +1,74 @@
 # Architecture
 
+## Shared sessions with Loro
+
+Every native session is backed by one Loro document in
+`hrns_slim/hrns/server/loro/`. Python, ACP, and any number of synchronized Loro
+replicas access the same session; one server process owns execution and there is
+no internal ACP bridge. ACP and Loro mounts are independent, and AG-UI remains a
+read-only observer of the same native stream.
+
+The document root separates concerns: `meta` (schema version, identity, counters),
+`lifecycle` (durable status/revision/interruption), `settings` (model, selections,
+cost, todos, skills), `inputs` (collaborative contributions with `LoroText`),
+`consumption` (immutable capture records), `history` (lossless native
+`ModelMessage` JSON), `display` (display-only projections), and `interactions`
+(questions/approvals by stable ID). Native history is not a display transcript; a
+partial display can survive a crash without being presented as completed history.
+Schema version 1 is the only accepted version.
+
+Admitted writers are trusted across the whole document. The writer split in the
+module docstring is an application convention, not field security; admission and
+store checks remain outside mutable CRDT fields. Loro peer IDs and `author` labels
+are not authenticated identities.
+
+Input capture was fixed in T1 against Pydantic AI 2.57.0 and verified end to end in
+the runtime. `Session.submit`/ACP `session/prompt` write a contributed message and
+return a handle tied to that contribution's consumption record. At each
+`before_model_request`, `InputCapture` freezes every ready contribution, assigns
+server arrival and consumption order, writes immutable consumption records,
+persists the checkpoint, and appends one `ModelRequest` per contribution to
+`request_context.messages` and `RunContext.messages`. Idle execution pre-captures
+input into `message_history`; input arriving during the final response starts a
+later execution. No upstream enqueue is fed at network arrival, so pending text
+stays editable until the boundary. One execution may complete several handles;
+an unconsumed contribution resolves cancelled.
+
+`consumption` records are the authoritative author and order source; `settings` is
+server-owned and mirrored on every persist.
+Pydantic AI can merge adjacent captured `ModelRequest`s when a later execution
+starts, so per-request message metadata is not stable across executions; content and
+order are preserved, and user display records retain the author for clients.
+
+`Session` in `server/session.py` is transport-independent: it owns the scheduler,
+handles, pause/resume/clear, and lifecycle. `server/acp/host.py` owns registrations
+and constructs it; the ACP adapter is only an interface. A serialized drain loop
+re-checks eligible input after every execution, so input arriving at completion is
+never stranded, and a paused/restored session starts no work. Restored work is
+marked `interrupted` with `resume_required`; orphaned captures are failed rather
+than replayed, and restored ready input starts when the session was not interrupted.
+Execution errors publish a display record and a lifecycle outcome rather than only
+pausing silently.
+
+Persistence uses `DocumentCheckpoint` in `server/loro/store.py`: snapshot bytes,
+pending imports, schema version, cwd, title, and update time. `InMemoryDocumentStore`
+is the default and `SQLiteDocumentStore` is opt-in, storing snapshot and pending
+imports in one transaction with metadata-backed listing. The runtime mirrors native
+history append-only and derives ACP replay from display records; there is no second
+mutable JSON conversation store. Store failures that must gate acknowledgment or
+model dispatch propagate; turn-end persistence logs and leaves durable state behind.
+
+`mount_loro` adds authenticated POST/GET/DELETE lifecycle routes, explicit
+`resume`/`clear` operations for Loro-only participants, and one WebSocket per replica
+under `{prefix}/{agent_id}/sessions`. `SessionSync` exchanges version
+vectors, sends only missing updates (or a chunked snapshot on first join), fans
+imports out to other peers, persists before an `ack`, and never triggers execution
+by importing. Per-peer queues are bounded at 128 frames; overflow disconnects that
+peer, and oversized updates or imported snapshots are fanned out as chunked
+snapshots instead of one oversized frame. Frames are one tag byte plus payload; the full table and TypeScript example
+are in `docs/loro.md`. ACP and Loro clients answer the same interaction record; the
+server accepts the first valid answer, and cancel/restart invalidate the rest.
+
 ## Distribution packages
 
 `hrns` is the default distribution: a metadata-only wrapper depending on the same
@@ -97,11 +166,12 @@ client toolsets; accepted work survives. Close explicitly cancels and closes the
 session. The default store is separate per registration; the same store instance
 cannot be registered twice. Shared persistence requires explicit agent partitions.
 
-Programmatic and ACP prompts share FIFO acceptance order. A prompt enters history
-only when started. Cancelling an awaiter never cancels execution. Cancel and runtime
+Programmatic, ACP, and Loro contributions share one capture boundary described in
+"Shared sessions with Loro". Contributions enter native history only when captured
+at a model request. Cancelling an awaiter never cancels execution. Cancel and runtime
 errors pause remaining work; Python inspection/resume/clear are the only queue
-management API. Accepted prompts survive disconnect, their JSON-RPC associations do
-not, and no reconnect resubmits them. TUI-local queues remain separate.
+management API. Accepted contributions survive disconnect, their JSON-RPC associations
+do not, and no reconnect resubmits them. TUI-local queues remain separate.
 
 `RegisteredAgent.cancel_session(session_id)` resolves a session through `get_session`
 and delegates to `Session.cancel()`. It shares lookup/restoration and unknown-ID
@@ -113,10 +183,11 @@ delegates to `Session.close()`, sharing its lookup/restoration and unknown-ID er
 Closing cancels active work, clears queued prompts, detaches delivery, closes observers,
 and removes the live session and view. Stored history remains available for restoration.
 
-`interactions.py` retains unanswered decisions while disconnected, reissues after
-attachment replay, and ignores responses from departed generations. A connected
-client without form support gets the existing unavailable-question result. Client
-toolsets are selected through upstream `DynamicToolset` at each model step;
+`interactions.py` stores questions/approvals as session-owned document records
+before any ACP request, reissues after attachment replay, and accepts the first valid
+answer from ACP or Loro. A connected client without form support gets the existing
+unavailable-question result. Client toolsets are selected through upstream
+`DynamicToolset` at each model step;
 `AttachmentToolset` rejects dispatch against an old attachment. An uncertain lost
 result is reported rather than automatically replaying side effects. Provider
 resolver mutations apply to the registration and notify every affected live session.
@@ -171,7 +242,9 @@ if permissions later change. Unsupported operations stay unsupported, and provid
 routing retains registration scope. See `docs/authentication.md` for the public contract.
 
 Each native run passes through one `AGUIEventStream` converter and encoder, with
-server-assigned conversation/native-run IDs. Its native events also feed ACP.
+server-assigned conversation/native-run IDs. Its native events also feed ACP and the
+Loro document. Input captured before a run is added to the AG-UI baseline; input
+captured mid-run is injected as a user message on the live stream, once.
 Deferred decisions split a turn into native runs; session-level `STATE_SNAPSHOT`
 reports waiting without claiming application-turn completion. No request adapter or
 `RunAgentInput` is mounted.
@@ -196,9 +269,11 @@ completion. Subscriber queues hold 256 events; overflow closes the subscription 
 snapshot/replay reconnect instead of dropping deltas or blocking execution. ACP delivery uses a separate queue of transcript-update references. Idle SSE emits keep-alive comments.
 Server/session shutdown closes subscribers and pending deliveries.
 
-Deployment is one process/worker per runtime. Stores may recover committed state
-after restart; live tasks, queues, pending decisions, partial display history, and
-subscriptions are not durable. Cross-worker ownership/fan-out is outside this API.
+Deployment is one process/worker per runtime. Document checkpoints recover native
+history, pending contributions, settings, and partial display after restart; a
+session that was running is restored paused and interrupted, and pending decisions
+are marked obsolete. Live tasks and subscriptions are not durable, and no work is
+replayed automatically. Cross-worker ownership/fan-out is outside this API.
 
 ## MCP over ACP
 

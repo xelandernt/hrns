@@ -1,9 +1,10 @@
 """Agent Client Protocol transport, registered sessions, and configuration types."""
 
+from ..session import Session, TurnHandle, TurnResult
 from . import updates
 from .adapter import PydanticAIACPAgent
 from .content import PromptContentBlock, prompt_blocks_to_user_content
-from .host import AcpServer, RegisteredAgent, Session, TurnHandle, TurnResult
+from .host import AcpServer, RegisteredAgent
 from .mcp import acp_mcp_toolsets
 from .models import (
     ModelChoice,
@@ -51,12 +52,12 @@ from .session import (
 )
 from .store import (
     DeletableSessionStore,
-    InMemorySessionStore,
+    DocumentCheckpoint,
+    InMemoryDocumentStore,
     ListableSessionStore,
     SessionAccess,
     SessionStore,
     SessionSummary,
-    StoredSession,
 )
 from .toolsets import (
     AcpFileSystemToolset,
@@ -72,9 +73,10 @@ __all__ = [
     "AcpSessionConfig",
     "AcpTerminalToolset",
     "DeletableSessionStore",
+    "DocumentCheckpoint",
     "DocumentState",
     "InMemoryProviderRegistry",
-    "InMemorySessionStore",
+    "InMemoryDocumentStore",
     "ListableSessionStore",
     "McpServer",
     "McpServers",
@@ -97,7 +99,6 @@ __all__ = [
     "SessionUpdate",
     "SettingChoice",
     "SettingOption",
-    "StoredSession",
     "ToolCallContent",
     "ToolCallPermission",
     "ToolCallPresentation",

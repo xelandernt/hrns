@@ -22,11 +22,18 @@ skill library with the app, and the client sees them in ``/skills`` exactly like
 discovered ones. The agent loads one itself with ``load_capability``, or a person
 writes ``$release-notes`` in the composer.
 
-The agent also installs the ACP client filesystem and terminal toolsets. A client
-that connects with ``client_io = "all"`` (the terminal's default) gives it
-``read_file``, ``write_file``, and ``run_command`` against the client's machine;
-``"read"`` advertises only reads, and ``"off"`` gives it no client tools. This
-example has no server-side ``Coder``, so those are its only file and command tools.
+The agent also installs the ACP client filesystem and terminal toolsets under the
+``client_`` prefix. A client that connects with ``client_io = "all"`` (the
+terminal's default) gives it ``client_read_file``, ``client_write_file``, and
+``client_run_command`` against the client's machine; ``"read"`` advertises only
+reads, and ``"off"`` gives it no client tools. A server-side ``Coder``/workspace is
+installed too, so a participant who joins only through Loro still has ``read_file``,
+``write_file``, and ``run_command`` in the server workspace without any ACP client.
+
+``/loro`` mounts the session-document API independently of ``/acp`` and
+``/ag-ui``: create/list/read/delete over HTTP, then one WebSocket per replica to
+synchronize pending input and observe output. A TypeScript client can start a
+session there without an ACP bootstrap connection.
 """
 
 from __future__ import annotations
@@ -38,10 +45,12 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI
 from pydantic_ai.agent import AbstractAgent, Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.toolsets import PrefixedToolset
 from pydantic_ai_skills import Skill, SkillResource
 from starlette.requests import HTTPConnection
 
@@ -50,7 +59,8 @@ from hrns.server.acp import (
     AcpAttachmentConfig,
     AcpSession,
     DeletableSessionStore,
-    InMemorySessionStore,
+    DocumentCheckpoint,
+    InMemoryDocumentStore,
     ListableSessionStore,
     ModelChoice,
     ProviderConfig,
@@ -63,11 +73,10 @@ from hrns.server.acp import (
     SessionSummary,
     SettingChoice,
     SettingOption,
-    StoredSession,
     acp_filesystem,
     acp_terminal,
 )
-from hrns.server.capabilities import AskUser, Skills, Todo
+from hrns.server.capabilities import AskUser, Coder, Skills, Todo
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
@@ -279,29 +288,41 @@ class UserSessionStore(ListableSessionStore[Principal], DeletableSessionStore[Pr
     """Process-local per-user partitions; filtering precedes pagination."""
 
     def __init__(self) -> None:
-        self._stores: dict[str, InMemorySessionStore[Principal]] = {}
+        self._stores: dict[str, InMemoryDocumentStore[Principal]] = {}
         self._owners: dict[str, str] = {}
 
-    def _store(self, principal: Principal) -> InMemorySessionStore[Principal]:
-        return self._stores.setdefault(principal.user_id, InMemorySessionStore[Principal]())
+    def _store(self, principal: Principal) -> InMemoryDocumentStore[Principal]:
+        return self._stores.setdefault(principal.user_id, InMemoryDocumentStore[Principal]())
 
-    async def create(self, session_id: str, *, cwd: str, principal: Principal | None) -> None:
+    async def create(
+        self,
+        session_id: str,
+        *,
+        checkpoint: DocumentCheckpoint,
+        principal: Principal | None,
+    ) -> None:
         user = require_principal(principal)
         if user.read_only:
             raise PermissionError
-        await self._store(user).create(session_id, cwd=cwd, principal=user)
+        await self._store(user).create(session_id, checkpoint=checkpoint, principal=user)
         self._owners[session_id] = user.user_id
 
-    async def save(self, session_id: str, session: StoredSession) -> None:
-        await self._stores[self._owners[session_id]].save(session_id, session)
+    async def save(self, session_id: str, checkpoint: DocumentCheckpoint) -> None:
+        await self._stores[self._owners[session_id]].save(session_id, checkpoint)
 
     async def load(
         self, session_id: str, *, principal: Principal | None, operation: SessionAccess
-    ) -> StoredSession | None:
+    ) -> DocumentCheckpoint | None:
         user = require_principal(principal)
         if self._owners.get(session_id) != user.user_id:
             return None
-        if user.read_only and operation not in {"session/load", "ag-ui/snapshot", "ag-ui/events"}:
+        if user.read_only and operation not in {
+            "session/load",
+            "ag-ui/snapshot",
+            "ag-ui/events",
+            "loro/snapshot",
+            "loro/list",
+        }:
             raise PermissionError
         return await self._store(user).load(session_id, principal=user, operation=operation)
 
@@ -324,20 +345,28 @@ def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
     # travels as a form elicitation whenever the client advertises one. Skills
     # advertises the two programmatic skills on ``session/new`` and expands a
     # ``$release-notes`` reference without a model round trip.
-    return Agent(capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS])
+    return Agent(
+        capabilities=[
+            LocalWorkspace(session.cwd),
+            Coder(),
+            Todo(),
+            AskUser(),
+            _EXAMPLE_SKILLS,
+        ]
+    )
 
 
 def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
-    """Add the client's filesystem and terminal as tools for this attachment.
+    """Add the client's filesystem and terminal as ``client_*`` tools.
 
-    ``client_io`` only advertises ACP ``fs/`` and ``terminal/`` capabilities. They
-    become model tools only when the agent installs the matching toolsets, which is
-    why this hook exists: the factory above has no ``Coder``, so these are the
-    agent's only file and command tools. ``client_io = "read"`` yields ``read_file``;
-    ``"all"`` adds client-backed ``write_file`` and ``run_command``.
+    The server-side ``Coder`` already provides ``read_file``, ``write_file``, and
+    ``run_command`` in the session workspace. ACP tools are prefixed so a client
+    that advertises ``fs/`` or ``terminal/`` adds ``client_read_file``,
+    ``client_write_file``, and ``client_run_command`` instead of colliding with the
+    server tools. Loro-only participants still have the server tools.
     """
     toolsets = [
-        toolset
+        PrefixedToolset(toolset, "client")
         for toolset in (acp_filesystem(session), acp_terminal(session))
         if toolset is not None
     ]
@@ -363,6 +392,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="hrns example", lifespan=lifespan)
 server.mount_acp(app, prefix="/acp", authenticate=authenticate)
 server.mount_ag_ui(app, prefix="/ag-ui", authenticate=authenticate)
+server.mount_loro(app, prefix="/loro", authenticate=authenticate)
 
 
 if __name__ == "__main__":
