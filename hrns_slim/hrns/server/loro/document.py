@@ -790,6 +790,23 @@ class SessionDocument:
         self.commit()
         return True
 
+    def propose_interaction_response(
+        self,
+        interaction_id: str,
+        response: dict[str, object],
+        *,
+        actor: str = "loro",
+    ) -> bool:
+        """Write a candidate answer; acceptance remains the server's decision."""
+        entry = self._interaction_map(interaction_id)
+        if entry is None or _string(entry, "state") != "pending":
+            return False
+        entry.insert("response", _JSON_OBJECT.dump_json(response).decode("utf-8"))
+        entry.insert("resolved_by", actor)
+        self.touch()
+        self.commit()
+        return True
+
     def cancel_interaction(self, interaction_id: str, *, state: str, detail: str) -> bool:
         entry = self._interaction_map(interaction_id)
         if entry is None or _string(entry, "state") != "pending":

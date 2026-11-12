@@ -137,9 +137,11 @@ Approval answers use `{"option": "allow_once" | "allow_always" | "reject_once" |
 described by `request.schema` (the standard ACP form schema, also carried as
 `request.questions`).
 
-The server accepts the first valid answer for a pending ID, from ACP or Loro, and
-records who resolved it. Later, conflicting, stale, or cancelled answers change
-nothing. Disconnect retains a pending interaction; cancel marks it cancelled;
+A Loro client answers by writing `response` and optional `resolved_by` while leaving
+`state` pending. The server validates it, applies the first-answer rule, and sets
+`state` to `resolved`; clients must not set `state` themselves. The server accepts the
+first valid answer for a pending ID, from ACP or Loro, and records who resolved it.
+Later, conflicting, stale, or cancelled answers change nothing. Disconnect retains a pending interaction; cancel marks it cancelled;
 restart marks it `obsolete`. A client that lacks form support receives the existing
 unavailable-question outcome.
 
@@ -272,11 +274,9 @@ Answering an interaction writes the answer into its map and commits, then sends
 the delta the same way:
 
 ```ts
-doc.getMap("interactions").get(interactionId)?.set("state", "resolved");
-doc.getMap("interactions").get(interactionId)?.set(
-  "response",
-  JSON.stringify({ option: "allow_once" }),
-);
+const interaction = doc.getMap("interactions").get(interactionId);
+interaction?.set("response", JSON.stringify({ option: "allow_once" }));
+interaction?.set("resolved_by", "web");
 doc.commit();
 ```
 

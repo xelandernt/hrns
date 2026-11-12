@@ -108,6 +108,35 @@ class InteractionService:
         self._on_change()
         return True
 
+    async def ingest(self) -> list[str]:
+        """Accept answers written directly into the document by Loro clients.
+
+        A client writes a ``response`` object and leaves ``state`` pending; the
+        server validates it, applies the first-answer rule, and sets ``resolved``.
+        Answers that arrived while the server was not waiting are accepted too.
+        """
+        accepted: list[str] = []
+        for record in self._document.interactions():
+            if record.state != "pending" or record.response is None:
+                continue
+            validator = self._validators.get(record.id)
+            if validator is None:
+                continue
+            try:
+                validated = validator(record.response)
+            except ValueError:
+                continue
+            actor = record.resolved_by or "loro"
+            if not self._document.resolve_interaction(record.id, validated, resolved_by=actor):
+                continue
+            accepted.append(record.id)
+        if accepted:
+            await self._persist()
+            for interaction_id in accepted:
+                self._signal(interaction_id)
+            self._on_change()
+        return accepted
+
     async def wait(self, interaction_id: str) -> InteractionRecord:
         while True:
             record = self._document.interaction(interaction_id)

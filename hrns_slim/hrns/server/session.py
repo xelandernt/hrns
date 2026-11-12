@@ -116,6 +116,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
     def document_changed(self) -> None:
         """React to an imported document change without blocking the sync loop."""
         self._runtime.document.stamp_ready()
+        self._runtime.schedule_interaction_ingest()
         self._start_worker()
         self._publish()
 

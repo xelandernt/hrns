@@ -314,6 +314,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self.on_capture: Callable[[tuple[Contribution, ...]], None] = lambda contributions: None
         self._active_turn: _TurnState | None = None
         self._observer_input: Sequence[ModelMessage] = ()
+        self._ingest_task: asyncio.Task[None] | None = None
         #: Messages already written to the document, so persistence stays append-only.
         self._history_cache: list[ModelMessage] = []
         #: True when the session was restored from interrupted work and must stay paused.
@@ -549,6 +550,18 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
     def _interaction_changed(self) -> None:
         self.interactions.waiting = self._interaction_service.waiting
         self.on_state()
+
+    def schedule_interaction_ingest(self) -> None:
+        """Check for answers a Loro client wrote directly into the document."""
+        if self._ingest_task is not None and not self._ingest_task.done():
+            return
+        self._ingest_task = asyncio.create_task(self._ingest_interactions())
+
+    async def _ingest_interactions(self) -> None:
+        try:
+            await self._interaction_service.ingest()
+        except Exception:
+            _logger.exception("failed to ingest interaction answers from the document")
 
     async def answer_interaction(
         self, interaction_id: str, response: Mapping[str, object], *, actor: str

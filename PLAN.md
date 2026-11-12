@@ -693,8 +693,10 @@ Verification performed (disposable scripts outside the repository):
   display but no completed model response, and lossless history round-trip.
 - Two-author mid-tool capture, frozen content after capture, duplicate idempotence,
   clear/cancel, and idle/start/finish scheduling across three executions.
-- Loro-only and ACP-plus-Loro answers to the same approval/question, with the first
-  accepted answer winning and later answers rejected; restart marks pending obsolete.
+- Loro-only and ACP-plus-Loro answers to the same approval/question, including an
+  answer written as a document `response` (server ingests and resolves it), with the
+  first accepted answer winning and later answers rejected; restart marks pending
+  obsolete.
 - Version-vector join, snapshot bootstrap, bidirectional fan-out, duplicate delivery,
   offline reconnect, peer-ID collision, and slow-peer overflow close 1013.
 - HTTP create/list/read/delete, 401/403/404 paths, WebSocket join and ack, Loro-authored
