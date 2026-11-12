@@ -52,12 +52,12 @@ from .session import (
 )
 from .store import (
     DeletableSessionStore,
-    InMemorySessionStore,
+    DocumentCheckpoint,
+    InMemoryDocumentStore,
     ListableSessionStore,
     SessionAccess,
     SessionStore,
     SessionSummary,
-    StoredSession,
 )
 from .toolsets import (
     AcpFileSystemToolset,
@@ -73,9 +73,10 @@ __all__ = [
     "AcpSessionConfig",
     "AcpTerminalToolset",
     "DeletableSessionStore",
+    "DocumentCheckpoint",
     "DocumentState",
     "InMemoryProviderRegistry",
-    "InMemorySessionStore",
+    "InMemoryDocumentStore",
     "ListableSessionStore",
     "McpServer",
     "McpServers",
@@ -98,7 +99,6 @@ __all__ = [
     "SessionUpdate",
     "SettingChoice",
     "SettingOption",
-    "StoredSession",
     "ToolCallContent",
     "ToolCallPermission",
     "ToolCallPresentation",

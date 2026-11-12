@@ -6,6 +6,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic
@@ -20,13 +21,15 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
 from .._types import PrincipalT
+from ..loro.document import SessionDocument
+from ..loro.store import DocumentCheckpoint
 from ..session import Session, SessionHooks, SessionView
 from .models import ModelResolver
 from .permission import PermissionPolicy
 from .presentation import ToolCallPresenter
 from .runtime import RunObserver, SessionRuntime
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
-from .store import InMemorySessionStore, SessionStore
+from .store import InMemoryDocumentStore, SessionStore
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -81,7 +84,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._lock = asyncio.Lock()
 
     async def _make_runtime(
-        self, context: SessionContext
+        self, context: SessionContext, document: SessionDocument
     ) -> SessionRuntime[AgentDepsT, OutputDataT]:
         result = self._factory(context)
         agent = await result if isawaitable(result) else result
@@ -90,6 +93,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
             deps=self._deps,
             agent_id=self.agent_id,
             session_store=self.store,
+            document=document,
             model_resolver=self.resolver,
             session_config=self._session_config,
             attachment_config=self._attachment_config,
@@ -127,8 +131,23 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         context = SessionContext(
             agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
         )
-        await self.store.create(context.session_id, cwd=context.cwd, principal=principal)
-        runtime = await self._make_runtime(context)
+        document = SessionDocument.create(
+            agent_id=self.agent_id, session_id=context.session_id, cwd=context.cwd
+        )
+        await self.store.create(
+            context.session_id,
+            checkpoint=DocumentCheckpoint(
+                session_id=context.session_id,
+                agent_id=self.agent_id,
+                cwd=context.cwd,
+                snapshot=document.snapshot(),
+                pending=document.pending_updates(),
+                schema_version=document.schema_version,
+                updated_at=datetime.now(UTC),
+            ),
+            principal=principal,
+        )
+        runtime = await self._make_runtime(context, document)
         await runtime.create(context.session_id, context.cwd)
         return self._remember(runtime)
 
@@ -145,8 +164,10 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                 raise KeyError(session_id)
             if session_id in self._sessions:
                 return self._sessions[session_id]
+            document = SessionDocument.restore(stored.snapshot, stored.pending)
             runtime = await self._make_runtime(
-                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd)
+                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd),
+                document,
             )
             await runtime.restore(session_id, stored)
             return self._remember(runtime)
@@ -207,7 +228,7 @@ class AcpServer(Generic[PrincipalT]):
             raise ValueError("agent_id must be a safe route segment")
         if agent_id in self._registrations:
             raise ValueError(f"agent already registered: {agent_id}")
-        store = session_store if session_store is not None else InMemorySessionStore[PrincipalT]()
+        store = session_store if session_store is not None else InMemoryDocumentStore[PrincipalT]()
         if any(store is prior for prior in self._stores):
             raise ValueError("give each agent a separate store or explicit partition instance")
         if model_resolver is not None and any(model_resolver is prior for prior in self._resolvers):

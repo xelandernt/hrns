@@ -20,7 +20,7 @@ from .host import RegisteredAgent, Session
 from .models import ModelChoice
 from .runtime import ConfigOptions
 from .session import McpServers
-from .store import DeletableSessionStore, ListableSessionStore, SessionAccess, StoredSession
+from .store import DeletableSessionStore, DocumentCheckpoint, ListableSessionStore, SessionAccess
 
 
 class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]):
@@ -54,7 +54,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
                 session._runtime.detach()
         self._sessions.clear()
 
-    async def _load(self, session_id: str, operation: SessionAccess) -> StoredSession:
+    async def _load(self, session_id: str, operation: SessionAccess) -> DocumentCheckpoint:
         try:
             stored = await self._session_store.load(
                 session_id, principal=self._principal, operation=operation

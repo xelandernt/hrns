@@ -9,6 +9,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from inspect import isawaitable
 from typing import Generic, Protocol, TypeAlias, TypeVar
@@ -18,6 +19,7 @@ import acp
 import anyio
 from acp import schema
 from acp.interfaces import Client
+from pydantic import TypeAdapter
 from pydantic_ai import (
     DeferredToolRequests,
     DeferredToolResults,
@@ -71,6 +73,8 @@ from hrns.server.capabilities import (
 from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 
+from ..loro.document import SessionDocument
+from ..loro.store import CheckpointPersistence, DocumentCheckpoint
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
 from .elicitation import (
@@ -104,11 +108,7 @@ from .session import (
     SessionUpdate,
     apply_content_changes,
 )
-from .store import (
-    SessionPersistence,
-    StoredSession,
-    title_from_updates,
-)
+from .store import title_from_updates
 from .toolsets import AttachmentToolset
 
 _logger = logging.getLogger(__name__)
@@ -125,6 +125,8 @@ _SKILL_TOOL_PREFIX = "hrns-skill:"
 ConfigOptions: TypeAlias = list[
     schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean
 ]
+
+_ACP_UPDATE = TypeAdapter(SessionUpdate)
 
 
 def _skill_references(prompt: Sequence[PromptContentBlock]) -> tuple[str, ...]:
@@ -316,11 +318,17 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         agent_id: str = "agent",
         permission_policy: PermissionPolicy | None = None,
         tool_presenter: ToolCallPresenter | None = None,
-        session_store: SessionPersistence,
+        session_store: CheckpointPersistence,
+        document: SessionDocument,
         model_resolver: ModelResolver | None = None,
         usage_limits: UsageLimits | None = None,
     ) -> None:
         self._agent = agent
+        self._document = document
+        #: Messages already written to the document, so persistence stays append-only.
+        self._history_cache: list[ModelMessage] = []
+        #: True when the session was restored from interrupted work and must stay paused.
+        self.restored_interrupted = False
         self.last_output: OutputDataT | None = None
         self._deps = deps
         self._session_config = session_config
@@ -412,46 +420,106 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def create(self, session_id: str, cwd: str) -> None:
         config = await self._build_config(session_id, cwd)
-        choices = self._model_choices()
-        self._state = SessionState(
-            session_id=session_id,
-            config=config,
-            cwd=cwd,
-            model=choices[0].model_id if choices else None,
-        )
+        self._state = self._state_from_document(session_id, cwd, config)
+        self._history_cache = list(self._state.history)
         await self._persist(self.state)
 
-    async def restore(self, session_id: str, stored: StoredSession) -> None:
-        config = await self._build_config(session_id, stored.cwd)
-        self._state = SessionState(
-            session_id=session_id,
-            config=config,
-            cwd=stored.cwd,
-            history=list(stored.messages),
-            transcript=list(stored.updates),
-            model=stored.model,
-            setting_selections=dict(stored.setting_selections),
-            todos=TodoStore(items=stored.todos),
-            invoked_skills=set(stored.skills),
-        )
+    async def restore(self, session_id: str, checkpoint: DocumentCheckpoint) -> None:
+        config = await self._build_config(session_id, checkpoint.cwd)
+        self._state = self._state_from_document(session_id, checkpoint.cwd, config)
+        self._history_cache = list(self._state.history)
         self._title = title_from_updates(self.state.transcript)
+        lifecycle = self._document.lifecycle()
+        if lifecycle.status in ("running", "waiting") or lifecycle.resume_required:
+            # Never replay uncertain model requests or tool side effects after a restart.
+            self.restored_interrupted = True
+            self._document.cancel_pending_interactions(
+                state="obsolete", detail="server restarted during execution"
+            )
+            self._document.set_lifecycle_status("interrupted")
+            self._document.set_resume_required(True)
+            self._document.set_active_contribution(None)
+            self._document.commit_lifecycle()
         if self._reconcile_setting_selections(self.state):
             await self._persist(self.state)
 
+    def _state_from_document(
+        self, session_id: str, cwd: str, config: AcpSessionConfig[AgentDepsT]
+    ) -> SessionState[AgentDepsT]:
+        settings = self._document.settings()
+        choices = self._model_choices()
+        model = settings.model or (choices[0].model_id if choices else None)
+        state = SessionState(
+            session_id=session_id,
+            config=config,
+            cwd=cwd,
+            history=self._document.history_messages(),
+            transcript=self._transcript_from_document(),
+            model=model,
+            setting_selections=dict(settings.setting_selections),
+            todos=TodoStore(items=settings.todos),
+            invoked_skills=set(settings.skills),
+            cost=Decimal(settings.cost) if settings.cost is not None else None,
+        )
+        if settings.model != model:
+            self._document.set_model(model)
+        return state
+
+    def _transcript_from_document(self) -> list[SessionUpdate]:
+        """Derive the ACP replay view from display records, never a second store."""
+        updates: list[SessionUpdate] = []
+        for record in self._document.display_records():
+            raw = record.payload.get("acp")
+            if not isinstance(raw, dict):
+                continue
+            try:
+                updates.append(_ACP_UPDATE.validate_python(raw))
+            except ValueError:
+                continue
+        return updates
+
+    def _sync_document(self, state: SessionState[AgentDepsT]) -> None:
+        """Mirror the canonical runtime state into the document before saving."""
+        settings = self._document.settings()
+        if settings.model != state.model:
+            self._document.set_model(state.model)
+        if settings.setting_selections != state.setting_selections:
+            self._document.set_setting_selections(dict(state.setting_selections))
+        cost = str(state.cost) if state.cost is not None else None
+        if settings.cost != cost:
+            self._document.set_cost(cost)
+        if settings.todos != state.todos.items:
+            self._document.set_todos(state.todos.items)
+        skills = tuple(sorted(state.invoked_skills))
+        if settings.skills != skills:
+            self._document.set_skills(skills)
+        if self._history_cache == state.history:
+            return
+        if (
+            len(self._history_cache) <= len(state.history)
+            and state.history[: len(self._history_cache)] == self._history_cache
+        ):
+            self._document.append_history(state.history[len(self._history_cache) :])
+        else:
+            self._document.replace_history(state.history)
+        self._history_cache = list(state.history)
+
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
-        """Save a session's committed state, if a store is configured."""
+        """Save one durable document checkpoint, if a store is configured."""
         async with self._persist_lock:
             try:
+                self._sync_document(state)
                 await self._session_store.save(
                     state.session_id,
-                    StoredSession(
+                    DocumentCheckpoint(
+                        session_id=state.session_id,
+                        agent_id=self.agent_id,
                         cwd=state.cwd,
-                        messages=list(state.history),
-                        updates=list(state.transcript),
-                        model=state.model,
-                        setting_selections=dict(state.setting_selections),
-                        todos=state.todos.items,
-                        skills=tuple(sorted(state.invoked_skills)),
+                        snapshot=self._document.snapshot(),
+                        pending=self._document.pending_updates(),
+                        schema_version=self._document.schema_version,
+                        updated_at=datetime.now(UTC),
+                        title=self._document.title(),
                     ),
                 )
             except Exception:

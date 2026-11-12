@@ -50,7 +50,8 @@ from hrns.server.acp import (
     AcpAttachmentConfig,
     AcpSession,
     DeletableSessionStore,
-    InMemorySessionStore,
+    DocumentCheckpoint,
+    InMemoryDocumentStore,
     ListableSessionStore,
     ModelChoice,
     ProviderConfig,
@@ -63,7 +64,6 @@ from hrns.server.acp import (
     SessionSummary,
     SettingChoice,
     SettingOption,
-    StoredSession,
     acp_filesystem,
     acp_terminal,
 )
@@ -279,25 +279,31 @@ class UserSessionStore(ListableSessionStore[Principal], DeletableSessionStore[Pr
     """Process-local per-user partitions; filtering precedes pagination."""
 
     def __init__(self) -> None:
-        self._stores: dict[str, InMemorySessionStore[Principal]] = {}
+        self._stores: dict[str, InMemoryDocumentStore[Principal]] = {}
         self._owners: dict[str, str] = {}
 
-    def _store(self, principal: Principal) -> InMemorySessionStore[Principal]:
-        return self._stores.setdefault(principal.user_id, InMemorySessionStore[Principal]())
+    def _store(self, principal: Principal) -> InMemoryDocumentStore[Principal]:
+        return self._stores.setdefault(principal.user_id, InMemoryDocumentStore[Principal]())
 
-    async def create(self, session_id: str, *, cwd: str, principal: Principal | None) -> None:
+    async def create(
+        self,
+        session_id: str,
+        *,
+        checkpoint: DocumentCheckpoint,
+        principal: Principal | None,
+    ) -> None:
         user = require_principal(principal)
         if user.read_only:
             raise PermissionError
-        await self._store(user).create(session_id, cwd=cwd, principal=user)
+        await self._store(user).create(session_id, checkpoint=checkpoint, principal=user)
         self._owners[session_id] = user.user_id
 
-    async def save(self, session_id: str, session: StoredSession) -> None:
-        await self._stores[self._owners[session_id]].save(session_id, session)
+    async def save(self, session_id: str, checkpoint: DocumentCheckpoint) -> None:
+        await self._stores[self._owners[session_id]].save(session_id, checkpoint)
 
     async def load(
         self, session_id: str, *, principal: Principal | None, operation: SessionAccess
-    ) -> StoredSession | None:
+    ) -> DocumentCheckpoint | None:
         user = require_principal(principal)
         if self._owners.get(session_id) != user.user_id:
             return None
