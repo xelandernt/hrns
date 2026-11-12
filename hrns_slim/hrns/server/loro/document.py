@@ -37,6 +37,7 @@ from loro import (
     LoroText,
     Subscription,
     ValueOrContainer,
+    VersionVector,
 )
 from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
@@ -825,6 +826,10 @@ class SessionDocument:
 
     def version(self) -> bytes:
         return self._doc.oplog_vv.encode()
+
+    def export_updates(self, version: bytes) -> bytes:
+        """Export exactly what a peer at ``version`` is missing."""
+        return self._doc.export(ExportMode.Updates(VersionVector.decode(version)))
 
     def version_token(self) -> str:
         return base64.b64encode(self._doc.state_frontiers.encode()).decode("ascii")

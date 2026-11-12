@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from inspect import isawaitable
@@ -22,7 +22,14 @@ from pydantic_ai.usage import UsageLimits
 
 from .._types import PrincipalT
 from ..loro.document import SessionDocument
-from ..loro.store import DocumentCheckpoint
+from ..loro.registration import LoroRegistration
+from ..loro.store import (
+    DeletableSessionStore,
+    DocumentCheckpoint,
+    ListableSessionStore,
+    SessionAccess,
+    SessionSummary,
+)
 from ..session import Session, SessionHooks, SessionView
 from .models import ModelResolver
 from .permission import PermissionPolicy
@@ -152,14 +159,16 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         return self._remember(runtime)
 
     async def get_session(
-        self, session_id: str, *, principal: PrincipalT | None = None
+        self,
+        session_id: str,
+        *,
+        principal: PrincipalT | None = None,
+        operation: SessionAccess = "session/load",
     ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
         async with self._lock:
             self._server._require_running()
-            stored = await self.store.load(
-                session_id, principal=principal, operation="session/load"
-            )
+            stored = await self.store.load(session_id, principal=principal, operation=operation)
             if stored is None:
                 raise KeyError(session_id)
             if session_id in self._sessions:
@@ -182,6 +191,35 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         session = await self.get_session(session_id)
         await session.close()
 
+    async def list_sessions(
+        self,
+        *,
+        principal: PrincipalT | None = None,
+        cwd: str | None = None,
+        cursor: str | None = None,
+    ) -> tuple[Sequence[SessionSummary], str | None]:
+        store = self.store
+        if not isinstance(store, ListableSessionStore):
+            raise NotImplementedError("this registration's store cannot list sessions")
+        return await store.list_sessions(principal=principal, cwd=cwd, cursor=cursor)
+
+    async def delete_session(self, session_id: str, *, principal: PrincipalT | None = None) -> None:
+        """Delete a live or stored session; raise KeyError if unknown."""
+        self._server._require_running()
+        async with self._lock:
+            stored = await self.store.load(
+                session_id, principal=principal, operation="session/delete"
+            )
+            if stored is None:
+                raise KeyError(session_id)
+            session = self._sessions.get(session_id)
+            if session is not None:
+                await session._close()
+            store = self.store
+            if not isinstance(store, DeletableSessionStore):
+                raise NotImplementedError("this registration's store cannot delete sessions")
+            await store.delete(session_id, principal=principal)
+
     def connection(
         self, principal: PrincipalT | None = None
     ) -> PydanticAIACPAgent[PrincipalT, AgentDepsT, OutputDataT]:
@@ -198,6 +236,7 @@ class AcpServer(Generic[PrincipalT]):
 
     def __init__(self) -> None:
         self._registrations: dict[str, _RegistrationEntry[PrincipalT]] = {}
+        self._loro: dict[str, LoroRegistration[PrincipalT]] = {}
         self._stores: list[SessionStore[PrincipalT]] = []
         self._resolvers: list[ModelResolver] = []
         self._running = False
@@ -252,6 +291,33 @@ class AcpServer(Generic[PrincipalT]):
         self._registrations[agent_id] = _RegistrationEntry(
             registration.connection, registration.close, registration._views, registration.store
         )
+        list_sessions = (
+            (
+                lambda principal, cwd, cursor: registration.list_sessions(
+                    principal=principal, cwd=cwd, cursor=cursor
+                )
+            )
+            if isinstance(store, ListableSessionStore)
+            else None
+        )
+        delete_session = (
+            (
+                lambda session_id, principal: registration.delete_session(
+                    session_id, principal=principal
+                )
+            )
+            if isinstance(store, DeletableSessionStore)
+            else None
+        )
+        loro: LoroRegistration[PrincipalT] = LoroRegistration(
+            create=lambda cwd, principal: registration.new_session(cwd=cwd, principal=principal),
+            get=lambda session_id, principal, operation: registration.get_session(
+                session_id, principal=principal, operation=operation
+            ),
+            list=list_sessions,
+            delete=delete_session,
+        )
+        self._loro[agent_id] = loro
         self._stores.append(store)
         if model_resolver is not None:
             self._resolvers.append(model_resolver)
@@ -273,6 +339,17 @@ class AcpServer(Generic[PrincipalT]):
     async def __aexit__(self, *exc: object) -> None:
         self._running = False
         await asyncio.gather(*(entry.close() for entry in self._registrations.values()))
+
+    def mount_loro(
+        self,
+        app: FastAPI,
+        *,
+        prefix: str = "/loro",
+        authenticate: Authenticator[PrincipalT] | None = None,
+    ) -> None:
+        from ..loro.routes import mount_loro_routes
+
+        mount_loro_routes(self, app, prefix=prefix, authenticate=authenticate)
 
     def mount_acp(
         self,

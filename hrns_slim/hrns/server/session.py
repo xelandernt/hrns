@@ -25,6 +25,7 @@ from pydantic_ai.tools import AgentDepsT
 from .acp.content import PromptContentBlock, skill_references
 from .acp.runtime import RunObserver, SessionRuntime
 from .loro.models import Author, Contribution, InteractionRecord
+from .loro.sync import SessionSync, SyncTransport
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
         self._captured: set[str] = set()
+        self._sync: SessionSync | None = None
         self._paused = runtime.restored_interrupted
         self._closed = False
         self._revision = 0
@@ -106,6 +108,26 @@ class Session(Generic[AgentDepsT, OutputDataT]):
 
     def history(self) -> list[ModelMessage]:
         return list(self._runtime.state.history)
+
+    def snapshot(self) -> bytes:
+        """The current document image, for an HTTP bootstrap or inspection."""
+        return self._runtime.document.snapshot()
+
+    def document_changed(self) -> None:
+        """React to an imported document change without blocking the sync loop."""
+        self._runtime.document.stamp_ready()
+        self._start_worker()
+        self._publish()
+
+    async def sync(self, transport: SyncTransport) -> None:
+        """Serve one connected replica until it disconnects."""
+        if self._sync is None:
+            self._sync = SessionSync(
+                self._runtime.document,
+                persist=self._runtime._persist_strict,
+                on_change=self.document_changed,
+            )
+        await self._sync.connect(transport)
 
     async def submit(
         self,
@@ -135,6 +157,8 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         text = "\n".join(
             block.text for block in blocks if isinstance(block, schema.TextContentBlock)
         )
+        if origin is not None:
+            self._runtime.prompt_origin = origin
         if author is None:
             author = (
                 Author(id="acp", label="ACP client", kind="acp")
@@ -293,6 +317,9 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._closed = True
         await self.cancel()
         await self.clear_queue()
+        if self._sync is not None:
+            await self._sync.close()
+            self._sync = None
         await self._runtime.flush()
         delivery = self._runtime._delivery
         self._runtime.detach()

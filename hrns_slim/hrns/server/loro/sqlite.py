@@ -161,7 +161,7 @@ class SQLiteDocumentStore(Generic[PrincipalT]):
     async def list_sessions(
         self, *, principal: PrincipalT | None, cwd: str | None = None, cursor: str | None = None
     ) -> tuple[Sequence[SessionSummary], str | None]:
-        self._authorize_access("", "loro/write", principal)
+        self._authorize_access("", "loro/list", principal)
         offset = _cursor_offset(cursor)
 
         def select(connection: sqlite3.Connection) -> list[SessionSummary]:

@@ -31,6 +31,7 @@ SessionAccess: TypeAlias = Literal[
     "ag-ui/snapshot",
     "ag-ui/events",
     "loro/snapshot",
+    "loro/list",
     "loro/sync",
     "loro/write",
 ]
