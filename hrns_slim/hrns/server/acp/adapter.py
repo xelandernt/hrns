@@ -140,6 +140,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self, session_id: str, prompt: list[PromptContentBlock], **kwargs: object
     ) -> schema.PromptResponse:
         session = await self._session(session_id, "session/prompt")
+        if session.paused:
+            raise acp.RequestError.invalid_params(
+                {
+                    "reason": "session is paused; resume it through Python or the Loro "
+                    "resume route before prompting"
+                }
+            )
         handle = await session._accept(prompt, self._conn)
         result = await handle.result()
         return schema.PromptResponse(stop_reason=result.stop_reason, usage=result.usage)

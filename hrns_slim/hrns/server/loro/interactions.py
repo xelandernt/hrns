@@ -19,7 +19,10 @@ from .models import InteractionKind, InteractionRecord
 Validator = Callable[[Mapping[str, object]], dict[str, object]]
 _logger = logging.getLogger(__name__)
 
-_APPROVAL_OPTIONS = {"allow_once", "allow_always", "reject_once", "reject_always", "cancel"}
+APPROVAL_OPTIONS = frozenset(
+    {"allow_once", "allow_always", "reject_once", "reject_always", "cancel"}
+)
+_APPROVAL_OPTIONS = APPROVAL_OPTIONS
 _QUESTION_ACTIONS = {"accept", "decline", "cancel"}
 
 
@@ -192,6 +195,7 @@ class InteractionService:
 
 
 __all__ = [
+    "APPROVAL_OPTIONS",
     "InteractionService",
     "validate_approval",
     "validate_question",

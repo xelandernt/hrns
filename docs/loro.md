@@ -75,7 +75,7 @@ containers are fixed names; never repurpose one.
 | `settings` | `LoroMap` | server | Selected model, setting selections, cost, todos, invoked skills |
 | `inputs` | `LoroList<LoroMap>` | everyone | Contributions; text in a `LoroText` child |
 | `consumption` | `LoroList<LoroMap>` | server | Immutable capture records ordered by server sequence |
-| `history` | `LoroList<LoroMap>` | server | Lossless native `ModelMessage` JSON, append-only |
+| `history` | `LoroList<LoroMap>` | server | Lossless native `ModelMessage` JSON, append-only; adjacent requests may be merged |
 | `display` | `LoroList<LoroMap>` | server | Display-only user/assistant/thinking/tool/plan/usage records |
 | `interactions` | `LoroMap<LoroMap>` | everyone answers | Pending questions and approvals keyed by stable ID |
 
@@ -96,9 +96,11 @@ are rewritten or rejected by the server. `settings` in particular is mirrored fr
 server's session configuration on every persist; a client write there is transitory.
 
 Native history is not a display transcript. `history` preserves tool calls/results,
-cost/usage, run IDs, and metadata; `display` is a convenience projection that may
+cost/usage, and run IDs. Pydantic AI may merge adjacent captured requests and drop
+their application metadata; the `consumption` and user `display` records remain the
+authoritative per-contribution record. `display` is a convenience projection that may
 be partial after an interruption. A client must not write `history`, `consumption`,
-`display`, `lifecycle`, or `meta`.
+`display`, `lifecycle`, `settings`, or `meta`.
 
 Text offsets in this contract are Unicode code points, matching Python
 `LoroText`. JavaScript positions are UTF-16: convert at the boundary when editing
@@ -117,8 +119,11 @@ At a model-request boundary the server:
    (`consumed_seq`), so client clocks and CRDT list order never define order;
 3. freezes the text and document version into an immutable `consumption` record;
 4. persists that decision before any model dispatch;
-5. delivers one native user request per contribution, with `metadata.author`,
-   `contribution_id`, `consumption_seq`, and `capture_version`;
+5. delivers the captured content as native requests with `metadata.author`,
+   `contribution_id`, `consumption_seq`, and `capture_version`. Pydantic AI may merge
+   adjacent captured requests when a later execution starts and, when it does, drops
+   their application metadata. `consumption` and user `display` records are therefore
+   the authoritative per-contribution author/order source;
 6. marks the consumption record and contribution delivered.
 
 Input arriving while a tool is running is captured at the next request in the same

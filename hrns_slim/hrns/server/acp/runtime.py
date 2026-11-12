@@ -74,7 +74,12 @@ from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 
 from ..loro.document import SessionDocument
 from ..loro.input import CapturedInput, InputCapture, InputCoordinator, acp_blocks, messages_for
-from ..loro.interactions import InteractionService, validate_approval, validate_question
+from ..loro.interactions import (
+    APPROVAL_OPTIONS,
+    InteractionService,
+    validate_approval,
+    validate_question,
+)
 from ..loro.models import Contribution, InteractionRecord
 from ..loro.publisher import DocumentPublisher
 from ..loro.store import CheckpointPersistence, DocumentCheckpoint
@@ -315,6 +320,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self._active_turn: _TurnState | None = None
         self._observer_input: Sequence[ModelMessage] = ()
         self._ingest_task: asyncio.Task[None] | None = None
+        self._ingest_pending = False
         #: Messages already written to the document, so persistence stays append-only.
         self._history_cache: list[ModelMessage] = []
         #: True when the session was restored from interrupted work and must stay paused.
@@ -556,13 +562,18 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     def schedule_interaction_ingest(self) -> None:
         """Check for answers a Loro client wrote directly into the document."""
+        self._ingest_pending = True
         if self._ingest_task is not None and not self._ingest_task.done():
             return
         self._ingest_task = asyncio.create_task(self._ingest_interactions())
 
     async def _ingest_interactions(self) -> None:
         try:
-            await self._interaction_service.ingest()
+            while True:
+                self._ingest_pending = False
+                await self._interaction_service.ingest()
+                if not self._ingest_pending:
+                    return
         except Exception:
             _logger.exception("failed to ingest interaction answers from the document")
 
@@ -891,10 +902,12 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
     def _client_toolset(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         return CombinedToolset(list(self.attachment_toolsets)) if self.attachment_toolsets else None
 
-    async def execute(self) -> schema.PromptResponse:
+    async def execute(self) -> schema.PromptResponse | None:
         captured = await self._coordinator.capture()
         if not captured.contributions:
-            return schema.PromptResponse(stop_reason="cancelled")
+            # Another participant cleared the ready input after the scheduler's
+            # eligibility check; this is not an explicit cancellation.
+            return None
         self.state.invoked_skills.update(captured.skills)
         try:
             injections = await self._injections(captured)
@@ -1435,6 +1448,15 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                         interaction_id, detail=f"client request failed: {error}"
                     )
                     raise error
+                record = self._document.interaction(interaction_id)
+                if record is None or record.state == "pending":
+                    await self._interaction_service.cancel(
+                        interaction_id,
+                        detail="client dispatch ended without an accepted answer",
+                    )
+                    raise acp.RequestError.internal_error(
+                        {"reason": "client dispatch ended without an answer"}
+                    )
             return await wait_task
         finally:
             for task in (dispatch, wait_task):
@@ -1575,6 +1597,10 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 if isinstance(response.outcome, schema.DeniedOutcome)
                 else response.outcome.option_id
             )
+            if option not in APPROVAL_OPTIONS:
+                raise acp.RequestError.invalid_params(
+                    {"option_id": option, "reason": "not an offered permission option"}
+                )
             await self._interaction_service.resolve(record.id, {"option": option}, actor="acp")
 
         dispatch = asyncio.create_task(self.interactions.request(ask))

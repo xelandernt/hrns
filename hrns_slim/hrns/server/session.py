@@ -81,7 +81,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._accepted: dict[str, TurnHandle[OutputDataT]] = {}
         self._worker: asyncio.Task[None] | None = None
         self._active: TurnHandle[OutputDataT] | None = None
-        self._execution: asyncio.Task[schema.PromptResponse] | None = None
+        self._execution: asyncio.Task[schema.PromptResponse | None] | None = None
         self._captured: set[str] = set()
         self._origins: dict[str, object] = {}
         self._active_contribution_id: str | None = None
@@ -114,6 +114,10 @@ class Session(Generic[AgentDepsT, OutputDataT]):
     def _publish(self) -> None:
         self._revision += 1
         self._runtime.publish_state(self.status())
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def history(self) -> list[ModelMessage]:
         return list(self._runtime.state.history)
@@ -232,6 +236,10 @@ class Session(Generic[AgentDepsT, OutputDataT]):
                 self._execution = task
                 try:
                     response = await task
+                    if response is None:
+                        # Another participant cleared the ready input after the
+                        # eligibility check; this is not an explicit cancellation.
+                        break
                     self._last_outcome = response.stop_reason
                     self._last_usage = (
                         response.usage.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -305,12 +313,17 @@ class Session(Generic[AgentDepsT, OutputDataT]):
             self._execution.cancel()
             if self._worker is not None:
                 await asyncio.shield(self._worker)
-        await self._runtime.cancel_interactions("execution cancelled")
-        # A cancelled ACP prompt will not be echoed to a future attachment.
+        # ACP prompt requests must not stay unanswered while the session is paused.
+        # Cancel ready ACP-origin contributions; other accepted input remains paused.
         for contribution_id in list(self._origins):
             contribution = self._runtime.document.contribution(contribution_id)
-            if contribution is None or contribution.state != "captured":
-                self._origins.pop(contribution_id, None)
+            if contribution is not None and contribution.state == "ready":
+                await self._runtime.coordinator.cancel(contribution_id)
+                handle = self._accepted.pop(contribution_id, None)
+                if handle is not None and not handle._future.done():
+                    handle._future.set_result(TurnResult("cancelled"))
+            self._origins.pop(contribution_id, None)
+        await self._runtime.cancel_interactions("execution cancelled")
         await self._runtime.coordinator.interrupt_orphans()
 
     def start_if_ready(self) -> None:

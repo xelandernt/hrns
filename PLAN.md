@@ -724,10 +724,11 @@ Observed limitations, reported rather than hidden:
   after an interruption is not added to AG-UI native history (by design); Loro clients
   retain it as display content.
 - Pydantic AI may merge adjacent captured `ModelRequest`s when a later execution
-  starts. Text content and order remain correct, but per-request `metadata` survives
-  only on the first request of a merged run. The immutable `consumption` records and
-  user display records are the authoritative author/order source; UIs should read
-  those rather than message metadata.
+  starts. Text content and order remain correct, but when two or more contributions
+  are merged, their application metadata is dropped (only the reserved framework
+  namespace survives). The immutable `consumption` records and user display records
+  are the authoritative per-contribution author/order source; UIs should read those
+  rather than message metadata.
 - Checkpoints export a full snapshot on each persistence boundary and imported updates
   are persisted individually. Batching/compaction and an operation index are deferred;
   document size and write frequency should be measured for very long sessions.
@@ -746,6 +747,15 @@ oversized snapshot fan-out, silent execution failures, and missing Loro `resume`
 routes. The lockfile was regenerated with the repository's newer uv format and now
 differs only by the `loro` dependency. Remaining documented limitations are the
 upstream adjacent-request metadata merge and the absence of automated tests.
+
+A second gatekeeping review found and this change fixed: ACP prompts hanging while a
+session is paused, a `clear`/start race pausing the session, lost wakeups when a second
+document answer arrived during interaction persistence, and an invalid ACP permission
+option leaving the interaction pending. ACP `session/prompt` now rejects while paused,
+`cancel` resolves not-yet-captured ACP prompt handles and cancels those contributions,
+empty capture returns no execution instead of a cancellation, interaction ingestion
+coalesces pending schedules, and invalid client answers fail the dispatch. Native
+history metadata wording now matches Pydantic AI's merge behavior.
 
 The historical record below belongs to the previous ACP/AG-UI implementation.
 

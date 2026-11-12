@@ -143,6 +143,13 @@ class InputCoordinator:
                 )
         await self._persist()
 
+    async def cancel(self, contribution_id: str) -> bool:
+        if not self._document.cancel_contribution(contribution_id):
+            return False
+        if not self._document.poisoned:
+            await self._persist()
+        return True
+
     async def cancel_ready(self) -> list[str]:
         cancelled = self._document.discard_inputs({"ready"})
         if cancelled and not self._document.poisoned:

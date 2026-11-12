@@ -198,7 +198,10 @@ operations. The terminal also keeps its own local drafts and queue. See
 
 One ACP client may attach to a session. `session/new` creates and attaches;
 `session/load` reuses the live agent and replays completed plus active-turn ACP updates
-before responding. The current owner may reload the same session on its connection.
+before responding. While a session is paused (after a cancel, a runtime error, or an
+interrupted restore), `session/prompt` is rejected with `invalid_params` instead of
+waiting forever; resume it with Python `resume_queue()` or
+`POST {loro_prefix}/{agent_id}/sessions/{session_id}/resume`. The current owner may reload the same session on its connection.
 Loading must use the session's stored cwd. Another attached client
 receives an attachment conflict.
 
