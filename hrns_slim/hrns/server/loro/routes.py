@@ -171,6 +171,28 @@ def mount_loro_routes(
             raise HTTPException(404, "Session not found") from exc
         return {"deleted": session.session_id}
 
+    @app.post(base + "/{session_id}/resume", description="Resume a paused session.")
+    async def resume(
+        connection: HTTPConnection, agent_id: str, session_id: str
+    ) -> dict[str, object]:
+        principal = await principal_of(connection)
+        session = await session_of(agent_id, session_id, "loro/write", principal)
+        await session.resume()
+        return {"sessionId": session.session_id, "status": session.status()}
+
+    @app.post(base + "/{session_id}/clear", description="Cancel ready pending input.")
+    async def clear_inputs(
+        connection: HTTPConnection, agent_id: str, session_id: str
+    ) -> dict[str, object]:
+        principal = await principal_of(connection)
+        session = await session_of(agent_id, session_id, "loro/write", principal)
+        cancelled = await session.clear_inputs()
+        return {
+            "sessionId": session.session_id,
+            "cancelled": list(cancelled),
+            "status": session.status(),
+        }
+
     @app.websocket(base + "/{session_id}/sync")
     async def sync(websocket: WebSocket, agent_id: str, session_id: str) -> None:
         try:

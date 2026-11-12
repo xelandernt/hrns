@@ -125,8 +125,12 @@ the same data again.
 | `ag-ui/events` | Before opening an AG-UI event stream. |
 | `loro/snapshot` | Before returning a session's metadata or document snapshot. |
 | `loro/list` | Before enumerating stored sessions over HTTP. |
-| `loro/sync` | Before opening a document WebSocket; includes imports and writes. |
-| `loro/write` | Before creating a session through `SQLiteDocumentStore`'s authorize hook. |
+| `loro/sync` | Before opening a document WebSocket; necessarily includes imports and writes. |
+| `loro/write` | Before creating a session, and before the HTTP resume/clear operations. |
+
+A store cannot express "read-only sync" through `loro/sync` alone: a replica that may
+connect can also contribute. Deny `loro/sync` for read-only principals and use
+`loro/snapshot` for inspection.
 
 Creation, listing, and deletion also receive the principal through their dedicated
 store methods. A listing query can return all visible sessions while `load` permits

@@ -17,7 +17,7 @@ from acp import schema
 from hrns.server.acp.session import SessionUpdate
 
 from .document import DisplaySlot, SessionDocument
-from .models import Author, DisplayKind, LifecycleStatus
+from .models import Author, DisplayKind
 
 #: Flush buffered streamed text after this many characters.
 _TEXT_FLUSH_THRESHOLD = 1024
@@ -134,14 +134,6 @@ class DocumentPublisher:
             self._document.set_resume_required(True)
             self._document.set_active_contribution(None)
             self._document.commit_lifecycle()
-
-    async def pause(self) -> None:
-        self._document.set_lifecycle_status("paused")
-        self._document.commit_lifecycle()
-
-    async def set_status(self, status: LifecycleStatus) -> None:
-        self._document.set_lifecycle_status(status)
-        self._document.commit_lifecycle()
 
     async def flush(self) -> None:
         async with self._lock:

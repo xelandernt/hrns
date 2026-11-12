@@ -728,6 +728,20 @@ Observed limitations, reported rather than hidden:
   only on the first request of a merged run. The immutable `consumption` records and
   user display records are the authoritative author/order source; UIs should read
   those rather than message metadata.
+- Checkpoints export a full snapshot on each persistence boundary and imported updates
+  are persisted individually. Batching/compaction and an operation index are deferred;
+  document size and write frequency should be measured for very long sessions.
+
+An independent review after implementation found and this change fixed: the example's
+duplicate ACP/server tool names (ACP tools now use a `client_` prefix), interaction
+dispatch hangs on client errors, orphaned captures not reconciled on restore, mid-run
+captures lost from history on cancellation, idle restored ready input not starting,
+status reporting for Loro input/paused sessions, per-execution ACP echo suppression,
+acceptance persistence leaving a ready contribution, client-owned settings ambiguity,
+oversized snapshot fan-out, silent execution failures, and missing Loro `resume`/`clear`
+routes. The lockfile was regenerated with the repository's newer uv format and now
+differs only by the `loro` dependency. Remaining documented limitations are the
+upstream adjacent-request metadata merge and the absence of automated tests.
 
 The historical record below belongs to the previous ACP/AG-UI implementation.
 

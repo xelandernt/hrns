@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -37,6 +38,8 @@ from .presentation import ToolCallPresenter
 from .runtime import RunObserver, SessionRuntime
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
 from .store import InMemoryDocumentStore, SessionStore
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -125,6 +128,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._views[session.session_id] = SessionView(
             session.history, session.status, runtime.observer
         )
+        session.start_if_ready()
         return session
 
     def _forget(self, session_id: str) -> None:
@@ -183,12 +187,12 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
 
     async def cancel_session(self, session_id: str) -> None:
         """Cancel the active turn and pause queued prompts; raise KeyError if unknown."""
-        session = await self.get_session(session_id)
+        session = await self.get_session(session_id, operation="session/cancel")
         await session.cancel()
 
     async def close_session(self, session_id: str) -> None:
         """Close the session, preserving stored history; raise KeyError if unknown."""
-        session = await self.get_session(session_id)
+        session = await self.get_session(session_id, operation="session/close")
         await session.close()
 
     async def list_sessions(
@@ -212,12 +216,12 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
             )
             if stored is None:
                 raise KeyError(session_id)
-            session = self._sessions.get(session_id)
-            if session is not None:
-                await session._close()
             store = self.store
             if not isinstance(store, DeletableSessionStore):
                 raise NotImplementedError("this registration's store cannot delete sessions")
+            session = self._sessions.get(session_id)
+            if session is not None:
+                await session._close()
             await store.delete(session_id, principal=principal)
 
     def connection(
@@ -338,7 +342,13 @@ class AcpServer(Generic[PrincipalT]):
 
     async def __aexit__(self, *exc: object) -> None:
         self._running = False
-        await asyncio.gather(*(entry.close() for entry in self._registrations.values()))
+        results = await asyncio.gather(
+            *(entry.close() for entry in self._registrations.values()),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.exception("failed to close an agent registration", exc_info=result)
 
     def mount_loro(
         self,

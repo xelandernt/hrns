@@ -173,11 +173,6 @@ class InteractionService:
         if waiter is not None:
             waiter.event.set()
 
-    def close(self) -> None:
-        for waiter in self._waiters.values():
-            waiter.event.set()
-        self._waiters.clear()
-
 
 __all__ = [
     "InteractionService",

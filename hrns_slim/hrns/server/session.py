@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic
 
+import anyio
 from acp import schema
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.output import OutputDataT
@@ -82,6 +83,8 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
         self._captured: set[str] = set()
+        self._origins: dict[str, object] = {}
+        self._active_contribution_id: str | None = None
         self._sync: SessionSync | None = None
         self._paused = runtime.restored_interrupted
         self._closed = False
@@ -92,13 +95,18 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         runtime.on_capture = self._note_capture
 
     def status(self) -> dict[str, object]:
+        if self._paused:
+            lifecycle = "paused"
+        elif self._execution is not None:
+            lifecycle = "waiting" if self._runtime.interactions.waiting else "running"
+        else:
+            lifecycle = "idle"
+        active = self._active.turn_id if self._active else self._active_contribution_id
         return {
             "sessionId": self.session_id,
             "revision": self._revision,
-            "status": ("waiting" if self._runtime.interactions.waiting else "running")
-            if self._active is not None
-            else "idle",
-            "activeTurnId": self._active.turn_id if self._active else None,
+            "status": lifecycle,
+            "activeTurnId": active,
             "lastOutcome": self._last_outcome,
             "lastUsage": self._last_usage,
         }
@@ -159,8 +167,6 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         text = "\n".join(
             block.text for block in blocks if isinstance(block, schema.TextContentBlock)
         )
-        if origin is not None:
-            self._runtime.prompt_origin = origin
         if author is None:
             author = (
                 Author(id="acp", label="ACP client", kind="acp")
@@ -183,6 +189,8 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         )
         # Consume unobserved failures without changing what result() raises.
         handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+        if origin is not None:
+            self._origins[contribution.id] = origin
         self._accepted[contribution.id] = handle
         self._start_worker()
         return handle
@@ -190,11 +198,18 @@ class Session(Generic[AgentDepsT, OutputDataT]):
     def _note_capture(self, contributions: tuple[Contribution, ...]) -> None:
         for contribution in contributions:
             self._captured.add(contribution.id)
+            if self._active_contribution_id is None:
+                self._active_contribution_id = contribution.id
             if self._active is None:
                 self._active = self._accepted.get(contribution.id)
+            origin = self._origins.get(contribution.id)
+            if origin is not None and self._runtime.prompt_origin is None:
+                self._runtime.prompt_origin = origin
         self._publish()
 
     def _start_worker(self) -> None:
+        if self._runtime.document.poisoned:
+            return
         if (
             not self._paused
             and not self._closed
@@ -210,6 +225,8 @@ class Session(Generic[AgentDepsT, OutputDataT]):
                     break
                 self._captured.clear()
                 self._active = None
+                self._active_contribution_id = None
+                self._runtime.prompt_origin = None
                 self._publish()
                 task = asyncio.create_task(self._runtime.execute())
                 self._execution = task
@@ -236,8 +253,11 @@ class Session(Generic[AgentDepsT, OutputDataT]):
                     self._last_usage = None
                     self._fail_captured(exc)
                     self._paused = True
+                    with anyio.CancelScope(shield=True):
+                        await self._runtime.report_error(exc)
                 finally:
                     self._active = None
+                    self._active_contribution_id = None
                     self._execution = None
                     self._runtime.prompt_origin = None
                     self._publish()
@@ -248,6 +268,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
 
     def _resolve_captured(self, result: TurnResult[OutputDataT]) -> None:
         for contribution_id in self._captured:
+            self._origins.pop(contribution_id, None)
             handle = self._accepted.pop(contribution_id, None)
             if handle is not None and not handle._future.done():
                 handle._future.set_result(result)
@@ -255,6 +276,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
 
     def _fail_captured(self, error: Exception | None) -> None:
         for contribution_id in self._captured:
+            self._origins.pop(contribution_id, None)
             handle = self._accepted.pop(contribution_id, None)
             if handle is None or handle._future.done():
                 continue
@@ -286,6 +308,21 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         await self._runtime.cancel_interactions("execution cancelled")
         await self._runtime.coordinator.interrupt_orphans()
 
+    def start_if_ready(self) -> None:
+        """Start an idle session whose document already contains ready input."""
+        self._start_worker()
+        self._publish()
+
+    async def resume(self) -> None:
+        """Explicit recovery from a paused or interrupted session."""
+        await self.resume_queue()
+
+    async def clear_inputs(self) -> tuple[str, ...]:
+        """Cancel ready input and report the consumed contribution IDs."""
+        ready = [contribution.id for contribution in self._runtime.coordinator.pending()]
+        await self.clear_queue()
+        return tuple(ready)
+
     async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
         return tuple(
             handle
@@ -301,12 +338,15 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         if self._closed:
             raise RuntimeError("session is closed")
         self._paused = False
+        await self._runtime.coordinator.interrupt_orphans()
         self._runtime.resume_document()
         self._start_worker()
+        self._publish()
 
     async def clear_queue(self) -> None:
         cancelled = await self._runtime.coordinator.cancel_ready()
         for contribution_id in cancelled:
+            self._origins.pop(contribution_id, None)
             handle = self._accepted.pop(contribution_id, None)
             if handle is not None and not handle._future.done():
                 handle._future.set_result(TurnResult("cancelled"))

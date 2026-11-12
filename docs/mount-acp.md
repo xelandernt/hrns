@@ -125,9 +125,9 @@ def attachment_tools(attachment: AcpSession) -> AcpAttachmentConfig[None]:
 `acp_terminal` returns `None` unless it advertises terminal support. With
 `client_io = "read"`, `write_file` falls back to a local `FileSystem` bounded by
 the session `cwd` instead of the client. `acp_filesystem` defines `read_file` and
-`write_file`, which collide with `Coder`'s tools, so install it on an agent without
-`Coder`, or rename/filter one side. `examples/fastapi_app.py` is a working example
-that has no `Coder`.
+`write_file`, which collide with `Coder`'s tools, so either wrap the ACP toolset in
+`PrefixedToolset(toolset, "client_")` (as `examples/fastapi_app.py` does), or install
+it on an agent without `Coder`.
 
 ### Dispatch
 
@@ -159,8 +159,10 @@ await coder.close_session(session.session_id)
 ```
 
 `get_session(session_id)` reuses the live session or restores it from its registration's
-store. `history()` returns committed model messages. `status()` reports
-revisioned running/waiting/idle state and the last outcome.
+store. `history()` returns committed model messages. `status()` reports revisioned
+running/waiting/paused/idle state and the last outcome; `activeTurnId` is the first
+captured contribution in the active execution, including Loro-only input. Restored
+ready input starts automatically unless the session was interrupted.
 
 `cancel_session(session_id)` uses the same lookup as `get_session`: it reuses the live
 session or restores saved state, and raises `KeyError` for an unknown ID. It cancels
@@ -185,10 +187,12 @@ tool is running joins the following request in the same execution; late input st
 subsequent execution after the current one finishes. A cancelled or discarded handle
 returns a cancelled outcome; an unconsumed contribution resolves cancelled.
 
-Cancellation pauses execution; errors also pause it. Ready contributions stay pending
-while paused. `pending_prompts` returns handles for still-ready contributions;
-`resume_queue()` continues and `clear_queue()` cancels them. The terminal also keeps its
-own local drafts and queue. See [Loro sessions](loro.md) for the document contract.
+Cancellation pauses execution; errors also pause it and publish a display error record.
+Ready contributions stay pending while paused. `pending_prompts` returns handles for
+still-ready contributions; `resume_queue()` continues and `clear_queue()` cancels them.
+Loro-only participants use `POST .../resume` and `POST .../clear` for the same
+operations. The terminal also keeps its own local drafts and queue. See
+[Loro sessions](loro.md) for the document contract.
 
 ## ACP attachment and lifecycle
 

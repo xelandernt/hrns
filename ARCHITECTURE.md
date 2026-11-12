@@ -34,7 +34,8 @@ later execution. No upstream enqueue is fed at network arrival, so pending text
 stays editable until the boundary. One execution may complete several handles;
 an unconsumed contribution resolves cancelled.
 
-`consumption` records are the authoritative author and order source.
+`consumption` records are the authoritative author and order source; `settings` is
+server-owned and mirrored on every persist.
 Pydantic AI can merge adjacent captured `ModelRequest`s when a later execution
 starts, so per-request message metadata is not stable across executions; content and
 order are preserved, and user display records retain the author for clients.
@@ -45,7 +46,9 @@ and constructs it; the ACP adapter is only an interface. A serialized drain loop
 re-checks eligible input after every execution, so input arriving at completion is
 never stranded, and a paused/restored session starts no work. Restored work is
 marked `interrupted` with `resume_required`; orphaned captures are failed rather
-than replayed.
+than replayed, and restored ready input starts when the session was not interrupted.
+Execution errors publish a display record and a lifecycle outcome rather than only
+pausing silently.
 
 Persistence uses `DocumentCheckpoint` in `server/loro/store.py`: snapshot bytes,
 pending imports, schema version, cwd, title, and update time. `InMemoryDocumentStore`
@@ -55,12 +58,14 @@ history append-only and derives ACP replay from display records; there is no sec
 mutable JSON conversation store. Store failures that must gate acknowledgment or
 model dispatch propagate; turn-end persistence logs and leaves durable state behind.
 
-`mount_loro` adds authenticated POST/GET/DELETE lifecycle routes and one WebSocket
-per replica under `{prefix}/{agent_id}/sessions`. `SessionSync` exchanges version
+`mount_loro` adds authenticated POST/GET/DELETE lifecycle routes, explicit
+`resume`/`clear` operations for Loro-only participants, and one WebSocket per replica
+under `{prefix}/{agent_id}/sessions`. `SessionSync` exchanges version
 vectors, sends only missing updates (or a chunked snapshot on first join), fans
 imports out to other peers, persists before an `ack`, and never triggers execution
 by importing. Per-peer queues are bounded at 128 frames; overflow disconnects that
-peer. Frames are one tag byte plus payload; the full table and TypeScript example
+peer, and oversized updates or imported snapshots are fanned out as chunked
+snapshots instead of one oversized frame. Frames are one tag byte plus payload; the full table and TypeScript example
 are in `docs/loro.md`. ACP and Loro clients answer the same interaction record; the
 server accepts the first valid answer, and cancel/restart invalidate the rest.
 

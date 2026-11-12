@@ -50,6 +50,8 @@ network database.
 | `GET {prefix}/{agent_id}/sessions/{session_id}` | Metadata, live status, and a base64 snapshot |
 | `GET {prefix}/{agent_id}/sessions/{session_id}/snapshot` | Raw snapshot bytes |
 | `DELETE {prefix}/{agent_id}/sessions/{session_id}` | Close a live session and delete its checkpoint |
+| `POST {prefix}/{agent_id}/sessions/{session_id}/resume` | Resume a paused or interrupted session |
+| `POST {prefix}/{agent_id}/sessions/{session_id}/clear` | Cancel ready pending input |
 | `WS {prefix}/{agent_id}/sessions/{session_id}/sync` | Synchronize one replica |
 
 Pass the same `authenticate(HTTPConnection)` callback used by the other mounts.
@@ -81,11 +83,18 @@ A contribution map has `id`, `author` (JSON), `state`, `origin`, `created_at`,
 `blocks`, `skills`, optional `received_seq`/`consumed_seq`/`capture_version`, and a
 `text` container. `blocks` is an optional JSON array of ACP prompt-content blocks
 for non-text input; text-only clients leave it `"[]"`. `state` is one of `draft`, `ready`, `captured`, `delivered`,
-`cancelled`, or `failed`. Structured fields (`author`, `blocks`, `skills`, display
+`cancelled`, or `failed`. When `blocks` is non-empty it is the authoritative input
+delivery form and the `text` container is only a display/title projection; capture
+records both. Structured fields (`author`, `blocks`, `skills`, display
 `payload`, interaction `request`/`response`) are JSON *strings* in the map, because a
 Loro map stores scalars; parse them in the client.
 
 Each user display record carries the captured `author` object in its `payload`.
+Clients may write `inputs` and candidate answers under `interactions`; `meta`,
+`lifecycle`, `settings`, `consumption`, `history`, and `display` are server-owned and
+are rewritten or rejected by the server. `settings` in particular is mirrored from the
+server's session configuration on every persist; a client write there is transitory.
+
 Native history is not a display transcript. `history` preserves tool calls/results,
 cost/usage, run IDs, and metadata; `display` is a convenience projection that may
 be partial after an interruption. A client must not write `history`, `consumption`,
@@ -124,7 +133,8 @@ outcome for a cleared ready contribution; `failed` marks a capture that an
 interrupted process never delivered.
 
 An explicit cancel stops the active execution and pauses the session. Ready
-contributions stay pending until `resume_queue()` or `clear_queue()`. A restored
+contributions stay pending until `POST .../resume` or `POST .../clear` (the Python
+methods `resume_queue()` and `clear_queue()` call the same operations). A restored
 session is paused and `resume_required` is true; resume does not replay uncertain
 tool side effects.
 

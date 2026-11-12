@@ -38,11 +38,10 @@ DisplayKind = Literal[
     "usage",
     "title",
     "error",
-    "skill",
 ]
 """Display-only records. They never substitute for native model history."""
 
-LifecycleStatus = Literal["idle", "running", "waiting", "paused", "closed", "interrupted"]
+LifecycleStatus = Literal["idle", "running", "waiting", "paused", "interrupted"]
 
 
 class Author(BaseModel):
@@ -87,6 +86,7 @@ class Consumption(BaseModel):
     captured_at: int
     version: str
     content: str
+    blocks: tuple[dict[str, object], ...] = ()
     state: ConsumptionState = "captured"
     outcome: str | None = None
 

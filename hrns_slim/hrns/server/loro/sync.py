@@ -158,7 +158,7 @@ class SessionSync:
             await self._fail(peer, CLOSE_SCHEMA, "version vector is not known to this document")
             return
         if update:
-            self._send(peer, UpdateFrame(update))
+            self._send_update(peer, update)
 
     # -- peer loop ------------------------------------------------------------
 
@@ -171,6 +171,8 @@ class SessionSync:
                 await self._accept(peer, frame.data)
             elif isinstance(frame, SnapshotFrame):
                 peer.snapshot[frame.index] = frame.data
+                if peer.snapshot_count and peer.snapshot_count != frame.count:
+                    peer.snapshot.clear()
                 peer.snapshot_count = frame.count
                 if len(peer.snapshot) == frame.count:
                     data = b"".join(peer.snapshot[index] for index in range(frame.count))
@@ -184,16 +186,22 @@ class SessionSync:
                 continue
 
     async def _accept(self, peer: _Peer, data: bytes) -> None:
+        before = self._document.session_metadata()
         try:
             self._document.import_update(data, origin=f"peer:{peer.peer_id}")
-            self._document.validate()
+            after = self._document.validate()
         except Exception:
+            self._document.mark_poisoned()
             await self._fail(peer, CLOSE_SCHEMA, "update does not match this document")
+            return
+        if after.agent_id != before.agent_id or after.session_id != before.session_id:
+            self._document.mark_poisoned()
+            await self._fail(peer, CLOSE_SCHEMA, "update changed session identity")
             return
         # Fan out imported state to the other replicas; never back to the sender.
         for other in tuple(self._peers):
             if other is not peer:
-                self._send(other, UpdateFrame(data))
+                self._send_update(other, data)
         try:
             await self._persist()
         except Exception:
@@ -206,10 +214,17 @@ class SessionSync:
     # -- delivery -------------------------------------------------------------
 
     def _local_update(self, data: bytes) -> bool:
-        frame = UpdateFrame(data)
         for peer in tuple(self._peers):
-            self._send(peer, frame)
+            self._send_update(peer, data)
         return True
+
+    def _send_update(self, peer: _Peer, data: bytes) -> None:
+        """Keep outbound updates within the frame budget; snapshot chunks otherwise."""
+        if len(data) + 1 <= MAX_FRAME_BYTES:
+            self._send(peer, UpdateFrame(data))
+            return
+        for frame in snapshot_frames(self._document.snapshot()):
+            self._send(peer, frame)
 
     def _send(self, peer: _Peer, frame: Frame) -> None:
         if peer.closed:

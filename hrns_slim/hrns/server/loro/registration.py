@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol
 
 from hrns.server._types import PrincipalT
 
-from .models import InteractionRecord
 from .store import SessionAccess, SessionSummary
 from .sync import SyncTransport
 
@@ -25,13 +24,9 @@ class LoroSession(Protocol):
 
     async def sync(self, transport: SyncTransport) -> None: ...
 
-    def document_changed(self) -> None: ...
+    async def resume(self) -> None: ...
 
-    async def answer_interaction(
-        self, interaction_id: str, response: Mapping[str, object], *, actor: str = "loro"
-    ) -> bool: ...
-
-    async def pending_interactions(self) -> tuple[InteractionRecord, ...]: ...
+    async def clear_inputs(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True)

@@ -11,10 +11,10 @@ Root schema (server-assigned IDs are strings):
 ``display``       LoroList<LoroMap>   display-only records, streaming text in LoroText
 ``interactions``  LoroMap<LoroMap>    questions/approvals keyed by stable request ID
 
-Only the server writes ``meta``, ``lifecycle``, ``consumption``, ``history`` and
-``display``. Admitted writers may edit ``inputs``, ``settings`` and answers under
-``interactions``; that ownership split is a convention among trusted writers, not
-an authorization boundary.
+Only the server writes ``meta``, ``lifecycle``, ``settings``, ``consumption``,
+``history`` and ``display``. Admitted writers may edit ``inputs`` and candidate
+answers under ``interactions``; that ownership split is a convention among trusted
+writers, not an authorization boundary.
 """
 
 from __future__ import annotations
@@ -174,6 +174,7 @@ class SessionDocument:
         self._display = doc.get_list("display")
         self._interactions = doc.get_map("interactions")
         self._display_cache: dict[str, tuple[LoroMap, LoroText | None]] = {}
+        self._poisoned = False
 
     # -- construction ---------------------------------------------------------
 
@@ -225,6 +226,14 @@ class SessionDocument:
         document = cls(doc)
         document.validate()
         return document
+
+    @property
+    def poisoned(self) -> bool:
+        """A peer integrated an unsupported schema or changed session identity."""
+        return self._poisoned
+
+    def mark_poisoned(self) -> None:
+        self._poisoned = True
 
     def validate(self) -> SessionMetadata:
         version = _integer(self._meta, "schema_version")
@@ -359,11 +368,8 @@ class SessionDocument:
         self.commit()
         return self._parse_contribution(entry)
 
-    def contribution_text(self, contribution_id: str) -> LoroText | None:
-        entry = self._contribution_map(contribution_id)
-        return _child_text(entry, "text") if entry is not None else None
-
     def set_contribution_text(self, contribution_id: str, text: str) -> bool:
+        """Replace draft/ready text; captured content stays frozen."""
         entry = self._contribution_map(contribution_id)
         if entry is None or _string(entry, "state") not in ("draft", "ready"):
             return False
@@ -376,6 +382,7 @@ class SessionDocument:
         return True
 
     def mark_ready(self, contribution_id: str) -> bool:
+        """Make a draft eligible for the next capture boundary."""
         entry = self._contribution_map(contribution_id)
         if entry is None or _string(entry, "state") != "draft":
             return False
@@ -474,6 +481,10 @@ class SessionDocument:
             record.insert("captured_at", stamp)
             record.insert("version", version)
             record.insert("content", contribution.text)
+            record.insert(
+                "blocks",
+                _JSON_BLOCKS.dump_json(contribution.blocks).decode("utf-8"),
+            )
             record.insert("state", "captured")
             captured.append(
                 contribution.model_copy(
@@ -500,6 +511,10 @@ class SessionDocument:
                 if author_json is not None
                 else Author(id="unknown")
             )
+            try:
+                frozen_blocks = _JSON_BLOCKS.validate_json(_string(entry, "blocks") or "[]")
+            except ValueError:
+                frozen_blocks = ()
             records.append(
                 Consumption(
                     seq=_integer(entry, "seq") or 0,
@@ -508,6 +523,7 @@ class SessionDocument:
                     captured_at=_integer(entry, "captured_at") or 0,
                     version=_string(entry, "version") or "",
                     content=_string(entry, "content") or "",
+                    blocks=frozen_blocks,
                     state=_literal(_CONSUMPTION_STATE, _string(entry, "state"), "captured"),
                     outcome=_string(entry, "outcome"),
                 )

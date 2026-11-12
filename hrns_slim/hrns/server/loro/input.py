@@ -105,7 +105,12 @@ class InputCoordinator:
             state=state,
             contribution_id=contribution_id,
         )
-        await self._persist()
+        try:
+            await self._persist()
+        except BaseException:
+            # A contribution whose acceptance was not durable must never dispatch.
+            self._document.cancel_contribution(contribution.id)
+            raise
         return contribution
 
     def eligible(self) -> list[Contribution]:
@@ -146,6 +151,8 @@ class InputCoordinator:
 
     async def interrupt_orphans(self) -> list[str]:
         """Mark captures that no execution delivered; never replay them silently."""
+        if self._document.poisoned:
+            return []
         interrupted: list[str] = []
         for record in self._document.consumption():
             if record.state != "captured":

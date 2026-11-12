@@ -22,12 +22,13 @@ skill library with the app, and the client sees them in ``/skills`` exactly like
 discovered ones. The agent loads one itself with ``load_capability``, or a person
 writes ``$release-notes`` in the composer.
 
-The agent also installs the ACP client filesystem and terminal toolsets. A client
-that connects with ``client_io = "all"`` (the terminal's default) gives it
-``read_file``, ``write_file``, and ``run_command`` against the client's machine;
-``"read"`` advertises only reads, and ``"off"`` gives it no client tools. A
-server-side ``Coder``/workspace is installed too, so a participant who joins only
-through Loro still has file tools in the server workspace without any ACP client.
+The agent also installs the ACP client filesystem and terminal toolsets under the
+``client_`` prefix. A client that connects with ``client_io = "all"`` (the
+terminal's default) gives it ``client_read_file``, ``client_write_file``, and
+``client_run_command`` against the client's machine; ``"read"`` advertises only
+reads, and ``"off"`` gives it no client tools. A server-side ``Coder``/workspace is
+installed too, so a participant who joins only through Loro still has ``read_file``,
+``write_file``, and ``run_command`` in the server workspace without any ACP client.
 
 ``/loro`` mounts the session-document API independently of ``/acp`` and
 ``/ag-ui``: create/list/read/delete over HTTP, then one WebSocket per replica to
@@ -49,6 +50,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.toolsets import PrefixedToolset
 from pydantic_ai_skills import Skill, SkillResource
 from starlette.requests import HTTPConnection
 
@@ -355,16 +357,16 @@ def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
 
 
 def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
-    """Add the client's filesystem and terminal as tools for this attachment.
+    """Add the client's filesystem and terminal as ``client_*`` tools.
 
-    ``client_io`` only advertises ACP ``fs/`` and ``terminal/`` capabilities. They
-    become model tools only when the agent installs the matching toolsets, which is
-    why this hook exists: the factory above has no ``Coder``, so these are the
-    agent's only file and command tools. ``client_io = "read"`` yields ``read_file``;
-    ``"all"`` adds client-backed ``write_file`` and ``run_command``.
+    The server-side ``Coder`` already provides ``read_file``, ``write_file``, and
+    ``run_command`` in the session workspace. ACP tools are prefixed so a client
+    that advertises ``fs/`` or ``terminal/`` adds ``client_read_file``,
+    ``client_write_file``, and ``client_run_command`` instead of colliding with the
+    server tools. Loro-only participants still have the server tools.
     """
     toolsets = [
-        toolset
+        PrefixedToolset(toolset, "client_")
         for toolset in (acp_filesystem(session), acp_terminal(session))
         if toolset is not None
     ]

@@ -15,9 +15,11 @@ ACP is at `/acp/coder`; observation is at `/ag-ui/coder/sessions/{session_id}` a
 `Authorization: Bearer example-token`.
 
 The agent installs the ACP client filesystem and terminal toolsets through
-`attachment_config`, so `--client-io all` gives it `read_file`, `write_file`, and
-`run_command` on the machine running `hrns`. With `--client-io read` it gets
-`read_file`; `write_file` falls back to the server's filesystem instead of the
-client's. A server-side `Coder`/workspace is also installed, so a session driven only
-through Loro still has file tools in the server workspace without an ACP attachment.
+`attachment_config` under a `client_` prefix, so `--client-io all` gives it
+`client_read_file`, `client_write_file`, and `client_run_command` on the machine
+running `hrns`. With `--client-io read` it gets `client_read_file`;
+`client_write_file` falls back to the server's filesystem instead of the client's.
+A server-side `Coder`/workspace is also installed, so a session driven only through
+Loro still has `read_file`, `write_file`, and `run_command` in the server workspace
+without an ACP attachment.
 See [docs/loro.md](../docs/loro.md) for the minimal TypeScript client.

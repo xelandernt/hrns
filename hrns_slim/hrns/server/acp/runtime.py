@@ -75,7 +75,7 @@ from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 from ..loro.document import SessionDocument
 from ..loro.input import CapturedInput, InputCapture, InputCoordinator, acp_blocks, messages_for
 from ..loro.interactions import InteractionService, validate_approval, validate_question
-from ..loro.models import Contribution
+from ..loro.models import Contribution, InteractionRecord
 from ..loro.publisher import DocumentPublisher
 from ..loro.store import CheckpointPersistence, DocumentCheckpoint
 from . import updates
@@ -424,6 +424,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self._state = self._state_from_document(session_id, checkpoint.cwd, config)
         self._history_cache = list(self._state.history)
         self._title = title_from_updates(self.state.transcript)
+        await self._coordinator.interrupt_orphans()
         lifecycle = self._document.lifecycle()
         if lifecycle.status in ("running", "waiting") or lifecycle.resume_required:
             # Never replay uncertain model requests or tool side effects after a restart.
@@ -479,7 +480,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 if not isinstance(raw, dict):
                     continue
                 candidate = raw
-                if record.kind in ("user", "assistant", "thinking"):
+                if record.kind in ("user", "assistant", "thinking") and len(raw_list) == 1:
                     content = candidate.get("content")
                     if isinstance(content, dict):
                         rebuilt = dict(content)
@@ -525,6 +526,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         """
         async with self._persist_lock:
             try:
+                if self._document.poisoned:
+                    raise RuntimeError("the session document was poisoned by an invalid import")
                 self._sync_document(state)
                 await self._session_store.save(
                     state.session_id,
@@ -571,6 +574,16 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
     async def cancel_interactions(self, detail: str) -> list[str]:
         return await self._interaction_service.cancel_pending(detail=detail)
 
+    async def report_error(self, error: Exception) -> None:
+        """Make an execution failure visible without a transport handle."""
+        _logger.exception("session %s execution failed: %s", self.state.session_id, error)
+        try:
+            await self._publisher.record_error(str(error))
+            self._document.set_last_outcome("error")
+            self._document.commit_lifecycle()
+        except Exception:
+            _logger.exception("failed to publish the execution error for %s", self.state.session_id)
+
     async def _persist_strict(self) -> None:
         if self._state is not None:
             await self._persist(self._state, strict=True)
@@ -580,6 +593,12 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def flush(self) -> None:
         """Persist the canonical state at lifecycle boundaries."""
+        if self._document.poisoned:
+            _logger.error(
+                "not persisting poisoned session %s; the last checkpoint is intact",
+                self.state.session_id,
+            )
+            return
         if self._state is not None:
             await self._persist(self._state, strict=True)
 
@@ -905,6 +924,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self.state.invoked_skills.update(captured.skills)
         injections = await self._injections(captured)
         messages = messages_for(captured, injections)
+        # Persist the captured messages in native history at the boundary; on
+        # cancellation or error the end-of-run assignment never runs.
+        self.state.history.extend(messages)
         await self._record_captured(captured)
         if self.observer is not None:
             self.observer.injected(messages)
@@ -1395,6 +1417,33 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             resolved[call.tool_call_id] = await self._ask_user(turn, call)
         return resolved
 
+    async def _await_interaction(
+        self, interaction_id: str, dispatch: asyncio.Task[None]
+    ) -> InteractionRecord:
+        """Wait for an answer while supervising the ACP dispatch.
+
+        A failed client request must not leave the interaction permanently pending:
+        cancel it, then surface the error to the caller.
+        """
+        wait_task = asyncio.create_task(self._interaction_service.wait(interaction_id))
+        try:
+            done, _ = await asyncio.wait({dispatch, wait_task}, return_when=asyncio.FIRST_COMPLETED)
+            if dispatch in done:
+                error = dispatch.exception()
+                if error is not None:
+                    await self._interaction_service.cancel(
+                        interaction_id, detail=f"client request failed: {error}"
+                    )
+                    raise error
+            return await wait_task
+        finally:
+            for task in (dispatch, wait_task):
+                if not task.done():
+                    task.cancel()
+            for task in (dispatch, wait_task):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
     async def _ask_user(self, turn: _TurnState, call: ToolCallPart) -> object:
         """Put one ``ask_user_question`` call to ACP and/or Loro participants."""
         request = HarnessAskUserRequest.from_tool_call(call)
@@ -1445,11 +1494,11 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
         dispatch = asyncio.create_task(self.interactions.request(ask))
         try:
-            resolved = await self._interaction_service.wait(record.id)
-        finally:
-            dispatch.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await dispatch
+            resolved = await self._await_interaction(record.id, dispatch)
+        except acp.RequestError as exc:
+            _logger.info("client could not present an ask-user elicitation: %s", exc)
+            await self._update_status(turn, call.tool_call_id, "in_progress")
+            return ASK_USER_UNAVAILABLE
         action = resolved.response.get("action") if resolved.response else None
         await self._update_status(turn, call.tool_call_id, "in_progress")
         if action == "accept":
@@ -1529,12 +1578,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             await self._interaction_service.resolve(record.id, {"option": option}, actor="acp")
 
         dispatch = asyncio.create_task(self.interactions.request(ask))
-        try:
-            resolved = await self._interaction_service.wait(record.id)
-        finally:
-            dispatch.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await dispatch
+        resolved = await self._await_interaction(record.id, dispatch)
         option = resolved.response.get("option") if resolved.response else None
         if option == "cancel":
             raise _TurnCancelled
