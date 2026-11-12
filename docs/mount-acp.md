@@ -213,7 +213,9 @@ Permissions and questions are session-owned records. An ACP client is asked afte
 attachment replay, but a Loro participant may answer the same request without an ACP
 connection. The first valid answer wins and later answers change nothing. Disconnect
 retains the decision and invalidates old replies. A connected client lacking form
-elicitation gets the existing unavailable-question outcome. Server-side
+elicitation gets the existing unavailable-question outcome. A non-connection client
+error cancels that interaction and aborts the turn, which pauses the session; only a
+connection loss preserves the request for a later attachment. Server-side
 tools/workspace stay configured across attachments.
 
 The advertised `_hrns/session/state` notification and `hrns/session/state` load metadata

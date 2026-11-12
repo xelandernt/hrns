@@ -81,9 +81,12 @@ class InteractionService:
         request: dict[str, object],
         validator: Validator,
     ) -> InteractionRecord:
+        if self._document.poisoned:
+            raise RuntimeError("cannot create an interaction on a poisoned document")
         record = self._document.create_interaction(kind=kind, request=request)
         self._validators[record.id] = validator
-        await self._save()
+        # Acceptance is durable before any transport is asked; a failure aborts the turn.
+        await self._persist()
         self._on_change()
         return record
 

@@ -324,9 +324,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
 
     async def clear_inputs(self) -> tuple[str, ...]:
         """Cancel ready input and report the consumed contribution IDs."""
-        ready = [contribution.id for contribution in self._runtime.coordinator.pending()]
-        await self.clear_queue()
-        return tuple(ready)
+        return await self.clear_queue()
 
     async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
         return tuple(
