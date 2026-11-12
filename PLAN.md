@@ -173,12 +173,12 @@ Manually exercise public Pydantic AI injection and Python/TypeScript Loro exchan
 write down exact input, handle, storage, schema, and transport contracts.
 
 **Acceptance criteria:**
-- [ ] A controlled native run receives two authors' input after an in-flight tool
+- [x] A controlled native run receives two authors' input after an in-flight tool
   finishes, retains it in native history, and continues after final-response input.
-- [ ] Editable input is captured at the documented boundary; supported public APIs,
+- [x] Editable input is captured at the documented boundary; supported public APIs,
   minimum SDK versions, Unicode offsets, pending-import persistence, and Python/JS
   binary exchange are verified without private upstream imports.
-- [ ] This plan and `ARCHITECTURE.md` record concrete handle semantics, checkpoint
+- [x] This plan and `ARCHITECTURE.md` record concrete handle semantics, checkpoint
   types, route/frame shapes, and dependency versions; a material gap is reported
   before dependent implementation rather than hidden behind a speculative API.
 
@@ -187,6 +187,81 @@ two SDK replicas; record results and versions in this plan. No test files.
 **Dependencies:** None.
 **Files likely touched:** `PLAN.md`, `ARCHITECTURE.md`.
 **Estimated scope:** Small, 2 documentation files; disposable feasibility work.
+
+**T1 evidence (2026-11-12).** Versions exercised: `pydantic-ai-slim` 2.57.0,
+`loro` 1.17.1 (CPython 3.14.5, macOS arm64), `loro-crdt` 1.17.0 (Node 26.7.0).
+Disposable scripts were kept outside the repository.
+
+Capture point and handle semantics resolved:
+
+- A per-run `AbstractCapability.before_model_request` hook is the capture
+  boundary. It reads eligible contributions from the session document at the
+  instant of the model request, then sets `request_context.messages` to a new
+  list ending in the captured `ModelRequest`s and extends `RunContext.messages`
+  with the same objects. That assignment form is not deprecated; the upstream
+  pending-message drain capability uses the same pair of writes. No private
+  drain or queue imports are used.
+- A run started from idle pre-captures ready input into `message_history` before
+  dispatch, so the first request sees it and history records it. The hook still
+  runs at every request, including requests after a tool result. A run started
+  from a deferred-tool continuation passes `run_input=None`; history ends in a
+  tool-return request, so the model is still called.
+- `agent.run_stream_events(None, message_history=...)` supports the hook. A
+  controlled streaming run with a tool call produced two capture boundaries:
+  the injected messages reached the model, appeared in
+  `result.all_messages()`, and retained per-message `metadata` (author and
+  stable contribution id). `FunctionModel` needs `stream_function` for the
+  streamed path; this is a test-double property only.
+- Input arriving after an apparent final response is not injected by the ended
+  run. The scheduler starts a subsequent execution whose pre-capture includes
+  it. That is the documented continuation behavior; no upstream
+  `priority="asap"` queue is used, because enqueuing at network arrival would
+  freeze pending text before the boundary and choose a different capture rule.
+- `TurnHandle` is tied to a contribution's consumption record, not to one
+  "turn". One execution can complete several handles when it captures several
+  contributions. A handle that is never consumed resolves cancelled; waiting on
+  a handle never owns execution. ACP `session/prompt` waits on its handle, so
+  its response completes when the execution that consumed it reaches an
+  outcome, even if other participants contributed during that execution.
+
+Loro contracts resolved:
+
+- Python and JavaScript exchange snapshots and updates in both directions;
+  scalar `status` and `LoroText` content with non-BMP emoji converged
+  (`he😀llo` → `🦀:he😀llo`). `doc.import_()` is the Python import; imported
+  updates do not fire `subscribe_local_update`, so broadcasting local updates
+  cannot echo an import. A callback must return `True` to stay subscribed.
+- Python `LoroText` indices are Unicode code points (`len_unicode`), JavaScript
+  positions are UTF-16 (`len_utf16`). Server-produced streamed text is
+  append-only via `push_str`; clients own pending-input text. Server-created
+  input inserts its whole text once into an empty container. Documented offsets
+  are code points.
+- Checkpoint contract: `snapshot = doc.export(ExportMode.Snapshot())`,
+  `pending = doc.export_pending_updates()`, `version = doc.oplog_vv.encode()`,
+  `frontiers = doc.oplog_frontiers.encode()`. Restore imports the snapshot and
+  then the pending bytes. `ImportStatus.pending` identifies retained pending
+  imports. Version vectors implement `encode()`/`VersionVector.decode()` and can
+  drive `ExportMode.Updates(vv)` for either direction.
+- Minimum pinned versions: `loro>=1.17.1,<2` (server extra) and
+  `loro-crdt@1.17.0` for the documented TypeScript example.
+
+Wire contract fixed here for T10/T11:
+
+| Frame | Tag | Payload |
+| --- | --- | --- |
+| `version` | `0x01` | UTF-8 JSON `{"schemaVersion":1,"vv":"<base64>","sessionId":"…"}` |
+| `update` | `0x02` | raw Loro update bytes, one coalesced update per frame, ≤ 4 MiB |
+| `snapshot` | `0x03` | `u32 chunkIndex`, `u32 chunkCount`, raw snapshot bytes, ≤ 256 KiB per chunk |
+| `ack` | `0x04` | UTF-8 JSON `{"durable":true,"seq":N}` after the checkpoint is saved |
+| `error` | `0x05` | UTF-8 JSON `{"code":"…","message":"…"}` |
+
+Handshake: the server sends `version` on accept; the client replies with
+`version`. Each side then sends `snapshot` chunks (first join) or `update`
+frames computed from the peer's version vector. Live changes are `update`
+frames carrying only local updates. Imported updates are persisted before an
+`ack` is sent. Frame and peer-queue limits are 4 MiB and 128 frames; overflow
+closes that peer (code 1013) and relies on reconnect resynchronization. Schema
+version other than 1 closes with an `error` frame and code 1008.
 
 ### T2 — Establish a transport-independent session boundary
 

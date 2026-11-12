@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from inspect import isawaitable
 from pathlib import Path
@@ -14,7 +13,6 @@ from uuid import uuid4
 
 import acp
 from acp import schema
-from acp.interfaces import Client
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.output import OutputDataT
@@ -22,7 +20,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
 from .._types import PrincipalT
-from .content import PromptContentBlock
+from ..session import Session, SessionHooks, SessionView
 from .models import ModelResolver
 from .permission import PermissionPolicy
 from .presentation import ToolCallPresenter
@@ -35,187 +33,6 @@ if TYPE_CHECKING:
 
     from ..fastapi import Authenticator
     from .adapter import PydanticAIACPAgent
-
-
-@dataclass(frozen=True)
-class TurnResult(Generic[OutputDataT]):
-    stop_reason: schema.StopReason
-    output: OutputDataT | None = None
-    usage: schema.Usage | None = None
-
-
-@dataclass(frozen=True)
-class TurnHandle(Generic[OutputDataT]):
-    turn_id: str
-    prompt: tuple[PromptContentBlock, ...]
-    _future: asyncio.Future[TurnResult[OutputDataT]]
-
-    async def result(self) -> TurnResult[OutputDataT]:
-        """Wait without transferring ownership of execution to the waiter."""
-        return await asyncio.shield(self._future)
-
-
-@dataclass(frozen=True)
-class _QueuedTurn(Generic[OutputDataT]):
-    handle: TurnHandle[OutputDataT]
-    origin: Client | None
-
-
-@dataclass(frozen=True)
-class SessionView:
-    history: Callable[[], list[ModelMessage]]
-    status: Callable[[], dict[str, object]]
-    observer: RunObserver | None
-
-
-class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
-    def __init__(
-        self,
-        registration: RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT],
-        runtime: SessionRuntime[AgentDepsT, OutputDataT],
-    ) -> None:
-        self._registration = registration
-        self._runtime = runtime
-        self.session_id = runtime.state.session_id
-        self.cwd = runtime.state.cwd
-        self._queue: deque[_QueuedTurn[OutputDataT]] = deque()
-        self._worker: asyncio.Task[None] | None = None
-        self._active: TurnHandle[OutputDataT] | None = None
-        self._execution: asyncio.Task[schema.PromptResponse] | None = None
-        self._paused = False
-        self._closed = False
-        self._revision = 0
-        self._last_outcome: str | None = None
-        self._last_usage: dict[str, object] | None = None
-        runtime.on_state = self._publish
-
-    def status(self) -> dict[str, object]:
-        return {
-            "sessionId": self.session_id,
-            "revision": self._revision,
-            "status": ("waiting" if self._runtime.interactions.waiting else "running")
-            if self._active is not None
-            else "idle",
-            "activeTurnId": self._active.turn_id if self._active else None,
-            "lastOutcome": self._last_outcome,
-            "lastUsage": self._last_usage,
-        }
-
-    def _publish(self) -> None:
-        self._revision += 1
-        self._runtime.publish_state(self.status())
-
-    def history(self) -> list[ModelMessage]:
-        return list(self._runtime.state.history)
-
-    async def submit(self, prompt: str | Sequence[PromptContentBlock]) -> TurnHandle[OutputDataT]:
-        return await self._accept(prompt)
-
-    async def _accept(
-        self, prompt: str | Sequence[PromptContentBlock], origin: Client | None = None
-    ) -> TurnHandle[OutputDataT]:
-        self._registration._server._require_running()
-        if self._closed:
-            raise RuntimeError("session is closed")
-        blocks = (
-            (schema.TextContentBlock(text=prompt),) if isinstance(prompt, str) else tuple(prompt)
-        )
-        handle = TurnHandle[OutputDataT](
-            uuid4().hex, blocks, asyncio.get_running_loop().create_future()
-        )
-        # Consume unobserved failures without changing what result() raises.
-        handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        self._queue.append(_QueuedTurn(handle, origin))
-        self._start_worker()
-        return handle
-
-    def _start_worker(self) -> None:
-        if not self._paused and self._queue and self._worker is None:
-            self._worker = asyncio.create_task(self._drain())
-
-    async def _drain(self) -> None:
-        try:
-            while self._queue and not self._paused and not self._closed:
-                queued = self._queue.popleft()
-                handle = queued.handle
-                self._active = handle
-                self._runtime.last_output = None
-                self._runtime.prompt_origin = queued.origin
-                self._publish()
-                task = asyncio.create_task(self._runtime.execute(list(handle.prompt)))
-                self._execution = task
-                try:
-                    response = await task
-                    self._last_outcome = response.stop_reason
-                    self._last_usage = (
-                        response.usage.model_dump(mode="json", by_alias=True, exclude_none=True)
-                        if response.usage
-                        else None
-                    )
-                    if response.stop_reason == "cancelled":
-                        self._paused = True
-                    handle._future.set_result(
-                        TurnResult(response.stop_reason, self._runtime.last_output, response.usage)
-                    )
-                except asyncio.CancelledError:
-                    self._last_outcome = "cancelled"
-                    self._last_usage = None
-                    self._paused = True
-                    handle._future.set_result(TurnResult("cancelled"))
-                except Exception as exc:
-                    self._last_outcome = "error"
-                    self._last_usage = None
-                    self._paused = True
-                    handle._future.set_exception(exc)
-                finally:
-                    self._active = None
-                    self._execution = None
-                    self._runtime.prompt_origin = None
-                    self._publish()
-        finally:
-            self._worker = None
-
-    async def cancel(self) -> None:
-        self._paused = True
-        if self._execution is not None:
-            self._execution.cancel()
-            if self._worker is not None:
-                await asyncio.shield(self._worker)
-
-    async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
-        return tuple(queued.handle for queued in self._queue)
-
-    async def resume_queue(self) -> None:
-        self._registration._server._require_running()
-        if self._closed:
-            raise RuntimeError("session is closed")
-        self._paused = False
-        self._start_worker()
-
-    async def clear_queue(self) -> None:
-        while self._queue:
-            self._queue.popleft().handle._future.set_result(TurnResult("cancelled"))
-
-    async def close(self) -> None:
-        async with self._registration._lock:
-            await self._close()
-
-    async def _close(self) -> None:
-        self._closed = True
-        await self.cancel()
-        await self.clear_queue()
-        async with self._runtime._persist_lock:
-            pass
-        delivery = self._runtime._delivery
-        self._runtime.detach()
-        if delivery is not None:
-            await asyncio.gather(delivery, return_exceptions=True)
-        if self._worker is not None:
-            await asyncio.shield(self._worker)
-        if self._runtime.observer is not None:
-            self._runtime.observer.close()
-        self._registration._sessions.pop(self.session_id, None)
-        self._registration._views.pop(self.session_id, None)
 
 
 @dataclass
@@ -259,7 +76,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._usage_limits = usage_limits
         self._tool_presenter = tool_presenter
         self.mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
-        self._sessions: dict[str, Session[PrincipalT, AgentDepsT, OutputDataT]] = {}
+        self._sessions: dict[str, Session[AgentDepsT, OutputDataT]] = {}
         self._views: dict[str, SessionView] = {}
         self._lock = asyncio.Lock()
 
@@ -283,9 +100,14 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
 
     def _remember(
         self, runtime: SessionRuntime[AgentDepsT, OutputDataT]
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
-        session = Session(self, runtime)
+        hooks = SessionHooks(
+            require_running=self._server._require_running,
+            lock=self._lock,
+            forget=self._forget,
+        )
+        session = Session(runtime, hooks)
         runtime.observer = self._server._make_observer(session.session_id, session.history())
         session._publish()
         self._sessions[session.session_id] = session
@@ -294,9 +116,13 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         )
         return session
 
+    def _forget(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+        self._views.pop(session_id, None)
+
     async def new_session(
         self, *, cwd: str, principal: PrincipalT | None = None
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
         context = SessionContext(
             agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
@@ -308,7 +134,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
 
     async def get_session(
         self, session_id: str, *, principal: PrincipalT | None = None
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         self._server._require_running()
         async with self._lock:
             self._server._require_running()

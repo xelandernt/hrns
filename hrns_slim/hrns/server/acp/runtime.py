@@ -334,7 +334,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self._outbox: asyncio.Queue[SessionUpdate | dict[str, object]] | None = None
         self._attachment_lock = asyncio.Lock()
         self._attachment_generation = 0
-        self.prompt_origin: Client | None = None
+        self.prompt_origin: object | None = None
         self.attachment_toolsets: Sequence[AbstractToolset[AgentDepsT]] = ()
         self._permission_policy = permission_policy or default_permission_scope
         self._tool_presenter = tool_presenter or default_coding_presenter

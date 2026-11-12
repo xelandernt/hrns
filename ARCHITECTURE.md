@@ -19,8 +19,18 @@ outside mutable CRDT fields.
 The proposed store contract persists Loro checkpoints, including pending imports,
 with in-memory and opt-in SQLite implementations. Restart restores conversation
 state and pauses interrupted work without replaying uncertain tool side effects.
-Public Pydantic AI input-injection timing and exact contracts must be verified in
-the first implementation task. The sections below describe the existing system;
+
+The input contract was fixed in T1 against Pydantic AI 2.57.0 and Loro 1.17.1.
+A per-run capability's `before_model_request` hook is the single capture
+boundary: it reads eligible contributions, freezes their text/version, assigns
+server order, appends one `ModelRequest` per contribution to
+`request_context.messages` and `RunContext.messages`, and persists the
+consumption record before returning. Idle execution pre-appends captured input
+to `message_history`; input arriving after a final response starts a subsequent
+execution. No upstream enqueue is fed at network arrival. One execution may
+complete several contribution handles. Checkpoints are
+`ExportMode.Snapshot()` plus `export_pending_updates()`; version vectors drive
+incremental updates. The current sections below describe the existing system;
 update them as the planned slices land.
 
 ## Distribution packages

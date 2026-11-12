@@ -36,7 +36,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self._model_resolver = registration.resolver
         self._conn: Client | None = None
         self._client_capabilities: schema.ClientCapabilities | None = None
-        self._sessions: dict[str, Session[PrincipalT, AgentDepsT, OutputDataT]] = {}
+        self._sessions: dict[str, Session[AgentDepsT, OutputDataT]] = {}
         self._name = registration.agent_id
         self._version = "0.1.0"
         self._mcp_capabilities = registration.mcp_capabilities
@@ -67,7 +67,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
 
     async def _session(
         self, session_id: str, operation: SessionAccess
-    ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
+    ) -> Session[AgentDepsT, OutputDataT]:
         await self._load(session_id, operation)
         session = self._sessions.get(session_id)
         if session is None or session._closed or session._runtime._conn is not self._conn:
@@ -77,7 +77,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         return session
 
     async def _attach(
-        self, session: Session[PrincipalT, AgentDepsT, OutputDataT], mcp_servers: McpServers
+        self, session: Session[AgentDepsT, OutputDataT], mcp_servers: McpServers
     ) -> None:
         if self._conn is None:
             raise RuntimeError("ACP connection has not initialized")
