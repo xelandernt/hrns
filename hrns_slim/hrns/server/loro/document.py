@@ -630,6 +630,10 @@ class SessionDocument:
         found = self._display_map(display_id)
         return found[1] if found is not None else None
 
+    def display_record(self, display_id: str) -> DisplayRecord | None:
+        found = self._display_map(display_id)
+        return self._display_record(found[0]) if found is not None else None
+
     def set_display_status(self, display_id: str, status: str) -> DisplayRecord | None:
         found = self._display_map(display_id)
         if found is None:

@@ -80,7 +80,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._worker: asyncio.Task[None] | None = None
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
-        self._paused = False
+        self._paused = runtime.restored_interrupted
         self._closed = False
         self._revision = 0
         self._last_outcome: str | None = None
@@ -188,6 +188,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         if self._closed:
             raise RuntimeError("session is closed")
         self._paused = False
+        self._runtime.resume_document()
         self._start_worker()
 
     async def clear_queue(self) -> None:
@@ -202,8 +203,7 @@ class Session(Generic[AgentDepsT, OutputDataT]):
         self._closed = True
         await self.cancel()
         await self.clear_queue()
-        async with self._runtime._persist_lock:
-            pass
+        await self._runtime.flush()
         delivery = self._runtime._delivery
         self._runtime.detach()
         if delivery is not None:

@@ -74,6 +74,7 @@ from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 
 from ..loro.document import SessionDocument
+from ..loro.publisher import DocumentPublisher
 from ..loro.store import CheckpointPersistence, DocumentCheckpoint
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
@@ -325,6 +326,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
     ) -> None:
         self._agent = agent
         self._document = document
+        self._publisher = DocumentPublisher(document)
         #: Messages already written to the document, so persistence stays append-only.
         self._history_cache: list[ModelMessage] = []
         #: True when the session was restored from interrupted work and must stay paused.
@@ -422,7 +424,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         config = await self._build_config(session_id, cwd)
         self._state = self._state_from_document(session_id, cwd, config)
         self._history_cache = list(self._state.history)
-        await self._persist(self.state)
+        await self._persist(self.state, strict=True)
 
     async def restore(self, session_id: str, checkpoint: DocumentCheckpoint) -> None:
         config = await self._build_config(session_id, checkpoint.cwd)
@@ -442,6 +444,14 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             self._document.commit_lifecycle()
         if self._reconcile_setting_selections(self.state):
             await self._persist(self.state)
+
+    def resume_document(self) -> None:
+        """Leave an interrupted/paused execution from the document's point of view."""
+        self.restored_interrupted = False
+        self._document.set_resume_required(False)
+        self._document.set_lifecycle_status("idle")
+        self._document.set_active_contribution(None)
+        self._document.commit_lifecycle()
 
     def _state_from_document(
         self, session_id: str, cwd: str, config: AcpSessionConfig[AgentDepsT]
@@ -469,13 +479,23 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         """Derive the ACP replay view from display records, never a second store."""
         updates: list[SessionUpdate] = []
         for record in self._document.display_records():
-            raw = record.payload.get("acp")
-            if not isinstance(raw, dict):
+            raw_list = record.payload.get("acp")
+            if not isinstance(raw_list, list):
                 continue
-            try:
-                updates.append(_ACP_UPDATE.validate_python(raw))
-            except ValueError:
-                continue
+            for raw in raw_list:
+                if not isinstance(raw, dict):
+                    continue
+                candidate = raw
+                if record.kind in ("user", "assistant", "thinking"):
+                    content = candidate.get("content")
+                    if isinstance(content, dict):
+                        rebuilt = dict(content)
+                        rebuilt["text"] = record.text
+                        candidate = {**candidate, "content": rebuilt}
+                try:
+                    updates.append(_ACP_UPDATE.validate_python(candidate))
+                except ValueError:
+                    continue
         return updates
 
     def _sync_document(self, state: SessionState[AgentDepsT]) -> None:
@@ -504,8 +524,12 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             self._document.replace_history(state.history)
         self._history_cache = list(state.history)
 
-    async def _persist(self, state: SessionState[AgentDepsT]) -> None:
-        """Save one durable document checkpoint, if a store is configured."""
+    async def _persist(self, state: SessionState[AgentDepsT], *, strict: bool = False) -> None:
+        """Save one durable document checkpoint, if a store is configured.
+
+        ``strict`` callers treat a store failure as their own failure: they must
+        not acknowledge durability or dispatch work whose capture is not durable.
+        """
         async with self._persist_lock:
             try:
                 self._sync_document(state)
@@ -527,6 +551,13 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     "failed to persist ACP session %s; durable state is now behind",
                     state.session_id,
                 )
+                if strict:
+                    raise
+
+    async def flush(self) -> None:
+        """Persist the canonical state at lifecycle boundaries."""
+        if self._state is not None:
+            await self._persist(self._state, strict=True)
 
     def _model_option(
         self, current_model_id: str | None
@@ -803,6 +834,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             self._outbox.put_nowait(update)
 
     async def _deliver_update(self, update: SessionUpdate) -> None:
+        await self._publisher.publish(update)
         self._enqueue(update)
 
     def _client_toolset(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
@@ -810,12 +842,19 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def execute(self, prompt: list[PromptContentBlock]) -> schema.PromptResponse:
         skills = await self._resolve_skills(prompt)
+        await self._publisher.begin_turn()
         try:
             return await self._run_turn(
                 self.state, prompt, prompt_blocks_to_user_content(prompt), skills
             )
         except _TurnCancelled:
+            with anyio.CancelScope(shield=True):
+                await self._publisher.interrupt()
             return schema.PromptResponse(stop_reason="cancelled")
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await self._publisher.interrupt()
+            raise
         finally:
             self.live_updates = []
 
@@ -847,6 +886,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             update = updates.update_user_message(block)
             if self._conn is self.prompt_origin and self.prompt_origin is not None:
                 turn.updates.append(update)
+                await self._publisher.publish(update)
             else:
                 await self._send_update(turn, update)
         capability = self._skills
@@ -971,6 +1011,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         state.transcript.extend(turn.updates)
         self.live_updates = []
         await self._announce_title(state)
+        await self._publisher.end_turn(stop_reason)
         try:
             await self._persist(state)
         except asyncio.CancelledError:
