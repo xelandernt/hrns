@@ -1038,6 +1038,7 @@ def _command_connect(args: SimpleNamespace) -> int:
         config,
         initial_target=preselect,
         initial_session=args.session,
+        initial_session_cwd=args.cwd,
         status_message=status_message,
         client_io=parse_client_io(args.client_io) if args.client_io else None,
     )

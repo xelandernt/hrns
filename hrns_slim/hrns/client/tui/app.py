@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 from textual import work
@@ -688,6 +689,7 @@ class HrnsApp(App[int]):
         *,
         initial_target: ConnectionTarget | None = None,
         initial_session: str | None = None,
+        initial_session_cwd: str | None = None,
         status_message: str | None = None,
         client_io: ClientIoMode | None = None,
     ) -> None:
@@ -695,6 +697,7 @@ class HrnsApp(App[int]):
         self.config = config
         self.initial_target = initial_target
         self.initial_session = initial_session
+        self.initial_session_cwd = initial_session_cwd
         self.status_message = status_message
         self.client_io = client_io
         self.client: HrnsAcpClient | None = None
@@ -773,6 +776,12 @@ class HrnsApp(App[int]):
         try:
             initial_load = False
             if self.initial_session:
+                if target.kind == "remote":
+                    cwd = self.initial_session_cwd
+                    if cwd is None:
+                        cwd = await self._remote_session_cwd(client, self.initial_session)
+                    target = replace(target, cwd=cwd)
+                    self.target = target
                 session = SessionProxy(client, self.initial_session, target.cwd)
                 initial_load = True
             else:
@@ -807,6 +816,29 @@ class HrnsApp(App[int]):
                 await client.disconnect()
             raise
         return screen
+
+    async def _remote_session_cwd(self, client: HrnsAcpClient, session_id: str) -> str:
+        """Find the stored workspace without filtering by the connection's default cwd."""
+        if not client.has_session_capability("list"):
+            raise HrnsClientError(
+                "This agent does not advertise session/list; supply --cwd to load the session."
+            )
+        cursor: str | None = None
+        while True:
+            listing = await client.list_sessions(cursor=cursor)
+            for item in listing.sessions:
+                if item.get("sessionId") == session_id:
+                    cwd = item.get("cwd")
+                    if isinstance(cwd, str) and cwd:
+                        return cwd
+                    raise HrnsClientError(
+                        f"Session {session_id} has no listed working directory; supply --cwd."
+                    )
+            cursor = listing.next_cursor
+            if not cursor:
+                raise HrnsClientError(
+                    f"Session {session_id} was not found in session/list; supply --cwd to load it."
+                )
 
     @work(group="turn", exclusive=True)
     async def start_turn(
@@ -1022,6 +1054,7 @@ def run_terminal(
     *,
     initial_target: ConnectionTarget | None = None,
     initial_session: str | None = None,
+    initial_session_cwd: str | None = None,
     status_message: str | None = None,
     client_io: ClientIoMode | None = None,
 ) -> int:
@@ -1030,6 +1063,7 @@ def run_terminal(
         config,
         initial_target=initial_target,
         initial_session=initial_session,
+        initial_session_cwd=initial_session_cwd,
         status_message=status_message,
         client_io=client_io,
     )

@@ -423,6 +423,14 @@ which makes Enter a retry of the connection that just failed.
 `_remembered_target()` in `cli.py` owns the identity→target mapping and only the terminal
 uses it: `hrns run` takes its target from its own arguments every time.
 
+When `hrns connect --session ID` opens a remote session without `--cwd`, the terminal
+finds the session's stored cwd through unfiltered, paginated `session/list` before
+loading its history. This cwd also becomes the connection's displayed workspace.
+An explicit `--cwd` goes directly to `session/load`, where the server validates it
+against the stored cwd. If listing is unavailable or the session is absent from
+the listing, the terminal asks for `--cwd`. New sessions retain profile and local
+cwd defaults.
+
 ## Todos
 
 `hrns.server.capabilities.Todo` is a standalone Pydantic AI capability with two tools:
