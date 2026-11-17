@@ -53,7 +53,7 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `session/load` | request | **Conditional** | Requires a `session_store`; attaches to live execution or restores saved state, then replays before responding |
 | `session/set_mode` | request | **No** | Returns `method_not_found` |
 | `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
-| `session/prompt` | request | **Yes** | Queues one turn in the shared FIFO and streams `session/update`; `stop_reason` is the finish reason, or `cancelled` |
+| `session/prompt` | request | **Yes** | Steers the active turn at its next model request, or starts a turn while idle; late messages become follow-ups. Streams `session/update` and returns the consuming turn's outcome |
 | `session/cancel` | notification | **Yes** | Cancels the in-flight turn and pauses pending work; the prompt returns `cancelled` |
 | `mcp/message` | request | **Conditional** | The stateless binding routes registered provider requests; client-provided servers are consumed through `McpOverAcpCaller` |
 | `session/list` | request | **Conditional** | Requires a `ListableSessionStore`; supports `cwd` filter and cursor paging |

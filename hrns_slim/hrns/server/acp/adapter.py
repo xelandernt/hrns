@@ -140,7 +140,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self, session_id: str, prompt: list[PromptContentBlock], **kwargs: object
     ) -> schema.PromptResponse:
         session = await self._session(session_id, "session/prompt")
-        handle = await session._accept(prompt, self._conn)
+        handle = await session._accept(prompt, self._conn, steer=True)
         result = await handle.result()
         return schema.PromptResponse(stop_reason=result.stop_reason, usage=result.usage)
 

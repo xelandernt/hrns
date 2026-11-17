@@ -26,7 +26,7 @@ from .content import PromptContentBlock
 from .models import ModelResolver
 from .permission import PermissionPolicy
 from .presentation import ToolCallPresenter
-from .runtime import RunObserver, SessionRuntime
+from .runtime import RunObserver, SessionRuntime, SteeringPrompt
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
 from .store import InMemorySessionStore, SessionStore
 
@@ -79,6 +79,8 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self.session_id = runtime.state.session_id
         self.cwd = runtime.state.cwd
         self._queue: deque[_QueuedTurn[OutputDataT]] = deque()
+        self._steering: deque[_QueuedTurn[OutputDataT]] = deque()
+        self._joined: list[TurnHandle[OutputDataT]] = []
         self._worker: asyncio.Task[None] | None = None
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
@@ -88,6 +90,7 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._last_outcome: str | None = None
         self._last_usage: dict[str, object] | None = None
         runtime.on_state = self._publish
+        runtime.take_steering = self._take_steering
 
     def status(self) -> dict[str, object]:
         return {
@@ -109,10 +112,23 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         return list(self._runtime.state.history)
 
     async def submit(self, prompt: str | Sequence[PromptContentBlock]) -> TurnHandle[OutputDataT]:
+        """Queue a separate turn, even when another turn is running."""
         return await self._accept(prompt)
 
+    async def steer(self, prompt: str | Sequence[PromptContentBlock]) -> TurnHandle[OutputDataT]:
+        """Join the active turn at its next model request, or queue a follow-up.
+
+        A consumed message shares the active turn's result. Messages left unconsumed
+        when it ends become separate turns. Cancellation and errors pause that work.
+        """
+        return await self._accept(prompt, steer=True)
+
     async def _accept(
-        self, prompt: str | Sequence[PromptContentBlock], origin: Client | None = None
+        self,
+        prompt: str | Sequence[PromptContentBlock],
+        origin: Client | None = None,
+        *,
+        steer: bool = False,
     ) -> TurnHandle[OutputDataT]:
         self._registration._server._require_running()
         if self._closed:
@@ -125,9 +141,19 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         )
         # Consume unobserved failures without changing what result() raises.
         handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-        self._queue.append(_QueuedTurn(handle, origin))
+        queued = _QueuedTurn(handle, origin)
+        if steer and self._active is not None and not self._paused:
+            self._steering.append(queued)
+        else:
+            self._queue.append(queued)
         self._start_worker()
         return handle
+
+    def _take_steering(self) -> tuple[SteeringPrompt, ...]:
+        pending = tuple(self._steering)
+        self._steering.clear()
+        self._joined.extend(queued.handle for queued in pending)
+        return tuple(SteeringPrompt(queued.handle.prompt, queued.origin) for queued in pending)
 
     def _start_worker(self) -> None:
         if not self._paused and self._queue and self._worker is None:
@@ -154,20 +180,29 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                     )
                     if response.stop_reason == "cancelled":
                         self._paused = True
-                    handle._future.set_result(
-                        TurnResult(response.stop_reason, self._runtime.last_output, response.usage)
+                    result = TurnResult[OutputDataT](
+                        response.stop_reason, self._runtime.last_output, response.usage
                     )
+                    for accepted in (handle, *self._joined):
+                        accepted._future.set_result(result)
                 except asyncio.CancelledError:
                     self._last_outcome = "cancelled"
                     self._last_usage = None
                     self._paused = True
-                    handle._future.set_result(TurnResult("cancelled"))
+                    for accepted in (handle, *self._joined):
+                        accepted._future.set_result(TurnResult("cancelled"))
                 except Exception as exc:
                     self._last_outcome = "error"
                     self._last_usage = None
                     self._paused = True
-                    handle._future.set_exception(exc)
+                    for accepted in (handle, *self._joined):
+                        accepted._future.set_exception(exc)
                 finally:
+                    self._joined.clear()
+                    # These messages were meant for this turn; run them before
+                    # explicitly queued follow-ups if its last request already began.
+                    self._queue.extendleft(reversed(self._steering))
+                    self._steering.clear()
                     self._active = None
                     self._execution = None
                     self._runtime.prompt_origin = None

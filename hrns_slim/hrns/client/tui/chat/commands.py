@@ -131,6 +131,8 @@ class CommandWorkflow:
         composer.clear_composer()
         if name == "attach":
             await screen.prompts.stage_attachment(rest)
+        elif name == "queue":
+            await screen.prompts.enqueue(rest)
         elif name == "connect":
             await self.connect(rest)
         elif name == "rename":

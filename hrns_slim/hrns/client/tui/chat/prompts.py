@@ -25,7 +25,7 @@ class PromptWorkflow:
 
     def __init__(self, screen: ChatScreen) -> None:
         self.screen = screen
-        self._steering: dict[str, list[str]] = {}
+        self._queue_lock = asyncio.Lock()
 
     # ----------------------------------------------------------- suggestions
 
@@ -369,24 +369,6 @@ class PromptWorkflow:
             )
             screen.query_one("#composer", Composer).focus()
             return False
-        if screen.busy:
-            pending_count = len(self._steering.get(screen.session.session_id, []))
-            if len(screen._queued_prompts) + pending_count >= 20:
-                await screen._notice(
-                    "The queue is full (20 follow-ups). Edit or remove an item.", "warning"
-                )
-                return False
-            queued_attachments = list(screen._attachments)
-            self.remember_prompt(text)
-            screen._attachments.clear()
-            screen.query_one("#composer", Composer).clear_composer()
-            self.refresh_queue()
-            if not queued_attachments and await self.steer(text):
-                return True
-            screen._queued_prompts.append((text, queued_attachments))
-            self.refresh_queue()
-            await self.send_next_queued()
-            return True
         attachments = list(screen._attachments) if attachments is None else attachments
         try:
             blocks = build_prompt_blocks(text, attachments) if attachments else None
@@ -421,24 +403,23 @@ class PromptWorkflow:
             del history[:-100]
         screen.query_one("#composer", Composer).prompt_history = history
 
-    async def steer(self, text: str) -> bool:
-        """Standard ACP has no steering; the caller queues the message locally."""
-        return False
-
-    def steering_delivered(self, text: str) -> None:
-        pending = self._steering.get(self.screen.session.session_id, [])
-        if text in pending:
-            pending.remove(text)
-            self.refresh_queue()
-
-    def recover_steering(self) -> None:
-        """Keep undelivered messages available after cancellation or disconnect."""
-        pending = self._steering.pop(self.screen.session.session_id, [])
-        if pending:
-            self.screen._queued_prompts[:0] = [(text, []) for text in pending]
-            pending.clear()
-            self.screen._queue_paused = True
-            self.refresh_queue()
+    async def enqueue(self, text: str) -> None:
+        """Hold a follow-up locally until the current turn finishes."""
+        screen = self.screen
+        if not text:
+            await screen._notice("Usage: /queue <message>", "warning")
+            return
+        if len(screen._queued_prompts) >= 20:
+            screen.query_one("#composer", Composer).load_text(f"/queue {text}")
+            await screen._notice(
+                "The queue is full (20 follow-ups). Edit or remove an item.", "warning"
+            )
+            return
+        self.remember_prompt(text)
+        screen._queued_prompts.append((text, list(screen._attachments)))
+        screen._attachments.clear()
+        self.refresh_queue()
+        await self.send_next_queued()
 
     # ---------------------------------------------------------------- drafts
 
@@ -474,7 +455,6 @@ class PromptWorkflow:
         screen.query_one(PromptQueue).show_prompts(
             screen._queued_prompts,
             paused=screen._queue_paused,
-            steering=self._steering.get(screen.session.session_id, []),
         )
         screen.query_one(AttachmentBar).show_files(attachment_summary(screen._attachments))
 
@@ -508,6 +488,10 @@ class PromptWorkflow:
             self.refresh_queue()
 
     async def send_next_queued(self) -> None:
+        async with self._queue_lock:
+            await self._send_next_queued()
+
+    async def _send_next_queued(self) -> None:
         screen = self.screen
         if (
             screen not in screen.app.screen_stack

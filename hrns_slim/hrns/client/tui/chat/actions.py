@@ -188,10 +188,10 @@ class ChatActions:
 {plugin_section}
 
 Type `@` to find and attach a local workspace file; select a staged file to remove it.
-Submitting during a running turn steers the agent: the text reaches it at its next model
-request instead of waiting for the turn to end. Prompts with attachments, and peers without
-the steering extension, queue locally instead; use the queue's Edit and Remove controls to
-revise those. Cancellation or errors pause the queue.
+Submitting during a running turn sends another prompt immediately. With hrns, it steers
+the agent at its next model request after ongoing tools finish. Late messages become
+follow-up turns. Use `/queue <message>` to hold a follow-up locally until the turn ends;
+use Edit and Remove to revise queued messages. Cancellation or errors pause the queue.
 Drafts, prompt history, attachments, and queues stay with their session while this app is open.
 Use `/` in the sessions panel to filter titles and workspaces. `Esc` closes the panel.
 

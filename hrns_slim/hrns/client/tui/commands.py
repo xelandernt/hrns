@@ -68,6 +68,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
     LocalCommand("permissions", "Choose how tool approvals are answered"),
     LocalCommand("settings", "Terminal preferences"),
     LocalCommand("attach", "Stage a local file for the next message", takes_argument=True),
+    LocalCommand("queue", "Queue a follow-up after the current turn", takes_argument=True),
     LocalCommand("help", "Keyboard map and commands"),
     # Routing prefix for agent-advertised commands with a local name collision.
     LocalCommand(

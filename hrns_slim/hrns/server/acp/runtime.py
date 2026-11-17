@@ -26,7 +26,8 @@ from pydantic_ai import (
     UsageLimitExceeded,
     capture_run_messages,
 )
-from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.agent import AbstractAgent, ModelRequestNode
+from pydantic_ai.capabilities import AgentNode, Hooks
 from pydantic_ai.messages import (
     AgentStreamEvent,
     FinishReason,
@@ -303,6 +304,12 @@ class _ToolCallFields:
     locations: list[schema.ToolCallLocation] | None
 
 
+@dataclass(frozen=True)
+class SteeringPrompt:
+    prompt: tuple[PromptContentBlock, ...]
+    origin: Client | None
+
+
 class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
     """Execute one conversation independently of transport request tasks."""
 
@@ -328,6 +335,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self.agent_id = agent_id
         self.observer: RunObserver | None = None
         self.on_state: Callable[[], None] = lambda: None
+        self.take_steering: Callable[[], tuple[SteeringPrompt, ...]] = lambda: ()
         self.live_updates: list[SessionUpdate] = []
         self.interactions = Interactions()
         self._delivery: asyncio.Task[None] | None = None
@@ -395,6 +403,24 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 )
             resolved.append(info)
         return tuple(resolved)
+
+    async def _with_skill_instructions(
+        self,
+        state: SessionState[AgentDepsT],
+        content: list[UserContent],
+        skills: Sequence[SkillInfo],
+    ) -> list[UserContent]:
+        capability = self._skills
+        if not skills or capability is None:
+            return content
+        state.invoked_skills.update(info.id for info in skills)
+        injected = [
+            f'<skill_content name="{info.id}">\n'
+            f"{await capability.instructions(info.id)}\n"
+            "</skill_content>"
+            for info in skills
+        ]
+        return [*injected, *content]
 
     async def _announce_skills(self, turn: _TurnState, skills: Sequence[SkillInfo]) -> None:
         """Show one completed tool call per skill the person invoked, as a transcript marker."""
@@ -781,23 +807,35 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 turn.updates.append(update)
             else:
                 await self._send_update(turn, update)
-        capability = self._skills
-        if skills and capability is not None:
-            # Add invoked instructions as user content and keep the skills active
-            # for the session so their bundled-file tools are available.
-            state.invoked_skills.update(info.id for info in skills)
-            injected = [
-                f'<skill_content name="{info.id}">\n'
-                f"{await capability.instructions(info.id)}\n"
-                "</skill_content>"
-                for info in skills
-            ]
-            user_content = [*injected, *user_content]
-            run_input = user_content
-            await self._announce_skills(turn, skills)
+        run_input = await self._with_skill_instructions(state, user_content, skills)
+        await self._announce_skills(turn, skills)
 
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
+
+        async def inject_steering(
+            ctx: RunContext[AgentDepsT], *, node: AgentNode[AgentDepsT]
+        ) -> AgentNode[AgentDepsT]:
+            # Keep messages in the session queue while tools are running, so a
+            # cancellation before the next request leaves them available to resume.
+            if not isinstance(node, ModelRequestNode):
+                return node
+            for pending in self.take_steering():
+                invoked = await self._resolve_skills(pending.prompt)
+                content = await self._with_skill_instructions(
+                    state, prompt_blocks_to_user_content(pending.prompt), invoked
+                )
+                ctx.enqueue(*content)
+                for block in pending.prompt:
+                    update = updates.update_user_message(block)
+                    if self._conn is pending.origin and pending.origin is not None:
+                        turn.updates.append(update)
+                    else:
+                        await self._send_update(turn, update)
+                await self._announce_skills(turn, invoked)
+            return node
+
+        steering = Hooks[AgentDepsT](before_node_run=inject_steering)
         try:
             while True:
                 result = None
@@ -816,7 +854,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                         deferred_tool_results=deferred_results,
                         output_type=output_type,
                         deps=config.deps,
-                        capabilities=config.capabilities,
+                        capabilities=[*(config.capabilities or ()), steering],
                         toolsets=[
                             *(config.toolsets or ()),
                             DynamicToolset(self._client_toolset, per_run_step=True),

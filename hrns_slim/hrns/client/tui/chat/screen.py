@@ -337,7 +337,6 @@ class ChatScreen(_HrnsScreen):
         ):
             return
         if isinstance(event, UserMessageReplayed):
-            self.prompts.steering_delivered(event.text)
             await pane.finish_message()
             await pane.add_user(event.text)
             return
@@ -367,8 +366,7 @@ class ChatScreen(_HrnsScreen):
             self.chrome.refresh_status()
             return
         if isinstance(event, TurnCompleted):
-            self._set_busy(False)
-            self.prompts.recover_steering()
+            self._set_busy(self.client.turns.is_running(self.session.session_id))
             if event.stop_reason not in {"end_turn", ""}:
                 self._queue_paused = True
             self.prompts.refresh_queue()
@@ -447,7 +445,6 @@ class ChatScreen(_HrnsScreen):
             self.chrome.update_chrome()
             return
         if isinstance(event, ConnectionEvent) and event.state == "lost":
-            self.prompts.recover_steering()
             self._queue_paused = True
             self.prompts.refresh_queue()
             self.connected = False

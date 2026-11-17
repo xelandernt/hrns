@@ -62,10 +62,12 @@ class TurnService:
         self.client = client
         self._revisions: dict[str, int] = {}
         self._active: dict[str, str | None] = {}
+        self._pending: dict[str, int] = {}
 
     def reset(self) -> None:
         self._revisions.clear()
         self._active.clear()
+        self._pending.clear()
 
     def forget_session(self, session_id: str) -> None:
         """A restored runtime may restart its revision sequence."""
@@ -73,7 +75,9 @@ class TurnService:
         self._active.pop(session_id, None)
 
     def is_running(self, session_id: str) -> bool:
-        return self._active.get(session_id) is not None
+        if self.server_lifecycle:
+            return self._active.get(session_id) is not None
+        return bool(self._pending.get(session_id))
 
     @property
     def server_lifecycle(self) -> bool:
@@ -177,10 +181,18 @@ class TurnService:
             if display_text is not None
             else (prompt if isinstance(prompt, str) else "")
         )
-        if not self.server_lifecycle:
+        if not self.server_lifecycle and not self.is_running(session_id):
             client.bus.publish(TurnStarted(session_id=session_id, prompt_text=hint))
         try:
-            response = await client.connection.prompt(session_id=session_id, prompt=blocks)
+            self._pending[session_id] = self._pending.get(session_id, 0) + 1
+            try:
+                response = await client.connection.prompt(session_id=session_id, prompt=blocks)
+            finally:
+                remaining = self._pending.get(session_id, 1) - 1
+                if remaining > 0:
+                    self._pending[session_id] = remaining
+                else:
+                    self._pending.pop(session_id, None)
         except RequestError as exc:
             await client.drain_events()
             detail = describe_rpc_error("session/prompt", exc)
@@ -215,7 +227,7 @@ class TurnService:
             if response.usage
             else None
         )
-        if not self.server_lifecycle:
+        if not self.server_lifecycle and not self.is_running(session_id):
             client.bus.publish(
                 TurnCompleted(session_id=session_id, stop_reason=response.stop_reason, usage=usage)
             )

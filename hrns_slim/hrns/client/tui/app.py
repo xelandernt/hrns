@@ -840,7 +840,7 @@ class HrnsApp(App[int]):
                     f"Session {session_id} was not found in session/list; supply --cwd to load it."
                 )
 
-    @work(group="turn", exclusive=True)
+    @work(group="turn")
     async def start_turn(
         self,
         screen: ChatScreen,
@@ -848,7 +848,7 @@ class HrnsApp(App[int]):
         blocks: list[Any] | None = None,
         skills: Sequence[SkillMention] = (),
     ) -> None:
-        """Run one prompt in an app-owned worker so panel switches do not cancel it."""
+        """Keep each prompt alive while later prompts steer the same session."""
         try:
             if blocks is not None:
                 await screen.session.prompt_blocks(blocks, display_text=text, skills=skills)
@@ -873,11 +873,7 @@ class HrnsApp(App[int]):
         finally:
             if screen in self.screen_stack:
                 await screen._events.join()
-                screen._set_busy(
-                    screen.client.turns.is_running(screen.session.session_id)
-                    if screen.client.turns.server_lifecycle
-                    else False
-                )
+                screen._set_busy(screen.client.turns.is_running(screen.session.session_id))
                 screen.prompts.refresh_queue()
                 self.call_later(screen.send_next_queued)
 

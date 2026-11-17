@@ -97,11 +97,23 @@ client toolsets; accepted work survives. Close explicitly cancels and closes the
 session. The default store is separate per registration; the same store instance
 cannot be registered twice. Shared persistence requires explicit agent partitions.
 
-Programmatic and ACP prompts share FIFO acceptance order. A prompt enters history
-only when started. Cancelling an awaiter never cancels execution. Cancel and runtime
-errors pause remaining work; Python inspection/resume/clear are the only queue
-management API. Accepted prompts survive disconnect, their JSON-RPC associations do
-not, and no reconnect resubmits them. TUI-local queues remain separate.
+`Session.submit()` queues a separate turn. `Session.steer()` and existing ACP
+`session/prompt` requests join an active turn at the next model request. A per-run
+`Hooks.before_node_run` hook forwards pending content before `ModelRequestNode`
+through Pydantic AI's native `RunContext.enqueue()` with its default `asap`
+priority. Ongoing tools finish before that boundary; native delivery stamps and
+persists the injected messages. Consumed steering handles share the active turn's
+result, usage, cancellation, or error.
+Messages left unconsumed at turn completion become separate follow-ups ahead of
+explicitly queued work. Idle steering starts a normal turn. ACP wire types and
+methods are unchanged.
+
+Cancelling an awaiter never cancels execution. Cancel and runtime errors pause
+remaining work; Python inspection/resume/clear manage separate queued turns.
+Accepted prompts survive disconnect, their JSON-RPC associations do not, and no
+reconnect resubmits them. The TUI sends concurrent prompts without cancelling
+earlier request workers. `/queue <message>` holds a follow-up and staged attachments
+in the TUI until idle; the command and queue controls are entirely client-side.
 
 `RegisteredAgent.cancel_session(session_id)` resolves a session through `get_session`
 and delegates to `Session.cancel()`. It shares lookup/restoration and unknown-ID

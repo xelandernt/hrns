@@ -173,11 +173,35 @@ with a `TurnHandle`; execution continues independently of the `result()` waiter.
 carry the typed output, ACP stop reason, and usage. Runtime errors raise from `result()`;
 cancelled or discarded work returns a cancelled outcome.
 
-Python and ACP prompts share one FIFO, with one active turn. Follow-ups enter history
-only when started. Cancellation pauses the queue; errors also pause it. New submissions
-stay queued while paused. `pending_prompts`, `resume_queue`, and `clear_queue` are
-Python APIs. Clear resolves pending handles as cancelled. The terminal also keeps its
-own local drafts and queue.
+From another task while a turn is running:
+
+```python
+steering = await session.steer("Focus on the PostgreSQL backend")
+result = await steering.result()
+```
+
+`steer` accepts the same content and returns a `TurnHandle`. During an active turn,
+ongoing tools finish before the message reaches the model's next request. Consumed
+steering handles share that turn's output, stop reason, and usage. With no active turn,
+or when a message arrives after the last opportunity to inject it, it becomes a separate
+follow-up turn. Unconsumed steering runs before explicitly queued follow-ups.
+
+`submit` always queues a separate turn. There is one active turn per session. ACP
+`session/prompt` uses steering during execution and starts a turn while idle, using
+the existing request and response types. Each request waits for the turn that consumes
+its message. Follow-ups enter history only when started; steering enters history when
+injected through Pydantic AI's native `RunContext.enqueue()`.
+
+Cancellation and errors pause remaining work. New submissions stay queued while paused.
+`pending_prompts`, `resume_queue`, and `clear_queue` manage separate queued turns through
+Python. Clear resolves pending handles as cancelled. Consumed steering shares the active
+turn's cancellation or error; unconsumed messages stay queued for resume.
+
+The terminal sends messages immediately, with existing prompt-capability checks.
+`/queue <message>` holds a follow-up and any staged attachments locally until execution
+is idle. Edit, Remove, and Resume operate on that client-side queue; `/queue` is never sent to the
+agent. Cancellation, errors, and disconnect pause the local queue. Accepted server
+work survives disconnect and is inspected through session reload.
 
 ## ACP attachment and lifecycle
 
