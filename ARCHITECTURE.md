@@ -45,8 +45,9 @@ all.
 
 ## ACP dependency
 
-`agent-client-protocol` is pinned to the 1.0 release candidate (`>=1.0.0rc3,<2`).
-That release provides the full ACP v1 method table, including `session/delete`.
+Both the client and server extras require the stable 1.x `agent-client-protocol`
+SDK (`>=1.0.0,<2`), which provides the full ACP v1 method table, including
+`session/delete`.
 `hrns` implements the adapter itself in `hrns_slim/hrns/server/acp/`, derived from the design
 of `pydantic-ai-harness`'s experimental ACP adapter but targeting ACP 1.x directly.
 

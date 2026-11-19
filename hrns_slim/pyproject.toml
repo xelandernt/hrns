@@ -22,7 +22,7 @@ dependencies = [
 
 [tool.hatch.metadata.hooks.uv-dynamic-versioning.optional-dependencies]
 client = [
-    "agent-client-protocol>=1.0.0rc3,<2",
+    "agent-client-protocol>=1.0.0,<2",
     "textual>=8.2,<9",
     "websockets>=13,<16",
     "PyYAML>=6,<7",
@@ -30,7 +30,7 @@ client = [
     "mcp>=2.3,<3",
 ]
 server = [
-    "agent-client-protocol>=1.0.0rc3,<2",
+    "agent-client-protocol>=1.0.0,<2",
     "fastmcp-slim[client]>=3.3,<5",
     "mcp>=2.3,<3",
     "pydantic-ai-slim[mcp,openai,anthropic]>=2.57.0,<3",
