@@ -419,9 +419,10 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
   cutover and no longer includes it; and `just native-install` plus the dispatcher
   selected native.
 - The first hosted run against `bc0ccb7` cancelled the arm64 wheel job because the
-  `macos-14` runner configuration was unavailable; the matrix moved to `macos-15`.
-  Its Linux wheel was `manylinux_2_39`, so the matrix now pins `manylinux: 2_17` to keep
-  glibc compatibility. The qualifying run is against `76785c8`.
+  `macos-14` runner configuration was unavailable; the matrix moved to `macos-15` for
+  arm64 and `macos-15-intel` for x64 after `macos-13` stayed queued. Its Linux wheel was
+  `manylinux_2_39`, so the matrix now pins `manylinux: 2_17` to keep glibc compatibility.
+  The qualifying run is against `9dc459e`.
 
 ### T21 — Switch the interactive command
 
