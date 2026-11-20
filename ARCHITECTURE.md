@@ -491,9 +491,9 @@ composer accepts `/provider` (also `/providers`) and `/models` to configure the 
 Selecting a model saves the configuration and starts the configured runtime with a new
 session. Headless prompts still require a configured model.
 
-The local and ACP model pickers bound the dialog to the terminal height and give
-the option list the remaining rows. The list owns vertical scrolling so the
-header, local filter, and keyboard hints stay visible with long model catalogs.
+The native client has no modal model picker. `/model` accepts an advertised value,
+`/effort` selects a thought level, and `/providers` / `/provider` list and update routing
+when the connected agent advertises it.
 
 ## Session settings
 
@@ -679,7 +679,7 @@ Writes emit a typed `TodoUpdated` capability event through `RunContext.emit`.
 Consumers of `agent.run_stream_events()` can inspect `event.items` without ACP.
 The ACP adapter translates these events into standard `AgentPlanUpdate` full
 snapshots through its existing transcript/update path. The client already maps
-these notifications to `PlanChanged` and renders them in the Todos panel.
+these notifications to `PlanChanged` and renders them in the sidebar Plan section.
 
 The adapter binds a session-owned `TodoStore` during each run using task-local
 context, without mutating the shared agent. That binding takes precedence over

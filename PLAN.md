@@ -33,7 +33,7 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** The native client is the only interactive client. The Python
+**Current state.** The native client is the only interactive client (`bc0ccb7`). The Python
 dispatcher requires the installed `hrns-tui` wheel and reports an install hint when it is
 missing; the Textual package and its dependency are gone. Native covers approvals with
 modes, agent forms, client I/O, themes, settings, remote provider routing and
@@ -58,6 +58,9 @@ run and a final real-workload release smoke remain.
 | `53784b3` | Activity sidebar with plan, usage, skills and recent events; persisted sidebar, tool and reasoning preferences on both targets. |
 | `ef2d1c5` | Inline approvals with modes and kind shortcuts, agent elicitation forms, native client I/O, themes and settings, session titles and usage cost, remote provider routing, default native launch with a Textual fallback, and wheel/bundle CI jobs. |
 | `1497edb` | Canvas browser backend, `method_not_found` for unadvertised browser I/O, and browser input-latency qualification. |
+| `3c0e5eb` | Native MCP-over-ACP export through a Python sidecar: declarations, consent, filters, health, progress and failure handling. |
+| `88b21a0` | Textual removed; the dispatcher always launches the native wheel and remembers the reopened identity. |
+| `bc0ccb7` | Release packaging: version-matched native dependency, source-tree wheel build, and developer install recipe. |
 
 ### What was verified
 

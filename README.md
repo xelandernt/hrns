@@ -154,10 +154,10 @@ key by key. `HRNS_*` environment variables override both.
 `hrns agent` launches the ACP entrypoint with the configured provider and model. The
 terminal client reuses that entrypoint, so it passes the same document to it.
 
-In the TUI connection picker, `l` opens provider management. Add or edit a provider
-to paste its API key into the password field; the key is stored in the OS keyring. After saving a provider without an active model, the model
-picker opens so a catalog or custom id can be selected. `/model provider:model` also
-sets it directly.
+Configure providers with `hrns login`, `hrns config`, or `/providers` and `/provider`
+when the connected agent advertises provider routing. `/model provider:model` sets the
+model directly. The Python commands own API-key entry and the OS keyring; the native
+client never prompts for a secret.
 
 `/providers` acts on whatever you are connected to. Over stdio to `hrns agent` it opens
 the entry editor above; connected to a remote agent that advertises provider
@@ -177,7 +177,7 @@ as `extra_headers` model settings.
 - Provider routing changes apply on the next turn. A running turn keeps its selected
   endpoint; session setting changes apply before its next model request.
 - MCP exports require client consent at session start. Headless clients export servers
-  configured with `always_allow = true`. The `/mcp` panel shows startup and authentication
+  configured with `always_allow = true`. `/mcp` and the `Ctrl-B` sidebar show startup and authentication
   failures. See [MCP over ACP](docs/mcp.md) for the request scope and upstream behavior.
 - Tool approvals are enabled by default. Reads run freely; file writes and shell calls
   request permission through ACP. `approval=False` delegates approval to the deployment.

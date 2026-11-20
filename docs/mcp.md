@@ -106,15 +106,14 @@ absent from `tools/list`, and calling it returns an `is_error` tool result.
 
 ## Health
 
-The terminal's `/mcp` command opens the MCP side panel. It lists every configured server
-with its state (`running`, `failed`, `disabled`, `local only`, `not started`,
-`waiting for approval`, `denied`, or `agent cannot use ACP`), transport, target, and
-negotiated upstream revision.
-`r` refreshes the view; it also refreshes after a connection or session change.
+The terminal's `/mcp` command prints the MCP health table, and the `Ctrl-B` sidebar lists
+every configured server with its state (`running`, `failed`, `disabled`, `local only`,
+`not started`, `waiting for approval`, `denied`, or `agent cannot use ACP`), transport,
+target, and negotiated upstream revision. Run `/mcp` again to refresh; the table also
+refreshes after a connection or session change.
 
-A server that fails to start, authenticate, or negotiate appears
-in the panel with the reason, and the chat screen shows a transcript notice plus a status
-hint. The session continues with the servers that started successfully.
+A server that fails to start, authenticate, or negotiate appears in `/mcp` and the
+sidebar with the reason, and the transcript shows a notice. The session continues with the servers that started successfully.
 
 ## What is served
 
