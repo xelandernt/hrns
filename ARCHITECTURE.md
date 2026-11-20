@@ -114,6 +114,16 @@ span to the first text block's `_meta`, leaving the typed text unchanged for
 the agent to expand. Paste, draft history and attachment staging stay shared;
 native reads paths while the browser opens its file chooser.
 
+`Ctrl-B` opens a sidebar with the connection identity, session, model, usage,
+plan, local queue, skills and recent activity. `Ctrl-O` expands tool details
+and the sidebar records tool transitions and turn outcomes. Both frontends
+persist the sidebar state, its width, automatic tool expansion and reasoning
+visibility without touching connection configuration: native writes JSON under
+`$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
+local storage. The sidebar is suppressed below 72 columns; the header keeps the
+destination, status and workspace visible on narrow layouts. Theme selection
+stays with the Python TUI settings until cutover.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`

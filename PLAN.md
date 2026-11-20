@@ -115,6 +115,14 @@ launch. The optimized browser bundle builds into `rust/dist/`.
   prompt history recalled a submitted prompt, and browser paste inserted
   through its clipboard event. Attachment staging was verified earlier with
   an agent that advertised embedded context.
+- Panels on both targets opened with `Ctrl-B`, showing connection identity,
+  plan, queue, skills and recent activity; tool transitions and turn outcomes
+  appeared in the activity list. Native saved the open sidebar, tool expansion
+  and reasoning preference to a state file and restored them on relaunch. The
+  browser restored the sidebar and its later closed state from local storage
+  across reloads. The header retained the endpoint and workspace when the
+  window was too narrow for the sidebar. Theme selection remains with the
+  Python TUI settings.
 
 ### Next implementation pass
 
@@ -141,11 +149,12 @@ each extension's wire contract before implementing its UI.
    currently rejects. Define how the remote deployment scopes browser
    workspace operations and MCP exports, then verify permissions, consent,
    and tool filtering end to end.
-4. **Close UI and extension parity (T12, T18).** Finish activity panels and
-   persisted settings. Port supported command and tool renderers. The Textual
-   audit found inactive legacy plugin-command UI and Textual-specific renderer
-   entry points. Use working Textual behavior and agent-advertised
-   capabilities as the parity baseline.
+4. **Close UI and extension parity (T12, T18).** Theme selection and the
+   remaining TUI setting parity need a decision on the Python-owned settings
+   boundary. Port supported command and tool renderers. The Textual audit
+   found inactive legacy plugin-command UI and Textual-specific renderer entry
+   points. Use working Textual behavior and agent-advertised capabilities as
+   the parity baseline.
 5. **Qualify both release artifacts (T01, T03, T19–T21).** Capture the
    long-stream Textual baseline while feature work proceeds. Then compare
    packaged native and browser release builds. Align versions and build

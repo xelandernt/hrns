@@ -3,7 +3,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::App;
 use crate::options;
@@ -11,6 +11,19 @@ use crate::options;
 impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let sidebar_width = if self.preferences.sidebar && area.width >= 72 {
+            self.preferences.sidebar_width(area.width)
+        } else {
+            0
+        };
+        let (area, sidebar) = if sidebar_width > 0 {
+            let [main, sidebar] =
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(sidebar_width)])
+                    .areas(area);
+            (main, Some(sidebar))
+        } else {
+            (area, None)
+        };
         let prompt_height = area.height.clamp(4, 12) / 2;
         let approval_height = self.approvals.front().map_or(0, |(options, _)| {
             u16::try_from(options.len().min(9) + 1).unwrap_or(10)
@@ -132,12 +145,76 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(if self.status == "Disconnected" {
-                " Ctrl-R reconnect · draft is kept · PgUp/PgDn scroll"
+                " Ctrl-R reconnect · draft is kept · Ctrl-B panel"
             } else {
-                " Enter send · Shift+Enter newline · Tab complete · PgUp/PgDn scroll · Esc cancel · Ctrl-O tools · Ctrl-R reconnect"
+                " Enter send · Shift+Enter newline · Tab complete · PgUp/PgDn scroll · Esc cancel · Ctrl-O tools · Ctrl-B panel · Ctrl-R reconnect"
             })
             .gray(),
             help,
+        );
+        if let Some(sidebar) = sidebar {
+            self.draw_sidebar(frame, sidebar);
+        }
+    }
+
+    fn draw_sidebar(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let mut lines = vec![
+            Line::from("Connection").cyan().bold(),
+            Line::from(self.destination.clone()).gray(),
+            Line::from(self.status).gray(),
+        ];
+        if let Some(workspace) = &self.workspace {
+            lines.push(Line::from(workspace.clone()).gray());
+        }
+        if let Some(session) = &self.session {
+            lines.push(Line::from(session.clone()).gray());
+        }
+        if let Some(model) = self.options.iter().find_map(|option| match &option.kind {
+            SessionConfigKind::Select(select)
+                if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
+            {
+                Some(select.current_value.clone())
+            }
+            _ => None,
+        }) {
+            lines.push(Line::from(format!("model {model}")).gray());
+        }
+        if let Some((used, size)) = self.usage {
+            lines.push(Line::from(format!("usage {used}/{size}")).gray());
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Plan").cyan().bold());
+        if self.plan.is_empty() {
+            lines.push(Line::from("no plan").gray());
+        } else {
+            lines.extend(self.plan.iter().cloned().map(Line::from));
+        }
+        if !self.queue.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Queue").cyan().bold());
+            lines.push(Line::from(format!("{} waiting", self.queue.len())).gray());
+        }
+        if !self.skills.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Skills").cyan().bold());
+            lines.extend(
+                self.skills
+                    .iter()
+                    .filter(|skill| skill.user_invocable)
+                    .map(|skill| Line::from(format!("${}", skill.id)).gray()),
+            );
+        }
+        if !self.activity.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Activity").cyan().bold());
+            lines.extend(self.activity.iter().cloned().map(Line::from));
+        }
+        let block = Block::default().borders(Borders::LEFT).title(" Panel ");
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
         );
     }
 }

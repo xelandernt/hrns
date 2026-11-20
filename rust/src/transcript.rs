@@ -222,6 +222,17 @@ impl Transcript {
         self.expanded_tools
     }
 
+    pub fn set_tools_expanded(&mut self, expanded: bool) {
+        self.expanded_tools = expanded;
+        for entry in &mut self.entries {
+            if entry.role == Role::Tool {
+                entry.expanded = expanded;
+            }
+        }
+        self.measured = 0;
+        self.total = 0;
+    }
+
     pub fn append(&mut self, role: Role, mut text: String) {
         if let Some(entry) = self.entries.last_mut().filter(|entry| entry.role == role) {
             text.retain(|ch| ch == '\n' || !ch.is_control());

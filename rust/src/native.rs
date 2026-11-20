@@ -140,7 +140,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = event_tx.unbounded_send(Event::Disconnected);
         }
     });
-    let mut app = App::new(destination, action_tx);
+    let mut app = App::new(destination, action_tx, crate::preferences::load());
     let result = (|| -> io::Result<()> {
         crossterm::execute!(stdout(), EnableBracketedPaste)?;
         let mut dirty = true;
@@ -211,6 +211,7 @@ fn local_effect(
         LocalEffect::Switch(target) => {
             let _ = requests.unbounded_send(Connection::Switch(target));
         }
+        LocalEffect::SavePreferences(preferences) => crate::preferences::save(&preferences),
         LocalEffect::Copy(text) => {
             if crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(text)).is_err() {
                 app.event(Event::Error(
@@ -360,6 +361,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Down => Some(Key::HistoryDown),
         KeyCode::PageUp => Some(Key::ScrollUp),
         KeyCode::PageDown => Some(Key::ScrollDown),
+        KeyCode::Char('b') if key.modifiers == KeyModifiers::CONTROL => Some(Key::ToggleSidebar),
         KeyCode::Char('o') if key.modifiers == KeyModifiers::CONTROL => Some(Key::ToggleTools),
         KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Reconnect),
         KeyCode::Esc => Some(Key::Escape),

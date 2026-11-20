@@ -10,6 +10,7 @@ use futures::channel::{mpsc, oneshot};
 use crate::acp::{Action, Event, ExecutionState, ExecutionStatus, SessionTarget};
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
+use crate::preferences::Preferences;
 use crate::skills::{self, Skill};
 use crate::transcript::{Role, Transcript};
 
@@ -18,6 +19,7 @@ pub enum LocalEffect {
     Attach(String),
     Reconnect,
     Switch(SessionTarget),
+    SavePreferences(Preferences),
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +39,7 @@ pub enum Key {
     ScrollDown,
     Tab,
     ToggleTools,
+    ToggleSidebar,
     Reconnect,
     Escape,
 }
@@ -72,6 +75,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/attach", "Stage a file"),
     ("/detach", "Remove a staged file"),
     ("/skills", "List available skills"),
+    ("/sidebar", "Toggle the activity sidebar"),
+    ("/thoughts", "Show or hide reasoning"),
     ("/agent", "Run an advertised agent command"),
 ];
 
@@ -105,11 +110,19 @@ pub struct App {
     completion: Option<Completion>,
     plan: Vec<String>,
     usage: Option<(u64, u64)>,
+    preferences: Preferences,
+    activity: VecDeque<String>,
     actions: mpsc::UnboundedSender<Action>,
 }
 
 impl App {
-    pub fn new(destination: String, actions: mpsc::UnboundedSender<Action>) -> Self {
+    pub fn new(
+        destination: String,
+        actions: mpsc::UnboundedSender<Action>,
+        preferences: Preferences,
+    ) -> Self {
+        let mut transcript = Transcript::new();
+        transcript.set_tools_expanded(preferences.expand_tools);
         Self {
             destination,
             workspace: None,
@@ -129,7 +142,7 @@ impl App {
             replay_from: None,
             queue_paused: false,
             draft: Composer::default(),
-            transcript: Transcript::new(),
+            transcript,
             approvals: VecDeque::new(),
             local_effect: None,
             options: Vec::new(),
@@ -138,6 +151,8 @@ impl App {
             completion: None,
             plan: Vec::new(),
             usage: None,
+            preferences,
+            activity: VecDeque::new(),
             actions,
         }
     }
@@ -165,6 +180,8 @@ impl App {
                 self.session = Some(session);
                 self.ready = true;
                 self.status = "Connected";
+                self.activity.push_back("connected".into());
+                self.trim_activity();
                 self.update_execution();
             }
             Event::Execution(state) => {
@@ -240,10 +257,18 @@ impl App {
                 title,
                 status,
                 detail,
-            } => self.transcript.tool(id, title, status, detail),
+            } => {
+                self.activity.push_back(format!("{status} · {title}"));
+                self.trim_activity();
+                self.transcript.tool(id, title, status, detail);
+            }
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
-            Event::Thought(text) => self.transcript.append(Role::Thought, text),
+            Event::Thought(text) => {
+                if self.preferences.show_thoughts {
+                    self.transcript.append(Role::Thought, text);
+                }
+            }
             Event::Note(text) => self.transcript.push(Role::Note, text),
             Event::Error(text) => {
                 if !self.ready
@@ -256,6 +281,12 @@ impl App {
             Event::End { interrupted } => {
                 self.turns = self.turns.saturating_sub(1);
                 self.queue_paused |= interrupted;
+                self.activity.push_back(if interrupted {
+                    "turn cancelled".into()
+                } else {
+                    "turn complete".into()
+                });
+                self.trim_activity();
                 if self.turns == 0 {
                     self.approvals.clear();
                     self.status = "Connected";
@@ -275,6 +306,8 @@ impl App {
                 self.queue_paused = true;
                 self.approvals.clear();
                 self.status = "Disconnected";
+                self.activity.push_back("disconnected".into());
+                self.trim_activity();
             }
             Event::Connecting => {
                 self.ready = false;
@@ -486,8 +519,11 @@ impl App {
             Key::ScrollUp => self.transcript.scroll_up(),
             Key::ScrollDown => self.transcript.scroll_down(),
             Key::ToggleTools => {
-                self.transcript.toggle_tools();
+                let expanded = self.transcript.toggle_tools();
+                self.preferences.expand_tools = expanded;
+                self.save_preferences();
             }
+            Key::ToggleSidebar => self.toggle_sidebar(),
             Key::Reconnect => self.reconnect(),
             Key::Escape if self.turns > 0 || self.remote_busy() => {
                 if self.actions.unbounded_send(Action::Cancel).is_ok() {
@@ -505,6 +541,33 @@ impl App {
     fn refresh_completion(&mut self) {
         self.completion = suggestions(self.draft.text(), &self.skills)
             .map(|items| Completion { items, selected: 0 });
+    }
+
+    pub fn toggle_sidebar(&mut self) {
+        self.preferences.sidebar = !self.preferences.sidebar;
+        self.save_preferences();
+    }
+
+    pub fn toggle_thoughts(&mut self) {
+        self.preferences.show_thoughts = !self.preferences.show_thoughts;
+        let shown = if self.preferences.show_thoughts {
+            "shown"
+        } else {
+            "hidden"
+        };
+        self.transcript
+            .push(Role::Note, format!("Reasoning is now {shown}"));
+        self.save_preferences();
+    }
+
+    fn save_preferences(&mut self) {
+        self.local_effect = Some(LocalEffect::SavePreferences(self.preferences.clone()));
+    }
+
+    fn trim_activity(&mut self) {
+        while self.activity.len() > 8 {
+            self.activity.pop_front();
+        }
     }
 
     fn accept_completion(&mut self) {
@@ -630,6 +693,8 @@ impl App {
         self.turns += 1;
         self.transcript.follow();
         self.status = "Streaming";
+        self.activity.push_back("prompt sent".into());
+        self.trim_activity();
         Ok(())
     }
 }

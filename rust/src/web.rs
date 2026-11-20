@@ -26,7 +26,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|(endpoint, _)| endpoint.host())
         .unwrap_or_else(|_| "Remote".into());
-    let app = Rc::new(RefCell::new(App::new(label, action_tx)));
+    let app = Rc::new(RefCell::new(App::new(
+        label,
+        action_tx,
+        crate::preferences::load(),
+    )));
     let terminal = Terminal::new(DomBackend::new_by_id("terminal")?)?;
     bind_input(Rc::clone(&app), requests_tx.clone())?;
     terminal.draw_web(move |frame| {
@@ -44,6 +48,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 LocalEffect::Switch(target) => {
                     let _ = requests_tx.unbounded_send(Connection::Switch(target));
+                }
+                LocalEffect::SavePreferences(preferences) => {
+                    crate::preferences::save(&preferences);
                 }
                 LocalEffect::Copy(_) | LocalEffect::Attach(_) => {}
             }
@@ -184,7 +191,7 @@ fn bind_input(
         let reconnect = requests.clone();
         Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
             if event.is_composing()
-                || (event.ctrl_key() && !matches!(event.key().as_str(), "r" | "o"))
+                || (event.ctrl_key() && !matches!(event.key().as_str(), "r" | "o" | "b"))
                 || event.alt_key()
                 || event.meta_key()
             {
@@ -204,6 +211,9 @@ fn bind_input(
                     }
                     Some(LocalEffect::Switch(target)) => {
                         let _ = reconnect.unbounded_send(Connection::Switch(target));
+                    }
+                    Some(LocalEffect::SavePreferences(preferences)) => {
+                        crate::preferences::save(&preferences);
                     }
                     Some(LocalEffect::Attach(path)) if path.is_empty() => input.click(),
                     Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Note(
@@ -294,6 +304,7 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
         return match key.as_str() {
             "r" => Some(Key::Reconnect),
             "o" => Some(Key::ToggleTools),
+            "b" => Some(Key::ToggleSidebar),
             _ => None,
         };
     }

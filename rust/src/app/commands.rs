@@ -14,7 +14,8 @@ impl App {
                 let mut commands = vec![
                     "/sessions [next] · /new · /load <id> · /models · /effort · /todo".to_owned(),
                     "/find <text> · /copy · /reconnect · /skills".to_owned(),
-                    "/queue <prompt> · /resume-queue · /clear-queue".to_owned(),
+                    "/sidebar · /thoughts · /queue <prompt> · /resume-queue · /clear-queue"
+                        .to_owned(),
                     "/attach [path] · /detach <filename> · /close [id] · /delete <id>".to_owned(),
                 ];
                 commands.extend(
@@ -33,6 +34,14 @@ impl App {
             "/new" => {
                 self.draft.submit();
                 self.new_session();
+            }
+            "/sidebar" => {
+                self.draft.submit();
+                self.toggle_sidebar();
+            }
+            "/thoughts" => {
+                self.draft.submit();
+                self.toggle_thoughts();
             }
             "/skills" => {
                 self.draft.submit();
