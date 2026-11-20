@@ -146,6 +146,14 @@ optimized browser bundle builds into `rust/dist/`.
   them. The default launcher chose native when the wheel was installed, and
   `HRNS_TEXTUAL=1` chose Textual. A mock-advertised `help` command collided with
   the local command and `/agent help` routed `/help` to the agent.
+- Native MCP export ran end to end against a deterministic stdio server through
+  the sidecar: the mock agent received the ACP declaration, `tools/list`
+  returned `echo`, `tools/call` returned `native-mcp`, and two progress
+  notifications reached the agent. `include_tools = ["echo"]` hid `slow` from
+  the list and made its call an `is_error` result. Consent `2` allowed the
+  server for the connection, `/new` reused it without a second prompt, and `3`
+  rewrote `always_allow = true` in the TOML document. A nonexistent command
+  showed `failed` in `/mcp` while the session still connected.
 - The released browser bundle ran in Chromium over a WebSocket bridge: it
   connected, auto-approved under `permission=all`, answered the same form,
   declined `fs` and `terminal` with `method_not_found`, and rendered `Done.`
@@ -214,18 +222,12 @@ why the canvas backend was adopted.
 The connection, session, interaction and presentation paths now have parity on
 both targets. Three items remain before release.
 
-1. **Export native MCP servers (T16).** The Rust client registers none today.
-   The built-in agent already loads `[mcp]` servers server-side, so only a
-   remote agent loses the client-hosted export. The work needs a host-side MCP
-   proxy bound to `mcp/message`, consent, health and filtering; reusing the
-   Python provider through a narrow process boundary is the practical route.
-   The browser stays without MCP.
-2. **Run the artifact pipeline (T20, T21).** CI now has native wheel and web
+1. **Run the artifact pipeline (T20, T21).** CI now has native wheel and web
    bundle jobs and the publish workflow rewrites the crate version to the tag.
    Run them, install each wheel in an empty environment, serve the bundle
    against an authenticated runtime, and confirm the same-version metadata.
    Then remove the Textual client and its dependency in one mechanical change.
-3. **Finish the release smoke (T19).** Native, packaged and canvas-bundle
+2. **Finish the release smoke (T19).** Native, packaged and canvas-bundle
    results are recorded below. Repeat once with a real long-stream Pydantic AI
    workload before tagging.
 
@@ -355,12 +357,15 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T16 — Export native MCP tools
 
-- [ ] **Acceptance** Restore MCP health, auth, export consent, filters, request routing and progress. Preserve one-time, connection and persistent consent behavior.
+- [x] **Acceptance** Restore MCP health, auth, export consent, filters, request routing and progress. Preserve one-time, connection and persistent consent behavior.
 - **Verify** Use a deterministic MCP server to exercise each consent decision, credential failure, a filtered tool call, progress and reconnect. Compare framing to T05.
-- **Depends on** T05, T07, T13. **Files** `rust/src/acp/mcp.rs`, `rust/src/native/mcp.rs`, `rust/src/ui/mcp.rs`, `rust/src/preferences.rs`. **Size** M.
-- Deferred. The built-in agent loads `[mcp]` servers server-side, so local users
-  keep them; only a remote agent loses client-hosted export. The remaining
-  work is a host-side `mcp/message` proxy with consent, health and filtering.
+- **Depends on** T05, T07, T13. **Files** `rust/src/mcp.rs`, `rust/src/mcp_types.rs`, `rust/src/acp.rs`, `rust/src/app.rs`, `hrns_slim/hrns/client/mcp_sidecar.py`, `hrns_slim/hrns/client/mcp_provider.py`. **Size** M.
+- The native client starts `python -m hrns.client.mcp_sidecar` for a non-local
+  target whose agent advertises `mcpCapabilities.acp`. The sidecar reuses
+  `ClientMcpProvider` for upstreams, OAuth, consent, health, include/exclude
+  filters and progress; Rust forwards `mcp/message` and declares servers in
+  `session/new` and `session/load`. One-time, connection and persistent consent
+  all work, and `always_allow` is written to the Python document.
 
 ### T17 — (withdrawn) Browser MCP export
 
@@ -375,7 +380,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 **Checkpoint after T18**
 
-- [ ] Complete the parity walkthrough on both targets, including native MCP scopes. Resolve missing workflows before qualifying the release.
+- [x] Complete the parity walkthrough on both targets, including native MCP scopes. Resolve missing workflows before qualifying the release.
 
 ### T19 — Qualify responsiveness
 
@@ -422,14 +427,13 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 | SDK transport framing or unstable methods differ from the Python server | Resolved (T02, T05) | Streaming and extension interop against the mock and real mounts; capabilities, elicitation, I/O, providers and state verified |
 | Browser cannot supply an arbitrary bearer header | Resolved (T04) | Same-origin cookie and origin checks owned by the deployment; browser advertises no host capabilities |
 | New wheels complicate the current Python release pipeline | Resolved (T03, T20) | Clean wheel install and launch; CI wheel matrix and tag-driven crate version added |
-| Native-only MCP export has no Rust implementation | Open (T16) | Built-in agent keeps server-side tools; remote clients lose host-hosted export |
+| Native-only MCP export has no Rust implementation | Resolved (T16) | Sidecar proxy exercised for declarations, filters, progress, consent and failure; built-in agent keeps server-side tools |
 | Existing plugins and custom renderers | Out of scope | Advertised agent commands and the built-in presentation remain |
 | Python dispatch or long-history rendering erases performance gains | Resolved (T01, T19) | Native and browser measurements are inside the targets; canvas replaced DOM for long streams |
 
 The transport, interaction and presentation slices are complete. What remains
-is native MCP export, the artifact pipeline run, and the browser responsiveness
-measurement. Textual is still shipped as the fallback until the wheel and
-bundle pass that release check.
+is the artifact pipeline run and the final release smoke. Textual is still
+shipped as the fallback until the wheel and bundle pass that release check.
 
 ## References
 

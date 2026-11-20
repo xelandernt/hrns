@@ -3,6 +3,7 @@ mod app;
 mod attachments;
 mod composer;
 mod elicitation;
+mod mcp_types;
 mod options;
 mod preferences;
 mod skills;
@@ -12,6 +13,8 @@ mod transcript;
 
 #[cfg(not(target_family = "wasm"))]
 mod client_io;
+#[cfg(not(target_family = "wasm"))]
+mod mcp;
 #[cfg(not(target_family = "wasm"))]
 mod native;
 #[cfg(target_family = "wasm")]

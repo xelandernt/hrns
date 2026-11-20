@@ -7,7 +7,7 @@ publish = false
 license = "MIT"
 
 [dependencies]
-agent-client-protocol = "=5.4.0"
+agent-client-protocol = { version = "=5.4.0", features = ["unstable_mcp_over_acp"] }
 base64 = "0.22"
 futures = "0.3"
 mime_guess = "2"
@@ -19,15 +19,15 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-agent-client-protocol = { version = "=5.4.0", features = ["process", "stdio"] }
+agent-client-protocol = { version = "=5.4.0", features = ["process", "stdio", "unstable_mcp_over_acp"] }
 crossterm = { version = "0.29", features = ["osc52"] }
 libc = "0.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
-tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio = { version = "1", features = ["rt", "net", "time", "process", "io-util", "sync"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-agent-client-protocol = { version = "=5.4.0", features = ["wasm_js"] }
+agent-client-protocol = { version = "=5.4.0", features = ["wasm_js", "unstable_mcp_over_acp"] }
 js-sys = "0.3"
 ratzilla = "0.3.1"
 wasm-bindgen = "0.2"

@@ -5,11 +5,11 @@ use agent_client_protocol::v1::schema::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateElicitationResponse, DeleteSessionRequest, ElicitationCapabilities,
     ElicitationContentValue, ElicitationFormCapabilities, FileSystemCapabilities, Implementation,
-    InitializeRequest, ListSessionsRequest, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigId, SessionConfigOption, SessionConfigOptionValue, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCallContent, ToolCallStatus,
-    ToolKind,
+    InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer, NewSessionRequest,
+    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigOption,
+    SessionConfigOptionValue, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, StopReason, ToolCallContent, ToolCallStatus, ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
 use agent_client_protocol::{
@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::attachments::{Attachment, Prompt};
 use crate::elicitation::{self, Form};
+#[cfg(not(target_family = "wasm"))]
+use crate::mcp_types::{AcpMcpNotification, AcpMcpResponse};
+use crate::mcp_types::{AcpMcpRequest, ConsentDecision, Health};
 use crate::skills::Skill;
 
 #[cfg(not(target_family = "wasm"))]
@@ -119,9 +122,12 @@ impl ClientIoMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+#[derive(Clone, Debug, Default)]
 pub struct Services {
     pub client_io: ClientIoMode,
+    pub mcp_sidecar: Option<PathBuf>,
+    pub mcp_config: Option<PathBuf>,
 }
 
 pub enum Action {
@@ -218,6 +224,15 @@ pub enum Event {
         form: Form,
         respond: oneshot::Sender<Option<BTreeMap<String, ElicitationContentValue>>>,
     },
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    McpConsent {
+        name: String,
+        transport: String,
+        target: String,
+        respond: oneshot::Sender<ConsentDecision>,
+    },
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    McpHealth(Vec<Health>),
 }
 
 pub enum Connection {
@@ -244,6 +259,11 @@ pub async fn connect(
 ) -> Result<(), Error> {
     let notifications = events.clone();
     let elicit_events = events.clone();
+    #[cfg(not(target_family = "wasm"))]
+    let bridge_slot: Arc<tokio::sync::Mutex<Option<crate::mcp::Bridge>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    #[cfg(not(target_family = "wasm"))]
+    let handler_bridge = Arc::clone(&bridge_slot);
     Client
         .v1()
         .name("hrns")
@@ -276,6 +296,27 @@ pub async fn connect(
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_request(
+            async move |request: AcpMcpRequest, responder, _cx| {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let bridge = handler_bridge.lock().await.clone();
+                    let Some(bridge) = bridge else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    match bridge.request(&request.0).await {
+                        Ok(response) => responder.respond(AcpMcpResponse(response)),
+                        Err(error) => responder.respond_with_error(error),
+                    }
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    let _ = request;
+                    responder.respond_with_error(Error::method_not_found())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
             let info = Implementation::new("hrns", env!("CARGO_PKG_VERSION"));
             let capabilities = ClientCapabilities::new()
@@ -302,6 +343,20 @@ pub async fn connect(
             let load_supported = caps.load_session;
             let close_supported = caps.session_capabilities.close.is_some();
             let delete_supported = caps.session_capabilities.delete.is_some();
+            #[cfg(not(target_family = "wasm"))]
+            let (mcp_bridge, mcp_servers) = prepare_mcp(
+                &connection,
+                &services,
+                events.clone(),
+                caps.mcp_capabilities.acp,
+            )
+            .await;
+            #[cfg(target_family = "wasm")]
+            let mcp_servers: Vec<McpServer> = Vec::new();
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(bridge) = &mcp_bridge {
+                *bridge_slot.lock().await = Some(bridge.clone());
+            }
             let (mut session, cwd, options, meta) = if let Some(id) = target.session {
                 if !caps.load_session {
                     return Err(Error::new(ErrorCode::INVALID_PARAMS, "The agent does not support loading sessions"));
@@ -312,11 +367,23 @@ pub async fn connect(
                     None if caps.session_capabilities.list.is_some() => find_workspace(&connection, &id).await?,
                     None => return Err(needs_workspace()),
                 };
-                let setup = connection.load_session(id, &cwd).block_task().start_session().await?;
+                let setup = connection
+                    .load_session_from(
+                        LoadSessionRequest::new(id, &cwd).mcp_servers(mcp_servers.clone()),
+                    )
+                    .block_task()
+                    .start_session()
+                    .await?;
                 (setup.session, cwd, setup.response.config_options, setup.response.meta)
             } else {
                 let cwd = target.cwd.ok_or_else(needs_workspace)?;
-                let setup = connection.build_session(&cwd).block_task().start_session().await?;
+                let setup = connection
+                    .build_session_from(
+                        NewSessionRequest::new(&cwd).mcp_servers(mcp_servers.clone()),
+                    )
+                    .block_task()
+                    .start_session()
+                    .await?;
                 (setup.session, cwd, setup.response.config_options, setup.response.meta)
             };
             #[cfg(not(target_family = "wasm"))]
@@ -756,12 +823,67 @@ pub async fn connect(
                 }
             }
             #[cfg(not(target_family = "wasm"))]
-            if let Ok(mut io) = io.lock() {
-                io.close();
+            {
+                *bridge_slot.lock().await = None;
+                if let Some(bridge) = mcp_bridge {
+                    bridge.shutdown().await;
+                }
+                if let Ok(mut io) = io.lock() {
+                    io.close();
+                }
             }
             Ok(())
         })
         .await
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn prepare_mcp(
+    connection: &ConnectionTo<Agent>,
+    services: &Services,
+    events: Events,
+    supported: bool,
+) -> (Option<crate::mcp::Bridge>, Vec<McpServer>) {
+    if !supported {
+        return (None, Vec::new());
+    }
+    let Some(executable) = services.mcp_sidecar.as_deref() else {
+        return (None, Vec::new());
+    };
+    let bridge =
+        match crate::mcp::Bridge::start(executable, services.mcp_config.as_deref(), events.clone())
+            .await
+        {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                let _ = events.unbounded_send(Event::Note(format!(
+                    "MCP export unavailable: {}",
+                    error.message
+                )));
+                return (None, Vec::new());
+            }
+        };
+    let declarations = match bridge.declare().await {
+        Ok((declarations, health)) => {
+            let _ = events.unbounded_send(Event::McpHealth(health));
+            declarations
+        }
+        Err(error) => {
+            let _ = events.unbounded_send(Event::Note(format!(
+                "MCP export unavailable: {}",
+                error.message
+            )));
+            bridge.shutdown().await;
+            return (None, Vec::new());
+        }
+    };
+    let outgoing = connection.clone();
+    bridge
+        .set_notifier(Arc::new(move |notification| {
+            let _ = outgoing.send_notification(AcpMcpNotification(notification));
+        }))
+        .await;
+    (Some(bridge), crate::mcp_types::servers(&declarations))
 }
 
 #[cfg(not(target_family = "wasm"))]

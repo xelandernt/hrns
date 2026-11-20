@@ -28,6 +28,11 @@ impl App {
             (area, None)
         };
         let prompt_height = area.height.clamp(4, 12) / 2;
+        let mcp_height = if self.mcp_consent.front().is_some() {
+            7
+        } else {
+            0
+        };
         let approval_height = self.approvals.front().map_or(0, |request| {
             u16::try_from((request.options.len() + 4).min(12)).unwrap_or(12)
         });
@@ -40,6 +45,7 @@ impl App {
         let [
             header,
             transcript,
+            mcp,
             approval,
             elicitation,
             suggestions,
@@ -48,6 +54,7 @@ impl App {
         ] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(mcp_height),
             Constraint::Length(approval_height),
             Constraint::Length(elicitation_height),
             Constraint::Length(completion_height),
@@ -126,6 +133,19 @@ impl App {
             transcript,
         );
 
+        if let Some(pending) = self.mcp_consent.front() {
+            let lines = vec![
+                Line::from(format!(" MCP server · {}", pending.name))
+                    .fg(palette.accent)
+                    .bold(),
+                Line::from(format!(" {} · {}", pending.transport, pending.target))
+                    .fg(palette.muted),
+                Line::from(" 1 allow once   2 allow for this connection   3 always allow   4 deny")
+                    .fg(palette.foreground),
+                Line::from(" y allow once · n deny · Esc deny").fg(palette.muted),
+            ];
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), mcp);
+        }
         if let Some(request) = self.approvals.front() {
             frame.render_widget(
                 Paragraph::new(self.approval_lines(request, &palette)).wrap(Wrap { trim: false }),
@@ -188,7 +208,9 @@ impl App {
             frame.render_widget(text.scroll((scroll, 0)), input);
             frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
         }
-        let help_text = if !self.elicitations.is_empty() {
+        let help_text = if self.mcp_consent.front().is_some() {
+            " 1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
+        } else if !self.elicitations.is_empty() {
             " type to answer · 1-9 choose · Enter next · Esc decline"
         } else if self.approvals.front().is_some() {
             " 1-9 choose · y allow · a always · n reject · N always reject · Esc cancel"
@@ -311,6 +333,23 @@ impl App {
                     .filter(|skill| skill.user_invocable)
                     .map(|skill| Line::from(format!("${}", skill.id)).fg(palette.muted)),
             );
+        }
+        if !self.mcp_health.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(heading("MCP"));
+            for item in &self.mcp_health {
+                let scope = if item.export { "export" } else { "local" };
+                lines.push(
+                    Line::from(format!(
+                        "{} · {} · {} · {scope}",
+                        item.name, item.transport, item.state
+                    ))
+                    .fg(palette.muted),
+                );
+                if !item.detail.is_empty() {
+                    lines.push(Line::from(format!("  {}", item.detail)).fg(palette.muted));
+                }
+            }
         }
         if !self.activity.is_empty() {
             lines.push(Line::from(""));

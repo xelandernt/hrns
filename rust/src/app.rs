@@ -1,7 +1,7 @@
 mod commands;
 mod render;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{ElicitationContentValue, SessionConfigOption, ToolKind};
@@ -14,6 +14,7 @@ use crate::acp::{
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
 use crate::elicitation::FormState;
+use crate::mcp_types::{ConsentDecision, Health};
 use crate::preferences::{ApprovalMode, Preferences};
 use crate::skills::{self, Skill};
 use crate::theme::{self, Palette};
@@ -81,6 +82,13 @@ pub struct PendingElicitation {
     pub respond: oneshot::Sender<Option<BTreeMap<String, ElicitationContentValue>>>,
 }
 
+pub struct PendingMcpConsent {
+    pub name: String,
+    pub transport: String,
+    pub target: String,
+    pub respond: oneshot::Sender<ConsentDecision>,
+}
+
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "List commands"),
     ("/sessions", "List saved sessions"),
@@ -97,6 +105,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/permissions", "Show or set the approval mode"),
     ("/settings", "Show or set terminal settings"),
     ("/theme", "Show or select a theme"),
+    ("/mcp", "Show MCP server health"),
     ("/todo", "Show the current plan"),
     ("/find", "Find transcript text"),
     ("/copy", "Copy the latest reply"),
@@ -137,6 +146,10 @@ pub struct App {
     transcript: Transcript,
     approvals: VecDeque<PermissionRequest>,
     elicitations: VecDeque<PendingElicitation>,
+    mcp_consent: VecDeque<PendingMcpConsent>,
+    mcp_grants: HashSet<String>,
+    mcp_health: Vec<Health>,
+    mcp_failures: usize,
     local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
@@ -197,6 +210,10 @@ impl App {
             transcript,
             approvals: VecDeque::new(),
             elicitations: VecDeque::new(),
+            mcp_consent: VecDeque::new(),
+            mcp_grants: HashSet::new(),
+            mcp_health: Vec::new(),
+            mcp_failures: 0,
             local_effect: None,
             options: Vec::new(),
             commands: Vec::new(),
@@ -386,6 +403,7 @@ impl App {
                 self.queue_paused = true;
                 self.approvals.clear();
                 self.elicitations.clear();
+                self.mcp_consent.clear();
                 self.status = "Disconnected";
                 self.activity.push_back("disconnected".into());
                 self.trim_activity();
@@ -396,7 +414,44 @@ impl App {
                 self.execution = None;
                 self.approvals.clear();
                 self.elicitations.clear();
+                self.mcp_consent.clear();
                 self.status = "Reconnecting";
+            }
+            Event::McpConsent {
+                name,
+                transport,
+                target,
+                respond,
+            } => {
+                if self.mcp_grants.contains(&name) {
+                    self.transcript
+                        .push(Role::Note, format!("MCP {name} reused until exit"));
+                    let _ = respond.send(ConsentDecision::Session);
+                } else {
+                    self.transcript
+                        .push(Role::Note, format!("MCP consent · {name} ({transport})"));
+                    self.mcp_consent.push_back(PendingMcpConsent {
+                        name,
+                        transport,
+                        target,
+                        respond,
+                    });
+                }
+            }
+            Event::McpHealth(health) => {
+                let failures = health.iter().filter(|item| item.state == "failed").count();
+                if failures > self.mcp_failures {
+                    let names = health
+                        .iter()
+                        .filter(|item| item.state == "failed")
+                        .map(|item| item.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.transcript
+                        .push(Role::Error, format!("MCP server failed · {names}"));
+                }
+                self.mcp_failures = failures;
+                self.mcp_health = health;
             }
             Event::Permission(request) => self.request_permission(request),
             Event::Elicitation { form, respond } => {
@@ -620,6 +675,10 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) {
+        if self.mcp_consent.front().is_some() {
+            self.mcp_consent_key(key);
+            return;
+        }
         if self.elicitations.front().is_some() {
             self.elicitation_key(key);
             return;
@@ -721,6 +780,32 @@ impl App {
             Key::Escape | Key::Enter => {}
         }
         self.refresh_completion();
+    }
+
+    fn mcp_consent_key(&mut self, key: Key) {
+        let decision = match key {
+            Key::Escape | Key::Text('n') | Key::Text('N') | Key::Text('4') => {
+                Some(ConsentDecision::Deny)
+            }
+            Key::Enter | Key::Text('y') | Key::Text('Y') | Key::Text('1') => {
+                Some(ConsentDecision::Once)
+            }
+            Key::Text('2') => Some(ConsentDecision::Session),
+            Key::Text('3') => Some(ConsentDecision::Always),
+            _ => None,
+        };
+        if let Some(decision) = decision
+            && let Some(pending) = self.mcp_consent.pop_front()
+        {
+            if matches!(decision, ConsentDecision::Session | ConsentDecision::Always) {
+                self.mcp_grants.insert(pending.name.clone());
+                self.transcript.push(
+                    Role::Note,
+                    format!("MCP {} approved until exit", pending.name),
+                );
+            }
+            let _ = pending.respond.send(decision);
+        }
     }
 
     fn elicitation_key(&mut self, key: Key) {

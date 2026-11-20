@@ -32,6 +32,7 @@ from mcp_types import (
     ListToolsResult,
     ReadResourceRequestParams,
     ReadResourceResult,
+    TextContent,
 )
 from mcp_types import (
     CallToolResult as McpCallToolResult,
@@ -40,6 +41,7 @@ from mcp_types import (
 from hrns.shared.acp_mcp import (
     MCP_PROTOCOL_VERSION,
     AcpChannel,
+    McpOutcome,
     McpOverAcpProvider,
     McpServerOptions,
     McpServerRegistration,
@@ -148,12 +150,24 @@ class ClientMcpProvider:
                 declarations.append(registration.declaration)
         return tuple(declarations)
 
-    async def start(self, connection: object, initialized: object) -> None:
-        """Bind the provider and start the servers that do not need consent."""
+    async def start(
+        self,
+        connection: object | None = None,
+        initialized: object | None = None,
+        *,
+        channel: AcpChannel | None = None,
+    ) -> None:
+        """Bind the provider and start the servers that do not need consent.
+
+        ``channel`` binds the provider to a transport owned by the caller, such
+        as the native client's stdio sidecar, instead of an ACP SDK connection.
+        Such a caller is responsible for delivering ``mcp/message`` requests and
+        notifications to :meth:`handle_request` and :meth:`handle_notification`.
+        """
         await self.close()
         self._provider = McpOverAcpProvider()
         self._active = True
-        self._agent_ready = _agent_supports_acp(initialized)
+        self._agent_ready = True if channel is not None else _agent_supports_acp(initialized)
         if not self._agent_ready:
             return
         self._exported = {
@@ -163,10 +177,29 @@ class ClientMcpProvider:
         }
         if not self._exported:
             return
-        self._channel = bind_provider(connection, self._provider)
+        if channel is not None:
+            self._channel = channel
+        elif connection is not None:
+            self._channel = bind_provider(connection, self._provider)
+        else:
+            raise ValueError("start() needs an ACP connection or an AcpChannel")
         for name, server in self._exported.items():
             if server.always_allow:
                 await self._offer(name, server)
+
+    async def handle_request(self, params: object) -> McpOutcome:
+        """Serve one ``mcp/message`` request delivered by the bound channel."""
+        channel = self._channel
+        if channel is None:
+            raise RuntimeError("the MCP provider is not started")
+        return await self._provider.handle_request(channel, params)
+
+    def handle_notification(self, params: object) -> None:
+        """Deliver an ``mcp/message`` notification from the bound channel."""
+        channel = self._channel
+        if channel is None:
+            return
+        self._provider.handle_notification(channel, params)
 
     async def close(self) -> None:
         """Cancel provider operations and stop every upstream connection."""
@@ -291,7 +324,7 @@ class ClientMcpProvider:
             await stack.enter_async_context(upstream)
             _log_era(name, upstream)
             self._protocols[name] = upstream.protocol_version or ""
-            adapter = from_mcp_server(lambda: _proxy_server(upstream, name))
+            adapter = from_mcp_server(lambda: _proxy_server(upstream, name, server))
             assert self._channel is not None
             registration = self._provider.register_server(
                 self._channel,
@@ -342,7 +375,7 @@ def _log_era(name: str, upstream: Client) -> None:
     )
 
 
-def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
+def _proxy_server(upstream: Client, name: str, server: McpServerSettings) -> LowLevelServer:
     """Proxy the upstream, advertising only the capabilities it actually has."""
     capabilities = upstream.server_capabilities
     if capabilities is None:
@@ -356,11 +389,22 @@ def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
     async def on_list_tools(
         _ctx: ServerRequestContext[object, object], _params: object
     ) -> ListToolsResult:
-        return ListToolsResult(tools=await upstream.list_tools())
+        tools = await upstream.list_tools()
+        return ListToolsResult(tools=[tool for tool in tools if tool_allowed(server, tool.name)])
 
     async def on_call_tool(
         ctx: ServerRequestContext[object, object], params: CallToolRequestParams
     ) -> McpCallToolResult:
+        if not tool_allowed(server, params.name):
+            return McpCallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"Tool {params.name!r} is not exported from {name!r}",
+                    )
+                ],
+                is_error=True,
+            )
         result = await upstream.call_tool(
             params.name,
             params.arguments,
@@ -421,6 +465,13 @@ def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
         on_get_prompt=on_get_prompt if has_prompts else None,
         on_completion=on_completion if has_completions else None,
     )
+
+
+def tool_allowed(server: McpServerSettings, tool: str) -> bool:
+    """Apply the same include/exclude lists the built-in agent uses."""
+    if server.include_tools:
+        return tool in server.include_tools
+    return tool not in server.exclude_tools
 
 
 def _progress_handler(ctx: ServerRequestContext[object, object]) -> ProgressFnT | None:

@@ -126,6 +126,7 @@ async fn connect_attempt(
             events,
             Services {
                 client_io: ClientIoMode::Off,
+                ..Services::default()
             },
         ),
     );

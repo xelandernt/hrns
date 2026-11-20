@@ -22,6 +22,7 @@ use crate::socket;
 const HELP: &str =
     "Usage: hrns-tui [--cwd PATH] [--session ID] [--server URL | --stdio COMMAND [ARGS...]]
        [--client-io off|read|all] [--theme NAME] [--permission-mode ask|reads|all]
+       [--mcp-sidecar PYTHON [--mcp-config PATH]]
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
 
@@ -36,6 +37,8 @@ struct Options {
     client_io: ClientIoMode,
     theme: Option<String>,
     permission: Option<ApprovalMode>,
+    mcp_sidecar: Option<PathBuf>,
+    mcp_config: Option<PathBuf>,
 }
 
 impl Options {
@@ -47,6 +50,8 @@ impl Options {
         let mut client_io = None;
         let mut theme = None;
         let mut permission = None;
+        let mut mcp_sidecar = None;
+        let mut mcp_config = None;
         while let Some(arg) = argv.next() {
             match arg.as_str() {
                 "--help" | "-h" => return Ok(None),
@@ -64,6 +69,17 @@ impl Options {
                         ApprovalMode::parse(&value)
                             .ok_or("--permission-mode expects ask, reads or all")?,
                     );
+                }
+                "--mcp-sidecar" if mcp_sidecar.is_none() => {
+                    mcp_sidecar = Some(PathBuf::from(
+                        argv.next()
+                            .ok_or("--mcp-sidecar requires a Python executable")?,
+                    ));
+                }
+                "--mcp-config" if mcp_config.is_none() => {
+                    mcp_config = Some(PathBuf::from(
+                        argv.next().ok_or("--mcp-config requires a path")?,
+                    ));
                 }
                 "--cwd" if cwd.is_none() => {
                     cwd = Some(PathBuf::from(argv.next().ok_or("--cwd requires a path")?));
@@ -107,6 +123,8 @@ impl Options {
             client_io: client_io.unwrap_or(ClientIoMode::All),
             theme,
             permission,
+            mcp_sidecar,
+            mcp_config,
         }))
     }
 
@@ -154,6 +172,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let services = Services {
         client_io: options.client_io,
+        mcp_sidecar: options.mcp_sidecar.clone(),
+        mcp_config: options.mcp_config.clone(),
     };
     let io = Arc::new(Mutex::new(ClientIo::new(match options.client_io {
         ClientIoMode::Off => crate::client_io::Mode::Off,
@@ -304,7 +324,7 @@ async fn supervise(
                 Some(request) => apply(&mut target, request, &events),
                 None => return,
             },
-            result = connect(options, target.clone(), actions, events.clone(), services, Arc::clone(&io)).fuse() => {
+            result = connect(options, target.clone(), actions, events.clone(), services.clone(), Arc::clone(&io)).fuse() => {
                 finish(&events, result);
                 select_biased! {
                     _ = stop.next() => return,

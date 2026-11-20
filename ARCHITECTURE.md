@@ -105,6 +105,29 @@ that offers an allow option; the decision uses the kind reported by the agent,
 never a tool name. Pending approvals and forms are cleared when their turn ends
 or the connection drops, so a request resolves exactly once.
 
+### Native MCP export
+
+A non-local native target can offer configured MCP servers to an agent that
+advertises `agentCapabilities.mcpCapabilities.acp`. The Rust client does not
+speak MCP itself: it starts `python -m hrns.client.mcp_sidecar` with the resolved
+configuration, and the sidecar reuses `ClientMcpProvider` to own the stdio or
+HTTP upstreams, OAuth token store, consent policy, health, include/exclude
+filters and progress. The two processes exchange newline-delimited JSON on
+stdin/stdout; stdout is protocol-only and logs go to stderr. Rust declares the
+approved servers in `session/new` and `session/load`, forwards `mcp/message`
+requests to the sidecar, forwards request-scoped notifications back to the
+agent, and shows consent and health in the UI.
+
+Consent options are allow once, allow for this connection, always allow and
+deny. The application keeps connection grants across reconnects and new
+sessions; `always allow` writes `always_allow = true` through the Python
+configuration document. A server that fails to start is reported by `/mcp` and
+the sidebar, and the session continues without it. The built-in local agent
+already loads `[mcp]` server-side, so the native client does not export to it;
+the browser advertises no MCP capability at all. The flags are `--mcp-sidecar
+PYTHON` and optional `--mcp-config PATH`; the Python launcher adds them for
+non-local targets.
+
 Agent forms (`elicitation/create`) render as a dock above the composer. A form
 walks its fields in order: typing edits text and number fields, `1`-`6` choose,
 toggle or advance a choice field, `y`/`n` answer booleans, `Enter` moves on and

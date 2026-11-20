@@ -51,6 +51,13 @@ outer codes:
 `hrns agent` advertises `mcpCapabilities.acp`, `http`, and `sse`. A client exports servers
 only when the agent advertises `acp`; otherwise the declarations are omitted entirely.
 
+The Textual client hosts the provider in-process. The native Ratatui client starts
+`python -m hrns.client.mcp_sidecar` with the resolved configuration and forwards
+`mcp/message` over a newline-delimited JSON pipe, so the same provider, OAuth token
+store, consent rules and health checks apply. The native client only exports to
+non-local targets; the built-in agent already loads `[mcp]` server-side. The browser
+never exports MCP servers.
+
 The provider terminates both MCP sessions and translates at the method level. The upstream
 and downstream sessions are independent, so the upstream may speak an older revision while
 the ACP side stays on 2026-07-28. The proxy translates individual methods between them.
@@ -94,6 +101,8 @@ Approval gates upstream startup and session declarations. A non-interactive clie
 (`hrns run`) exports servers with `always_allow = true`.
 
 The client owns export consent. Once exported, the server exposes its tools to the agent.
+`include_tools` and `exclude_tools` also apply to the exported view: a hidden tool is
+absent from `tools/list`, and calling it returns an `is_error` tool result.
 
 ## Health
 
