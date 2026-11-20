@@ -33,7 +33,7 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** A working preview is on the `ratatui` branch through `c0e6e2f`.
+**Current state.** A working preview is on the `ratatui` branch through `f6bc1c8`.
 Install the separate `hrns-tui` wheel and set `HRNS_RUST_TUI_PREVIEW=1` to
 preview the Python launch path. Textual still handles the default interactive
 launch. The optimized browser bundle builds into `rust/dist/`.
@@ -51,6 +51,7 @@ launch. The optimized browser bundle builds into `rust/dist/`.
 | `8938964` | In-app new, load, close and delete with capability checks, replay replacement and failure rollback. |
 | `b06e8d8` | Turn lifecycle verification for steering, queueing, cancellation, reconnect and clear. |
 | `c0e6e2f` | Markdown transcript rendering, status-aware expandable tool calls, and scroll anchoring across streaming and resize. |
+| `f6bc1c8` | Slash-command and `$skill` completion, skill catalogs from session metadata, and prompt skill references. |
 
 ### What was verified
 
