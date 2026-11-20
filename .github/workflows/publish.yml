@@ -63,6 +63,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            manylinux: "2_17"
           - os: macos-15
             target: aarch64-apple-darwin
           - os: macos-13
@@ -106,6 +107,7 @@ jobs:
           args: --release --out dist
           working-directory: rust
           target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
