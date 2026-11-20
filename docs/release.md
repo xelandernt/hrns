@@ -93,7 +93,9 @@ Python packages and no client binary; see
 
 The launcher resolves the target, credential references, `client_io` (CLI, then
 profile, then `[tui]`), theme and permission mode, then replaces the Python process.
-The native process inherits the terminal and restores it on exit.
+For a non-local target it also passes `--mcp-sidecar <python>` and the selected
+`--mcp-config` path, so configured exported MCP servers run on the client host. The
+native process inherits the terminal and restores it on exit.
 
 ## Serve the browser bundle
 
