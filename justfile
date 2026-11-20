@@ -27,10 +27,11 @@ lint:
     uv run ruff check .
     uv run pyrefly check hrns_slim examples scripts --no-progress-bar
     just --fmt --check
+# A wheel built from the unpacked sdist has no git history, so uv-dynamic-versioning
+# falls back to `fallback-version` and pins the sibling packages to the wrong version.
+# Build the sdist and the wheel from the source tree in separate invocations.
+
 # build the Python distributions
-# The wheel is built from the source tree, not from the source distribution: a wheel
-# built from an unpacked sdist has no git history, so uv-dynamic-versioning falls back
-# to `fallback-version` and pins the sibling packages to the wrong version.
 build:
     uv build --all-packages --sdist --clear
     uv build --all-packages --wheel
