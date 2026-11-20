@@ -10,6 +10,7 @@ from typing import Annotated
 
 from acp import schema
 from cyclopts import App, Parameter
+from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import infer_model, infer_model_profile, known_model_names
 from pydantic_ai.profiles import ModelProfile
@@ -333,6 +334,7 @@ def run(
     catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
     login: Annotated[bool, Parameter(help="Account login (not supported).")] = False,
     cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+    setup: Annotated[bool, Parameter(show=False)] = False,
 ) -> None:
     """Run the configured agent as an ACP stdio server."""
     settings = (
@@ -348,6 +350,9 @@ def run(
         return
     if login:
         raise SystemExit("Account login is not supported by the minimal backend.")
+    if setup:
+        run_acp_stdio(lambda _session: Agent[None, str](name="hrns", deps_type=type(None)))
+        return
 
     resolver = RuntimeModelResolver(settings)
     models = resolver.list_models()

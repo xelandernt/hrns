@@ -777,12 +777,13 @@ def _stdio_profile(name: str, command: list[str], cwd: str | None) -> Profile:
     )
 
 
-async def _resolve_target(
+def _resolve_target(
     config: HrnsConfig,
     args: SimpleNamespace,
     *,
     remainder: Sequence[str] = (),
     split_prompt: bool = True,
+    allow_local_setup: bool = False,
 ) -> ConnectionTarget:
     """Apply CLI precedence: explicit server or stdio > local model."""
     cwd_override = getattr(args, "cwd", None)
@@ -817,7 +818,9 @@ async def _resolve_target(
             raise HrnsClientError(
                 "A command was supplied without --stdio. Use `--stdio -- CMD ARGS`."
             )
-        return agent_target(getattr(args, "config", None), cwd_override)
+        return agent_target(
+            getattr(args, "config", None), cwd_override, allow_setup=allow_local_setup
+        )
     command, _prompt = _split_stdio_remainder(remainder, split_prompt=split_prompt)
     if stdio_requested:
         profile = _stdio_profile("cli", command, cwd_override)
@@ -850,7 +853,7 @@ def _remembered_target(config: HrnsConfig, args: SimpleNamespace) -> ConnectionT
         return None
     cwd = getattr(args, "cwd", None)
     if identity == BUILTIN_CONNECTION:
-        return agent_target(getattr(args, "config", None), cwd)
+        return agent_target(getattr(args, "config", None), cwd, allow_setup=True)
     profile = config.profile.get(identity)
     if profile is None:
         config.forget_connection()
@@ -899,7 +902,7 @@ async def _command_run(args: SimpleNamespace) -> int:
             '`hrns run --server wss://host/acp "your prompt"` or '
             '`hrns run --profile NAME "your prompt"`.'
         )
-    target = await _resolve_target(config, args, remainder=target_remainder)
+    target = _resolve_target(config, args, remainder=target_remainder)
     policy_name = "allow" if args.allow_all else "deny" if args.deny_all else "required"
     policy = HeadlessInteractions(policy_name, answers=_answers(args))
     client_io = args.client_io or target.profile.client_io
@@ -1008,14 +1011,9 @@ async def _command_login(args: SimpleNamespace) -> int:
     return EXIT_OK
 
 
-def _command_connect(args: SimpleNamespace) -> int:
-    _require_client_extra()
-    from .client.io import parse_client_io
-    from .client.tui.app import run_terminal
-
-    config = _config(args)
-    preselect: ConnectionTarget | None = None
-    status_message: str | None = None
+def _initial_connection(
+    config: HrnsConfig, args: SimpleNamespace
+) -> tuple[ConnectionTarget | None, str | None]:
     explicit = any(getattr(args, name, None) for name in ("stdio", "profile", "server")) or getattr(
         args, "local", False
     )
@@ -1023,24 +1021,37 @@ def _command_connect(args: SimpleNamespace) -> int:
     try:
         if not explicit and not command_words:
             # A bare launch reopens the connection used last; the picker is the fallback.
-            preselect = _remembered_target(config, args)
-        if preselect is None:
-            preselect = asyncio.run(
-                _resolve_target(config, args, remainder=args.remainder, split_prompt=False)
-            )
+            remembered = _remembered_target(config, args)
+            if remembered is not None:
+                return remembered, None
+        return (
+            _resolve_target(
+                config, args, remainder=args.remainder, split_prompt=False, allow_local_setup=True
+            ),
+            None,
+        )
     except HrnsClientError as exc:
-        # Local mode is the default. If it is not configured yet, show the picker
-        # with the local-model action selected instead of exiting.
+        # A failed implicit target leaves the picker available.
         if explicit:
             raise
-        status_message = str(exc)
+        return None, exc.message
+
+
+def _command_connect(args: SimpleNamespace) -> int:
+    _require_client_extra()
+    from .client.tui.app import run_terminal
+
+    config = _config(args)
+    # These targets need no credential lookup to validate their CLI options.
+    explicit_target = (
+        _initial_connection(config, args) if args.stdio or args.profile or args.server else None
+    )
     return run_terminal(
         config,
-        initial_target=preselect,
+        resolve_initial_target=lambda: explicit_target or _initial_connection(config, args),
         initial_session=args.session,
         initial_session_cwd=args.cwd,
-        status_message=status_message,
-        client_io=parse_client_io(args.client_io) if args.client_io else None,
+        client_io=args.client_io,
     )
 
 

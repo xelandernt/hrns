@@ -66,14 +66,10 @@ class ConnectScreen(_HrnsScreen):
         self,
         config: HrnsConfig,
         *,
-        initial_target: ConnectionTarget | None = None,
-        auto_connect: bool = False,
         status_message: str | None = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.initial_target = initial_target
-        self.auto_connect = auto_connect
         self.status_message = status_message
         self.entries: list[PickEntry] = []
         self._visible: list[PickEntry] = []
@@ -107,11 +103,10 @@ class ConnectScreen(_HrnsScreen):
         self._list.focus()
         if self.status_message:
             self._status.update(self.status_message)
-        if self.auto_connect and self.initial_target is not None:
-            self._connect_worker(self.initial_target)
 
     def on_screen_resume(self) -> None:
         self._render_entries()
+        self._list.focus()
 
     def on_resize(self, event: Any) -> None:
         del event
@@ -134,7 +129,7 @@ class ConnectScreen(_HrnsScreen):
         local_ok = True
         detail = f"Configured {default_config_path()} or HRNS_* environment"
         try:
-            detail = agent_detail()
+            detail = agent_detail(self.config.config_file)
         except HrnsClientError as exc:
             local_ok = False
             detail = exc.message
@@ -537,7 +532,9 @@ class ConnectScreen(_HrnsScreen):
 
     def _connect_local(self) -> None:
         try:
-            target = agent_target()
+            target = agent_target(
+                self.config.config_file, self.app.initial_session_cwd, allow_setup=True
+            )
         except HrnsClientError as exc:
             self._status.update(f"error · {exc.message}")
             return
@@ -563,7 +560,7 @@ class ConnectScreen(_HrnsScreen):
             self._status.update(f"error · {exc}")
         finally:
             self._connecting = False
-            if self.is_attached:
+            if self.is_current:
                 self._list.focus()
 
     async def action_escape_picker(self) -> None:

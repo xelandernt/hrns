@@ -147,12 +147,9 @@ def agent_credential_available(provider: str, api_key_env: str = "") -> bool:
 
 def _load_agent(config: Path | None) -> HrnsConfig:
     try:
-        settings = HrnsConfig(config_file=config) if config is not None else HrnsConfig()
-        settings.require_model()
-        settings.require_entry()
+        return HrnsConfig(config_file=config) if config is not None else HrnsConfig()
     except (ValueError, OSError) as exc:
         raise HrnsClientError(str(exc)) from exc
-    return settings
 
 
 def _agent_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
@@ -182,19 +179,28 @@ def _agent_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
     )
 
 
-def _target(settings: HrnsConfig, cwd: str | None) -> ConnectionTarget:
+def _target(
+    settings: HrnsConfig, cwd: str | None, *, local_setup: bool = False
+) -> ConnectionTarget:
     profile = _agent_profile(settings, cwd)
+    if local_setup:
+        profile.name = "Set up a model"
+        profile.args.append("--setup")
     return ConnectionTarget(
         name=profile.name,
         kind="local",
         profile=profile,
         cwd=local_cwd(profile),
+        local_setup=local_setup,
     )
 
 
 def agent_detail(config: Path | None = None, cwd: str | None = None) -> str:
     """The picker's description of the built-in agent, without reading the keyring."""
-    return _target(_load_agent(config), cwd).location_text()
+    settings = _load_agent(config)
+    if not settings.model or settings.entry() is None:
+        return "Open Local mode and run /provider to add a provider, then /models to pick a model."
+    return _target(settings, cwd).location_text()
 
 
 def agent_target(
@@ -202,9 +208,16 @@ def agent_target(
     cwd: str | None = None,
     *,
     api_key_ref: str | None = None,
+    allow_setup: bool = False,
 ) -> ConnectionTarget:
     settings = _load_agent(config)
-    entry = settings.require_entry()
+    try:
+        settings.require_model()
+        entry = settings.require_entry()
+    except ValueError as exc:
+        if allow_setup:
+            return _target(settings, cwd, local_setup=True)
+        raise HrnsClientError(str(exc)) from exc
     env_has_key = bool(
         settings.api_key is not None or (entry.api_key_env and os.environ.get(entry.api_key_env))
     )
@@ -214,6 +227,8 @@ def agent_target(
         try:
             settings.resolved_api_key()
         except ValueError as exc:
+            if allow_setup:
+                return _target(settings, cwd, local_setup=True)
             raise HrnsClientError(str(exc)) from exc
     target = _target(settings, cwd)
     if api_key_ref is not None:

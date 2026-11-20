@@ -351,6 +351,9 @@ class PromptWorkflow:
         self, text: str, *, attachments: list[str] | None = None, from_queue: bool = False
     ) -> bool:
         screen = self.screen
+        if screen.target.local_setup:
+            await screen._notice("Run /provider and /models before sending a message.", "warning")
+            return False
         if not screen.connected:
             await screen._notice("Not connected. Press Ctrl+R to reconnect.", "error")
             return False

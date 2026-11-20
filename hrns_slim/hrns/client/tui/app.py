@@ -5,20 +5,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
-from typing import Any
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
 from textual import work
-from textual.app import App
+from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.theme import Theme
+from textual.widgets import Static
 
-from hrns.shared.config import HrnsConfig, McpServerSettings, TuiSettings
+from hrns.shared.config import ClientIoMode, HrnsConfig, McpServerSettings, TuiSettings
 from hrns.shared.config.mcp import server_target
 
 from ...shared.errors import HrnsClientError, InteractionRequired, TransportError
-from ..client import HrnsAcpClient
 from ..interactions import (
     ElicitationAnswer,
     ElicitationRequest,
@@ -27,15 +29,22 @@ from ..interactions import (
     PermissionRequest,
     auto_permission,
 )
-from ..io import ClientIoMode
 from ..launch import ConnectionTarget, transport_for
-from ..mcp_provider import ClientMcpProvider, ConsentDecision
 from ..runtime import agent_model_catalog
-from ..session import SessionProxy
 from ..skills import SkillMention
-from .chat.screen import ChatScreen
-from .connection_screen import ConnectScreen
-from .dialogs import ChoiceDialog, ElicitationDialog, PermissionDialog
+from .composer import Composer
+from .messages import Submitted
+from .screen_base import _HrnsScreen
+
+if TYPE_CHECKING:
+    from textual.widgets.text_area import Selection
+
+    from ..client import HrnsAcpClient
+    from ..mcp_provider import ClientMcpProvider, ConsentDecision
+    from ..session import SessionProxy
+    from .chat.screen import ChatScreen
+
+InitialTarget = Callable[[], tuple[ConnectionTarget | None, str | None]]
 
 __all__ = ["HrnsApp", "run_terminal"]
 
@@ -61,6 +70,30 @@ HRNS_THEME = Theme(
 )
 
 
+class _StartupScreen(_HrnsScreen):
+    """An editable prompt while the first connection is opening."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.composer = Composer(placeholder="Draft a message…", id="composer")
+        self.status = Static("Connecting…", id="statusbar", markup=False)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="composer-dock"):
+            with Horizontal(id="composer-row"):
+                yield Static("›", id="composer-prompt", markup=False)
+                yield self.composer
+        yield self.status
+
+    def on_mount(self) -> None:
+        self.composer.focus()
+        self.call_after_refresh(self.app.start_initial_connection)
+
+    def on_submitted(self, event: Submitted) -> None:
+        event.stop()
+        self.status.update("Connecting… Draft kept. Press Enter when the session is ready.")
+
+
 class UiInteractionPolicy(InteractionPolicy):
     """Approvals answered inline, elicitation answered by a dialog."""
 
@@ -71,10 +104,9 @@ class UiInteractionPolicy(InteractionPolicy):
         return await self.app.ask_permission(request)
 
     async def answer_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
-        if request.kind == "form":
-            for screen in reversed(self.app.screen_stack):
-                if isinstance(screen, ChatScreen):
-                    return await screen.request_elicitation(request)
+        chat = self.app.chat
+        if request.kind == "form" and chat is not None and chat in self.app.screen_stack:
+            return await chat.request_elicitation(request)
         return await self.app.ask_elicitation(request)
 
 
@@ -341,7 +373,7 @@ class HrnsApp(App[int]):
         text-overflow: ellipsis;
     }
     #approval .approval-content {
-        height: 6;
+        height: auto;
         max-height: 20vh;
         scrollbar-size-vertical: 1;
     }
@@ -687,22 +719,23 @@ class HrnsApp(App[int]):
         self,
         config: HrnsConfig,
         *,
-        initial_target: ConnectionTarget | None = None,
+        resolve_initial_target: InitialTarget,
         initial_session: str | None = None,
         initial_session_cwd: str | None = None,
-        status_message: str | None = None,
         client_io: ClientIoMode | None = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.initial_target = initial_target
+        self.resolve_initial_target = resolve_initial_target
         self.initial_session = initial_session
         self.initial_session_cwd = initial_session_cwd
-        self.status_message = status_message
         self.client_io = client_io
         self.client: HrnsAcpClient | None = None
         self.session: SessionProxy | None = None
         self.target: ConnectionTarget | None = None
+        self.chat: ChatScreen | None = None
+        self.startup_error: HrnsClientError | ValueError | OSError | KeyError | None = None
+        self._startup_draft: tuple[str, Selection] | None = None
         self._shutting_down = False
         self._approval_lock = asyncio.Lock()
 
@@ -715,15 +748,39 @@ class HrnsApp(App[int]):
             self.theme = theme
         except Exception:
             self.theme = "hrns"
+        self.push_screen(_StartupScreen())
+
+    @work(group="connect", exclusive=True)
+    async def start_initial_connection(self) -> None:
+        try:
+            target, error = await asyncio.to_thread(self.resolve_initial_target)
+        except (HrnsClientError, ValueError, OSError, KeyError) as exc:
+            self.startup_error = exc
+            self.exit()
+            return
+        if self._shutting_down:
+            return
+        if target is not None:
+            startup = self.screen
+            if isinstance(startup, _StartupScreen):
+                startup.status.update(f"Connecting to {target.location_text()}…")
+            try:
+                await self.connect_target(target)
+            except Exception as exc:
+                error = f"error · {exc}"
+        if self._shutting_down:
+            return
+        if self.chat is None:
+            await asyncio.to_thread(import_module, ".connection_screen", __package__)
+            if self._shutting_down:
+                return
+            from .connection_screen import ConnectScreen
+
+            startup = self.screen
+            if isinstance(startup, _StartupScreen):
+                self._startup_draft = (startup.composer.text, startup.composer.selection)
+                await self.switch_screen(ConnectScreen(self.config, status_message=error))
         self._warm_local_catalog()
-        self.push_screen(
-            ConnectScreen(
-                self.config,
-                initial_target=self.initial_target,
-                auto_connect=self.initial_target is not None,
-                status_message=self.status_message,
-            )
-        )
 
     @work(thread=True, group="local-catalog", exclusive=True)
     def _warm_local_catalog(self) -> None:
@@ -731,6 +788,8 @@ class HrnsApp(App[int]):
         agent_model_catalog()
 
     def _mcp_provider(self) -> ClientMcpProvider:
+        from ..mcp_provider import ClientMcpProvider
+
         return ClientMcpProvider(
             self.config.mcp,
             consent=self.ask_mcp_consent,
@@ -738,6 +797,8 @@ class HrnsApp(App[int]):
         )
 
     def make_client(self) -> HrnsAcpClient:
+        from ..client import HrnsAcpClient
+
         if self.target is None:
             raise HrnsClientError("No connection target is selected.")
         target = self.target
@@ -746,7 +807,7 @@ class HrnsApp(App[int]):
             policy=UiInteractionPolicy(self),
             auth_method=target.profile.auth_method,
             client_io=self.client_io_mode(target),
-            mcp=self._mcp_provider(),
+            mcp=None if target.local_setup else self._mcp_provider(),
         )
 
     def client_io_mode(self, target: ConnectionTarget) -> ClientIoMode:
@@ -762,20 +823,22 @@ class HrnsApp(App[int]):
         return self.config.tui.client_io
 
     async def connect_target(self, target: ConnectionTarget) -> ChatScreen:
-        """Connect, open the initial session, and push the chat workspace."""
-        client = HrnsAcpClient(
-            lambda: transport_for(target),
-            policy=UiInteractionPolicy(self),
-            auth_method=target.profile.auth_method,
-            client_io=self.client_io_mode(target),
-            mcp=self._mcp_provider(),
-        )
-        await client.connect()
+        """Connect, open the initial session, and show the chat workspace."""
+        await asyncio.to_thread(import_module, ".chat.screen", __package__)
+        from ..session import SessionProxy
+        from .chat.screen import ChatScreen
+
+        if self._shutting_down:
+            raise asyncio.CancelledError
         self.target = target
-        self.client = client
+        client = self.make_client()
         try:
+            await client.connect()
+            if self._shutting_down:
+                raise asyncio.CancelledError
+            self.client = client
             initial_load = False
-            if self.initial_session:
+            if self.initial_session and not target.local_setup:
                 if target.kind == "remote":
                     cwd = self.initial_session_cwd
                     if cwd is None:
@@ -797,8 +860,14 @@ class HrnsApp(App[int]):
                         f"{target.location_text()} did not answer session/new within "
                         f"{client.connect_timeout:g}s."
                     ) from exc
+            if self._shutting_down:
+                raise asyncio.CancelledError
             self.session = session
-            self.config.remember_connection(self.config.connection_identity(target.profile))
+            if not target.local_setup:
+                self.config.remember_connection(self.config.connection_identity(target.profile))
+            startup = self.screen
+            if isinstance(startup, _StartupScreen):
+                self._startup_draft = (startup.composer.text, startup.composer.selection)
             screen = ChatScreen(
                 client,
                 session,
@@ -806,10 +875,17 @@ class HrnsApp(App[int]):
                 self.config.tui,
                 initial_session_id=self.initial_session if initial_load else None,
                 initial_load=initial_load,
+                initial_draft=self._startup_draft,
             )
-            await self.push_screen(screen)
+            self.chat = screen
+            if isinstance(startup, _StartupScreen):
+                await self.switch_screen(screen)
+            else:
+                await self.push_screen(screen)
+            self._startup_draft = None
         except BaseException:
-            # A failed session/new must not leave a connected orphan client.
+            # Release the transport if startup fails or is cancelled.
+            self.chat = None
             self.client = None
             self.session = None
             with contextlib.suppress(Exception):
@@ -896,7 +972,7 @@ class HrnsApp(App[int]):
     async def _switch_to(self, target: ConnectionTarget) -> None:
         await self.disconnect_current()
         with contextlib.suppress(Exception):
-            await self.pop_screen()
+            await self._return_to_picker()
         try:
             await self.connect_target(target)
         except HrnsClientError as exc:
@@ -907,9 +983,18 @@ class HrnsApp(App[int]):
     async def _leave_chat(self) -> None:
         await self.disconnect_current()
         with contextlib.suppress(Exception):
+            await self._return_to_picker()
+
+    async def _return_to_picker(self) -> None:
+        from .connection_screen import ConnectScreen
+
+        if isinstance(self.screen_stack[-2], ConnectScreen):
             await self.pop_screen()
+        else:
+            await self.switch_screen(ConnectScreen(self.config))
 
     async def disconnect_current(self) -> None:
+        self.chat = None
         client, self.client = self.client, None
         if client is not None:
             with contextlib.suppress(Exception):
@@ -933,8 +1018,8 @@ class HrnsApp(App[int]):
                 return decision
             if not self.screen_stack:
                 return PermissionDecision(option_id=None)
-            screen = self.screen
-            if not isinstance(screen, ChatScreen):
+            screen = self.chat
+            if screen is None or screen is not self.screen:
                 return await self._ask_permission_dialog(request)
             decision = await screen.request_approval(request)
             if decision.option_id is None:
@@ -942,6 +1027,8 @@ class HrnsApp(App[int]):
             return decision
 
     async def _ask_permission_dialog(self, request: PermissionRequest) -> PermissionDecision:
+        from .dialogs import PermissionDialog
+
         future: asyncio.Future[PermissionDecision] = asyncio.get_running_loop().create_future()
 
         def done(result: str | None) -> None:
@@ -958,6 +1045,8 @@ class HrnsApp(App[int]):
             return PermissionDecision(option_id=None)
 
     async def ask_elicitation(self, request: ElicitationRequest) -> ElicitationAnswer:
+        from .dialogs import ElicitationDialog
+
         future: asyncio.Future[ElicitationAnswer] = asyncio.get_running_loop().create_future()
 
         def done(result: ElicitationAnswer | None) -> None:
@@ -975,6 +1064,9 @@ class HrnsApp(App[int]):
 
     async def ask_mcp_consent(self, name: str, server: McpServerSettings) -> ConsentDecision:
         """Ask before an exported MCP server is offered to the agent."""
+        from ..mcp_provider import ConsentDecision
+        from .dialogs import ChoiceDialog
+
         if not self.screen_stack:
             return ConsentDecision.DENY
         subtitle = f"{server_target(server)}\n\nThe agent will be able to call this server's tools."
@@ -1034,8 +1126,8 @@ class HrnsApp(App[int]):
         if self._shutting_down:
             return
         self._shutting_down = True
-        screen = self.screen
-        if isinstance(screen, ChatScreen) and screen.busy:
+        screen = self.chat
+        if screen is not None and screen is self.screen and screen.busy:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(screen.session.cancel(), timeout=3)
         await self.disconnect_current()
@@ -1048,25 +1140,25 @@ class HrnsApp(App[int]):
 def run_terminal(
     config: HrnsConfig,
     *,
-    initial_target: ConnectionTarget | None = None,
+    resolve_initial_target: InitialTarget,
     initial_session: str | None = None,
     initial_session_cwd: str | None = None,
-    status_message: str | None = None,
     client_io: ClientIoMode | None = None,
 ) -> int:
     """Run the terminal app to completion and always close the agent connection."""
     app = HrnsApp(
         config,
-        initial_target=initial_target,
+        resolve_initial_target=resolve_initial_target,
         initial_session=initial_session,
         initial_session_cwd=initial_session_cwd,
-        status_message=status_message,
         client_io=client_io,
     )
 
     async def _main() -> int:
         try:
             result = await app.run_async()
+            if app.startup_error is not None:
+                raise app.startup_error
             return result or 0
         finally:
             await app.shutdown_client()

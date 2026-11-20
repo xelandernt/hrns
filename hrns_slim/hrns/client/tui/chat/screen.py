@@ -45,7 +45,7 @@ from ..completion import FileIndex
 from ..model_setup import ModelSetupResult
 
 if TYPE_CHECKING:
-    pass
+    from textual.widgets.text_area import Selection
 
 from hrns.shared.config import TuiSettings
 
@@ -128,6 +128,7 @@ class ChatScreen(_HrnsScreen):
         *,
         initial_session_id: str | None = None,
         initial_load: bool = False,
+        initial_draft: tuple[str, Selection] | None = None,
     ) -> None:
         super().__init__()
         self.client = client
@@ -161,6 +162,10 @@ class ChatScreen(_HrnsScreen):
         self._turns_started = 0
         self._attachments: list[str] = []
         self._drafts: dict[str, tuple[str, list[str], list[tuple[str, list[str]]]]] = {}
+        self._initial_selection: Selection | None = None
+        if initial_draft is not None:
+            text, self._initial_selection = initial_draft
+            self._drafts[session.session_id] = (text, [], [])
         self._prompt_history: dict[str, list[str]] = {}
         self._queued_prompts: list[tuple[str, list[str]]] = []
         self._queue_paused = False
@@ -213,7 +218,12 @@ class ChatScreen(_HrnsScreen):
         with Horizontal(id="composer-dock"):
             with Horizontal(id="composer-row"):
                 yield Static("›", id="composer-prompt", markup=False)
-                yield Composer(placeholder="Send a message…", id="composer")
+                placeholder = (
+                    "Run /provider to add a provider, then /models to pick a model"
+                    if self.target.local_setup
+                    else "Send a message…"
+                )
+                yield Composer(placeholder=placeholder, id="composer")
         yield StatusBar(id="statusbar")
 
     def on_mount(self) -> None:
@@ -226,7 +236,11 @@ class ChatScreen(_HrnsScreen):
         self._bind_view_context()
         self.chrome.update_chrome()
         self._report_mcp_failures()
-        self.query_one("#composer", Composer).focus()
+        composer = self.query_one("#composer", Composer)
+        if self._initial_selection is not None:
+            composer.selection = self._initial_selection
+            self._initial_selection = None
+        composer.focus()
         self._run_bootstrap()
 
     def on_unmount(self) -> None:

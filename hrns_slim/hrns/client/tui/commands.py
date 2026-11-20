@@ -43,6 +43,7 @@ LOCAL_COMMANDS: tuple[LocalCommand, ...] = (
     LocalCommand(
         "providers",
         "Edit providers, or change the connected agent's provider routing",
+        aliases=("provider",),
     ),
     LocalCommand(
         "models",

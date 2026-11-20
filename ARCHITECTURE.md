@@ -301,6 +301,12 @@ model→provider link travels separately: each `ModelChoice.provider_id` becomes
 the client's `/providers` table groups the option's values by that tag, and `/models`
 appends it to any model name that does not already read `provider:model`.
 
+The terminal can open Local mode before a provider and model are selected. It launches
+the built-in ACP runtime in setup mode with a model-free, in-memory session. The chat
+composer accepts `/provider` (also `/providers`) and `/models` to configure the agent.
+Selecting a model saves the configuration and starts the configured runtime with a new
+session. Headless prompts still require a configured model.
+
 ## Session settings
 
 Settings are the same object's second surface, because they have the same owner as models
@@ -418,6 +424,14 @@ user file (defaults omitted). Project documents are read, never written.
 
 ## Reopening the last connection
 
+The terminal renders a focused composer before resolving the initial connection.
+After the first frame, a Textual worker resolves the target and imports the ACP
+client and chat screen off the UI thread, then opens the connection and session
+asynchronously. Enter keeps the draft while startup is in progress. The draft
+moves into the chat composer when the session opens. If auto-connect fails, the
+picker shows the error and the draft is retained for the next successful
+connection. The local model catalog warms after chat or the picker is shown.
+
 A bare `hrns` reconnects to the connection this terminal used last instead of always
 defaulting to the built-in model. The identity is one string in the document's `[tui]`
 section, written by the same `HrnsConfig.save()` that persists theme and permission
@@ -427,11 +441,10 @@ file and there would be nothing to reopen. The identity never carries a working 
 a reopened connection starts where the new launch stands, or where its profile says.
 
 Remembering happens once a session exists, so a connection that fails at `session/new`
-does not become the next launch's default. Resolution failures — an unconfigured
-built-in model, a deleted profile, a dead endpoint — drop into the picker with the reason in its
-status line rather than exiting, and a profile deleted from disk is forgotten outright so
-its name cannot fail on every launch. The picker's cursor starts on the remembered entry,
-which makes Enter a retry of the connection that just failed.
+does not become the next launch's default. A missing remembered profile or an
+unreachable endpoint opens the picker with the reason in its status line. A
+profile deleted from disk is forgotten. When the remembered entry still exists,
+the picker selects it so Enter can retry the connection.
 
 `_remembered_target()` in `cli.py` owns the identity→target mapping and only the terminal
 uses it: `hrns run` takes its target from its own arguments every time.

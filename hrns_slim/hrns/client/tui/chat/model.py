@@ -129,7 +129,9 @@ class ModelWorkflow:
             if is_builtin_hrns(target.profile if target is not None else None)
             else []
         )
-        config = Path(args[1]) if len(args) == 2 and args[0] == "--config" else None
+        config = None
+        if "--config" in args[:-1]:
+            config = Path(args[args.index("--config") + 1])
         return HrnsConfig(config_file=config) if config else HrnsConfig()
 
     async def show_models(self) -> None:
@@ -664,6 +666,14 @@ class ModelWorkflow:
             await screen._notice(
                 f"Saved the configuration, but it cannot be used yet: {exc.message}", "error"
             )
+            return
+        if screen.target.local_setup:
+            try:
+                screen.app.config = self.local_settings()
+            except (ValueError, OSError) as exc:
+                await screen._notice(f"Could not reload the saved configuration: {exc}", "error")
+                return
+            await screen.app.switch_agent(screen, target)
             return
         screen.app.target = target
         screen.target = target
