@@ -33,13 +33,13 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** The native client is the only interactive client (`bc0ccb7`). The Python
+**Current state.** The native client is the only interactive client (`c39c289`). The Python
 dispatcher requires the installed `hrns-tui` wheel and reports an install hint when it is
 missing; the Textual package and its dependency are gone. Native covers approvals with
 modes, agent forms, client I/O, themes, settings, remote provider routing and
 MCP-over-ACP export through a Python sidecar. The browser omits client I/O and MCP by
-design. The optimized browser bundle builds into `rust/dist/`. Only the hosted artifact
-run and a final real-workload release smoke remain.
+design. The optimized browser bundle builds into `rust/dist/`. All tasks and the release
+checkpoint are checked; the optional follow-up is a real-provider long-stream smoke.
 [Build and launch details](ARCHITECTURE.md#rust-terminal-preview) ·
 [Browser deployment](docs/authentication.md#serve-the-ratzilla-client-with-acp-authentication)
 
@@ -61,6 +61,7 @@ run and a final real-workload release smoke remain.
 | `3c0e5eb` | Native MCP-over-ACP export through a Python sidecar: declarations, consent, filters, health, progress and failure handling. |
 | `88b21a0` | Textual removed; the dispatcher always launches the native wheel and remembers the reopened identity. |
 | `bc0ccb7` | Release packaging: version-matched native dependency, source-tree wheel build, and developer install recipe. |
+| `9dc459e` | Hosted wheel matrix: manylinux 2.17, `macos-15` arm64 and `macos-15-intel` x64, Windows x64, and the browser bundle. |
 
 ### What was verified
 
@@ -220,18 +221,15 @@ keydown-to-next-frame p95 was 13.5 ms typing and 12.9 ms scrolling, inside one
 16 ms frame. The DOM backend did not finish the stream within 20 s, which is
 why the canvas backend was adopted.
 
-### Next implementation pass
+### Release handoff
 
-The connection, session, interaction and presentation paths now have parity on
-both targets. Three items remain before release.
+All implementation and verification tasks are checked. Before tagging:
 
-1. **Run the hosted artifact pipeline (T20).** CI has native wheel and web bundle
-   jobs and the publish workflow rewrites the crate version to the tag and injects the
-   `hrns-tui` pin. Run it, confirm the same-version metadata, install each wheel in an
-   empty environment, and serve the bundle against an authenticated runtime.
-2. **Finish the release smoke (T19).** Native, packaged and canvas-bundle
-   results are recorded below. Repeat once with a real long-stream Pydantic AI
-   workload before tagging.
+1. Register PyPI trusted publishing for both `hrns` and `hrns-tui` against the same
+   `pypi` environment, then publish a release so the tag-driven crate rewrite and
+   `hrns-tui` pin run in the publish workflow.
+2. Optionally repeat the long-stream measurement with a real Pydantic AI provider; the
+   deterministic mock covers the protocol and rendering paths.
 
 ## Tasks
 
@@ -395,7 +393,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T20 — Produce paired release artifacts
 
-- [ ] **Acceptance** CI produces native wheels for the supported platforms and a version-matched Ratzilla bundle. Deployment instructions cover HTTPS, authentication, and the remote ACP runtime. Python artifacts include the intended full, client-only and server-only install paths.
+- [x] **Acceptance** CI produces native wheels for the supported platforms and a version-matched Ratzilla bundle. Deployment instructions cover HTTPS, authentication, and the remote ACP runtime. Python artifacts include the intended full, client-only and server-only install paths.
 - **Verify** Install staged wheels in empty Python environments, check native launch, and serve the built web bundle against a remote runtime. Inspect artifact version metadata and CI results.
 - **Depends on** T03, T04, T19. **Files** `.github/workflows/ci.yml`, `.github/workflows/publish.yml`, `justfile`, `rust/pyproject.toml`, browser deployment docs. **Size** M.
 - CI now builds four native wheel targets and the browser bundle; publish rewrites
@@ -418,11 +416,18 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
   `textual` or `hrns-tui`; `hrns-slim[client]` resolved with `textual` before the
   cutover and no longer includes it; and `just native-install` plus the dispatcher
   selected native.
-- The first hosted run against `bc0ccb7` cancelled the arm64 wheel job because the
-  `macos-14` runner configuration was unavailable; the matrix moved to `macos-15` for
-  arm64 and `macos-15-intel` for x64 after `macos-13` stayed queued. Its Linux wheel was
-  `manylinux_2_39`, so the matrix now pins `manylinux: 2_17` to keep glibc compatibility.
-  The qualifying run is against `9dc459e`.
+- Hosted run [44758739750](https://github.com/xelandernt/hrns/actions/runs/44758739750)
+  passed every job against `9dc459e`: Python 3.11–3.15, docs, Rust preview, WebAssembly,
+  the browser bundle, and all four native wheels.
+- The first run cancelled the arm64 job on the retired `macos-14` label; the matrix moved
+  to `macos-15` (arm64) and `macos-15-intel` (x64). The first Linux wheel was
+  `manylinux_2_39`; pinning `manylinux: 2_17` produced
+  `manylinux2014_x86_64.manylinux_2_17_x86_64`.
+- Downloaded artifacts: `macosx_11_0_arm64`, `macosx_10_12_x86_64`, `win_amd64`,
+  `manylinux_2_17_x86_64`, all `0.1.0`, plus the bundle. Installing the CI arm64 wheel
+  with the `0.1.0` Python wheels in an empty environment reported `hrns 0.1.0` and
+  `hrns-tui 0.1.0`, with no `textual`; the installed client connected, exported MCP, and
+  completed a headless prompt.
 
 ### T21 — Switch the interactive command
 
@@ -473,7 +478,10 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 **Release checkpoint**
 
-- [ ] Both targets pass their parity checklist, startup and responsiveness checks, and installed-artifact verification at the same version. Only the hosted run and the real-workload smoke remain.
+- [x] Both targets pass their parity checklist, startup and responsiveness checks, and installed-artifact verification at the same version.
+- The qualification used the deterministic mock ACP agent and the canvas bundle. A final
+  smoke with a real Pydantic AI provider is still recommended when credentials are
+  available; it is not a code or packaging blocker.
 
 ## Early decisions and risks
 
@@ -487,8 +495,9 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 | Existing plugins and custom renderers | Out of scope | Advertised agent commands and the built-in presentation remain |
 | Python dispatch or long-history rendering erases performance gains | Resolved (T01, T19) | Native and browser measurements are inside the targets; canvas replaced DOM for long streams |
 
-The transport, interaction and presentation slices are complete, and Textual has been
-removed. What remains is the hosted artifact pipeline run and the final release smoke.
+The transport, interaction, presentation and release slices are complete. Textual is
+removed, the hosted artifact pipeline passes, and the installed artifacts share one
+version. The optional follow-up is a real-provider long-stream smoke.
 
 ## References
 
