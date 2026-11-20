@@ -33,7 +33,7 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** A working preview is on the `ratatui` branch through `6baaf0d`.
+**Current state.** A working preview is on the `ratatui` branch through `8938964`.
 Install the separate `hrns-tui` wheel and set `HRNS_RUST_TUI_PREVIEW=1` to
 preview the Python launch path. Textual still handles the default interactive
 launch. The optimized browser bundle builds into `rust/dist/`.
@@ -47,6 +47,8 @@ launch. The optimized browser bundle builds into `rust/dist/`.
 | `f7ecdd6` | Session load and replay, workspace lookup, revisioned turn state, composer history, cached transcript layout, queue and steering, search and copy, model and effort options. |
 | `a97dcda` | Paginated session listing, plan and usage display, advertised command dispatch, concurrent approval handling, native and browser file attachments. |
 | `6baaf0d` | CI job for Rust formatting, native Clippy, and the WASM build. |
+| `3eba27c` | Reconnect with `Ctrl-R`, keeping the draft, transcript and connection identity; verified native bearer and stdio startup cleanup. |
+| `8938964` | In-app new, load, close and delete with capability checks, replay replacement and failure rollback. |
 
 ### What was verified
 
@@ -87,6 +89,15 @@ launch. The optimized browser bundle builds into `rust/dist/`.
   transcript, and closing or deleting the current session started a new one.
   A native stdio switch left exactly one agent child and reaped it on exit.
   `/sessions` reflected the delete and close.
+- Turn lifecycle ran on both targets against a slow deterministic agent. A
+  prompt sent during an active turn steered into that turn; `/queue` held
+  follow-ups locally; disconnecting kept the draft, transcript and queue, and
+  `/resume-queue` after reconnect sent each queued prompt once. Cancellation
+  stopped the turn, paused the local queue and kept the draft. The Python
+  adapter pauses its server-side queue after `session/cancel` and exposes
+  resume only in Python, so new ACP prompts stay queued until the session is
+  closed and restored; the Textual client behaves the same way. The client
+  only resumes its local queue explicitly.
 
 ### Next implementation pass
 
@@ -188,8 +199,8 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T09 — Restore prompt lifecycle controls
 
-- [ ] **Acceptance** Queue, steer, cancel, clear and resume work as supported by the current client and agent. Drafts stay editable while busy. Disconnection, explicit cancellation and session close have their existing distinct effects.
-- **Verify** Queue multiple prompts, cancel mid-turn, resume or clear, then reconnect and check active-turn state and duplicate submissions.
+- [x] **Acceptance** Queue, steer, cancel, clear and resume work as supported by the current client and agent. Drafts stay editable while busy. Disconnection, explicit cancellation and session close have their existing distinct effects.
+- **Verify** Queue multiple prompts, cancel mid-turn, resume or clear, then reconnect and check active-turn state and duplicate submissions. The Python adapter exposes server-side resume only in Python; after cancellation, new ACP prompts stay queued.
 - **Depends on** T08. **Files** `rust/src/acp/turn.rs`, `rust/src/turn.rs`, `rust/src/ui/composer.rs`, `rust/src/ui/queue.rs`. **Size** M.
 
 **Checkpoint after T09**
