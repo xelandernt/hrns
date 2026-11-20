@@ -420,7 +420,8 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
   selected native.
 - The first hosted run against `bc0ccb7` cancelled the arm64 wheel job because the
   `macos-14` runner configuration was unavailable; the matrix moved to `macos-15`.
-  The follow-up verify run against `4f4428d` is the qualifying run.
+  Its Linux wheel was `manylinux_2_39`, so the matrix now pins `manylinux: 2_17` to keep
+  glibc compatibility. The qualifying run is against `76785c8`.
 
 ### T21 — Switch the interactive command
 
