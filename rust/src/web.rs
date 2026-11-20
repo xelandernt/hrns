@@ -6,7 +6,8 @@ use std::rc::Rc;
 use agent_client_protocol::Channel;
 use futures::{StreamExt, channel::mpsc};
 use ratatui::Terminal;
-use ratzilla::{DomBackend, WebRenderer};
+use ratzilla::backend::canvas::CanvasBackendOptions;
+use ratzilla::{CanvasBackend, WebRenderer};
 use wasm_bindgen::{JsCast, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, window};
@@ -34,7 +35,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         crate::preferences::load(),
         startup,
     )));
-    let terminal = Terminal::new(DomBackend::new_by_id("terminal")?)?;
+    let backend = CanvasBackend::new_with_options(CanvasBackendOptions::new().grid_id("terminal"))?;
+    let terminal = Terminal::new(backend)?;
     bind_input(Rc::clone(&app), requests_tx.clone())?;
     terminal.draw_web(move |frame| {
         let mut app = app.borrow_mut();

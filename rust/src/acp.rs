@@ -581,8 +581,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await
@@ -602,8 +602,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await
@@ -634,8 +634,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await
@@ -660,8 +660,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await
@@ -697,8 +697,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await
@@ -720,8 +720,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await
@@ -743,8 +743,8 @@ pub async fn connect(
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
-                                        let _ = (request, responder);
-                                        Ok(())
+                                        let _ = request;
+                                        responder.respond_with_error(Error::method_not_found())
                                     }
                                 })
                                 .await

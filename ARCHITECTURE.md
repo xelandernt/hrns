@@ -56,7 +56,11 @@ a browser task so the composer renders independently of connection setup.
 
 Build the terminal with `cargo build --locked --manifest-path rust/Cargo.toml`
 and the browser with `trunk build --locked --release` from `rust/` with
-`wasm32-unknown-unknown` installed. The preview expects a remote ACP mount at
+`wasm32-unknown-unknown` installed. The browser renders through Ratzilla's
+canvas backend. The DOM backend stayed above 20 seconds for a 500-line stream;
+canvas completed the same stream in 1.5 seconds, and synthetic keydown-to-next-
+frame p95 was 13.5 ms for typing and 12.9 ms for scrolling. Canvas has no text
+selection; `/copy` remains the clipboard path. The preview expects a remote ACP mount at
 the same origin under `/acp/agent`. For local development, set the `endpoint`
 and `cwd` page query parameters to a WebSocket URL and remote workspace.
 Put any deployment authentication upstream of the browser connection. The

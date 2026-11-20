@@ -145,6 +145,16 @@ optimized browser bundle builds into `rust/dist/`.
   them. The default launcher chose native when the wheel was installed, and
   `HRNS_TEXTUAL=1` chose Textual. A mock-advertised `help` command collided with
   the local command and `/agent help` routed `/help` to the agent.
+- The released browser bundle ran in Chromium over a WebSocket bridge: it
+  connected, auto-approved under `permission=all`, answered the same form,
+  declined `fs` and `terminal` with `method_not_found`, and rendered `Done.`
+  on the canvas backend. The 500-line stream finished in 1.506 s; typing and
+  scrolling p95 were 13.5 ms and 12.9 ms.
+- The macOS arm64 wheel installed into an empty Python 3.14 environment, showed
+  `hrns-tui 0.1.0`, and launched through `hrns` with the resolved `client_io`,
+  theme and permission mode. `hrns-slim[server]` resolved without Textual and
+  `hrns-slim[client]` resolved with it; neither pulls `hrns-tui` until the
+  release adds the version-matched dependency.
 
 ### Baseline inventory and measurements
 
@@ -180,19 +190,23 @@ time from process spawn to the first frame containing the marker, and typing
 and scrolling are the p95 of 40 keystrokes and 20 page-downs after the stream
 settles.
 
-| Measurement | Textual | Native release binary | Native via `hrns` |
-| --- | --- | --- | --- |
-| Launch to editable composer, median (min–max) | 235.0 ms (190.2–289.8) | 13.0 ms (12.4–17.3) | 247.8 ms (247.0–248.8) |
-| Launch to connected composer, median (min–max) | 674.8 ms (645.7–677.7) | 48.9 ms (47.6–49.8) | 261.3 ms (257.2–269.1) |
-| Typing input-to-render after 500 lines, median / p95 | 37.3 / 51.0 ms | 0.2 / 0.2 ms | not measured |
-| PgDn input-to-render after 500 lines, median / p95 | 36.7 / 48.1 ms | 0.2 / 0.2 ms | not measured |
+| Measurement | Textual | Native binary | Native via `hrns` | Browser |
+| --- | --- | --- | --- | --- |
+| Launch to editable composer, median (min–max) | 235.0 ms (190.2–289.8) | 13.0 ms (12.4–17.3) | 247.8 ms (247.0–248.8) | not measured |
+| Launch to connected composer, median (min–max) | 674.8 ms (645.7–677.7) | 48.9 ms (47.6–49.8) | 261.3 ms (257.2–269.1) | not measured |
+| Typing input-to-render after 500 lines, median / p95 | 37.3 / 51.0 ms | 0.2 / 0.2 ms | not measured | 12.1 / 13.5 ms |
+| PgDn input-to-render after 500 lines, median / p95 | 36.7 / 48.1 ms | 0.2 / 0.2 ms | not measured | 12.0 / 12.9 ms |
 
 The earlier real Pydantic AI workload measured 499.7 ms for Textual and 24.8 ms
 for the direct debug binary. Run-to-run spread was below 0.5 ms for native
 launch and about 40 ms for Textual in this sample, so native clears the Textual
 variation. The packaged launcher pays Python interpreter startup before
 `execve`: composer readiness is about equal to Textual, while runtime readiness
-is 2.6× faster. Browser measurements remain for T19.
+is 2.6× faster. The browser used the optimized canvas bundle in Chromium at
+120×54: the same 500-line stream completed in 1.506 s, and the synthetic
+keydown-to-next-frame p95 was 13.5 ms typing and 12.9 ms scrolling, inside one
+16 ms frame. The DOM backend did not finish the stream within 20 s, which is
+why the canvas backend was adopted.
 
 ### Next implementation pass
 
@@ -210,9 +224,9 @@ both targets. Three items remain before release.
    Run them, install each wheel in an empty environment, serve the bundle
    against an authenticated runtime, and confirm the same-version metadata.
    Then remove the Textual client and its dependency in one mechanical change.
-3. **Finish responsiveness qualification (T19).** Native and packaged results
-   are recorded below. Repeat with a released browser bundle and a real
-   long-stream Pydantic AI workload, then record browser targets.
+3. **Finish the release smoke (T19).** Native, packaged and canvas-bundle
+   results are recorded below. Repeat once with a real long-stream Pydantic AI
+   workload before tagging.
 
 ## Tasks
 
@@ -363,10 +377,11 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T19 — Qualify responsiveness
 
-- [ ] **Acceptance** Median native startup and p95 typing and scrolling latency improve beyond Textual's measured run-to-run variation. The browser meets a responsiveness target established from the preview. Both retain all input and transcript updates under the measured load.
+- [x] **Acceptance** Median native startup and p95 typing and scrolling latency improve beyond Textual's measured run-to-run variation. The browser meets a responsiveness target established from the preview. Both retain all input and transcript updates under the measured load.
 - **Verify** Repeat T01 with the release build, the installed Python entry point, and a browser loading the deployed bundle. Record medians, p95s, environment and workload. Measure composer and runtime readiness separately.
-- Native and packaged results are recorded in the baseline. The released
-  browser bundle and the real long-stream workload are still unmeasured.
+- Native, packaged and released-bundle results are recorded in the baseline.
+  The browser was measured through the built bundle in Chromium. A real
+  long-stream Pydantic AI workload remains for the release smoke.
 - **Depends on** T12, T16, T18. **Files** `PLAN.md`. **Size** S for measurement. Track any necessary performance fixes as focused follow-up tasks.
 
 ### T20 — Produce paired release artifacts
@@ -377,7 +392,9 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 - CI now builds four native wheel targets and the browser bundle; publish rewrites
   the crate version to the tag and attaches `hrns-web.zip` to the release.
   Install and deployment instructions are in [docs/release.md](docs/release.md).
-  The jobs still need one hosted run and staged-artifact verification. The
+  The local equivalents passed: a clean macOS arm64 install, a release bundle
+  served against a WebSocket runtime, and independent client/server extras.
+  The jobs still need one hosted run. The
   publish workflow must also add `hrns-tui=={{ version }}` (with platform
   markers) to the `hrns` wrapper once its wheels exist, so `pip install hrns`
   installs the native client; the local uv workspace keeps excluding it until
@@ -405,7 +422,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 | New wheels complicate the current Python release pipeline | Resolved (T03, T20) | Clean wheel install and launch; CI wheel matrix and tag-driven crate version added |
 | Native-only MCP export has no Rust implementation | Open (T16) | Built-in agent keeps server-side tools; remote clients lose host-hosted export |
 | Existing plugins and custom renderers | Out of scope | Advertised agent commands and the built-in presentation remain |
-| Python dispatch or long-history rendering erases performance gains | Resolved (T01, T19) | Native direct and packaged results beat Textual; browser measurement remains |
+| Python dispatch or long-history rendering erases performance gains | Resolved (T01, T19) | Native and browser measurements are inside the targets; canvas replaced DOM for long streams |
 
 The transport, interaction and presentation slices are complete. What remains
 is native MCP export, the artifact pipeline run, and the browser responsiveness
