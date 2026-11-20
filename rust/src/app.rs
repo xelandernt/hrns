@@ -1,19 +1,20 @@
+mod commands;
+mod render;
+
 use std::collections::VecDeque;
 
-use agent_client_protocol::v1::schema::{
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-};
+use agent_client_protocol::v1::schema::SessionConfigOption;
 use futures::channel::{mpsc, oneshot};
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position};
-use ratatui::style::Stylize;
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::acp::{Action, Event, ExecutionState, ExecutionStatus};
+use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
-use crate::options;
 use crate::transcript::{Role, Transcript};
+
+pub enum LocalEffect {
+    Copy(String),
+    Attach(String),
+}
 
 pub enum Key {
     Text(char),
@@ -42,13 +43,19 @@ pub struct App {
     ready: bool,
     turns: usize,
     execution: Option<ExecutionState>,
-    queue: VecDeque<String>,
+    queue: VecDeque<Prompt>,
+    attachments: Vec<Attachment>,
+    attachment_reads: usize,
+    attachments_supported: bool,
     queue_paused: bool,
     draft: Composer,
     transcript: Transcript,
-    approval: Option<Approval>,
-    clipboard: Option<String>,
+    approvals: VecDeque<Approval>,
+    local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
+    commands: Vec<(String, String)>,
+    plan: Vec<String>,
+    usage: Option<(u64, u64)>,
     actions: mpsc::UnboundedSender<Action>,
 }
 
@@ -63,19 +70,30 @@ impl App {
             turns: 0,
             execution: None,
             queue: VecDeque::new(),
+            attachments: Vec::new(),
+            attachment_reads: 0,
+            attachments_supported: false,
             queue_paused: false,
             draft: Composer::default(),
             transcript: Transcript::new(),
-            approval: None,
-            clipboard: None,
+            approvals: VecDeque::new(),
+            local_effect: None,
             options: Vec::new(),
+            commands: Vec::new(),
+            plan: Vec::new(),
+            usage: None,
             actions,
         }
     }
 
     pub fn event(&mut self, event: Event) {
         match event {
-            Event::Ready { session, workspace } => {
+            Event::Ready {
+                session,
+                workspace,
+                attachments_supported,
+            } => {
+                self.attachments_supported = attachments_supported;
                 self.workspace = Some(workspace.display().to_string());
                 self.session = Some(session);
                 self.ready = true;
@@ -96,6 +114,40 @@ impl App {
                 }
             }
             Event::Options(options) => self.options = options,
+            Event::AgentCommands(commands) => self.commands = commands,
+            Event::LoadingAttachment => self.attachment_reads += 1,
+            Event::Attachment(attachment) => {
+                self.attachment_reads = self.attachment_reads.saturating_sub(1);
+                let attachment = match attachment {
+                    Ok(attachment) => attachment,
+                    Err(error) => {
+                        self.transcript.push(Role::Error, error);
+                        return;
+                    }
+                };
+                let staged: usize = self.attachments.iter().map(|item| item.size).sum();
+                if staged.saturating_add(attachment.size) > MAX_PROMPT_BYTES {
+                    self.transcript.push(
+                        Role::Error,
+                        "Attachments exceed the ACP prompt limit".into(),
+                    );
+                } else if !self
+                    .attachments
+                    .iter()
+                    .any(|item| item.name == attachment.name)
+                {
+                    self.transcript
+                        .push(Role::Note, format!("Attached {}", attachment.name));
+                    self.attachments.push(*attachment);
+                } else {
+                    self.transcript.push(
+                        Role::Note,
+                        format!("{} is already attached", attachment.name),
+                    );
+                }
+            }
+            Event::Plan(plan) => self.plan = plan,
+            Event::Usage { used, size } => self.usage = Some((used, size)),
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
             Event::Thought(text) => self.transcript.append(Role::Thought, text),
@@ -105,7 +157,7 @@ impl App {
                 self.turns = self.turns.saturating_sub(1);
                 self.queue_paused |= interrupted;
                 if self.turns == 0 {
-                    self.approval = None;
+                    self.approvals.clear();
                     self.status = "Connected";
                     self.update_execution();
                     self.flush_queue();
@@ -116,7 +168,7 @@ impl App {
                 self.turns = 0;
                 self.execution = None;
                 self.queue_paused = true;
-                self.approval = None;
+                self.approvals.clear();
                 self.status = "Disconnected";
             }
             Event::Permission {
@@ -126,7 +178,7 @@ impl App {
             } => {
                 self.transcript
                     .push(Role::Note, format!("Permission requested · {title}"));
-                self.approval = Some((options, respond));
+                self.approvals.push_back((options, respond));
             }
         }
     }
@@ -135,12 +187,12 @@ impl App {
         self.draft.insert(text);
     }
 
-    pub fn take_clipboard(&mut self) -> Option<String> {
-        self.clipboard.take()
+    pub fn take_local_effect(&mut self) -> Option<LocalEffect> {
+        self.local_effect.take()
     }
 
     pub fn key(&mut self, key: Key) {
-        if let Some((options, _)) = &self.approval {
+        if let Some((options, _)) = self.approvals.front() {
             let answer = match key {
                 Key::Escape => Some(None),
                 Key::Text(digit) => digit
@@ -152,7 +204,7 @@ impl App {
                 _ => None,
             };
             if let Some(answer) = answer {
-                if let Some((_, sender)) = self.approval.take() {
+                if let Some((_, sender)) = self.approvals.pop_front() {
                     let _ = sender.send(answer);
                 }
                 return;
@@ -181,96 +233,6 @@ impl App {
             Key::Enter if self.ready && !self.draft.text().trim().is_empty() => self.submit(),
             Key::Escape | Key::Enter => {}
         }
-    }
-
-    fn submit(&mut self) {
-        let input = self.draft.text().to_owned();
-        match input.trim() {
-            "/help" => {
-                self.draft.submit();
-                self.transcript.push(
-                    Role::Note,
-                    "/queue <prompt> · /resume-queue · /clear-queue · /find <text> · /copy".into(),
-                );
-            }
-            "/model" | "/models" => self.config_command(SessionConfigOptionCategory::Model, ""),
-            "/effort" => self.config_command(SessionConfigOptionCategory::ThoughtLevel, ""),
-            text if text.starts_with("/model ") => {
-                self.config_command(
-                    SessionConfigOptionCategory::Model,
-                    text["/model ".len()..].trim(),
-                );
-            }
-            text if text.starts_with("/effort ") => {
-                self.config_command(
-                    SessionConfigOptionCategory::ThoughtLevel,
-                    text["/effort ".len()..].trim(),
-                );
-            }
-            "/copy" => {
-                self.draft.submit();
-                if self.turns == 0 && !self.remote_busy() {
-                    self.clipboard = self.transcript.latest_agent().map(str::to_owned);
-                }
-                if self.clipboard.is_none() {
-                    self.transcript
-                        .push(Role::Note, "No completed response to copy".into());
-                }
-            }
-            text if text.starts_with("/find ") => {
-                self.draft.submit();
-                if !self.transcript.find(text["/find ".len()..].trim()) {
-                    self.transcript
-                        .push(Role::Note, "No matching transcript text".into());
-                }
-            }
-            "/resume-queue" => {
-                self.draft.submit();
-                self.queue_paused = false;
-                self.flush_queue();
-            }
-            "/clear-queue" => {
-                self.draft.submit();
-                self.queue.clear();
-                self.queue_paused = false;
-            }
-            text if text.starts_with("/queue ") => {
-                let text = text["/queue ".len()..].trim();
-                if !text.is_empty() {
-                    self.draft.submit();
-                    self.queue.push_back(text.to_owned());
-                    self.flush_queue();
-                }
-            }
-            _ => {
-                let accepted = self.status != "Cancelling" && self.send_prompt(input);
-                if accepted {
-                    self.draft.submit();
-                }
-            }
-        }
-    }
-
-    fn config_command(&mut self, category: SessionConfigOptionCategory, input: &str) {
-        self.draft.submit();
-        let selected = self
-            .options
-            .iter()
-            .find(|option| options::matches_category(option, &category));
-        let notice = match selected {
-            Some(option) if input.is_empty() => options::summary(option),
-            Some(option) => match options::value(option, input) {
-                Some(value) => {
-                    let _ = self
-                        .actions
-                        .unbounded_send(Action::SetOption(option.id.clone(), value));
-                    return;
-                }
-                None => "Invalid configuration value".into(),
-            },
-            None => "The agent did not advertise this session setting".into(),
-        };
-        self.transcript.push(Role::Note, notice);
     }
 
     fn update_execution(&mut self) {
@@ -307,114 +269,66 @@ impl App {
             return;
         }
         if let Some(prompt) = self.queue.pop_front()
-            && !self.send_prompt(prompt.clone())
+            && let Err(prompt) = self.send_prompt(prompt)
         {
             self.queue.push_front(prompt);
         }
     }
 
-    fn send_prompt(&mut self, prompt: String) -> bool {
-        if self
-            .actions
-            .unbounded_send(Action::Prompt(prompt.clone()))
-            .is_err()
-        {
-            return false;
+    fn prepare_prompt(&mut self, text: String) -> Option<Prompt> {
+        if self.attachment_reads > 0 {
+            self.transcript.push(
+                Role::Note,
+                "Wait for the attachment to finish loading".into(),
+            );
+            return None;
         }
-        self.transcript.push(Role::User, prompt);
+        let size = self
+            .attachments
+            .iter()
+            .fold(text.len(), |size, attachment| {
+                size.saturating_add(attachment.size)
+            });
+        if size > MAX_PROMPT_BYTES {
+            self.transcript.push(
+                Role::Error,
+                "Prompt and attachments exceed the ACP prompt limit".into(),
+            );
+            return None;
+        }
+        Some(Prompt {
+            text,
+            attachments: std::mem::take(&mut self.attachments),
+        })
+    }
+
+    fn send_draft(&mut self, text: String) {
+        let Some(prompt) = self.prepare_prompt(text) else {
+            return;
+        };
+        match self.send_prompt(prompt) {
+            Ok(()) => {
+                self.draft.submit();
+            }
+            Err(prompt) => self.attachments = prompt.attachments,
+        }
+    }
+
+    fn send_prompt(&mut self, prompt: Prompt) -> Result<(), Prompt> {
+        let mut displayed = prompt.text.clone();
+        for attachment in &prompt.attachments {
+            displayed.push_str(&format!("\n[Attachment: {}]", attachment.name));
+        }
+        if let Err(error) = self.actions.unbounded_send(Action::Prompt(prompt)) {
+            let Action::Prompt(prompt) = error.into_inner() else {
+                unreachable!()
+            };
+            return Err(prompt);
+        }
+        self.transcript.push(Role::User, displayed);
         self.turns += 1;
         self.transcript.follow();
         self.status = "Streaming";
-        true
-    }
-
-    pub fn draw(&mut self, frame: &mut Frame) {
-        let area = frame.area();
-        let prompt_height = area.height.clamp(4, 12) / 2;
-        let approval_height = self.approval.as_ref().map_or(0, |(options, _)| {
-            u16::try_from(options.len().min(9) + 1).unwrap_or(10)
-        });
-        let [header, transcript, approval, composer, help] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(approval_height),
-            Constraint::Length(prompt_height),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                " hrns ".bold().cyan(),
-                format!(" · {} · {}", self.destination, self.status).into(),
-                self.workspace
-                    .as_ref()
-                    .map_or_else(String::new, |cwd| format!(" · {cwd}"))
-                    .into(),
-                self.options
-                    .iter()
-                    .find_map(|option| match &option.kind {
-                        SessionConfigKind::Select(select)
-                            if options::matches_category(
-                                option,
-                                &SessionConfigOptionCategory::Model,
-                            ) =>
-                        {
-                            Some(format!(" · {}", select.current_value))
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-                    .into(),
-                if self.queue.is_empty() {
-                    String::new().into()
-                } else {
-                    let state = if self.queue_paused {
-                        "queued · paused"
-                    } else {
-                        "queued"
-                    };
-                    format!(" · {} {state}", self.queue.len()).into()
-                },
-            ])),
-            header,
-        );
-        let visible = self.transcript.visible(transcript.width, transcript.height);
-        frame.render_widget(Paragraph::new(visible), transcript);
-
-        if let Some((options, _)) = &self.approval {
-            let choices = options
-                .iter()
-                .take(9)
-                .enumerate()
-                .map(|(i, option)| Line::from(format!(" {}  {option}", i + 1)));
-            let rows: Vec<_> =
-                std::iter::once(Line::from(" Choose a permission · Esc cancels".yellow()))
-                    .chain(choices)
-                    .collect();
-            frame.render_widget(Paragraph::new(rows), approval);
-        }
-
-        let title = self.session.as_ref().map_or_else(
-            || " Prompt ".to_owned(),
-            |session| format!(" Prompt · {session} "),
-        );
-        let block = Block::default().borders(Borders::TOP).title(title).cyan();
-        let input = block.inner(composer);
-        frame.render_widget(block, composer);
-        if input.width > 0 && input.height > 0 {
-            let (rows, (row, column)) = self.draft.display(input.width);
-            let scroll = row.saturating_sub(input.height - 1);
-            let text = Paragraph::new(Text::from(
-                rows.into_iter().map(Line::raw).collect::<Vec<_>>(),
-            ));
-            frame.render_widget(text.scroll((scroll, 0)), input);
-            frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
-        }
-        frame.render_widget(
-            Paragraph::new(" Enter send · Shift+Enter newline · PgUp/PgDn scroll · Esc cancel")
-                .gray(),
-            help,
-        );
+        Ok(())
     }
 }

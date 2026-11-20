@@ -1,5 +1,6 @@
 mod acp;
 mod app;
+mod attachments;
 mod composer;
 mod options;
 mod socket;

@@ -55,11 +55,15 @@ shared application state. ACP work is driven on a native worker thread or
 a browser task so the composer renders independently of connection setup.
 
 Build the terminal with `cargo build --locked --manifest-path rust/Cargo.toml`
-and the browser with `trunk build --locked` from `rust/` with
+and the browser with `trunk build --locked --release` from `rust/` with
 `wasm32-unknown-unknown` installed. The preview expects a remote ACP mount at
 the same origin under `/acp/agent`. For local development, set the `endpoint`
 and `cwd` page query parameters to a WebSocket URL and remote workspace.
 Put any deployment authentication upstream of the browser connection.
+The shared `/attach` command stages an embedded ACP resource when the runtime
+advertises embedded context. The native frontend reads the supplied path away
+from the event loop. The browser opens its file chooser, and the prompt carries
+the chosen content rather than a path to the browser device.
 
 The Python dispatcher can launch an installed native preview wheel when
 `HRNS_RUST_TUI_PREVIEW=1`. It resolves the target and existing credential

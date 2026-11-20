@@ -12,7 +12,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::acp::{self, Actions, Event, Events, SessionTarget};
-use crate::app::{App, Key};
+use crate::app::{App, Key, LocalEffect};
+use crate::attachments;
 use crate::socket;
 
 const HELP: &str =
@@ -115,6 +116,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (action_tx, action_rx) = mpsc::unbounded();
     let (event_tx, mut event_rx) = mpsc::unbounded();
+    let local_events = event_tx.clone();
     let destination = options.label();
     let (shutdown, stop) = futures::channel::oneshot::channel();
     let mut terminal = ratatui::try_init()?;
@@ -162,16 +164,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if let Some(key) = translate(key) {
                         app.key(key);
-                        if let Some(text) = app.take_clipboard()
-                            && crossterm::execute!(
-                                stdout(),
-                                CopyToClipboard::to_clipboard_from(text)
-                            )
-                            .is_err()
-                        {
-                            app.event(Event::Error(
-                                "Could not copy to the terminal clipboard".into(),
-                            ));
+                        if let Some(effect) = app.take_local_effect() {
+                            local_effect(effect, &mut app, &local_events);
                         }
                         dirty = true;
                     }
@@ -194,6 +188,38 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     paste?;
     restore?;
     Ok(())
+}
+
+fn local_effect(effect: LocalEffect, app: &mut App, events: &Events) {
+    match effect {
+        LocalEffect::Copy(text) => {
+            if crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(text)).is_err() {
+                app.event(Event::Error(
+                    "Could not copy to the terminal clipboard".into(),
+                ));
+            }
+        }
+        LocalEffect::Attach(path) if path.is_empty() => {
+            app.event(Event::Note("Use /attach <path> to select a file".into()));
+        }
+        LocalEffect::Attach(path) => {
+            app.event(Event::LoadingAttachment);
+            let events = events.clone();
+            std::thread::spawn(move || {
+                let expanded = path.strip_prefix("~/").and_then(|relative| {
+                    env::var_os("HOME").map(|home| PathBuf::from(home).join(relative))
+                });
+                let path = expanded
+                    .as_ref()
+                    .and_then(|path| path.to_str())
+                    .unwrap_or(&path);
+                let attachment = attachments::read_native(path)
+                    .map(Box::new)
+                    .map_err(|error| format!("Could not attach file: {error}"));
+                let _ = events.unbounded_send(Event::Attachment(attachment));
+            });
+        }
+    }
 }
 
 async fn connect(options: Options, actions: Actions, events: Events) -> Result<(), String> {

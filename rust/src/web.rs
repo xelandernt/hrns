@@ -9,11 +9,12 @@ use ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 use wasm_bindgen::{JsCast, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{ClipboardEvent, HtmlElement, KeyboardEvent, Url, window};
+use web_sys::{ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, window};
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
 use crate::acp::{self, Event, SessionTarget};
-use crate::app::{App, Key};
+use crate::app::{App, Key, LocalEffect};
+use crate::attachments::{Attachment, MAX_FILE_BYTES};
 use crate::socket;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -129,6 +130,7 @@ fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
         .and_then(|document| document.get_element_by_id("terminal"))
         .and_then(|element| element.dyn_into::<HtmlElement>().ok())
         .ok_or_else(|| io::Error::other("Terminal element unavailable"))?;
+    let input = bind_file_chooser(Rc::clone(&app))?;
     let keyboard = {
         let app = Rc::clone(&app);
         Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
@@ -137,23 +139,18 @@ fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
             }
             if let Some(key) = translate(&event) {
                 event.prevent_default();
-                let copy = {
+                let effect = {
                     let mut app = app.borrow_mut();
                     app.key(key);
-                    app.take_clipboard()
+                    app.take_local_effect()
                 };
-                if let Some(text) = copy
-                    && let Some(window) = window()
-                {
-                    let write = window.navigator().clipboard().write_text(&text);
-                    let app = Rc::clone(&app);
-                    wasm_bindgen_futures::spawn_local(async move {
-                        if JsFuture::from(write).await.is_err() {
-                            app.borrow_mut().event(Event::Error(
-                                "Could not copy to the browser clipboard".into(),
-                            ));
-                        }
-                    });
+                match effect {
+                    Some(LocalEffect::Copy(text)) => copy(&app, &text),
+                    Some(LocalEffect::Attach(path)) if path.is_empty() => input.click(),
+                    Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Note(
+                        "Use /attach to open the browser file chooser".into(),
+                    )),
+                    None => {}
                 }
             }
         })
@@ -176,6 +173,60 @@ fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
     paste.forget();
     let _ = terminal.focus();
     Ok(())
+}
+
+fn copy(app: &Rc<RefCell<App>>, text: &str) {
+    let Some(window) = window() else {
+        return;
+    };
+    let write = window.navigator().clipboard().write_text(text);
+    let app = Rc::clone(app);
+    wasm_bindgen_futures::spawn_local(async move {
+        if JsFuture::from(write).await.is_err() {
+            app.borrow_mut().event(Event::Error(
+                "Could not copy to the browser clipboard".into(),
+            ));
+        }
+    });
+}
+
+fn bind_file_chooser(app: Rc<RefCell<App>>) -> io::Result<HtmlInputElement> {
+    let input = window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("attachment"))
+        .and_then(|element| element.dyn_into::<HtmlInputElement>().ok())
+        .ok_or_else(|| io::Error::other("File chooser unavailable"))?;
+    let element = input.clone();
+    let change = Closure::<dyn FnMut()>::new(move || {
+        let Some(file) = element.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        element.set_value("");
+        app.borrow_mut().event(Event::LoadingAttachment);
+        let app = Rc::clone(&app);
+        wasm_bindgen_futures::spawn_local(async move {
+            let attachment = read_file(file).await.map(Box::new);
+            app.borrow_mut().event(Event::Attachment(attachment));
+        });
+    });
+    input
+        .add_event_listener_with_callback("change", change.as_ref().unchecked_ref())
+        .map_err(|_| io::Error::other("Could not bind file chooser"))?;
+    change.forget();
+    Ok(input)
+}
+
+async fn read_file(file: File) -> Result<Attachment, String> {
+    if file.size() > MAX_FILE_BYTES as f64 {
+        return Err("Attachment exceeds the 8 MiB file limit".into());
+    }
+    let data = JsFuture::from(file.array_buffer())
+        .await
+        .map_err(|_| "Could not read the selected file")?;
+    let data = js_sys::Uint8Array::new(&data).to_vec();
+    let name = file.name();
+    let path = format!("/uploads/{name}");
+    Attachment::new(name, &path, Some(file.type_()), data)
 }
 
 fn translate(event: &KeyboardEvent) -> Option<Key> {

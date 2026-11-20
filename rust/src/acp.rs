@@ -15,8 +15,11 @@ use agent_client_protocol::{
     util::MatchDispatch,
 };
 use futures::channel::{mpsc, oneshot};
+use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt, select_biased};
 use serde::{Deserialize, Serialize};
+
+use crate::attachments::{Attachment, Prompt};
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonRpcNotification)]
 #[notification(method = "_hrns/session/state")]
@@ -36,18 +39,28 @@ pub enum ExecutionStatus {
 }
 
 pub enum Action {
-    Prompt(String),
+    Prompt(Prompt),
     Cancel,
     SetOption(SessionConfigId, SessionConfigOptionValue),
+    ListSessions { more: bool },
 }
 
 pub enum Event {
     Ready {
         session: String,
         workspace: PathBuf,
+        attachments_supported: bool,
     },
     Execution(ExecutionState),
     Options(Vec<SessionConfigOption>),
+    AgentCommands(Vec<(String, String)>),
+    LoadingAttachment,
+    Attachment(Result<Box<Attachment>, String>),
+    Plan(Vec<String>),
+    Usage {
+        used: u64,
+        size: u64,
+    },
     UserChunk(String),
     Chunk(String),
     Thought(String),
@@ -118,6 +131,7 @@ pub async fn connect(
             let _ = events.unbounded_send(Event::Ready {
                 session: session.session_id().to_string(),
                 workspace: cwd,
+                attachments_supported: caps.prompt_capabilities.embedded_context,
             });
             if let Some(state) = meta.and_then(|mut meta| meta.remove("hrns/session/state"))
                 .and_then(|state| serde_json::from_value(state).ok())
@@ -125,24 +139,24 @@ pub async fn connect(
                 let _ = events.unbounded_send(Event::Execution(state));
             }
 
-            let mut decisions: Option<oneshot::Receiver<Option<usize>>> = None;
-            let mut permission = None;
+            let mut decisions = FuturesUnordered::new();
+            let mut session_cursor: Option<String> = None;
             loop {
                 let decision = async {
-                    match decisions.as_mut() {
-                        Some(receiver) => receiver.await,
-                        None => std::future::pending().await,
+                    if decisions.is_empty() {
+                        std::future::pending().await
+                    } else {
+                        decisions.next().await
                     }
                 };
                 select_biased! {
                     decision = decision.fuse() => {
-                        if let Some((request, responder)) = permission.take() {
-                            respond(request, responder, decision.ok().flatten())?;
+                        if let Some((request, responder, option)) = decision {
+                            respond(request, responder, option)?;
                         }
-                        decisions = None;
                     }
                     action = actions.next().fuse() => match action {
-                        Some(Action::Prompt(prompt)) => session.send_prompt(prompt)?,
+                        Some(Action::Prompt(prompt)) => session.send_prompt_blocks(prompt.into_blocks())?,
                         Some(Action::Cancel) => {
                             session.connection().send_notification(
                                 CancelNotification::new(session.session_id().clone())
@@ -154,6 +168,38 @@ pub async fn connect(
                             let event = match reply {
                                 Ok(reply) => Event::Options(reply.config_options),
                                 Err(error) => Event::Error(error.message),
+                            };
+                            let _ = events.unbounded_send(event);
+                        }
+                        Some(Action::ListSessions { more }) => {
+                            let event = if caps.session_capabilities.list.is_none() {
+                                Event::Error("The agent does not advertise session listing".into())
+                            } else if more && session_cursor.is_none() {
+                                Event::Note("No further session pages".into())
+                            } else {
+                                let cursor = if more { session_cursor.take() } else { None };
+                                let reply = session.connection().send_request(
+                                    ListSessionsRequest::new().cursor(cursor.clone())
+                                ).block_task().await;
+                                match reply {
+                                    Ok(page) => {
+                                        session_cursor = page.next_cursor;
+                                        let mut lines = page.sessions.into_iter().map(|item| {
+                                            format!("{} · {} · {}", item.session_id, item.title.as_deref().unwrap_or("Untitled"), item.cwd.display())
+                                        }).collect::<Vec<_>>();
+                                        if lines.is_empty() {
+                                            lines.push("No saved sessions".into());
+                                        }
+                                        if session_cursor.is_some() {
+                                            lines.push("/sessions next to see more".into());
+                                        }
+                                        Event::Note(lines.join("\n"))
+                                    }
+                                    Err(error) => {
+                                        session_cursor = cursor;
+                                        Event::Error(error.message)
+                                    }
+                                }
                             };
                             let _ = events.unbounded_send(event);
                         }
@@ -180,17 +226,15 @@ pub async fn connect(
                                 })
                                 .await
                                 .if_request(async |request: RequestPermissionRequest, responder| {
-                                    if permission.is_some() {
-                                        return respond(request, responder, None);
-                                    }
                                     let (sender, receiver) = oneshot::channel();
                                     let _ = events.unbounded_send(Event::Permission {
                                         title: request.tool_call.fields.title.clone().unwrap_or_else(|| "Tool call".into()),
                                         options: request.options.iter().map(|option| option.name.clone()).collect(),
                                         respond: sender,
                                     });
-                                    decisions = Some(receiver);
-                                    permission = Some((request, responder));
+                                    decisions.push(async move {
+                                        (request, responder, receiver.await.ok().flatten())
+                                    });
                                     Ok(())
                                 })
                                 .await
@@ -275,6 +319,24 @@ fn text_update(update: SessionUpdate) -> Option<Event> {
             ..
         }) => Some(Event::Thought(text.text)),
         SessionUpdate::ConfigOptionUpdate(update) => Some(Event::Options(update.config_options)),
+        SessionUpdate::AvailableCommandsUpdate(update) => Some(Event::AgentCommands(
+            update
+                .available_commands
+                .into_iter()
+                .map(|command| (command.name, command.description))
+                .collect(),
+        )),
+        SessionUpdate::Plan(plan) => Some(Event::Plan(
+            plan.entries
+                .into_iter()
+                .map(|entry| format!("{:?} · {}", entry.status, entry.content))
+                .collect(),
+        )),
+        SessionUpdate::UsageUpdate(usage) => Some(Event::Usage {
+            used: usage.used,
+            size: usage.size,
+        }),
+
         SessionUpdate::ToolCall(call) => Some(Event::Note(format!("Tool: {}", call.title))),
         _ => None,
     }
