@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import sysconfig
 
 from ..shared.errors import HrnsClientError
@@ -26,6 +27,7 @@ def run_rust_preview(
     client_io: str = "all",
     theme: str | None = None,
     permission_mode: str | None = None,
+    config_file: str | None = None,
 ) -> int:
     executable = native_executable()
     if executable is None:
@@ -39,6 +41,10 @@ def run_rust_preview(
         argv.extend(("--theme", theme))
     if permission_mode:
         argv.extend(("--permission-mode", permission_mode))
+    if not target.local_setup:
+        argv.extend(("--mcp-sidecar", sys.executable))
+        if config_file:
+            argv.extend(("--mcp-config", config_file))
     if session:
         argv.extend(("--session", session))
     if target.kind != "remote" or session is None or explicit_cwd is not None:
