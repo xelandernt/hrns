@@ -91,6 +91,29 @@ impl Transcript {
         self.top = self.top.saturating_sub(6);
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Discards everything from `from` onward, keeping the prefix intact.
+    pub fn trim(&mut self, from: usize) {
+        self.entries.truncate(from.min(self.entries.len()));
+        self.reset_layout();
+    }
+
+    /// Drops the first `from` entries and keeps the entries a replay appended after them.
+    pub fn replace(&mut self, from: usize) {
+        self.entries.drain(..from.min(self.entries.len()));
+        self.reset_layout();
+        self.following = true;
+    }
+
+    fn reset_layout(&mut self) {
+        self.measured = 0;
+        self.total = 0;
+        self.top = 0;
+    }
+
     pub fn scroll_down(&mut self) {
         self.top = self.top.saturating_add(6);
     }

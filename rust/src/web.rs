@@ -12,7 +12,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, window};
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
-use crate::acp::{self, Event, SessionTarget};
+use crate::acp::{self, Connection, Event, SessionTarget};
 use crate::app::{App, Key, LocalEffect};
 use crate::attachments::{Attachment, MAX_FILE_BYTES};
 use crate::socket;
@@ -20,7 +20,7 @@ use crate::socket;
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (action_tx, mut action_rx) = mpsc::unbounded();
     let (event_tx, mut event_rx) = mpsc::unbounded();
-    let (reconnect_tx, mut reconnect_rx) = mpsc::unbounded();
+    let (requests_tx, mut requests_rx) = mpsc::unbounded();
     let config = web_config();
     let label = config
         .as_ref()
@@ -28,7 +28,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "Remote".into());
     let app = Rc::new(RefCell::new(App::new(label, action_tx)));
     let terminal = Terminal::new(DomBackend::new_by_id("terminal")?)?;
-    bind_input(Rc::clone(&app), reconnect_tx)?;
+    bind_input(Rc::clone(&app), requests_tx.clone())?;
     terminal.draw_web(move |frame| {
         let mut app = app.borrow_mut();
         for _ in 0..256 {
@@ -37,44 +37,80 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             app.event(update);
         }
+        if let Some(effect) = app.take_local_effect() {
+            match effect {
+                LocalEffect::Reconnect => {
+                    let _ = requests_tx.unbounded_send(Connection::Reconnect);
+                }
+                LocalEffect::Switch(target) => {
+                    let _ = requests_tx.unbounded_send(Connection::Switch(target));
+                }
+                LocalEffect::Copy(_) | LocalEffect::Attach(_) => {}
+            }
+        }
         app.draw(frame);
     });
 
     wasm_bindgen_futures::spawn_local(async move {
+        use futures::{FutureExt, select_biased};
+        let mut target =
+            config
+                .as_ref()
+                .map(|(_, target)| target.clone())
+                .unwrap_or(SessionTarget {
+                    cwd: None,
+                    session: None,
+                });
         loop {
-            let result = async {
-                let (endpoint, target) = config.clone()?;
-                let (_, ws) = WsMeta::connect(endpoint.href(), None)
-                    .await
-                    .map_err(|_| "Could not open the remote ACP WebSocket".to_owned())?;
-                let (transport, bridge) = Channel::duplex();
-                let (wire, session) = futures::join!(
-                    socket::pump(
-                        ws.map(Ok::<_, WsErr>),
-                        bridge,
-                        WsMessage::Text,
-                        message_text
-                    ),
-                    acp::connect(transport, target, &mut action_rx, event_tx.clone()),
-                );
-                wire?;
-                session.map_err(|error| error.message)
-            }
-            .await;
-            if let Err(error) = result {
-                let _ = event_tx.unbounded_send(Event::Error(error));
-            }
-            let _ = event_tx.unbounded_send(Event::Disconnected);
-            match reconnect_rx.next().await {
-                Some(()) => {
-                    let _ = event_tx.unbounded_send(Event::Connecting);
+            let request = select_biased! {
+                request = requests_rx.next().fuse() => request,
+                result = connect_attempt(
+                    config.clone(),
+                    target.clone(),
+                    &mut action_rx,
+                    event_tx.clone(),
+                ).fuse() => {
+                    if let Err(error) = result {
+                        let _ = event_tx.unbounded_send(Event::Error(error));
+                    }
+                    let _ = event_tx.unbounded_send(Event::Disconnected);
+                    requests_rx.next().await
                 }
+            };
+            match request {
+                Some(Connection::Reconnect) => {}
+                Some(Connection::Switch(next)) => target = next,
                 None => return,
             }
+            let _ = event_tx.unbounded_send(Event::Connecting);
         }
     });
 
     Ok(())
+}
+
+async fn connect_attempt(
+    config: Result<(Url, SessionTarget), String>,
+    target: SessionTarget,
+    actions: &mut crate::acp::Actions,
+    events: crate::acp::Events,
+) -> Result<(), String> {
+    let (endpoint, _) = config?;
+    let (_, ws) = WsMeta::connect(endpoint.href(), None)
+        .await
+        .map_err(|_| "Could not open the remote ACP WebSocket".to_owned())?;
+    let (transport, bridge) = Channel::duplex();
+    let (wire, session) = futures::join!(
+        socket::pump(
+            ws.map(Ok::<_, WsErr>),
+            bridge,
+            WsMessage::Text,
+            message_text
+        ),
+        acp::connect(transport, target, actions, events),
+    );
+    wire?;
+    session.map_err(|error| error.message)
 }
 
 fn web_config() -> Result<(Url, SessionTarget), String> {
@@ -133,7 +169,10 @@ fn message_text(message: WsMessage) -> Result<Option<String>, String> {
     }
 }
 
-fn bind_input(app: Rc<RefCell<App>>, reconnect: mpsc::UnboundedSender<()>) -> io::Result<()> {
+fn bind_input(
+    app: Rc<RefCell<App>>,
+    requests: mpsc::UnboundedSender<Connection>,
+) -> io::Result<()> {
     let terminal = window()
         .and_then(|window| window.document())
         .and_then(|document| document.get_element_by_id("terminal"))
@@ -142,7 +181,7 @@ fn bind_input(app: Rc<RefCell<App>>, reconnect: mpsc::UnboundedSender<()>) -> io
     let input = bind_file_chooser(Rc::clone(&app))?;
     let keyboard = {
         let app = Rc::clone(&app);
-        let reconnect = reconnect.clone();
+        let reconnect = requests.clone();
         Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
             if event.is_composing()
                 || (event.ctrl_key() && event.key() != "r")
@@ -161,7 +200,10 @@ fn bind_input(app: Rc<RefCell<App>>, reconnect: mpsc::UnboundedSender<()>) -> io
                 match effect {
                     Some(LocalEffect::Copy(text)) => copy(&app, &text),
                     Some(LocalEffect::Reconnect) => {
-                        let _ = reconnect.unbounded_send(());
+                        let _ = reconnect.unbounded_send(Connection::Reconnect);
+                    }
+                    Some(LocalEffect::Switch(target)) => {
+                        let _ = reconnect.unbounded_send(Connection::Switch(target));
                     }
                     Some(LocalEffect::Attach(path)) if path.is_empty() => input.click(),
                     Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Note(

@@ -83,6 +83,18 @@ and in-flight turns are discarded, and the next `Ready` refreshes the session,
 workspace and agent capabilities. Reconnecting never replays a submitted
 prompt.
 
+The same supervisor replaces a live connection when the composer asks for a new
+or saved session. `/new` reconnects with the current workspace and `/load <id>`
+reconnects with the saved session ID, which the client resolves through
+paginated `session/list` when no workspace is supplied. `/close` and `/delete`
+use the capabilities advertised at initialize; closing or deleting the current
+session starts a new one, while acting on another session leaves the current
+one attached. A switch opens a replay window: the client keeps the old
+transcript until the new connection's `Ready`, then drops the old prefix so
+restored history is not duplicated. A failed load rolls back to the old
+prefix, and its error is reported after the restored transcript. New sessions
+clear the transcript rather than replay it.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`

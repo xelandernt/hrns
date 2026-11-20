@@ -11,7 +11,7 @@ use futures::channel::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use crate::acp::{self, Actions, Event, Events, SessionTarget};
+use crate::acp::{self, Actions, Connection, Event, Events, SessionTarget};
 use crate::app::{App, Key, LocalEffect};
 use crate::attachments;
 use crate::socket;
@@ -117,7 +117,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (action_tx, mut action_rx) = mpsc::unbounded();
     let (event_tx, mut event_rx) = mpsc::unbounded();
     let local_events = event_tx.clone();
-    let (reconnect_tx, reconnect_rx) = mpsc::unbounded();
+    let (requests_tx, requests_rx) = mpsc::unbounded();
     let destination = options.label();
     let (shutdown, stop_rx) = mpsc::unbounded();
     let mut terminal = ratatui::try_init()?;
@@ -131,7 +131,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &options,
                     &mut action_rx,
                     event_tx.clone(),
-                    reconnect_rx,
+                    requests_rx,
                     stop_rx,
                 ));
             });
@@ -152,6 +152,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.event(update);
                 dirty = true;
             }
+            if let Some(effect) = app.take_local_effect() {
+                local_effect(effect, &mut app, &local_events, &requests_tx);
+                dirty = true;
+            }
             if dirty {
                 terminal.draw(|frame| app.draw(frame))?;
                 dirty = false;
@@ -169,7 +173,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(key) = translate(key) {
                         app.key(key);
                         if let Some(effect) = app.take_local_effect() {
-                            local_effect(effect, &mut app, &local_events, &reconnect_tx);
+                            local_effect(effect, &mut app, &local_events, &requests_tx);
                         }
                         dirty = true;
                     }
@@ -198,11 +202,14 @@ fn local_effect(
     effect: LocalEffect,
     app: &mut App,
     events: &Events,
-    reconnect: &mpsc::UnboundedSender<()>,
+    requests: &mpsc::UnboundedSender<Connection>,
 ) {
     match effect {
         LocalEffect::Reconnect => {
-            let _ = reconnect.unbounded_send(());
+            let _ = requests.unbounded_send(Connection::Reconnect);
+        }
+        LocalEffect::Switch(target) => {
+            let _ = requests.unbounded_send(Connection::Switch(target));
         }
         LocalEffect::Copy(text) => {
             if crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(text)).is_err() {
@@ -238,30 +245,49 @@ async fn supervise(
     options: &Options,
     actions: &mut Actions,
     events: Events,
-    mut reconnect: mpsc::UnboundedReceiver<()>,
+    mut requests: mpsc::UnboundedReceiver<Connection>,
     mut stop: mpsc::UnboundedReceiver<()>,
 ) {
     use futures::{FutureExt, StreamExt, select_biased};
+    let mut target = options.session.clone();
     loop {
         select_biased! {
             _ = stop.next() => return,
-            result = connect(options, actions, events.clone()).fuse() => finish(&events, result),
-        }
-        select_biased! {
-            _ = stop.next() => return,
-            request = reconnect.next() => if request.is_none() {
-                return;
+            request = requests.next() => match request {
+                Some(request) => apply(&mut target, request, &events),
+                None => return,
             },
+            result = connect(options, target.clone(), actions, events.clone()).fuse() => {
+                finish(&events, result);
+                select_biased! {
+                    _ = stop.next() => return,
+                    request = requests.next() => match request {
+                        Some(request) => apply(&mut target, request, &events),
+                        None => return,
+                    },
+                }
+            }
         }
-        let _ = events.unbounded_send(Event::Connecting);
     }
 }
 
-async fn connect(options: &Options, actions: &mut Actions, events: Events) -> Result<(), String> {
+fn apply(target: &mut SessionTarget, request: Connection, events: &Events) {
+    if let Connection::Switch(next) = request {
+        *target = next;
+    }
+    let _ = events.unbounded_send(Event::Connecting);
+}
+
+async fn connect(
+    options: &Options,
+    target: SessionTarget,
+    actions: &mut Actions,
+    events: Events,
+) -> Result<(), String> {
     match &options.target {
         Target::Stdio { command, args } => {
             let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));
-            acp::connect(agent, options.session.clone(), actions, events)
+            acp::connect(agent, target, actions, events)
                 .await
                 .map_err(|error| error.message)
         }
@@ -297,7 +323,7 @@ async fn connect(options: &Options, actions: &mut Actions, events: Events) -> Re
             let (transport, bridge) = Channel::duplex();
             let (wire, session) = futures::join!(
                 socket::pump(ws, bridge, |text| Message::Text(text.into()), message_text),
-                acp::connect(transport, options.session.clone(), actions, events),
+                acp::connect(transport, target, actions, events),
             );
             wire?;
             session.map_err(|error| error.message)

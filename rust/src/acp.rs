@@ -3,11 +3,11 @@ use std::path::PathBuf;
 
 use agent_client_protocol::component::ConnectTo;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-    ListSessionsRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigOption,
-    SessionConfigOptionValue, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, StopReason,
+    CancelNotification, CloseSessionRequest, ContentBlock, ContentChunk, DeleteSessionRequest,
+    Implementation, InitializeRequest, ListSessionsRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigOption, SessionConfigOptionValue, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
 use agent_client_protocol::{
@@ -43,6 +43,8 @@ pub enum Action {
     Cancel,
     SetOption(SessionConfigId, SessionConfigOptionValue),
     ListSessions { more: bool },
+    CloseSession(String),
+    DeleteSession(String),
 }
 
 pub enum Event {
@@ -50,6 +52,10 @@ pub enum Event {
         session: String,
         workspace: PathBuf,
         attachments_supported: bool,
+        loaded: bool,
+        load_supported: bool,
+        close_supported: bool,
+        delete_supported: bool,
     },
     Execution(ExecutionState),
     Options(Vec<SessionConfigOption>),
@@ -61,6 +67,8 @@ pub enum Event {
         used: u64,
         size: u64,
     },
+    SessionClosed(String),
+    SessionDeleted(String),
     UserChunk(String),
     Chunk(String),
     Thought(String),
@@ -76,6 +84,11 @@ pub enum Event {
         options: Vec<String>,
         respond: oneshot::Sender<Option<usize>>,
     },
+}
+
+pub enum Connection {
+    Reconnect,
+    Switch(SessionTarget),
 }
 
 #[derive(Clone)]
@@ -112,6 +125,10 @@ pub async fn connect(
                 .await?;
 
             let caps = initialized.agent_capabilities;
+            let loaded = target.session.is_some();
+            let load_supported = caps.load_session;
+            let close_supported = caps.session_capabilities.close.is_some();
+            let delete_supported = caps.session_capabilities.delete.is_some();
             let (mut session, cwd, options, meta) = if let Some(id) = target.session {
                 if !caps.load_session {
                     return Err(Error::new(ErrorCode::INVALID_PARAMS, "The agent does not support loading sessions"));
@@ -134,6 +151,10 @@ pub async fn connect(
                 session: session.session_id().to_string(),
                 workspace: cwd,
                 attachments_supported: caps.prompt_capabilities.embedded_context,
+                loaded,
+                load_supported,
+                close_supported,
+                delete_supported,
             });
             if let Some(state) = meta.and_then(|mut meta| meta.remove("hrns/session/state"))
                 .and_then(|state| serde_json::from_value(state).ok())
@@ -191,6 +212,8 @@ pub async fn connect(
                                         }).collect::<Vec<_>>();
                                         if lines.is_empty() {
                                             lines.push("No saved sessions".into());
+                                        } else {
+                                            lines.push("/load <id> to open one".into());
                                         }
                                         if session_cursor.is_some() {
                                             lines.push("/sessions next to see more".into());
@@ -201,6 +224,42 @@ pub async fn connect(
                                         session_cursor = cursor;
                                         Event::Error(error.message)
                                     }
+                                }
+                            };
+                            let _ = events.unbounded_send(event);
+                        }
+                        Some(Action::CloseSession(id)) => {
+                            let event = if !close_supported {
+                                Event::Error(
+                                    "The agent does not advertise session/close".into(),
+                                )
+                            } else {
+                                let reply = session
+                                    .connection()
+                                    .send_request(CloseSessionRequest::new(id.clone()))
+                                    .block_task()
+                                    .await;
+                                match reply {
+                                    Ok(_) => Event::SessionClosed(id),
+                                    Err(error) => Event::Error(error.message),
+                                }
+                            };
+                            let _ = events.unbounded_send(event);
+                        }
+                        Some(Action::DeleteSession(id)) => {
+                            let event = if !delete_supported {
+                                Event::Error(
+                                    "The agent does not advertise session/delete".into(),
+                                )
+                            } else {
+                                let reply = session
+                                    .connection()
+                                    .send_request(DeleteSessionRequest::new(id.clone()))
+                                    .block_task()
+                                    .await;
+                                match reply {
+                                    Ok(_) => Event::SessionDeleted(id),
+                                    Err(error) => Event::Error(error.message),
                                 }
                             };
                             let _ = events.unbounded_send(event);
@@ -271,7 +330,10 @@ async fn find_workspace(
             return Ok(session.cwd);
         }
         let Some(next) = page.next_cursor else {
-            return Err(needs_workspace());
+            return Err(Error::new(
+                ErrorCode::INVALID_PARAMS,
+                "The agent did not list that session; provide its workspace with --cwd",
+            ));
         };
         if !visited.insert(next.clone()) {
             return Err(Error::new(

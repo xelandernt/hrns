@@ -81,6 +81,12 @@ launch. The optimized browser bundle builds into `rust/dist/`.
   missing and wrong bearer tokens with the draft retained, and accepted the
   configured token. Native launched the built-in stdio agent, retained the
   draft after a missing command, and reaped the agent child on Ctrl-C.
+- In-app `/new`, `/load <id>`, `/close` and `/delete` were exercised on both
+  targets against a deterministic ACP agent. Loaded history replayed once,
+  `Ctrl-R` reloaded it once, a missing session ID restored the prior
+  transcript, and closing or deleting the current session started a new one.
+  A native stdio switch left exactly one agent child and reaped it on exit.
+  `/sessions` reflected the delete and close.
 
 ### Next implementation pass
 
@@ -93,13 +99,13 @@ each extension's wire contract before implementing its UI.
    stdio startup and child cleanup through the preview launcher. Add
    profile management and reconnect on both targets, preserving draft
    input and connection identity after a failed attempt.
-2. **Close session and turn lifecycle gaps (T08, T09).** Add in-app
-   create, load, close and delete controls with capability checks. Verify
-   attachment to an already-running session, pending approvals after
+2. **Close session and turn lifecycle gaps (T08, T09).** The in-app create,
+   load, close and delete controls with capability checks are in place.
+   Verify attachment to an already-running session, pending approvals after
    reconnect, cancellation, and queue pause/resume without replaying a
    submitted prompt. The current Python mount supports load and exposes
-   session titles, so verify the actual wire contract before adding a
-   resume or rename action.
+   session titles, but advertises neither resume nor rename, so verify the
+   actual wire contract before adding those actions.
 3. **Finish the protocol inventory and interaction paths (T05, T13–T17).**
    Check the pinned SDK against the deployed elicitation, provider and MCP
    methods. Restore approval modes, forms and provider login/setup.

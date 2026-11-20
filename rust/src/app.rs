@@ -2,11 +2,12 @@ mod commands;
 mod render;
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::SessionConfigOption;
 use futures::channel::{mpsc, oneshot};
 
-use crate::acp::{Action, Event, ExecutionState, ExecutionStatus};
+use crate::acp::{Action, Event, ExecutionState, ExecutionStatus, SessionTarget};
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
 use crate::transcript::{Role, Transcript};
@@ -15,6 +16,7 @@ pub enum LocalEffect {
     Copy(String),
     Attach(String),
     Reconnect,
+    Switch(SessionTarget),
 }
 
 pub enum Key {
@@ -49,6 +51,11 @@ pub struct App {
     attachments: Vec<Attachment>,
     attachment_reads: usize,
     attachments_supported: bool,
+    load_supported: bool,
+    close_supported: bool,
+    delete_supported: bool,
+    loaded: bool,
+    replay_from: Option<usize>,
     queue_paused: bool,
     draft: Composer,
     transcript: Transcript,
@@ -75,6 +82,11 @@ impl App {
             attachments: Vec::new(),
             attachment_reads: 0,
             attachments_supported: false,
+            load_supported: false,
+            close_supported: false,
+            delete_supported: false,
+            loaded: false,
+            replay_from: None,
             queue_paused: false,
             draft: Composer::default(),
             transcript: Transcript::new(),
@@ -94,8 +106,19 @@ impl App {
                 session,
                 workspace,
                 attachments_supported,
+                loaded,
+                load_supported,
+                close_supported,
+                delete_supported,
             } => {
+                if let Some(from) = self.replay_from.take() {
+                    self.transcript.replace(from);
+                }
                 self.attachments_supported = attachments_supported;
+                self.load_supported = load_supported;
+                self.close_supported = close_supported;
+                self.delete_supported = delete_supported;
+                self.loaded = loaded;
                 self.workspace = Some(workspace.display().to_string());
                 self.session = Some(session);
                 self.ready = true;
@@ -150,11 +173,34 @@ impl App {
             }
             Event::Plan(plan) => self.plan = plan,
             Event::Usage { used, size } => self.usage = Some((used, size)),
+            Event::SessionClosed(id) => {
+                self.transcript.push(
+                    Role::Note,
+                    format!("Closed session {id}; the agent keeps its history"),
+                );
+                if self.session.as_deref() == Some(&id) {
+                    self.new_session();
+                }
+            }
+            Event::SessionDeleted(id) => {
+                self.transcript
+                    .push(Role::Note, format!("Deleted session {id}"));
+                if self.session.as_deref() == Some(&id) {
+                    self.new_session();
+                }
+            }
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
             Event::Thought(text) => self.transcript.append(Role::Thought, text),
             Event::Note(text) => self.transcript.push(Role::Note, text),
-            Event::Error(text) => self.transcript.push(Role::Error, text),
+            Event::Error(text) => {
+                if !self.ready
+                    && let Some(from) = self.replay_from.take()
+                {
+                    self.transcript.trim(from);
+                }
+                self.transcript.push(Role::Error, text);
+            }
             Event::End { interrupted } => {
                 self.turns = self.turns.saturating_sub(1);
                 self.queue_paused |= interrupted;
@@ -166,6 +212,11 @@ impl App {
                 }
             }
             Event::Disconnected => {
+                if let Some(from) = self.replay_from.take() {
+                    self.transcript.trim(from);
+                    self.transcript
+                        .push(Role::Note, "The session did not finish loading".into());
+                }
                 self.ready = false;
                 self.turns = 0;
                 self.execution = None;
@@ -201,13 +252,129 @@ impl App {
     }
 
     pub fn reconnect(&mut self) {
-        if self.ready || self.status == "Reconnecting" {
+        if self.ready || matches!(self.status, "Reconnecting" | "Connecting") {
             self.transcript
                 .push(Role::Note, "The connection is already open".into());
             return;
         }
+        if self.loaded {
+            self.replay_from = Some(self.transcript.len());
+        }
         self.status = "Reconnecting";
         self.local_effect = Some(LocalEffect::Reconnect);
+    }
+
+    pub fn new_session(&mut self) {
+        if !self.can_switch() {
+            self.transcript.push(
+                Role::Note,
+                "Stop the running turn before switching sessions".into(),
+            );
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.transcript.push(
+                Role::Note,
+                "Connect once so the new session has a workspace".into(),
+            );
+            return;
+        };
+        self.loaded = false;
+        self.ready = false;
+        self.replay_from = Some(self.transcript.len());
+        self.status = "Connecting";
+        self.local_effect = Some(LocalEffect::Switch(SessionTarget {
+            cwd: Some(PathBuf::from(workspace)),
+            session: None,
+        }));
+    }
+
+    pub fn load_session(&mut self, id: String) {
+        if !self.can_switch() {
+            self.transcript.push(
+                Role::Note,
+                "Stop the running turn before switching sessions".into(),
+            );
+            return;
+        }
+        if !self.load_supported {
+            self.transcript.push(
+                Role::Note,
+                "The agent does not advertise session/load".into(),
+            );
+            return;
+        }
+        self.loaded = true;
+        self.ready = false;
+        self.replay_from = Some(self.transcript.len());
+        self.status = "Connecting";
+        self.local_effect = Some(LocalEffect::Switch(SessionTarget {
+            cwd: None,
+            session: Some(id),
+        }));
+    }
+
+    fn can_switch(&self) -> bool {
+        self.turns == 0 && !self.remote_busy()
+    }
+
+    pub fn close_session(&mut self, id: Option<String>) {
+        if !self.ready {
+            self.transcript
+                .push(Role::Note, "Connect before closing a session".into());
+            return;
+        }
+        if !self.close_supported {
+            self.transcript.push(
+                Role::Note,
+                "The agent does not advertise session/close".into(),
+            );
+            return;
+        }
+        let Some(id) = id
+            .filter(|id| !id.is_empty())
+            .or_else(|| self.session.clone())
+        else {
+            self.transcript
+                .push(Role::Note, "There is no current session to close".into());
+            return;
+        };
+        if self.session.as_deref() == Some(&id) && !self.can_switch() {
+            self.transcript.push(
+                Role::Note,
+                "Stop the running turn before closing its session".into(),
+            );
+            return;
+        }
+        let _ = self.actions.unbounded_send(Action::CloseSession(id));
+    }
+
+    pub fn delete_session(&mut self, id: String) {
+        if id.is_empty() {
+            self.transcript
+                .push(Role::Note, "Use /delete <session id>".into());
+            return;
+        }
+        if !self.ready {
+            self.transcript
+                .push(Role::Note, "Connect before deleting a session".into());
+            return;
+        }
+        if !self.delete_supported {
+            self.transcript.push(
+                Role::Note,
+                "The agent does not advertise session/delete".into(),
+            );
+            return;
+        }
+        if self.session.as_deref() == Some(id.as_str()) && !self.can_switch() {
+            self.transcript.push(
+                Role::Note,
+                "Stop the running turn before deleting its session".into(),
+            );
+            return;
+        }
+        let _ = self.actions.unbounded_send(Action::DeleteSession(id));
     }
 
     pub fn key(&mut self, key: Key) {
@@ -250,7 +417,7 @@ impl App {
                     self.status = "Cancelling";
                 }
             }
-            Key::Enter if self.ready && !self.draft.text().trim().is_empty() => self.submit(),
+            Key::Enter if !self.draft.text().trim().is_empty() => self.submit(),
             Key::Escape | Key::Enter => {}
         }
     }

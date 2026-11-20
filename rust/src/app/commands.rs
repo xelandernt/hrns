@@ -12,10 +12,10 @@ impl App {
             "/help" => {
                 self.draft.submit();
                 let mut commands = vec![
-                    "/sessions [next] · /models · /effort · /todo · /find <text> · /copy"
-                        .to_owned(),
+                    "/sessions [next] · /new · /load <id> · /models · /effort · /todo".to_owned(),
+                    "/find <text> · /copy · /reconnect".to_owned(),
                     "/queue <prompt> · /resume-queue · /clear-queue".to_owned(),
-                    "/attach [path] · /detach <filename> · /reconnect".to_owned(),
+                    "/attach [path] · /detach <filename> · /close [id] · /delete <id>".to_owned(),
                 ];
                 commands.extend(
                     self.commands
@@ -29,6 +29,42 @@ impl App {
                 let _ = self.actions.unbounded_send(Action::ListSessions {
                     more: command.ends_with(" next"),
                 });
+            }
+            "/new" => {
+                self.draft.submit();
+                self.new_session();
+            }
+            "/load" => {
+                self.draft.submit();
+                self.transcript
+                    .push(Role::Note, "Use /load <session id>".into());
+            }
+            text if text.starts_with("/load ") => {
+                self.draft.submit();
+                let id = text["/load ".len()..].trim();
+                if id.is_empty() {
+                    self.transcript
+                        .push(Role::Note, "Use /load <session id>".into());
+                } else {
+                    self.load_session(id.to_owned());
+                }
+            }
+            "/close" => {
+                self.draft.submit();
+                self.close_session(None);
+            }
+            text if text.starts_with("/close ") => {
+                self.draft.submit();
+                self.close_session(Some(text["/close ".len()..].trim().to_owned()));
+            }
+            "/delete" => {
+                self.draft.submit();
+                self.transcript
+                    .push(Role::Note, "Use /delete <session id>".into());
+            }
+            text if text.starts_with("/delete ") => {
+                self.draft.submit();
+                self.delete_session(text["/delete ".len()..].trim().to_owned());
             }
             "/todo" | "/todos" => {
                 self.draft.submit();
@@ -133,6 +169,13 @@ impl App {
                 }
             }
             _ => {
+                if !self.ready {
+                    self.transcript.push(
+                        Role::Note,
+                        "Not connected · use /reconnect, /new or /load <id>".into(),
+                    );
+                    return;
+                }
                 let available = self.status != "Cancelling";
                 if available {
                     self.send_draft(input);
