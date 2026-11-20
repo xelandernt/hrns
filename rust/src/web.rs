@@ -18,8 +18,9 @@ use crate::attachments::{Attachment, MAX_FILE_BYTES};
 use crate::socket;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (action_tx, action_rx) = mpsc::unbounded();
+    let (action_tx, mut action_rx) = mpsc::unbounded();
     let (event_tx, mut event_rx) = mpsc::unbounded();
+    let (reconnect_tx, mut reconnect_rx) = mpsc::unbounded();
     let config = web_config();
     let label = config
         .as_ref()
@@ -27,7 +28,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "Remote".into());
     let app = Rc::new(RefCell::new(App::new(label, action_tx)));
     let terminal = Terminal::new(DomBackend::new_by_id("terminal")?)?;
-    bind_input(Rc::clone(&app))?;
+    bind_input(Rc::clone(&app), reconnect_tx)?;
     terminal.draw_web(move |frame| {
         let mut app = app.borrow_mut();
         for _ in 0..256 {
@@ -40,29 +41,37 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     wasm_bindgen_futures::spawn_local(async move {
-        let result = async {
-            let (endpoint, target) = config?;
-            let (_, ws) = WsMeta::connect(endpoint.href(), None)
-                .await
-                .map_err(|_| "Could not open the remote ACP WebSocket".to_owned())?;
-            let (transport, bridge) = Channel::duplex();
-            let (wire, session) = futures::join!(
-                socket::pump(
-                    ws.map(Ok::<_, WsErr>),
-                    bridge,
-                    WsMessage::Text,
-                    message_text
-                ),
-                acp::connect(transport, target, action_rx, event_tx.clone()),
-            );
-            wire?;
-            session.map_err(|error| error.message)
+        loop {
+            let result = async {
+                let (endpoint, target) = config.clone()?;
+                let (_, ws) = WsMeta::connect(endpoint.href(), None)
+                    .await
+                    .map_err(|_| "Could not open the remote ACP WebSocket".to_owned())?;
+                let (transport, bridge) = Channel::duplex();
+                let (wire, session) = futures::join!(
+                    socket::pump(
+                        ws.map(Ok::<_, WsErr>),
+                        bridge,
+                        WsMessage::Text,
+                        message_text
+                    ),
+                    acp::connect(transport, target, &mut action_rx, event_tx.clone()),
+                );
+                wire?;
+                session.map_err(|error| error.message)
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = event_tx.unbounded_send(Event::Error(error));
+            }
+            let _ = event_tx.unbounded_send(Event::Disconnected);
+            match reconnect_rx.next().await {
+                Some(()) => {
+                    let _ = event_tx.unbounded_send(Event::Connecting);
+                }
+                None => return,
+            }
         }
-        .await;
-        if let Err(error) = result {
-            let _ = event_tx.unbounded_send(Event::Error(error));
-        }
-        let _ = event_tx.unbounded_send(Event::Disconnected);
     });
 
     Ok(())
@@ -124,7 +133,7 @@ fn message_text(message: WsMessage) -> Result<Option<String>, String> {
     }
 }
 
-fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
+fn bind_input(app: Rc<RefCell<App>>, reconnect: mpsc::UnboundedSender<()>) -> io::Result<()> {
     let terminal = window()
         .and_then(|window| window.document())
         .and_then(|document| document.get_element_by_id("terminal"))
@@ -133,8 +142,13 @@ fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
     let input = bind_file_chooser(Rc::clone(&app))?;
     let keyboard = {
         let app = Rc::clone(&app);
+        let reconnect = reconnect.clone();
         Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
-            if event.is_composing() || event.ctrl_key() || event.alt_key() || event.meta_key() {
+            if event.is_composing()
+                || (event.ctrl_key() && event.key() != "r")
+                || event.alt_key()
+                || event.meta_key()
+            {
                 return;
             }
             if let Some(key) = translate(&event) {
@@ -146,6 +160,9 @@ fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
                 };
                 match effect {
                     Some(LocalEffect::Copy(text)) => copy(&app, &text),
+                    Some(LocalEffect::Reconnect) => {
+                        let _ = reconnect.unbounded_send(());
+                    }
                     Some(LocalEffect::Attach(path)) if path.is_empty() => input.click(),
                     Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Note(
                         "Use /attach to open the browser file chooser".into(),
@@ -231,6 +248,9 @@ async fn read_file(file: File) -> Result<Attachment, String> {
 
 fn translate(event: &KeyboardEvent) -> Option<Key> {
     let key = event.key();
+    if event.ctrl_key() && !event.alt_key() && !event.meta_key() && key == "r" {
+        return Some(Key::Reconnect);
+    }
     match key.as_str() {
         "Enter" if event.shift_key() => Some(Key::Newline),
         "Enter" => Some(Key::Enter),

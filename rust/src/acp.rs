@@ -69,6 +69,7 @@ pub enum Event {
         interrupted: bool,
     },
     Error(String),
+    Connecting,
     Disconnected,
     Permission {
         title: String,
@@ -77,6 +78,7 @@ pub enum Event {
     },
 }
 
+#[derive(Clone)]
 pub struct SessionTarget {
     pub cwd: Option<PathBuf>,
     pub session: Option<String>,
@@ -88,7 +90,7 @@ pub type Actions = mpsc::UnboundedReceiver<Action>;
 pub async fn connect(
     transport: impl ConnectTo<Client> + 'static,
     target: SessionTarget,
-    mut actions: Actions,
+    actions: &mut Actions,
     events: Events,
 ) -> Result<(), Error> {
     let notifications = events.clone();

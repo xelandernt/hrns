@@ -15,7 +15,7 @@ impl App {
                     "/sessions [next] · /models · /effort · /todo · /find <text> · /copy"
                         .to_owned(),
                     "/queue <prompt> · /resume-queue · /clear-queue".to_owned(),
-                    "/attach [path] · /detach <filename>".to_owned(),
+                    "/attach [path] · /detach <filename> · /reconnect".to_owned(),
                 ];
                 commands.extend(
                     self.commands
@@ -68,6 +68,10 @@ impl App {
                     SessionConfigOptionCategory::ThoughtLevel,
                     text["/effort ".len()..].trim(),
                 );
+            }
+            "/reconnect" => {
+                self.draft.submit();
+                self.reconnect();
             }
             "/copy" => {
                 self.draft.submit();

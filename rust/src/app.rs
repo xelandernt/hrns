@@ -14,6 +14,7 @@ use crate::transcript::{Role, Transcript};
 pub enum LocalEffect {
     Copy(String),
     Attach(String),
+    Reconnect,
 }
 
 pub enum Key {
@@ -30,6 +31,7 @@ pub enum Key {
     HistoryDown,
     ScrollUp,
     ScrollDown,
+    Reconnect,
     Escape,
 }
 
@@ -171,6 +173,13 @@ impl App {
                 self.approvals.clear();
                 self.status = "Disconnected";
             }
+            Event::Connecting => {
+                self.ready = false;
+                self.turns = 0;
+                self.execution = None;
+                self.approvals.clear();
+                self.status = "Reconnecting";
+            }
             Event::Permission {
                 title,
                 options,
@@ -189,6 +198,16 @@ impl App {
 
     pub fn take_local_effect(&mut self) -> Option<LocalEffect> {
         self.local_effect.take()
+    }
+
+    pub fn reconnect(&mut self) {
+        if self.ready || self.status == "Reconnecting" {
+            self.transcript
+                .push(Role::Note, "The connection is already open".into());
+            return;
+        }
+        self.status = "Reconnecting";
+        self.local_effect = Some(LocalEffect::Reconnect);
     }
 
     pub fn key(&mut self, key: Key) {
@@ -224,6 +243,7 @@ impl App {
             Key::HistoryDown => self.draft.recall(false),
             Key::ScrollUp => self.transcript.scroll_up(),
             Key::ScrollDown => self.transcript.scroll_down(),
+            Key::Reconnect => self.reconnect(),
             Key::Escape if self.turns > 0 || self.remote_busy() => {
                 if self.actions.unbounded_send(Action::Cancel).is_ok() {
                     self.queue_paused = true;

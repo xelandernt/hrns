@@ -105,8 +105,12 @@ impl App {
             frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
         }
         frame.render_widget(
-            Paragraph::new(" Enter send · Shift+Enter newline · PgUp/PgDn scroll · Esc cancel")
-                .gray(),
+            Paragraph::new(if self.status == "Disconnected" {
+                " Ctrl-R reconnect · draft is kept · PgUp/PgDn scroll"
+            } else {
+                " Enter send · Shift+Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-R reconnect"
+            })
+            .gray(),
             help,
         );
     }

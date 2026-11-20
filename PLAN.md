@@ -75,6 +75,12 @@ launch. The optimized browser bundle builds into `rust/dist/`.
   24.8 ms for the direct Rust debug binary. The first direct Rust launch
   took 844.9 ms. Packaged startup, bare `hrns`, and long-stream p95 typing
   and scrolling are still needed for release qualification.
+- Both targets reconnected with `Ctrl-R` after the ACP runtime restarted on
+  the same endpoint. The draft, transcript and workspace identity survived,
+  and the next turn-ready header showed a fresh session. Native rejected
+  missing and wrong bearer tokens with the draft retained, and accepted the
+  configured token. Native launched the built-in stdio agent, retained the
+  draft after a missing command, and reaped the agent child on Ctrl-C.
 
 ### Next implementation pass
 
@@ -154,7 +160,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T06 — Start a local stdio agent
 
-- [ ] **Acceptance** Native can launch the built-in Python agent and an external stdio command with the selected cwd and environment, accepts draft input while connecting, and retains the draft after a failed launch.
+- [x] **Acceptance** Native can launch the built-in Python agent and an external stdio command with the selected cwd and environment, accepts draft input while connecting, and retains the draft after a failed launch.
 - **Verify** Exercise both agent types, a child exit during startup, reconnect and clean shutdown. Check that owned child processes exit and that the WASM build still compiles.
 - **Depends on** T02, T03. **Files** `rust/src/native.rs`, `rust/src/native/stdio.rs`, `rust/src/app.rs`. **Size** M.
 

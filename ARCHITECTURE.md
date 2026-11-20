@@ -73,6 +73,16 @@ Build a development wheel with `uvx maturin build --manifest-path rust/Cargo.tom
 and install it alongside the Python client. This wheel uses the Rust crate's
 preview version. Release version coordination remains part of the cutover.
 
+Both frontends keep one action queue for the process lifetime and can retry the
+transport after a disconnect. `Ctrl-R`, or the `/reconnect` command, starts
+another attempt with the same transport options and connection identity.
+`Ctrl-R` edits nothing, so the draft survives; `/reconnect` is an ordinary
+command and therefore consumes the current draft line. The transcript and
+queued prompts survive the attempt; connection-scoped session state, approvals
+and in-flight turns are discarded, and the next `Ready` refreshes the session,
+workspace and agent capabilities. Reconnecting never replays a submitted
+prompt.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`

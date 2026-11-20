@@ -114,27 +114,31 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         env::set_current_dir(cwd)?;
     }
-    let (action_tx, action_rx) = mpsc::unbounded();
+    let (action_tx, mut action_rx) = mpsc::unbounded();
     let (event_tx, mut event_rx) = mpsc::unbounded();
     let local_events = event_tx.clone();
+    let (reconnect_tx, reconnect_rx) = mpsc::unbounded();
     let destination = options.label();
-    let (shutdown, stop) = futures::channel::oneshot::channel();
+    let (shutdown, stop_rx) = mpsc::unbounded();
     let mut terminal = ratatui::try_init()?;
     let worker = std::thread::spawn(move || {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| error.to_string())
-            .and_then(|runtime| {
-                runtime.block_on(async {
-                    use futures::{FutureExt, select_biased};
-                    select_biased! {
-                        _ = stop.fuse() => Ok(()),
-                        result = connect(options, action_rx, event_tx.clone()).fuse() => result,
-                    }
-                })
+            .map(|runtime| {
+                runtime.block_on(supervise(
+                    &options,
+                    &mut action_rx,
+                    event_tx.clone(),
+                    reconnect_rx,
+                    stop_rx,
+                ));
             });
-        finish(&event_tx, result);
+        if let Err(error) = result {
+            let _ = event_tx.unbounded_send(Event::Error(error));
+            let _ = event_tx.unbounded_send(Event::Disconnected);
+        }
     });
     let mut app = App::new(destination, action_tx);
     let result = (|| -> io::Result<()> {
@@ -165,7 +169,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(key) = translate(key) {
                         app.key(key);
                         if let Some(effect) = app.take_local_effect() {
-                            local_effect(effect, &mut app, &local_events);
+                            local_effect(effect, &mut app, &local_events, &reconnect_tx);
                         }
                         dirty = true;
                     }
@@ -182,7 +186,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     })();
     let paste = crossterm::execute!(stdout(), DisableBracketedPaste);
     let restore = ratatui::try_restore();
-    let _ = shutdown.send(());
+    let _ = shutdown.unbounded_send(());
     let _ = worker.join();
     result?;
     paste?;
@@ -190,8 +194,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn local_effect(effect: LocalEffect, app: &mut App, events: &Events) {
+fn local_effect(
+    effect: LocalEffect,
+    app: &mut App,
+    events: &Events,
+    reconnect: &mpsc::UnboundedSender<()>,
+) {
     match effect {
+        LocalEffect::Reconnect => {
+            let _ = reconnect.unbounded_send(());
+        }
         LocalEffect::Copy(text) => {
             if crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(text)).is_err() {
                 app.event(Event::Error(
@@ -222,16 +234,40 @@ fn local_effect(effect: LocalEffect, app: &mut App, events: &Events) {
     }
 }
 
-async fn connect(options: Options, actions: Actions, events: Events) -> Result<(), String> {
-    match options.target {
+async fn supervise(
+    options: &Options,
+    actions: &mut Actions,
+    events: Events,
+    mut reconnect: mpsc::UnboundedReceiver<()>,
+    mut stop: mpsc::UnboundedReceiver<()>,
+) {
+    use futures::{FutureExt, StreamExt, select_biased};
+    loop {
+        select_biased! {
+            _ = stop.next() => return,
+            result = connect(options, actions, events.clone()).fuse() => finish(&events, result),
+        }
+        select_biased! {
+            _ = stop.next() => return,
+            request = reconnect.next() => if request.is_none() {
+                return;
+            },
+        }
+        let _ = events.unbounded_send(Event::Connecting);
+    }
+}
+
+async fn connect(options: &Options, actions: &mut Actions, events: Events) -> Result<(), String> {
+    match &options.target {
         Target::Stdio { command, args } => {
-            let agent = AcpAgent::new(AcpAgentConfig::new(command).args(args));
-            acp::connect(agent, options.session, actions, events)
+            let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));
+            acp::connect(agent, options.session.clone(), actions, events)
                 .await
                 .map_err(|error| error.message)
         }
         Target::Remote(url) => {
             let mut request = url
+                .as_str()
                 .into_client_request()
                 .map_err(|_| "Invalid ACP endpoint")?;
             let uri = request.uri();
@@ -261,7 +297,7 @@ async fn connect(options: Options, actions: Actions, events: Events) -> Result<(
             let (transport, bridge) = Channel::duplex();
             let (wire, session) = futures::join!(
                 socket::pump(ws, bridge, |text| Message::Text(text.into()), message_text),
-                acp::connect(transport, options.session, actions, events),
+                acp::connect(transport, options.session.clone(), actions, events),
             );
             wire?;
             session.map_err(|error| error.message)
@@ -298,6 +334,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Down => Some(Key::HistoryDown),
         KeyCode::PageUp => Some(Key::ScrollUp),
         KeyCode::PageDown => Some(Key::ScrollDown),
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Reconnect),
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Char(c)
             if !key
