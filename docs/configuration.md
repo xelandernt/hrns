@@ -103,7 +103,10 @@ notes = "scratch agent"
 
 ### `[tui]`
 
-Terminal preferences. The client reads and writes terminal preferences here.
+Terminal defaults and the last connection. `theme`, `permission_mode` and `client_io`
+seed the native client when it has no stored value; the client keeps later changes in its
+own state file. `auto_expand_tools`, `show_thoughts` and `sidebar_width` are accepted for
+older clients; the native client stores those toggles in its state file instead.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -315,13 +318,13 @@ terminal, the built-in agent, and `hrns serve`.
 - The document is validated on every load; an unknown key, a wrong type, or a bad value
   (an invalid `base_url`, a model id containing `:`) stops both programs with the file and
   field named.
-- `hrns` saves what changes: a profile edit, a new provider, a TUI preference, or the
-  remembered connection. Values equal to their defaults are omitted, so the file stays
+- `hrns` saves what changes: a profile edit, a new provider, the remembered connection,
+  or an MCP `always_allow` consent. Values equal to their defaults are omitted, so the file stays
   close to what a person would write.
 - Saving goes to the user document unless `--config` selected another file. A project
   document supplies read-only overrides.
 - The client passes the same document to the built-in agent it spawns, so a model selected
-  in the TUI is the one `hrns agent` runs.
+  in the terminal is the one `hrns agent` runs.
 
 ## Managing the file from the CLI
 

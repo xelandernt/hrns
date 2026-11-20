@@ -418,7 +418,9 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
   `textual` or `hrns-tui`; `hrns-slim[client]` resolved with `textual` before the
   cutover and no longer includes it; and `just native-install` plus the dispatcher
   selected native.
-- The jobs still need one hosted run.
+- The first hosted run against `bc0ccb7` cancelled the arm64 wheel job because the
+  `macos-14` runner configuration was unavailable; the matrix moved to `macos-15`.
+  The follow-up verify run against `4f4428d` is the qualifying run.
 
 ### T21 — Switch the interactive command
 
