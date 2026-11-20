@@ -33,14 +33,86 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-- The native and Ratzilla previews stream against the same Python ACP mount. A PTY and Chromium each rendered an early delta before the final marker in a deterministic Pydantic AI turn. The browser rendered the disconnect state after server shutdown. Native stdio also streamed through the Python ACP server.
-- A macOS arm64 preview wheel installed in a clean Python 3.14 environment. The opt-in Python CLI launched it successfully with inherited terminal streams and Ctrl-C exit. The preview has its own version. Release version alignment and the cross-platform wheel matrix are pending.
-- The browser connected over HTTPS/WSS to the same-origin Python mount using a secure cookie. Missing-cookie admission failed and a reload reconnected with the cookie. The deployment owns login and principal resolution.
-- A saved session replayed across the two clients using the session ID and a workspace discovered via `session/list`. Both clients rendered each replayed message once. The preview reads the Python server's revisioned active-turn state. Interactive session management and mid-turn restart coverage remain open.
-- Shared editing now includes UTF-8 text, cursor movement, multiline input and submission history. Transcript layout caches off-screen rows. Queue and steering are available with preview commands, and a queued turn dispatched after an active turn in the native smoke. A native model and effort smoke changed both options against the Python adapter. Its model selector uses the model ID fallback because the Python server leaves the category unset. Retest performance after full feature parity.
-- Both targets sent text and binary embedded resources to an ACP agent that advertised them. Native stages files by path and the browser opens its file chooser. The native approval smoke delivered two concurrent requests and returned each selected option. The optimized Ratzilla bundle built and a Chromium smoke exercised typing, model changes and session listing.
-- Startup smoke on macOS arm64, an xterm-compatible 100×24 PTY, seven launches per case, one local WebSocket runtime. Median process-to-visible-draft was 499.7 ms for `hrns connect` (Textual) and 24.8 ms for the direct Rust debug binary. The first direct Rust launch took 844.9 ms. Native packaged launch, bare `hrns`, and long-stream p95 typing and scrolling remain part of qualification.
-- The Textual audit identified inactive legacy plugin-command UI, Textual-only renderer entry points, and a gap between the visible session-rename command and the mounted agent's capabilities. Preserve actual behavior and verify the advertised capabilities before assigning parity to those workflows. Also check whether MCP include/exclude filters are enforced at export or elsewhere.
+**Current state.** A working preview is on the `ratatui` branch through `6baaf0d`.
+Install the separate `hrns-tui` wheel and set `HRNS_RUST_TUI_PREVIEW=1` to
+preview the Python launch path. Textual still handles the default interactive
+launch. The optimized browser bundle builds into `rust/dist/`.
+[Build and launch details](ARCHITECTURE.md#rust-terminal-preview) ·
+[Browser deployment](docs/authentication.md#serve-the-ratzilla-client-with-acp-authentication)
+
+| Commit | Landed work |
+| --- | --- |
+| `8671f33` | Shared Ratatui composer and transcript, native stdio and WebSocket, Ratzilla WebSocket, ACP v1 streaming. |
+| `e74b370` | Maturin binary wheel and opt-in Python launcher using existing target and credential resolution. |
+| `f7ecdd6` | Session load and replay, workspace lookup, revisioned turn state, composer history, cached transcript layout, queue and steering, search and copy, model and effort options. |
+| `a97dcda` | Paginated session listing, plan and usage display, advertised command dispatch, concurrent approval handling, native and browser file attachments. |
+| `6baaf0d` | CI job for Rust formatting, native Clippy, and the WASM build. |
+
+### What was verified
+
+- Native PTY and Chromium smokes each saw a text delta before completion
+  under the same deterministic Pydantic AI workload. The native stdio smoke also streamed, and
+  the browser showed the disconnect state after the server stopped.
+- The macOS arm64 wheel installed in a clean Python 3.14 environment. The
+  opt-in launcher streamed and exited on Ctrl-C. The final rebuilt wheel
+  sent text and binary attachments through `hrns connect`.
+- The same-origin HTTPS/WSS browser smoke rejected a missing cookie,
+  accepted a secure cookie, and reconnected on reload with that cookie.
+  Login and principal resolution belong to the deployment.
+- Both targets loaded a saved session by ID without an explicit cwd, found
+  the workspace through `session/list`, and displayed each replayed
+  message once. Chromium also exercised draft editing, model selection
+  and session listing. Native exercised queue dispatch, model and effort
+  changes, and two concurrent ACP approvals.
+- Native paths and the browser file chooser each staged text and binary
+  attachments against an agent that advertised embedded context. The native
+  build, optimized Ratzilla build, Rust formatting and Clippy, `just check`,
+  and `just docs-build` passed locally. The hosted CI result remains to be
+  checked.
+- Startup smoke used macOS arm64, a 100×24 xterm-compatible PTY, seven
+  launches per case, and one local WebSocket runtime. Median
+  process-to-visible-draft was 499.7 ms for Textual `hrns connect` and
+  24.8 ms for the direct Rust debug binary. The first direct Rust launch
+  took 844.9 ms. Packaged startup, bare `hrns`, and long-stream p95 typing
+  and scrolling are still needed for release qualification.
+
+### Next implementation pass
+
+Start the remaining T05 wire checks alongside the connection work. Finish
+the session-state checks before qualifying turn reconciliation, and confirm
+each extension's wire contract before implementing its UI.
+
+1. **Make the connection path recoverable (T04, T06, T07).** Verify the
+   origin, expired-credential and native bearer cases. Exercise built-in
+   stdio startup and child cleanup through the preview launcher. Add
+   profile management and reconnect on both targets, preserving draft
+   input and connection identity after a failed attempt.
+2. **Close session and turn lifecycle gaps (T08, T09).** Add in-app
+   create, load, close and delete controls with capability checks. Verify
+   attachment to an already-running session, pending approvals after
+   reconnect, cancellation, and queue pause/resume without replaying a
+   submitted prompt. The current Python mount supports load and exposes
+   session titles, so verify the actual wire contract before adding a
+   resume or rename action.
+3. **Finish the protocol inventory and interaction paths (T05, T13–T17).**
+   Check the pinned SDK against the deployed elicitation, provider and MCP
+   methods. Restore approval modes, forms and provider login/setup.
+   Implement and verify native `--client-io`, which the preview launcher
+   currently rejects. Define how the remote deployment scopes browser
+   workspace operations and MCP exports, then verify permissions, consent,
+   and tool filtering end to end.
+4. **Close UI and extension parity (T10–T12, T18).** Finish formatted
+   transcript and expandable tool output, completion and skill mentions,
+   activity panels and persisted settings. Port supported command and
+   tool renderers. The Textual audit found inactive legacy plugin-command
+   UI and Textual-specific renderer entry points. Use working Textual
+   behavior and agent-advertised capabilities as the parity baseline.
+5. **Qualify both release artifacts (T01, T03, T19–T21).** Capture the
+   long-stream Textual baseline while feature work proceeds. Then compare
+   packaged native and browser release builds. Align versions and build
+   the platform wheel matrix, verify full/client-only/server-only
+   installs, and publish the matching browser bundle. Change the default
+   CLI only after both targets pass the parity and performance checks.
 
 ## Tasks
 
@@ -211,7 +283,11 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 | Existing plugins return Textual widget objects | T05, T18 | Inventory and a demonstrated behavioral replacement for each supported renderer workflow |
 | Python dispatch or long-history rendering erases performance gains | T01, T12, T19 | Repeatable measurements through the shipped entry points |
 
-T01 and T02 can proceed independently. After T02, native installation and browser authentication can proceed independently. Keep session restoration and prompt lifecycle work in dependency order. Transcript rendering and composer gestures can proceed independently once prompt state is stable.
+The preview proves the base transport on both targets. Benchmarking (T01),
+release version coordination (T03), and the remaining browser authentication
+checks (T04) can proceed alongside the connection work. Keep session
+restoration ahead of turn reconciliation. Transcript and composer parity can
+proceed alongside the interaction work once the turn state is stable.
 
 ## References
 
