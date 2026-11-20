@@ -429,7 +429,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 - Removal inventory, measured against `b5c9b9b` plus the T20 packaging change.
   Shared modules stay: everything `hrns run`, `hrns connect`, `hrns login`,
   `hrns serve`, `hrns agent` and `hrns acp` reach must survive.
-  - Delete `hrns_slim/hrns/client/tui/`: 38 modules and 11 828 lines covering
+  - Delete `hrns_slim/hrns/client/tui/`: 38 modules and 12 456 lines covering
     `app.py`, `chat/`, `panels/`, dialogs, composer, transcript, status,
     providers, extensions and the connection screen.
   - `hrns_slim/pyproject.toml`: drop `textual>=8.2,<9` from the `client` extra.
