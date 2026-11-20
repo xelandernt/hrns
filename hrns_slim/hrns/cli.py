@@ -492,10 +492,7 @@ def _config(args: SimpleNamespace) -> HrnsConfig:
 
 def _require_client_extra() -> None:
     """Fail with an install hint instead of an ImportError from a missing extra."""
-    if all(
-        importlib.util.find_spec(name) is not None
-        for name in ("textual", "acp", "websockets", "fastmcp")
-    ):
+    if all(importlib.util.find_spec(name) is not None for name in ("acp", "websockets", "fastmcp")):
         return
     raise HrnsClientError(
         "This command needs the client extra. Install it with `pip install 'hrns-slim[client]'`."
@@ -1040,47 +1037,31 @@ def _initial_connection(
 def _command_connect(args: SimpleNamespace) -> int:
     _require_client_extra()
     config = _config(args)
-    from .client.rust_preview import native_executable
+    from .client.rust_preview import native_executable, run_rust_preview
 
-    # The release installs the native client, so it is the default. A source install
-    # without the wheel, or HRNS_TEXTUAL=1, keeps the Textual client available.
-    use_native = os.environ.get("HRNS_RUST_TUI_PREVIEW") == "1" or (
-        os.environ.get("HRNS_TEXTUAL") != "1" and native_executable() is not None
-    )
-    if use_native:
-        from .client.rust_preview import run_rust_preview
-
-        target, reason = _initial_connection(config, args)
-        if target is None:
-            raise HrnsClientError(reason or "The Rust preview needs a connection target.")
-        # Precedence matches the Textual client: CLI flag, then profile, then [tui].
-        client_io = args.client_io or target.profile.client_io or config.tui.client_io
-        return run_rust_preview(
-            target,
-            session=args.session,
-            explicit_cwd=args.cwd,
-            client_io=client_io or "all",
-            theme=config.tui.theme,
-            permission_mode=config.tui.permission_mode,
-            config_file=str(config.config_file) if config.config_file else None,
+    if native_executable() is None:
+        raise HrnsClientError(
+            "The native client is not installed. Install it with "
+            "`python -m pip install hrns-tui`, or run `just native-install` in a source "
+            "checkout."
         )
-
-    from .client.tui.app import run_terminal
-
-    # These targets need no credential lookup to validate their CLI options.
-    explicit_target = (
-        _initial_connection(config, args) if args.stdio or args.profile or args.server else None
+    target, reason = _initial_connection(config, args)
+    if target is None:
+        raise HrnsClientError(reason or "The native client needs a connection target.")
+    # Record the identity before exec. A profile or the built-in runtime reopens on a
+    # bare launch; an ad-hoc command line has no document entry to reopen.
+    config.remember_connection(config.connection_identity(target.profile))
+    # Precedence: CLI flag, then profile, then [tui].
+    client_io = args.client_io or target.profile.client_io or config.tui.client_io
+    return run_rust_preview(
+        target,
+        session=args.session,
+        explicit_cwd=args.cwd,
+        client_io=client_io or "all",
+        theme=config.tui.theme,
+        permission_mode=config.tui.permission_mode,
+        config_file=str(config.config_file) if config.config_file else None,
     )
-    return run_terminal(
-        config,
-        resolve_initial_target=lambda: explicit_target or _initial_connection(config, args),
-        initial_session=args.session,
-        initial_session_cwd=args.cwd,
-        client_io=args.client_io,
-    )
-
-
-# ------------------------------------------------------------------- output
 
 
 def _mcp_config(args: SimpleNamespace) -> tuple[HrnsConfig, Path]:

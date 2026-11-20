@@ -33,13 +33,13 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** The native client is on the `ratatui` branch through
-`1497edb`. The release installs the `hrns-tui` wheel, and the Python dispatcher
-launches it by default; `HRNS_TEXTUAL=1` keeps Textual available for comparison
-and for source installs, and `HRNS_RUST_TUI_PREVIEW=1` forces native. Native now
-covers approvals with modes, agent forms, client I/O, themes, settings and
-remote provider routing. The browser omits client I/O and MCP by design. The
-optimized browser bundle builds into `rust/dist/`.
+**Current state.** The native client is the only interactive client. The Python
+dispatcher requires the installed `hrns-tui` wheel and reports an install hint when it is
+missing; the Textual package and its dependency are gone. Native covers approvals with
+modes, agent forms, client I/O, themes, settings, remote provider routing and
+MCP-over-ACP export through a Python sidecar. The browser omits client I/O and MCP by
+design. The optimized browser bundle builds into `rust/dist/`. Only the hosted artifact
+run and a final real-workload release smoke remain.
 [Build and launch details](ARCHITECTURE.md#rust-terminal-preview) ·
 [Browser deployment](docs/authentication.md#serve-the-ratzilla-client-with-acp-authentication)
 
@@ -222,11 +222,10 @@ why the canvas backend was adopted.
 The connection, session, interaction and presentation paths now have parity on
 both targets. Three items remain before release.
 
-1. **Run the artifact pipeline (T20, T21).** CI now has native wheel and web
-   bundle jobs and the publish workflow rewrites the crate version to the tag.
-   Run them, install each wheel in an empty environment, serve the bundle
-   against an authenticated runtime, and confirm the same-version metadata.
-   Then remove the Textual client and its dependency in one mechanical change.
+1. **Run the hosted artifact pipeline (T20).** CI has native wheel and web bundle
+   jobs and the publish workflow rewrites the crate version to the tag and injects the
+   `hrns-tui` pin. Run it, confirm the same-version metadata, install each wheel in an
+   empty environment, and serve the bundle against an authenticated runtime.
 2. **Finish the release smoke (T19).** Native, packaged and canvas-bundle
    results are recorded below. Repeat once with a real long-stream Pydantic AI
    workload before tagging.
@@ -413,18 +412,20 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
   version in an empty venv on macOS arm64; all four markers resolved for their
   target platforms and skipped Linux arm64 and 32-bit Windows; `hrns-tui
   --version` reported the release version; `hrns-slim[server]` installed without
-  `textual` or `hrns-tui`; `hrns-slim[client]` resolved with `textual`; and
-  `just native-install` plus the dispatcher selected native, with
-  `HRNS_TEXTUAL=1` still forcing Textual.
+  `textual` or `hrns-tui`; `hrns-slim[client]` resolved with `textual` before the
+  cutover and no longer includes it; and `just native-install` plus the dispatcher
+  selected native.
 - The jobs still need one hosted run.
 
 ### T21 — Switch the interactive command
 
-- [ ] **Acceptance** Bare `hrns` and `hrns connect` launch Ratatui. The paired browser artifact is ready for the same release. Retire Textual and its dependency after checking callers. Keep shared Python modules used by `hrns run`.
+- [x] **Acceptance** Bare `hrns` and `hrns connect` launch Ratatui. The paired browser artifact is ready for the same release. Retire Textual and its dependency after checking callers. Keep shared Python modules used by `hrns run`.
 - **Verify** Run `just check`, `just docs-build`, Rust and WASM CI checks, and installed-artifact smokes for interactive launch, a headless prompt and an agent launch. Repeat the deployed browser smoke with the final bundle.
-- The dispatcher now prefers the installed native wheel and keeps Textual as a
-  fallback (`HRNS_TEXTUAL=1`). Removing Textual and the wheel-absent path waits
-  for T20.
+- The dispatcher always launches the native wheel and reports an install hint when it is
+  missing. It records the profile or builtin identity through `HrnsConfig.save()` so a
+  bare launch still reopens the last connection. The Textual package, its dependency,
+  its settings branches and `client/renderers.py` are removed; shared client modules used
+  by `hrns run` remain.
 - Removal inventory, measured against `b5c9b9b` plus the T20 packaging change.
   Shared modules stay: everything `hrns run`, `hrns connect`, `hrns login`,
   `hrns serve`, `hrns agent` and `hrns acp` reach must survive.
@@ -465,7 +466,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 **Release checkpoint**
 
-- [ ] Both targets pass their parity checklist, startup and responsiveness checks, and installed-artifact verification at the same version.
+- [ ] Both targets pass their parity checklist, startup and responsiveness checks, and installed-artifact verification at the same version. Only the hosted run and the real-workload smoke remain.
 
 ## Early decisions and risks
 
@@ -475,12 +476,12 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 | Browser cannot supply an arbitrary bearer header | Resolved (T04) | Same-origin cookie and origin checks owned by the deployment; browser advertises no host capabilities |
 | New wheels complicate the current Python release pipeline | Resolved (T03, T20) | Clean wheel install and launch; CI wheel matrix and tag-driven crate version added |
 | Native-only MCP export has no Rust implementation | Resolved (T16) | Sidecar proxy exercised for declarations, filters, progress, consent and failure; built-in agent keeps server-side tools |
+| Platforms without a native wheel lose the interactive client | Resolved (T21) | The wrapper's marker skips `hrns-tui` there; `hrns`/`connect` fail with an install hint while non-interactive commands keep working |
 | Existing plugins and custom renderers | Out of scope | Advertised agent commands and the built-in presentation remain |
 | Python dispatch or long-history rendering erases performance gains | Resolved (T01, T19) | Native and browser measurements are inside the targets; canvas replaced DOM for long streams |
 
-The transport, interaction and presentation slices are complete. What remains
-is the artifact pipeline run and the final release smoke. Textual is still
-shipped as the fallback until the wheel and bundle pass that release check.
+The transport, interaction and presentation slices are complete, and Textual has been
+removed. What remains is the hosted artifact pipeline run and the final release smoke.
 
 ## References
 

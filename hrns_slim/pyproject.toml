@@ -23,7 +23,6 @@ dependencies = [
 [tool.hatch.metadata.hooks.uv-dynamic-versioning.optional-dependencies]
 client = [
     "agent-client-protocol>=1.0.0,<2",
-    "textual>=8.2,<9",
     "websockets>=13,<16",
     "PyYAML>=6,<7",
     "fastmcp-slim[client]>=3.3,<5",

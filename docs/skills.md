@@ -241,7 +241,6 @@ the dedicated bundled-file tools require a model-loadable capability.
 | The default composition | `hrns.server.agent.build_agent` |
 | The ACP catalog and prompt reference | `hrns.server.acp.adapter` |
 | The client-side `$name` scanner | `hrns.client.skills` |
-| The terminal workflow | `hrns.client.tui.chat.prompts.PromptWorkflow` |
 
 `Skills` is a capability in the same sense as [`Coder` and `Todo`](capabilities.md): if
 you build your own agent, add it to the capability list and the adapter finds it, so the

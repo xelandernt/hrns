@@ -1,7 +1,7 @@
 """Typed events published by :class:`~hrns.client.client.HrnsAcpClient`.
 
-Events are plain frozen dataclasses so both the Textual UI and the headless
-runner can consume them without depending on UI types or on live ACP schema
+Events are plain frozen dataclasses so the native UI and the headless runner
+can consume them without depending on UI types or on live ACP schema
 objects.
 """
 

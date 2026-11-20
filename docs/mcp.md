@@ -51,7 +51,7 @@ outer codes:
 `hrns agent` advertises `mcpCapabilities.acp`, `http`, and `sse`. A client exports servers
 only when the agent advertises `acp`; otherwise the declarations are omitted entirely.
 
-The Textual client hosts the provider in-process. The native Ratatui client starts
+The headless runner hosts the provider in-process. The native Ratatui client starts
 `python -m hrns.client.mcp_sidecar` with the resolved configuration and forwards
 `mcp/message` over a newline-delimited JSON pipe, so the same provider, OAuth token
 store, consent rules and health checks apply. The native client only exports to

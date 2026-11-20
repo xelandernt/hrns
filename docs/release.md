@@ -81,9 +81,10 @@ For Python tooling without the agent:
 pip install 'hrns-slim[client]==0.1.0'
 ```
 
-The native executable is optional. Without it, `hrns` and `hrns connect` fall back to
-the Textual client. `HRNS_TEXTUAL=1` forces Textual; `HRNS_RUST_TUI_PREVIEW=1` forces
-the native client and reports a missing wheel.
+Bare `hrns` and `hrns connect` require the native executable. Without it they fail
+with an install hint; the non-interactive commands (`run`, `serve`, `agent`, `acp`,
+`login`, `config`, `profiles`, `mcp`, `clean`) still work. Platforms without a native
+wheel skip the `hrns-tui` requirement and therefore have no full-screen client.
 
 The wrapper's native requirement carries platform markers, so `pip install hrns` adds
 the binary on Linux x64, macOS arm64/x64 and Windows x64. Other platforms install the
@@ -131,7 +132,7 @@ unless `hrns-slim` declares no native dependency. The `pip install --find-links 
 step resolves the native wheel from `dist/` exactly as PyPI would. For local development,
 run `just native-install` after `just install` (a `uv sync` drops packages outside the
 lockfile); it builds the release wheel with Maturin and installs it into the project
-environment, after which bare `hrns` selects it and `HRNS_TEXTUAL=1` forces Textual.
+environment, after which bare `hrns` selects it.
 
 Install in an empty environment, launch the interactive client against the built-in
 agent, run one headless prompt, and serve the unpacked bundle against the deployed ACP

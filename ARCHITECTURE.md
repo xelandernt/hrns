@@ -81,12 +81,10 @@ spawned in its own process group, its output is capped, and release or
 disconnect kills the group. Both targets treat unsupported client requests as
 `method_not_found`, and the browser's absent capabilities are never advertised.
 
-The Python dispatcher launches an installed native wheel by default, because the
-release installs it with the Python client. `HRNS_TEXTUAL=1` keeps the Textual
-client available for comparison and for source installs without the wheel;
-`HRNS_RUST_TUI_PREVIEW=1` forces native and reports a missing wheel. The
-dispatcher resolves the target and existing credential references before
-replacing the Python process on POSIX. It also resolves `client_io` with the
+The Python dispatcher always launches the installed native wheel; the release
+installs it with the Python client. A source checkout without the wheel reports an
+install hint instead of opening a Python terminal. The dispatcher resolves the target
+and existing credential references before replacing the Python process on POSIX. It also resolves `client_io` with the
 documented precedence (CLI, profile, `[tui]`) and passes the TOML theme and
 permission mode as launch defaults. The native process
 inherits the terminal and owns terminal restoration and the ACP connection.
@@ -615,43 +613,46 @@ are read by every entry point, so the same variable means the same thing in the
 terminal, the built-in agent, and the HTTP server.
 
 `Profile` and `TuiSettings` are plain models inside the same document, so `hrns` needs no
-facade: `HrnsConfig.profile` is the map the picker lists, `HrnsConfig.tui` is what the
-settings dialog edits, and `HrnsConfig.save()` writes the whole effective document to the
-user file (defaults omitted). Project documents are read, never written.
+facade: `HrnsConfig.profile` is the profile map the dispatcher resolves, `HrnsConfig.tui`
+seeds the terminal's theme, permission mode and client I/O, and `HrnsConfig.save()` writes
+the whole effective document to the user file (defaults omitted). The native client keeps
+changes it makes in its own state file; MCP `always_allow` consent is written through
+`HrnsConfig.save()`. Project documents are read, never written.
 
-## Reopening the last connection
+## Launching the terminal
 
-The terminal renders a focused composer before resolving the initial connection.
-After the first frame, a Textual worker resolves the target and imports the ACP
-client and chat screen off the UI thread, then opens the connection and session
-asynchronously. Enter keeps the draft while startup is in progress. The draft
-moves into the chat composer when the session opens. If auto-connect fails, the
-picker shows the error and the draft is retained for the next successful
-connection. The local model catalog warms after chat or the picker is shown.
+Bare `hrns`, `hrns connect` and the connection flags enter the Python dispatcher. It
+resolves the target and existing credential reference, records the connection identity,
+and replaces itself with the installed `hrns-tui` executable on POSIX. The native process
+owns the terminal, the composer, the ACP connection and terminal restoration. A missing
+wheel is an install error: there is no Python terminal fallback. Platforms without a
+native wheel keep every non-interactive command but cannot open the full-screen client.
+
+The native client draws an editable composer immediately and connects on its worker
+thread. The draft stays in place while startup is in progress and moves into the session
+when it opens. A failed auto-connect leaves the draft and the disconnected state visible;
+`Ctrl-R` retries with the same target. The browser runs the same shared state against an
+authenticated remote mount.
 
 A bare `hrns` reconnects to the connection this terminal used last instead of always
 defaulting to the built-in model. The identity is one string in the document's `[tui]`
-section, written by the same `HrnsConfig.save()` that persists theme and permission
-mode: `builtin` for the built-in runtime, a profile name for a saved stdio or remote target.
-An ad-hoc `--server`/`--stdio` command line is not remembered, because it belongs to no
-file and there would be nothing to reopen. The identity never carries a working directory:
-a reopened connection starts where the new launch stands, or where its profile says.
+section, written by the Python dispatcher through `HrnsConfig.save()`: `builtin` for the
+built-in runtime, a profile name for a saved stdio or remote target. An ad-hoc
+`--server`/`--stdio` command line is not remembered, because it belongs to no file and
+there would be nothing to reopen. The identity never carries a working directory: a
+reopened connection starts where the new launch stands, or where its profile says.
 
-Remembering happens once a session exists, so a connection that fails at `session/new`
-does not become the next launch's default. A missing remembered profile or an
-unreachable endpoint opens the picker with the reason in its status line. A
-profile deleted from disk is forgotten. When the remembered entry still exists,
-the picker selects it so Enter can retry the connection.
+A missing remembered profile or an unreachable endpoint opens the native client with the
+reason in the transcript. A profile deleted from disk is forgotten. `_remembered_target()`
+in `cli.py` owns the identity→target mapping and only the interactive command uses it;
+`hrns run` takes its target from its own arguments every time.
 
-`_remembered_target()` in `cli.py` owns the identity→target mapping and only the terminal
-uses it: `hrns run` takes its target from its own arguments every time.
-
-When `hrns connect --session ID` opens a remote session without `--cwd`, the terminal
+When `hrns connect --session ID` opens a remote session without `--cwd`, the native client
 finds the session's stored cwd through unfiltered, paginated `session/list` before
 loading its history. This cwd also becomes the connection's displayed workspace.
 An explicit `--cwd` goes directly to `session/load`, where the server validates it
 against the stored cwd. If listing is unavailable or the session is absent from
-the listing, the terminal asks for `--cwd`. New sessions retain profile and local
+the listing, the client asks for `--cwd`. New sessions retain profile and local
 cwd defaults.
 
 ## Todos
