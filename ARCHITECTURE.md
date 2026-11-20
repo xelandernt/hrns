@@ -43,6 +43,24 @@ unchanged.
 for its command implementations, so the codebase has no `argparse` dependency at
 all.
 
+## Rust terminal preview
+
+The preview in `rust/` shares its composer, transcript and ACP v1 client across
+native Ratatui and Ratzilla. The protocol uses the official Rust ACP SDK. Native
+launches stdio agents using the SDK and connects to remote agents with
+Tungstenite. The browser uses its WebSocket API through `ws_stream_wasm`.
+Both WebSocket adapters send one SDK JSON-RPC frame per text message through
+the Python ACP mount. Host arguments and browser services stay outside the
+shared application state. ACP work is driven on a native worker thread or
+a browser task so the composer renders independently of connection setup.
+
+Build the terminal with `cargo build --locked --manifest-path rust/Cargo.toml`
+and the browser with `trunk build --locked` from `rust/` with
+`wasm32-unknown-unknown` installed. The preview expects a remote ACP mount at
+the same origin under `/acp/agent`. For local development, set the `endpoint`
+and `cwd` page query parameters to a WebSocket URL and remote workspace.
+Put any deployment authentication upstream of the browser connection.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`

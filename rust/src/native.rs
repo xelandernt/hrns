@@ -1,0 +1,242 @@
+use std::env;
+use std::io::{self, stdout};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::channel::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+use crate::acp::{self, Actions, Event, Events};
+use crate::app::{App, Key};
+use crate::socket;
+
+const HELP: &str = "Usage: hrns-tui [--cwd PATH] [--server URL | --stdio COMMAND [ARGS...]]
+       Native WebSocket authentication reads HRNS_TUI_TOKEN.
+       With no transport option, starts the built-in hrns agent.";
+
+enum Target {
+    Remote(String),
+    Stdio { command: String, args: Vec<String> },
+}
+
+struct Options {
+    cwd: PathBuf,
+    target: Target,
+}
+
+impl Options {
+    fn parse() -> Result<Option<Self>, String> {
+        let mut argv = env::args().skip(1);
+        let mut cwd = None;
+        let mut target = None;
+        while let Some(arg) = argv.next() {
+            match arg.as_str() {
+                "--help" | "-h" => return Ok(None),
+                "--cwd" if cwd.is_none() => {
+                    cwd = Some(PathBuf::from(argv.next().ok_or("--cwd requires a path")?));
+                }
+                "--server" if target.is_none() => {
+                    let url = argv.next().ok_or("--server requires a URL")?;
+                    if !url.starts_with("ws://") && !url.starts_with("wss://") {
+                        return Err("Expected a ws:// or wss:// endpoint".into());
+                    }
+                    target = Some(Target::Remote(url));
+                }
+                "--stdio" if target.is_none() => {
+                    target = Some(Target::Stdio {
+                        command: argv.next().ok_or("--stdio requires a command")?,
+                        args: argv.by_ref().collect(),
+                    });
+                }
+                _ => return Err(format!("Unknown or repeated option {arg:?}\n{HELP}")),
+            }
+        }
+        let cwd = cwd
+            .map(std::path::absolute)
+            .unwrap_or_else(env::current_dir)
+            .map_err(|error| error.to_string())?;
+        let target = target.unwrap_or_else(|| Target::Stdio {
+            command: "hrns".into(),
+            args: vec!["agent".into(), "--cwd".into(), cwd.display().to_string()],
+        });
+        Ok(Some(Self { cwd, target }))
+    }
+
+    fn label(&self) -> String {
+        let location = match &self.target {
+            Target::Remote(url) => url
+                .split_once("://")
+                .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+                .and_then(|authority| authority.rsplit('@').next())
+                .unwrap_or("remote"),
+            Target::Stdio { .. } => "local",
+        };
+        format!("{location} · {}", self.cwd.display())
+    }
+}
+
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args()
+        .nth(1)
+        .as_deref()
+        .is_some_and(|arg| matches!(arg, "--version" | "-V"))
+    {
+        println!("hrns-tui {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let Some(options) = Options::parse()? else {
+        println!("{HELP}");
+        return Ok(());
+    };
+
+    let (action_tx, action_rx) = mpsc::unbounded();
+    let (event_tx, mut event_rx) = mpsc::unbounded();
+    let destination = options.label();
+    let (shutdown, stop) = futures::channel::oneshot::channel();
+    let mut terminal = ratatui::try_init()?;
+    let worker = std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async {
+                    use futures::{FutureExt, select_biased};
+                    select_biased! {
+                        _ = stop.fuse() => Ok(()),
+                        result = connect(options, action_rx, event_tx.clone()).fuse() => result,
+                    }
+                })
+            });
+        finish(&event_tx, result);
+    });
+    let mut app = App::new(destination, action_tx);
+    let result = (|| -> io::Result<()> {
+        crossterm::execute!(stdout(), EnableBracketedPaste)?;
+        let mut dirty = true;
+        loop {
+            for _ in 0..256 {
+                let Ok(update) = event_rx.try_recv() else {
+                    break;
+                };
+                app.event(update);
+                dirty = true;
+            }
+            if dirty {
+                terminal.draw(|frame| app.draw(frame))?;
+                dirty = false;
+            }
+            if !event::poll(Duration::from_millis(16))? {
+                continue;
+            }
+            match event::read()? {
+                TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => {
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        break;
+                    }
+                    if let Some(key) = translate(key) {
+                        app.key(key);
+                        dirty = true;
+                    }
+                }
+                TerminalEvent::Paste(text) => {
+                    app.paste(&text);
+                    dirty = true;
+                }
+                TerminalEvent::Resize(_, _) => dirty = true,
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+    let paste = crossterm::execute!(stdout(), DisableBracketedPaste);
+    let restore = ratatui::try_restore();
+    let _ = shutdown.send(());
+    let _ = worker.join();
+    result?;
+    paste?;
+    restore?;
+    Ok(())
+}
+
+async fn connect(options: Options, actions: Actions, events: Events) -> Result<(), String> {
+    match options.target {
+        Target::Stdio { command, args } => {
+            let agent = AcpAgent::new(AcpAgentConfig::new(command).args(args));
+            acp::connect(agent, options.cwd, actions, events)
+                .await
+                .map_err(|error| error.message)
+        }
+        Target::Remote(url) => {
+            let mut request = url
+                .into_client_request()
+                .map_err(|_| "Invalid ACP endpoint")?;
+            if let Ok(token) = env::var("HRNS_TUI_TOKEN") {
+                let mut header = format!("Bearer {token}")
+                    .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
+                    .map_err(|_| "Invalid ACP bearer token")?;
+                header.set_sensitive(true);
+                request.headers_mut().insert("authorization", header);
+            }
+            let (ws, _) = tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio_tungstenite::connect_async(request),
+            )
+            .await
+            .map_err(|_| "Timed out connecting to the ACP endpoint")?
+            .map_err(|error| match error {
+                tokio_tungstenite::tungstenite::Error::Http(response) => {
+                    format!("WebSocket upgrade rejected ({})", response.status())
+                }
+                _ => "Could not open the ACP WebSocket".into(),
+            })?;
+            let (transport, bridge) = Channel::duplex();
+            let (wire, session) = futures::join!(
+                socket::pump(ws, bridge, |text| Message::Text(text.into()), message_text),
+                acp::connect(transport, options.cwd, actions, events),
+            );
+            wire?;
+            session.map_err(|error| error.message)
+        }
+    }
+}
+
+fn message_text(message: Message) -> Result<Option<String>, String> {
+    match message {
+        Message::Text(text) => Ok(Some(text.to_string())),
+        Message::Binary(_) => Err("The ACP endpoint sent a binary WebSocket frame".into()),
+        _ => Ok(None),
+    }
+}
+
+fn finish(events: &Events, result: Result<(), String>) {
+    if let Err(error) = result {
+        let _ = events.unbounded_send(Event::Error(error));
+    }
+    let _ = events.unbounded_send(Event::Disconnected);
+}
+
+fn translate(key: KeyEvent) -> Option<Key> {
+    match key.code {
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Key::Newline),
+        KeyCode::Enter => Some(Key::Enter),
+        KeyCode::Backspace => Some(Key::Backspace),
+        KeyCode::PageUp => Some(Key::ScrollUp),
+        KeyCode::PageDown => Some(Key::ScrollDown),
+        KeyCode::Esc => Some(Key::Escape),
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(Key::Text(c))
+        }
+        _ => None,
+    }
+}
