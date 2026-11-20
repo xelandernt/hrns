@@ -13,7 +13,9 @@ bundle at the same version.
 | `hrns-web.zip` | Optimized Ratzilla bundle built from `rust/`. |
 
 The publish workflow rewrites the `hrns-tui` crate version to the release tag before
-Maturin builds, so every wheel reports the same version as the Python packages.
+Maturin builds, so every wheel reports the same version as the Python packages. Register
+trusted publishing for both `hrns` and `hrns-tui` against the same `pypi` environment, or
+move the native wheels to their own publish job when the projects differ.
 
 ## Install
 

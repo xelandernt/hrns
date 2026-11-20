@@ -72,7 +72,7 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
       - uses: taiki-e/install-action@v2
         with:
-          tool: trunk
+          tool: trunk@0.21.14
       - run: trunk build --locked --release
       - uses: actions/upload-artifact@v7
         with:
