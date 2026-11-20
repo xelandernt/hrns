@@ -33,7 +33,7 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** A working preview is on the `ratatui` branch through `f6bc1c8`.
+**Current state.** A working preview is on the `ratatui` branch through `53784b3`.
 Install the separate `hrns-tui` wheel and set `HRNS_RUST_TUI_PREVIEW=1` to
 preview the Python launch path. Textual still handles the default interactive
 launch. The optimized browser bundle builds into `rust/dist/`.
@@ -52,6 +52,7 @@ launch. The optimized browser bundle builds into `rust/dist/`.
 | `b06e8d8` | Turn lifecycle verification for steering, queueing, cancellation, reconnect and clear. |
 | `c0e6e2f` | Markdown transcript rendering, status-aware expandable tool calls, and scroll anchoring across streaming and resize. |
 | `f6bc1c8` | Slash-command and `$skill` completion, skill catalogs from session metadata, and prompt skill references. |
+| `53784b3` | Activity sidebar with plan, usage, skills and recent events; persisted sidebar, tool and reasoning preferences on both targets. |
 
 ### What was verified
 
