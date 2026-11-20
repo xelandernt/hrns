@@ -4,17 +4,19 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
+use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::channel::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use crate::acp::{self, Actions, Event, Events};
+use crate::acp::{self, Actions, Event, Events, SessionTarget};
 use crate::app::{App, Key};
 use crate::socket;
 
-const HELP: &str = "Usage: hrns-tui [--cwd PATH] [--server URL | --stdio COMMAND [ARGS...]]
+const HELP: &str =
+    "Usage: hrns-tui [--cwd PATH] [--session ID] [--server URL | --stdio COMMAND [ARGS...]]
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
 
@@ -24,7 +26,7 @@ enum Target {
 }
 
 struct Options {
-    cwd: PathBuf,
+    session: SessionTarget,
     target: Target,
 }
 
@@ -33,11 +35,19 @@ impl Options {
         let mut argv = env::args().skip(1);
         let mut cwd = None;
         let mut target = None;
+        let mut session = None;
         while let Some(arg) = argv.next() {
             match arg.as_str() {
                 "--help" | "-h" => return Ok(None),
                 "--cwd" if cwd.is_none() => {
                     cwd = Some(PathBuf::from(argv.next().ok_or("--cwd requires a path")?));
+                }
+                "--session" if session.is_none() => {
+                    session = Some(
+                        argv.next()
+                            .filter(|id| !id.is_empty())
+                            .ok_or("--session requires an ID")?,
+                    );
                 }
                 "--server" if target.is_none() => {
                     let url = argv.next().ok_or("--server requires a URL")?;
@@ -55,15 +65,20 @@ impl Options {
                 _ => return Err(format!("Unknown or repeated option {arg:?}\n{HELP}")),
             }
         }
-        let cwd = cwd
-            .map(std::path::absolute)
-            .unwrap_or_else(env::current_dir)
-            .map_err(|error| error.to_string())?;
+        let cwd = match cwd {
+            Some(cwd) if matches!(target, Some(Target::Remote(_))) => Some(cwd),
+            Some(cwd) => Some(std::path::absolute(cwd).map_err(|error| error.to_string())?),
+            None if session.is_some() && matches!(target, Some(Target::Remote(_))) => None,
+            None => Some(env::current_dir().map_err(|error| error.to_string())?),
+        };
         let target = target.unwrap_or_else(|| Target::Stdio {
             command: "hrns".into(),
-            args: vec!["agent".into(), "--cwd".into(), cwd.display().to_string()],
+            args: vec!["agent".into()],
         });
-        Ok(Some(Self { cwd, target }))
+        Ok(Some(Self {
+            session: SessionTarget { cwd, session },
+            target,
+        }))
     }
 
     fn label(&self) -> String {
@@ -75,7 +90,7 @@ impl Options {
                 .unwrap_or("remote"),
             Target::Stdio { .. } => "local",
         };
-        format!("{location} · {}", self.cwd.display())
+        location.to_owned()
     }
 }
 
@@ -93,6 +108,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
+    if matches!(options.target, Target::Stdio { .. })
+        && let Some(cwd) = &options.session.cwd
+    {
+        env::set_current_dir(cwd)?;
+    }
     let (action_tx, action_rx) = mpsc::unbounded();
     let (event_tx, mut event_rx) = mpsc::unbounded();
     let destination = options.label();
@@ -142,6 +162,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if let Some(key) = translate(key) {
                         app.key(key);
+                        if let Some(text) = app.take_clipboard()
+                            && crossterm::execute!(
+                                stdout(),
+                                CopyToClipboard::to_clipboard_from(text)
+                            )
+                            .is_err()
+                        {
+                            app.event(Event::Error(
+                                "Could not copy to the terminal clipboard".into(),
+                            ));
+                        }
                         dirty = true;
                     }
                 }
@@ -169,7 +200,7 @@ async fn connect(options: Options, actions: Actions, events: Events) -> Result<(
     match options.target {
         Target::Stdio { command, args } => {
             let agent = AcpAgent::new(AcpAgentConfig::new(command).args(args));
-            acp::connect(agent, options.cwd, actions, events)
+            acp::connect(agent, options.session, actions, events)
                 .await
                 .map_err(|error| error.message)
         }
@@ -177,6 +208,11 @@ async fn connect(options: Options, actions: Actions, events: Events) -> Result<(
             let mut request = url
                 .into_client_request()
                 .map_err(|_| "Invalid ACP endpoint")?;
+            let uri = request.uri();
+            let loopback = matches!(uri.host(), Some("127.0.0.1" | "localhost" | "[::1]"));
+            if uri.scheme_str() != Some("wss") && !loopback {
+                return Err("Use wss:// for remote ACP connections".into());
+            }
             if let Ok(token) = env::var("HRNS_TUI_TOKEN") {
                 let mut header = format!("Bearer {token}")
                     .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
@@ -199,7 +235,7 @@ async fn connect(options: Options, actions: Actions, events: Events) -> Result<(
             let (transport, bridge) = Channel::duplex();
             let (wire, session) = futures::join!(
                 socket::pump(ws, bridge, |text| Message::Text(text.into()), message_text),
-                acp::connect(transport, options.cwd, actions, events),
+                acp::connect(transport, options.session, actions, events),
             );
             wire?;
             session.map_err(|error| error.message)
@@ -227,6 +263,13 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Key::Newline),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace => Some(Key::Backspace),
+        KeyCode::Delete => Some(Key::Delete),
+        KeyCode::Left => Some(Key::Left),
+        KeyCode::Right => Some(Key::Right),
+        KeyCode::Home => Some(Key::Home),
+        KeyCode::End => Some(Key::End),
+        KeyCode::Up => Some(Key::HistoryUp),
+        KeyCode::Down => Some(Key::HistoryDown),
         KeyCode::PageUp => Some(Key::ScrollUp),
         KeyCode::PageDown => Some(Key::ScrollDown),
         KeyCode::Esc => Some(Key::Escape),

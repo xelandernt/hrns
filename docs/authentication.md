@@ -50,6 +50,26 @@ If a mount omits `authenticate`, it admits callers with principal `None`. Your s
 still receives that value and decides whether anonymous access is allowed. Returning
 `None` from a configured authentication callback rejects admission.
 
+
+## Serve the Ratzilla client with ACP authentication
+
+Build the browser bundle with `trunk build --locked --release` from `rust/` after
+installing the Rust `wasm32-unknown-unknown` target. Serve `rust/dist/` over HTTPS
+on the same origin as the authenticated ACP endpoint. The app defaults to
+`/acp/agent`. Set the `endpoint` query parameter to select a different WebSocket
+URL and `cwd` to select the remote workspace. An optional `session` parameter
+opens a saved session. When `cwd` is omitted for a saved session, the runtime must
+support session listing so the client can look up its workspace.
+
+For a private deployment, reuse the site's login flow. Let the deployment issue
+a short-lived `Secure`, `HttpOnly` session cookie and validate it on the ACP
+WebSocket upgrade with the existing `authenticate` callback. The callback should
+also compare the browser's `Origin` header with the configured HTTPS site origin
+before admitting the connection. Return the same principal that authorizes
+ordinary ACP operations. Native clients can continue to use bearer headers
+through the same callback. Keep the WebSocket endpoint and its credentials in
+separate configuration.
+
 ## Implement a principal-aware store
 
 Pass your store through `server.add_agent(..., session_store=...)`. Each registration

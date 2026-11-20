@@ -1043,12 +1043,12 @@ def _command_connect(args: SimpleNamespace) -> int:
     if os.environ.get("HRNS_RUST_TUI_PREVIEW") == "1":
         from .client.rust_preview import run_rust_preview
 
-        if args.session or args.client_io:
-            raise HrnsClientError("The Rust preview does not yet accept --session or --client-io.")
+        if args.client_io:
+            raise HrnsClientError("The Rust preview does not yet accept --client-io.")
         target, reason = _initial_connection(config, args)
         if target is None:
             raise HrnsClientError(reason or "The Rust preview needs a connection target.")
-        return run_rust_preview(target)
+        return run_rust_preview(target, session=args.session, explicit_cwd=args.cwd)
 
     from .client.tui.app import run_terminal
 

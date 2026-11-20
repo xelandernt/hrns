@@ -8,10 +8,11 @@ use futures::{StreamExt, channel::mpsc};
 use ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 use wasm_bindgen::{JsCast, closure::Closure};
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{ClipboardEvent, HtmlElement, KeyboardEvent, Url, window};
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
-use crate::acp::{self, Event};
+use crate::acp::{self, Event, SessionTarget};
 use crate::app::{App, Key};
 use crate::socket;
 
@@ -21,7 +22,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = web_config();
     let label = config
         .as_ref()
-        .map(|(endpoint, cwd)| format!("{} · {cwd}", endpoint.host()))
+        .map(|(endpoint, _)| endpoint.host())
         .unwrap_or_else(|_| "Remote".into());
     let app = Rc::new(RefCell::new(App::new(label, action_tx)));
     let terminal = Terminal::new(DomBackend::new_by_id("terminal")?)?;
@@ -39,7 +40,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     wasm_bindgen_futures::spawn_local(async move {
         let result = async {
-            let (endpoint, cwd) = config?;
+            let (endpoint, target) = config?;
             let (_, ws) = WsMeta::connect(endpoint.href(), None)
                 .await
                 .map_err(|_| "Could not open the remote ACP WebSocket".to_owned())?;
@@ -51,7 +52,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     WsMessage::Text,
                     message_text
                 ),
-                acp::connect(transport, PathBuf::from(cwd), action_rx, event_tx.clone()),
+                acp::connect(transport, target, action_rx, event_tx.clone()),
             );
             wire?;
             session.map_err(|error| error.message)
@@ -66,7 +67,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn web_config() -> Result<(Url, String), String> {
+fn web_config() -> Result<(Url, SessionTarget), String> {
     let window = window().ok_or("Browser window unavailable")?;
     let page = window
         .location()
@@ -87,18 +88,32 @@ fn web_config() -> Result<(Url, String), String> {
             endpoint
         }
     };
-    if !matches!(endpoint.protocol().as_str(), "ws:" | "wss:")
-        || !endpoint.username().is_empty()
-        || !endpoint.password().is_empty()
-    {
-        return Err("Expected a WebSocket endpoint without embedded credentials".into());
+    let supported = match endpoint.protocol().as_str() {
+        "wss:" => true,
+        "ws:" => matches!(
+            endpoint.hostname().as_str(),
+            "localhost" | "127.0.0.1" | "[::1]"
+        ),
+        _ => false,
+    };
+    if !supported || !endpoint.username().is_empty() || !endpoint.password().is_empty() {
+        return Err("Use a wss:// endpoint without embedded credentials (ws:// is allowed for loopback development)".into());
     }
     endpoint.set_hash("");
-    let cwd = query.get("cwd").unwrap_or_else(|| "/".into());
-    if !cwd.starts_with('/') {
+    let session = query.get("session").filter(|id| !id.is_empty());
+    let cwd = query
+        .get("cwd")
+        .or_else(|| session.is_none().then(|| "/".into()));
+    if cwd.as_ref().is_some_and(|path| !path.starts_with('/')) {
         return Err("Enter an absolute remote workspace path".into());
     }
-    Ok((endpoint, cwd))
+    Ok((
+        endpoint,
+        SessionTarget {
+            cwd: cwd.map(PathBuf::from),
+            session,
+        },
+    ))
 }
 
 fn message_text(message: WsMessage) -> Result<Option<String>, String> {
@@ -122,7 +137,24 @@ fn bind_input(app: Rc<RefCell<App>>) -> io::Result<()> {
             }
             if let Some(key) = translate(&event) {
                 event.prevent_default();
-                app.borrow_mut().key(key);
+                let copy = {
+                    let mut app = app.borrow_mut();
+                    app.key(key);
+                    app.take_clipboard()
+                };
+                if let Some(text) = copy
+                    && let Some(window) = window()
+                {
+                    let write = window.navigator().clipboard().write_text(&text);
+                    let app = Rc::clone(&app);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if JsFuture::from(write).await.is_err() {
+                            app.borrow_mut().event(Event::Error(
+                                "Could not copy to the browser clipboard".into(),
+                            ));
+                        }
+                    });
+                }
             }
         })
     };
@@ -152,6 +184,13 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
         "Enter" if event.shift_key() => Some(Key::Newline),
         "Enter" => Some(Key::Enter),
         "Backspace" => Some(Key::Backspace),
+        "Delete" => Some(Key::Delete),
+        "ArrowLeft" => Some(Key::Left),
+        "ArrowRight" => Some(Key::Right),
+        "Home" => Some(Key::Home),
+        "End" => Some(Key::End),
+        "ArrowUp" => Some(Key::HistoryUp),
+        "ArrowDown" => Some(Key::HistoryDown),
         "PageUp" => Some(Key::ScrollUp),
         "PageDown" => Some(Key::ScrollDown),
         "Escape" => Some(Key::Escape),

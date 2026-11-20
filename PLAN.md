@@ -31,6 +31,16 @@ The native composer should become editable sooner than Textual, with faster typi
 
 Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/commands.py), [widgets and workflows](hrns_slim/hrns/client/tui), [configuration reference](docs/configuration.md), [MCP behavior](docs/mcp.md) and [ACP contract](docs/acp.md). Use the resulting checklist for release verification.
 
+## Implementation progress
+
+- The native and Ratzilla previews stream against the same Python ACP mount. A PTY and Chromium each rendered an early delta before the final marker in a deterministic Pydantic AI turn. The browser rendered the disconnect state after server shutdown. Native stdio also streamed through the Python ACP server.
+- A macOS arm64 preview wheel installed in a clean Python 3.14 environment. The opt-in Python CLI launched it successfully with inherited terminal streams and Ctrl-C exit. The preview has its own version. Release version alignment and the cross-platform wheel matrix are pending.
+- The browser connected over HTTPS/WSS to the same-origin Python mount using a secure cookie. Missing-cookie admission failed and a reload reconnected with the cookie. The deployment owns login and principal resolution.
+- A saved session replayed across the two clients using the session ID and a workspace discovered via `session/list`. Both clients rendered each replayed message once. The preview reads the Python server's revisioned active-turn state. Interactive session management and mid-turn restart coverage remain open.
+- Shared editing now includes UTF-8 text, cursor movement, multiline input and submission history. Transcript layout caches off-screen rows. Queue and steering are available with preview commands, and a queued turn dispatched after an active turn in the native smoke. A native model and effort smoke changed both options against the Python adapter. Its model selector uses the model ID fallback because the Python server leaves the category unset. Retest performance after full feature parity.
+- Startup smoke on macOS arm64, an xterm-compatible 100×24 PTY, seven launches per case, one local WebSocket runtime. Median process-to-visible-draft was 499.7 ms for `hrns connect` (Textual) and 24.8 ms for the direct Rust debug binary. The first direct Rust launch took 844.9 ms. Native packaged launch, bare `hrns`, and long-stream p95 typing and scrolling remain part of qualification.
+- The Textual audit identified inactive legacy plugin-command UI, Textual-only renderer entry points, and a gap between the visible session-rename command and the mounted agent's capabilities. Preserve actual behavior and verify the advertised capabilities before assigning parity to those workflows. Also check whether MCP include/exclude filters are enforced at export or elsewhere.
+
 ## Tasks
 
 Paths under `rust/` are proposed locations. Size estimates count implementation files. Use existing checks and manual or ephemeral verification in accordance with the repo's test policy. The build commands and platform matrix for the new targets are outputs of the early slices.
@@ -43,7 +53,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T02 — Stream a remote prompt on both targets
 
-- [ ] **Acceptance** A native Ratatui preview and Ratzilla browser preview share the composer and transcript, establish ACP v1 against the same Python mount, and stream a prompt.
+- [x] **Acceptance** A native Ratatui preview and Ratzilla browser preview share the composer and transcript, establish ACP v1 against the same Python mount, and stream a prompt.
 - **Verify** Build the native and `wasm32-unknown-unknown` targets, serve the browser bundle, and check that text arrives incrementally. Close the socket and check the disconnect state. Record the dependency pins and the browser transport approach.
 - **Depends on** None. **Files** `rust/Cargo.toml`, `rust/src/app.rs`, `rust/src/native.rs`, `rust/src/web.rs`, `rust/index.html`. **Size** M.
 

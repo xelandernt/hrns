@@ -1,6 +1,9 @@
 mod acp;
 mod app;
+mod composer;
+mod options;
 mod socket;
+mod transcript;
 
 #[cfg(not(target_family = "wasm"))]
 mod native;

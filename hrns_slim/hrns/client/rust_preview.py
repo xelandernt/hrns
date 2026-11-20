@@ -12,7 +12,12 @@ from .launch import ConnectionTarget
 from .transport import secret_value
 
 
-def run_rust_preview(target: ConnectionTarget) -> int:
+def run_rust_preview(
+    target: ConnectionTarget,
+    *,
+    session: str | None,
+    explicit_cwd: str | None,
+) -> int:
     scripts = sysconfig.get_path("scripts")
     executable = shutil.which("hrns-tui", path=scripts) or shutil.which("hrns-tui")
     if executable is None:
@@ -21,7 +26,11 @@ def run_rust_preview(target: ConnectionTarget) -> int:
     profile = target.profile
     env = dict(os.environ)
     env.pop("HRNS_TUI_TOKEN", None)
-    argv = [executable, "--cwd", target.cwd]
+    argv = [executable]
+    if session:
+        argv.extend(("--session", session))
+    if target.kind != "remote" or session is None or explicit_cwd is not None:
+        argv.extend(("--cwd", target.cwd))
     cwd = None
     if target.kind == "remote":
         argv.extend(("--server", profile.url))
