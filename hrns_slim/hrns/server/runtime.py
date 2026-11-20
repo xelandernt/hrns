@@ -23,7 +23,6 @@ from hrns.shared.config import (
     THINKING_LEVELS,
     HrnsConfig,
     ProviderEntry,
-    thinking_from_settings,
 )
 
 from .acp import (
@@ -295,30 +294,6 @@ def _print_catalog(settings: HrnsConfig) -> None:
     print(json.dumps({"providers": providers}, indent=2))
 
 
-def _check_configured_effort(
-    settings: HrnsConfig, model_id: str, resolver: RuntimeModelResolver
-) -> None:
-    """Refuse a configured effort the policy does not offer for the startup model.
-
-    The agent's own settings are the baseline every session inherits, so a value outside
-    ``[thinking]`` would apply without ever appearing among a client's options.
-    """
-    configured = thinking_from_settings(settings)
-    if configured is None:
-        return
-    offered = {
-        choice.value for option in resolver.list_options(model_id) for choice in option.choices
-    }
-    if not offered:
-        # The model advertises no effort option; the provider ignores the setting anyway.
-        return
-    if configured not in offered:
-        raise SystemExit(
-            f"model_settings.thinking = {configured!r} is not offered by [thinking] for "
-            f"{model_id}. Allowed: {', '.join(sorted(offered))}."
-        )
-
-
 def _attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:
     """Turn the client's MCP declarations into Pydantic AI toolsets."""
     return AcpAttachmentConfig(toolsets=acp_mcp_toolsets(session))
@@ -358,7 +333,6 @@ def run(
     models = resolver.list_models()
     if not models:
         raise SystemExit("No models are configured. Add a provider and model first.")
-    _check_configured_effort(settings, models[0].model_id, resolver)
     resolved = resolver.resolve(models[0].model_id)
     # Advertise every configured model and resolve the client's choice through this
     # entry's provider configuration. The active model stays the default.

@@ -121,8 +121,8 @@ The adapter advertises them when a
   with each choice tagged `_meta.providerId`, followed by every
   [`SettingOption`](mount-acp.md#session-settings) `list_options(model_id)` returns. The
   effort option carries `category: "thought_level"`. The bundled terminal client's
-  `/effort` uses that option for any connected agent, local or remote, and only writes the
-  `[model_settings]` file when the agent is `hrns agent`.
+  `/effort` uses that option for any connected agent and saves choices by model in
+  Local mode and in named profiles. See [Saved reasoning effort](configuration.md#saved-reasoning-effort).
 - `session/set_config_option` accepts `model` and any advertised setting id; a value
   outside the advertised choices is `invalid_params`. Selections are persisted with the
   session and revalidated on `session/load`, so a value that a model switch or provider

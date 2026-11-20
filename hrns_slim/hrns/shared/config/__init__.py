@@ -36,8 +36,6 @@ from .settings import (
     default_config_path,
     is_builtin_hrns,
     project_config_path,
-    thinking_from_settings,
-    with_thinking,
 )
 
 __all__ = [
@@ -77,6 +75,4 @@ __all__ = [
     "store_secret",
     "stored_api_key_ref",
     "stored_secret",
-    "thinking_from_settings",
-    "with_thinking",
 ]

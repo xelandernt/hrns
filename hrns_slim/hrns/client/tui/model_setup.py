@@ -49,9 +49,7 @@ class ModelSetupResult:
     path: Path
     provider: str
     model: str
-    api_key_ref: str | None = None
-    api_key_changed: bool = False
-    #: ACP/TUI effort value to apply live; ``None`` means "leave it alone".
+    #: An explicit choice from the effort picker; ``None`` restores the saved preference.
     effort: str | None = None
 
 

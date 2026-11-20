@@ -53,8 +53,8 @@ options = { timeout = 60 }             # extra keyword arguments for the provide
 type = "openai"
 base_url = "http://127.0.0.1:11434/v1"
 
-[model_settings]
-thinking = "high"                      # baseline model request settings
+[local_model_effort]
+"deepseek:deepseek-flash" = "high"
 
 [thinking]
 levels = ["low", "medium", "high"]     # which reasoning efforts sessions may select
@@ -176,14 +176,26 @@ different endpoints and keys under one provider implementation.
 
 ### `[model_settings]`
 
-Forwarded as [model settings](https://ai.pydantic.dev/api/settings/) to every run. `thinking` is special: a level
-(`minimal`, `low`, `medium`, `high`, `xhigh`) enables reasoning, `false` disables it, and
-omitting it keeps the provider default. The TUI's `/effort` writes this key when connected
-to `hrns agent`; for any other agent it changes the session's `effort` config option
-instead, because only the server that owns this file can persist it.
+The built-in agent forwards ordinary request settings such as `max_tokens` to each
+run. See the [Pydantic AI model settings reference](https://ai.pydantic.dev/api/settings/).
 
-This is the baseline every session starts from. A client that changes reasoning effort
-over ACP overrides it for its own session.
+### Saved reasoning effort
+
+`/effort` applies the choice to the current session. The terminal remembers it in
+`[local_model_effort]` for Local mode or `[profile.<name>.model_effort]` for a named
+connection. Use the model ID advertised over ACP. The built-in agent uses
+`provider-entry:model` IDs.
+
+```toml
+[local_model_effort]
+"openai:gpt-5.2" = "high"
+
+[profile.work.model_effort]
+"openai:gpt-5.2" = "low"
+```
+
+The terminal restores an available saved choice in new sessions and after a model
+switch. A loaded session retains its own ACP choices.
 
 ### `[thinking]`
 
@@ -196,7 +208,7 @@ by both the policy and the model. Values outside the policy receive a validation
 | `levels` | list | all five levels | Values the `effort` option offers, in display order |
 | `allow_off` | bool | `true` | Offer `off` on models whose reasoning can be disabled |
 
-`default` is always offered and uses the baseline `thinking` setting. An empty `levels`
+`default` is always offered and lets the provider choose the effort. An empty `levels`
 removes the effort option entirely. Listing a value that is not one of `minimal`, `low`,
 `medium`, `high`, `xhigh` is a configuration error.
 
@@ -205,9 +217,6 @@ removes the effort option entirely. Listing a value that is not one of `minimal`
 levels = ["low", "medium", "high"]
 allow_off = false
 ```
-
-The startup model must support `[model_settings].thinking` within the advertised policy;
-a conflicting value produces a startup validation error.
 
 ### `[mcp]`
 

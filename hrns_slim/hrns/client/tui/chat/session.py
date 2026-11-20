@@ -137,6 +137,7 @@ class SessionWorkflow:
             return
         try:
             session = await screen.client.new_session(screen.target.cwd)
+            await screen.app.restore_effort(screen.target, session)
         except HrnsClientError as exc:
             await screen._notice(f"Could not create a session: {exc.message}", "error")
             return

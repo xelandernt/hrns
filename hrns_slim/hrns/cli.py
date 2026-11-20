@@ -807,7 +807,7 @@ def _resolve_target(
             token=token,
             remote_cwd=cwd_override or "",
         )
-        return profile_target(profile, cwd_override)
+        return profile_target(profile, cwd_override, saved=False)
     if local_requested or not (stdio_requested or profile_name):
         if local_requested and (stdio_requested or profile_name):
             raise HrnsClientError("--local cannot be combined with another connection target.")

@@ -523,6 +523,7 @@ class ConnectScreen(_HrnsScreen):
         profile.client_io = original.client_io
         profile.default = original.default
         profile.notes = original.notes
+        profile.model_effort = original.model_effort.copy()
 
     def _save_profile(self, profile: Profile, *, replacing: str | None = None) -> None:
         if replacing is not None and replacing != profile.name:

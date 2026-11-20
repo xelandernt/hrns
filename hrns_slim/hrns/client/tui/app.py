@@ -17,7 +17,14 @@ from textual.containers import Horizontal
 from textual.theme import Theme
 from textual.widgets import Static
 
-from hrns.shared.config import ClientIoMode, HrnsConfig, McpServerSettings, TuiSettings
+from hrns.shared.config import (
+    EFFORT_DEFAULT,
+    ClientIoMode,
+    HrnsConfig,
+    McpServerSettings,
+    TuiSettings,
+    is_builtin_hrns,
+)
 from hrns.shared.config.mcp import server_target
 
 from ...shared.errors import HrnsClientError, InteractionRequired, TransportError
@@ -833,6 +840,60 @@ class HrnsApp(App[int]):
             return target.profile.client_io
         return self.config.tui.client_io
 
+    @staticmethod
+    def _model_efforts(config: HrnsConfig, target: ConnectionTarget) -> dict[str, str] | None:
+        if target.profile_name is not None:
+            profile = config.profile.get(target.profile_name)
+            return profile.model_effort if profile is not None else None
+        return config.local_model_effort if is_builtin_hrns(target.profile) else None
+
+    def preferred_effort(self, target: ConnectionTarget, model: str) -> str | None:
+        return (self._model_efforts(self.config, target) or {}).get(model)
+
+    def remember_effort(self, target: ConnectionTarget, model: str, value: str) -> None:
+        current = self._model_efforts(self.config, target)
+        if current is None or current.get(model) == value:
+            return
+        try:
+            path = self.config.config_file
+            config = HrnsConfig(config_file=path) if path is not None else HrnsConfig()
+            preferences = self._model_efforts(config, target)
+            if preferences is None:
+                return
+            preferences[model] = value
+            config.save()
+        except (ValueError, OSError) as exc:
+            self.notify(f"Could not save reasoning effort: {exc}", severity="error")
+        else:
+            current.update(preferences)
+
+    async def restore_effort(
+        self, target: ConnectionTarget, session: SessionProxy, *, model_changed: bool = False
+    ) -> None:
+        from .state import effort_option, model_option, option_values
+
+        model = model_option(session.config_options)
+        effort = effort_option(session.config_options)
+        if model is None or effort is None:
+            return
+        model_id, option_id = model.get("currentValue"), effort.get("id")
+        if not isinstance(model_id, str) or not isinstance(option_id, str):
+            return
+        offered = {choice["value"] for choice in option_values(effort)}
+        value = self.preferred_effort(target, model_id)
+        if value not in offered and model_changed and is_builtin_hrns(target.profile):
+            value = EFFORT_DEFAULT
+        if value is None or value not in offered or value == effort.get("currentValue"):
+            return
+        try:
+            await asyncio.wait_for(
+                session.set_config_option(option_id, value), timeout=session.client.connect_timeout
+            )
+        except HrnsClientError as exc:
+            self.notify(f"Could not restore reasoning effort: {exc.message}", severity="error")
+        except TimeoutError:
+            self.notify("The agent timed out restoring reasoning effort.", severity="error")
+
     async def connect_target(self, target: ConnectionTarget) -> ChatScreen:
         """Connect, open the initial session, and show the chat workspace."""
         await asyncio.to_thread(import_module, ".chat.screen", __package__)
@@ -871,6 +932,7 @@ class HrnsApp(App[int]):
                         f"{target.location_text()} did not answer session/new within "
                         f"{client.connect_timeout:g}s."
                     ) from exc
+                await self.restore_effort(target, session)
             if self._shutting_down:
                 raise asyncio.CancelledError
             self.session = session

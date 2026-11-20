@@ -37,6 +37,7 @@ class ConnectionTarget:
     profile: Profile
     cwd: str
     local_setup: bool = False
+    profile_name: str | None = None
 
     def location(self) -> dict[str, str]:
         if self.kind == "remote":
@@ -71,7 +72,9 @@ def remote_cwd(profile: Profile, override: str | None = None) -> str:
     return candidate
 
 
-def profile_target(profile: Profile, cwd_override: str | None = None) -> ConnectionTarget:
+def profile_target(
+    profile: Profile, cwd_override: str | None = None, *, saved: bool = True
+) -> ConnectionTarget:
     """Resolve a saved profile into the connection it describes.
 
     ``cwd_override`` is the CLI's ``--cwd``: a stdio agent starts there, while a
@@ -86,6 +89,7 @@ def profile_target(profile: Profile, cwd_override: str | None = None) -> Connect
             kind="remote",
             profile=profile,
             cwd=remote_cwd(profile, cwd_override),
+            profile_name=profile.name if saved else None,
         )
     if not profile.command:
         raise HrnsClientError(f"Profile '{profile.name}' has no command.")
@@ -94,6 +98,7 @@ def profile_target(profile: Profile, cwd_override: str | None = None) -> Connect
         kind="local",
         profile=profile,
         cwd=local_cwd(profile, cwd_override),
+        profile_name=profile.name if saved else None,
     )
 
 

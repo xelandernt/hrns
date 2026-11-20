@@ -14,8 +14,6 @@ from textual.containers import Horizontal
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from hrns.shared.config import HrnsConfig
-
 from ....shared.errors import HrnsClientError
 from ...client import HrnsAcpClient, SessionProxy
 from ...events import (
@@ -42,7 +40,6 @@ from ...interactions import (
 from ...launch import ConnectionTarget
 from ..choice_keys import handle_choice_arrow
 from ..completion import FileIndex
-from ..model_setup import ModelSetupResult
 
 if TYPE_CHECKING:
     from textual.widgets.text_area import Selection
@@ -648,24 +645,11 @@ class ChatScreen(_HrnsScreen):
     @work(exit_on_error=False, group="model", exclusive=True)
     async def _save_model_selection_worker(
         self,
-        settings: HrnsConfig,
         provider: str,
         model: str,
         effort: str | None,
-        *,
-        touch_thinking: bool = True,
     ) -> None:
-        await self.models.save_model_selection(
-            settings, provider, model, effort, touch_thinking=touch_thinking
-        )
-
-    @work(exit_on_error=False, group="model", exclusive=True)
-    async def _set_local_effort_worker(self, settings: HrnsConfig, effort: str) -> None:
-        await self.models.set_local_effort(settings, effort)
-
-    @work(exit_on_error=False, group="model", exclusive=True)
-    async def _apply_model_settings_worker(self, result: ModelSetupResult) -> None:
-        await self.models.apply_model_settings(result)
+        await self.models.save_model_selection(provider, model, effort)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Surface a failed background action instead of letting it disappear."""

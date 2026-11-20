@@ -9,16 +9,14 @@ from acp import RequestError
 
 from hrns.shared.config import (
     EFFORT_DEFAULT,
+    EFFORT_OFF,
     HrnsConfig,
     is_builtin_hrns,
-    thinking_from_settings,
-    with_thinking,
 )
 
 from ....shared.errors import HrnsClientError, describe_rpc_error
 from ...runtime import (
     agent_credential_available,
-    agent_model_catalog,
     agent_target,
     agent_thinking_support,
 )
@@ -110,12 +108,21 @@ class ModelWorkflow:
 
     async def set_standard_value(self, option_id: str, value: str) -> bool:
         screen = self.screen
+        before = screen.session.config_options
+        model = model_option(before)
+        effort = effort_option(before)
         try:
             options = await screen.session.set_config_option(option_id, value)
         except HrnsClientError as exc:
             await screen._notice(exc.message, "error")
             return False
         screen.session.remember(tuple(options))
+        if model is not None:
+            active = model.get("currentValue")
+            if model.get("id") == option_id and active != value:
+                await screen.app.restore_effort(screen.target, screen.session, model_changed=True)
+            elif effort is not None and effort.get("id") == option_id and isinstance(active, str):
+                screen.app.remember_effort(screen.target, active, value)
         screen.chrome.update_chrome()
         return True
 
@@ -193,7 +200,7 @@ class ModelWorkflow:
             except HrnsClientError as exc:
                 await screen._notice(exc.message, "error")
                 return
-            await self.save_model_selection(settings, provider, model, None, touch_thinking=False)
+            await self.save_model_selection(provider, model, None)
             return
         await self._set_agent_model(target)
 
@@ -446,105 +453,80 @@ class ModelWorkflow:
         screen = self.screen
         provider_id = settings.provider_id(provider)
         support = agent_thinking_support(provider_id, model)
-        if support is None:
-            # A model outside the catalog has unknown support: keep a manually
-            # configured thinking level instead of clearing it.
-            known = model in agent_model_catalog().get(provider_id, ())
-            screen._save_model_selection_worker(
-                settings, provider, model, None, touch_thinking=known
-            )
+        if support is None or not settings.thinking.levels:
+            screen._save_model_selection_worker(provider, model, None)
             return
-        current = (
-            thinking_from_settings(settings)
-            if (provider, model) == (settings.provider, settings.model)
-            else None
-        )
-        self.choose_effort(
-            settings,
-            provider,
-            model,
-            current=current,
-            on_select=lambda effort: screen._save_model_selection_worker(
-                settings, provider, model, effort
-            ),
-        )
+        wanted = f"{provider}:{model}"
+        option = model_option(screen.session.config_options)
+        effort = effort_option(screen.session.config_options)
+        if option is not None and option.get("currentValue") == wanted and effort is not None:
+            choices = option_values(effort)
+            current = config_option_value(effort)
+        else:
+            allowed = {EFFORT_DEFAULT, *settings.thinking.levels}
+            if settings.thinking.allow_off:
+                allowed.add(EFFORT_OFF)
+            choices = [
+                choice
+                for choice in effort_choices(provider_id, model)
+                if choice["value"] in allowed
+            ]
+            current = screen.app.preferred_effort(screen.target, wanted)
 
-    def choose_effort(
-        self,
-        settings: HrnsConfig,
-        provider: str,
-        model: str,
-        *,
-        current: str | None,
-        on_select: Any,
-        choices: list[dict[str, str]] | None = None,
-    ) -> None:
-        """Offer the effort ladder; the server's ACP option wins over the local catalog."""
-        self.screen.app.push_screen(
+        def apply(value: str | None) -> None:
+            if value:
+                screen._save_model_selection_worker(provider, model, value)
+
+        screen.app.push_screen(
             ChoiceDialog(
                 "Reasoning effort",
-                f"{provider}:{model}. Applies to the next message.",
-                choices or effort_choices(settings.provider_id(provider), model),
-                current=current or EFFORT_DEFAULT,
+                f"{wanted}. Applies to the next message.",
+                choices,
+                current=current
+                if any(choice["value"] == current for choice in choices)
+                else EFFORT_DEFAULT,
             ),
-            lambda value: on_select(value) if value else None,
+            apply,
         )
 
-    async def save_model_selection(
-        self,
-        settings: HrnsConfig,
-        provider: str,
-        model: str,
-        effort: str | None,
-        *,
-        touch_thinking: bool = True,
-    ) -> None:
+    async def save_model_selection(self, provider: str, model: str, effort: str | None) -> None:
         screen = self.screen
-        entry = settings.entry(provider)
-        if entry is not None and not agent_credential_available(provider, entry.api_key_env):
-            await screen._notice(
-                f"{provider} has no API key yet. Add one in /providers, or press Ctrl+G there "
-                "to sign in.",
-                "error",
-            )
-            return
         try:
+            settings = self.local_settings()
+            entry = settings.require_entry(provider)
+            if not agent_credential_available(provider, entry.api_key_env):
+                await screen._notice(
+                    f"{provider} has no API key yet. Add one in /providers, or press Ctrl+G there "
+                    "to sign in.",
+                    "error",
+                )
+                return
             configured = settings.model_copy(update={"provider": provider, "model": model})
-            if touch_thinking:
-                configured = with_thinking(configured, effort)
             path = configured.save(settings.config_file)
         except (ValueError, OSError) as exc:
             await screen._notice(f"Could not save the model selection: {exc}", "error")
             return
+        if screen.app.config.path == path:
+            screen.app.config.provider = provider
+            screen.app.config.model = model
+            screen.app.config.providers = configured.providers
         await self.apply_model_settings(
             ModelSetupResult(
                 path=path,
                 provider=provider,
                 model=model,
-                api_key_ref=None,
-                api_key_changed=False,
                 effort=effort,
             )
         )
 
     async def show_effort(self) -> None:
-        """Offer the session's effort ladder, whichever transport the agent uses.
-
-        An agent that advertises an ``effort`` config option is authoritative: the server
-        decides which levels exist and applies the choice before each request. Only
-        the built-in agent also remembers it in the config file, because that is where its
-        policy lives; every other target — including a remote ACP server — uses the plain
-        config-option path.
-        """
+        """Offer the session's effort ladder, whichever transport the agent uses."""
         screen = self.screen
         if screen.session.client is not screen.client:
             await screen._notice(
                 "This session is not attached to the reconnected client. Start a new session first.",
                 "warning",
             )
-            return
-        if screen.target is not None and is_builtin_hrns(screen.target.profile):
-            await self._show_local_effort()
             return
         option = effort_option(screen.session.config_options)
         if option is None:
@@ -554,113 +536,17 @@ class ModelWorkflow:
             return
         await self.change_standard_option(str(option.get("id") or "effort"))
 
-    async def _show_local_effort(self) -> None:
-        """Persist the effort for the next ``hrns agent`` launch, then apply it here."""
-        screen = self.screen
-        try:
-            settings = self.local_settings()
-        except (ValueError, OSError) as exc:
-            await screen._notice(f"Local settings are unavailable: {exc}", "error")
-            return
-        if not settings.provider or not settings.model:
-            await screen._notice("Configure a model before setting reasoning effort.", "error")
-            return
-        provider_id = settings.provider_id()
-        support = agent_thinking_support(provider_id, settings.model)
-        if support is None:
-            await screen._notice(
-                f"{settings.provider}:{settings.model} does not advertise reasoning effort.",
-                "warning",
-            )
-            return
-        option = effort_option(screen.session.config_options)
-        current = (
-            str(option.get("currentValue"))
-            if option is not None
-            else (thinking_from_settings(settings) or EFFORT_DEFAULT)
-        )
-        self.choose_effort(
-            settings,
-            settings.provider,
-            settings.model,
-            current=current,
-            choices=option_values(option) if option is not None else None,
-            on_select=lambda effort: screen._set_local_effort_worker(settings, effort),
-        )
-
-    async def set_local_effort(self, settings: HrnsConfig, effort: str) -> None:
-        screen = self.screen
-        try:
-            configured = with_thinking(settings, effort)
-            path = configured.save(settings.config_file)
-        except (ValueError, OSError) as exc:
-            await screen._notice(f"Could not save the reasoning effort: {exc}", "error")
-            return
-        await self.apply_model_settings(
-            ModelSetupResult(
-                path=path,
-                provider=settings.provider,
-                model=settings.model,
-                api_key_ref=None,
-                api_key_changed=False,
-                effort=effort,
-            )
-        )
-
     async def apply_model_settings(self, result: ModelSetupResult) -> None:
-        """Switch the session's model in place; restart only when it cannot be switched.
-
-        The runtime resolves ``name:model`` ids itself, so a provider change is a config
-        option change like any other. The restart path stays for a runtime that started
-        before the selected id existed, and the effort fallback keeps its restart.
-        """
+        """Reload the built-in runtime if it has yet to advertise the saved model."""
         screen = self.screen
         wanted = f"{result.provider}:{result.model}"
-        option = model_option(screen.session.config_options)
-        restart = option is None
-        if option is not None:
-            option_id = str(option.get("id") or "model")
-            advertised = {item["value"] for item in option_values(option)}
-            try:
-                options = await screen.session.set_config_option(option_id, wanted)
-            except HrnsClientError as exc:
-                if wanted in advertised:
-                    await screen._notice(f"Model change failed: {exc.message}", "error")
-                    return
-                # The running runtime never advertised this id: reload it instead.
-                restart = True
-            else:
-                screen.session.remember(options)
-                if result.effort is not None:
-                    if effort_option(options) is not None:
-                        try:
-                            options = await screen.session.set_config_option(
-                                "effort", result.effort
-                            )
-                        except HrnsClientError as exc:
-                            await screen._notice(
-                                f"Reasoning effort change failed: {exc.message}", "error"
-                            )
-                            return
-                        screen.session.remember(options)
-                    elif result.effort != EFFORT_DEFAULT:
-                        # The new model may not have advertised effort until the switch
-                        # landed; restart so the saved setting is read at startup.
-                        restart = True
-                if not restart:
-                    screen.chrome.update_chrome()
-                    suffix = (
-                        f" · effort {effort_label(result.effort)}"
-                        if result.effort is not None
-                        else ""
-                    )
-                    await screen._notice(f"Model: {wanted}{suffix}", "success")
-                    return
+        if await self._apply_advertised_model(wanted, result.effort):
+            return
         try:
-            target = agent_target(
-                result.path,
-                api_key_ref=result.api_key_ref,
-                cwd=screen.target.cwd,
+            target = (
+                screen.target
+                if screen.target.profile_name is not None
+                else agent_target(result.path, cwd=screen.target.cwd)
             )
         except HrnsClientError as exc:
             await screen._notice(
@@ -668,21 +554,51 @@ class ModelWorkflow:
             )
             return
         if screen.target.local_setup:
-            try:
-                screen.app.config = self.local_settings()
-            except (ValueError, OSError) as exc:
-                await screen._notice(f"Could not reload the saved configuration: {exc}", "error")
-                return
+            if result.effort is not None:
+                screen.app.remember_effort(target, wanted, result.effort)
             await screen.app.switch_agent(screen, target)
             return
         screen.app.target = target
         screen.target = target
         await screen._notice(
-            "Restarting the built-in agent so it advertises the saved model; reloading this session "
-            "afterwards.",
+            "Restarting the built-in agent so it advertises the saved model.",
             "warning",
         )
         await screen._reconnect()
+        if screen.session.client is screen.client:
+            if not await self._apply_advertised_model(wanted, result.effort):
+                await screen._notice(
+                    f"The agent did not advertise {wanted} after restarting.", "error"
+                )
+
+    async def _apply_advertised_model(self, wanted: str, value: str | None) -> bool:
+        """Apply a saved selection once the runtime advertises it."""
+        screen = self.screen
+        option = model_option(screen.session.config_options)
+        if option is None or wanted not in {choice["value"] for choice in option_values(option)}:
+            return False
+        changed = option.get("currentValue") != wanted
+        if changed:
+            try:
+                await screen.session.set_config_option(str(option["id"]), wanted)
+            except HrnsClientError as exc:
+                await screen._notice(f"Model change failed: {exc.message}", "error")
+                return True
+        effort = effort_option(screen.session.config_options)
+        if (
+            value is not None
+            and effort is not None
+            and value in {choice["value"] for choice in option_values(effort)}
+        ):
+            if not await self.set_standard_value(str(effort["id"]), value):
+                return True
+        else:
+            await screen.app.restore_effort(screen.target, screen.session, model_changed=changed)
+        screen.chrome.update_chrome()
+        current = effort_option(screen.session.config_options)
+        suffix = f" · effort {effort_label(config_option_value(current))}" if current else ""
+        await screen._notice(f"Model: {wanted}{suffix}", "success")
+        return True
 
     async def show_model_dialog(self) -> None:
         """Show only the model ids the remote agent advertised over ACP."""

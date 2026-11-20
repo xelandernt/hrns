@@ -307,6 +307,10 @@ composer accepts `/provider` (also `/providers`) and `/models` to configure the 
 Selecting a model saves the configuration and starts the configured runtime with a new
 session. Headless prompts still require a configured model.
 
+The local and ACP model pickers bound the dialog to the terminal height and give
+the option list the remaining rows. The list owns vertical scrolling so the
+header, local filter, and keyboard hints stay visible with long model catalogs.
+
 ## Session settings
 
 Settings are the same object's second surface, because they have the same owner as models
@@ -328,9 +332,16 @@ shrank.
 
 `hrns agent` reads the policy from `[thinking]` (`levels`, `allow_off`) and intersects it
 with the model's profile via `infer_model_profile`, so a model that cannot reason gets no
-option and an always-on model does not offer `off`. `[model_settings].thinking` remains the
-agent-level baseline; the runtime refuses to start if it names a level the policy does not
-offer for the startup model, since no client could see or change it.
+option and an always-on model does not offer `off`. The built-in runtime uses the
+provider's default effort until the session selects a level.
+
+The terminal saves the selected effort in `[local_model_effort]` for Local mode and
+`[profile.<name>.model_effort]` for named connections. Each key is the model id advertised
+by the agent, such as `"work-openai:gpt-5.2"` for the built-in runtime. The terminal
+restores a saved value through ACP after creating a session or switching models if the
+agent still offers that value. A built-in model switch without an applicable preference
+uses the provider default. Loaded sessions retain their stored ACP selections, and
+external agents supply the session's effort when there is no applicable saved preference.
 
 ## Usage reporting
 

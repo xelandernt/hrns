@@ -137,6 +137,7 @@ class Profile(BaseModel):
     client_io: ClientIoMode | None = None
     default: bool = False
     notes: str = ""
+    model_effort: dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_remote(self) -> bool:
@@ -336,6 +337,7 @@ class HrnsConfig(BaseSettings):
         default_factory=TuiSettings,
         description="Terminal preferences.",
     )
+    local_model_effort: dict[str, str] = Field(default_factory=dict)
 
     # ------------------------------------------------------------ runtime
 
@@ -361,6 +363,12 @@ class HrnsConfig(BaseSettings):
         description="Agent Skills: discovery libraries and selection.",
     )
     store: Path = Field(default_factory=lambda: user_data_path("hrns") / "local-sessions.db")
+
+    @field_validator("model_settings")
+    @classmethod
+    def remove_global_thinking(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Reasoning effort is selected for a model through ACP."""
+        return {key: setting for key, setting in value.items() if key != "thinking"}
 
     @field_validator("providers")
     @classmethod
@@ -606,31 +614,3 @@ def is_builtin_hrns(profile: Profile | None) -> bool:
     if Path(profile.command).name in {"hrns", "hrns.exe"} and args[:1] == ["agent"]:
         return True
     return args[:2] == ["-m", "hrns.server.runtime"]
-
-
-def thinking_from_settings(settings: HrnsConfig) -> str | None:
-    """The configured effort as a TUI/ACP value, or ``None`` for the default."""
-    value = settings.model_settings.get("thinking")
-    if value is False:
-        return EFFORT_OFF
-    if isinstance(value, str) and value in THINKING_LEVELS:
-        return value
-    # ``True`` and an unset value both mean "provider default".
-    return None
-
-
-def with_thinking(settings: HrnsConfig, effort: str | None) -> HrnsConfig:
-    """Return a copy whose ``model_settings.thinking`` reflects ``effort``.
-
-    Only the ``thinking`` key is touched so other model settings survive.
-    """
-    model_settings = dict(settings.model_settings)
-    if effort in (None, "", EFFORT_DEFAULT):
-        model_settings.pop("thinking", None)
-    elif effort == EFFORT_OFF:
-        model_settings["thinking"] = False
-    elif effort in THINKING_LEVELS:
-        model_settings["thinking"] = effort
-    else:
-        raise ValueError(f"Unknown reasoning effort: {effort!r}")
-    return settings.model_copy(update={"model_settings": model_settings})
