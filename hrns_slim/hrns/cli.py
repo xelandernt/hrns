@@ -1039,9 +1039,19 @@ def _initial_connection(
 
 def _command_connect(args: SimpleNamespace) -> int:
     _require_client_extra()
+    config = _config(args)
+    if os.environ.get("HRNS_RUST_TUI_PREVIEW") == "1":
+        from .client.rust_preview import run_rust_preview
+
+        if args.session or args.client_io:
+            raise HrnsClientError("The Rust preview does not yet accept --session or --client-io.")
+        target, reason = _initial_connection(config, args)
+        if target is None:
+            raise HrnsClientError(reason or "The Rust preview needs a connection target.")
+        return run_rust_preview(target)
+
     from .client.tui.app import run_terminal
 
-    config = _config(args)
     # These targets need no credential lookup to validate their CLI options.
     explicit_target = (
         _initial_connection(config, args) if args.stdio or args.profile or args.server else None

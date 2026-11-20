@@ -61,6 +61,14 @@ the same origin under `/acp/agent`. For local development, set the `endpoint`
 and `cwd` page query parameters to a WebSocket URL and remote workspace.
 Put any deployment authentication upstream of the browser connection.
 
+The Python dispatcher can launch an installed native preview wheel when
+`HRNS_RUST_TUI_PREVIEW=1`. It resolves the target and existing credential
+references before replacing the Python process on POSIX. The native process
+inherits the terminal and owns terminal restoration and the ACP connection.
+Build a development wheel with `uvx maturin build --manifest-path rust/Cargo.toml`
+and install it alongside the Python client. This wheel uses the Rust crate's
+preview version. Release version coordination remains part of the cutover.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`
