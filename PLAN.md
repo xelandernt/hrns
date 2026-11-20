@@ -255,7 +255,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 **Checkpoint after T03**
 
-- [ ] Both previews stream against the Python mount, the wheel installs cleanly, and the Textual baseline is reproducible.
+- [x] Both previews stream against the Python mount, the wheel installs cleanly, and the Textual baseline is reproducible.
 
 ### T04 — Authenticate browser connections
 
