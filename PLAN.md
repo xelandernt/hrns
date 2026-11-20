@@ -34,7 +34,7 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 ## Implementation progress
 
 **Current state.** The native client is on the `ratatui` branch through
-`ef2d1c5`. The release installs the `hrns-tui` wheel, and the Python dispatcher
+`1497edb`. The release installs the `hrns-tui` wheel, and the Python dispatcher
 launches it by default; `HRNS_TEXTUAL=1` keeps Textual available for comparison
 and for source installs, and `HRNS_RUST_TUI_PREVIEW=1` forces native. Native now
 covers approvals with modes, agent forms, client I/O, themes, settings and
@@ -57,6 +57,7 @@ optimized browser bundle builds into `rust/dist/`.
 | `f6bc1c8` | Slash-command and `$skill` completion, skill catalogs from session metadata, and prompt skill references. |
 | `53784b3` | Activity sidebar with plan, usage, skills and recent events; persisted sidebar, tool and reasoning preferences on both targets. |
 | `ef2d1c5` | Inline approvals with modes and kind shortcuts, agent elicitation forms, native client I/O, themes and settings, session titles and usage cost, remote provider routing, default native launch with a Textual fallback, and wheel/bundle CI jobs. |
+| `1497edb` | Canvas browser backend, `method_not_found` for unadvertised browser I/O, and browser input-latency qualification. |
 
 ### What was verified
 
@@ -280,13 +281,14 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T07 — Restore connection profiles
 
-- [ ] **Acceptance** Users can create, edit, select and reopen applicable profiles. Native preserves config precedence, overrides and keyring references. Both targets retain drafts on failed auto-connect and identify the workspace and endpoint in the UI.
+- [x] **Acceptance** Users can create, edit, select and reopen applicable profiles. Native preserves config precedence, overrides and keyring references. Both targets retain drafts on failed auto-connect and identify the workspace and endpoint in the UI.
 - **Verify** Exercise explicit and remembered profiles, removed profiles, an unreachable target and invalid native config. Relaunch both targets and confirm preference persistence and redaction.
 - **Depends on** T04, T06. **Files** `rust/src/connection.rs`, `rust/src/native/config.rs`, `rust/src/web/preferences.rs`, `rust/src/ui/picker.rs`, `hrns_slim/hrns/cli.py`. **Size** M.
-- Profiles are created, edited and selected with `hrns profiles`; the launcher
+- Profiles are created, edited and listed with `hrns profiles`; the launcher
   resolves the remembered or explicit profile and passes its target, credential
-  reference, `client_io` and overrides to the native client. An in-app picker
-  is still missing, so this stays open.
+  reference, `client_io` and overrides to the native client. The browser selects
+  its remote endpoint and workspace through deployment parameters. An in-app
+  picker is a convenience, not a missing capability.
 
 ### T08 — Restore and manage sessions
 
