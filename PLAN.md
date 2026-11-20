@@ -1,263 +1,211 @@
-# ACP server API and read-only AG-UI observation
+# Rust TUI migration
 
-Status: implemented; offline validation completed. Human review pending.
-Task checklist: [tasks/todo.md](tasks/todo.md).
+## Release outcome
 
-## Confirmed outcome
+Replace Textual with a native Ratatui client and a Ratzilla browser build in the same release. Both use the official Rust Agent Client Protocol (ACP) SDK and share the Ratatui interface. Preserve the current feature set on each applicable target. Keep the native client installable through Python packaging and launchable with bare `hrns` and `hrns connect`. Native supports local stdio and remote WebSocket. The browser connects exclusively to a remote ACP runtime. The Python server, agent, and headless `hrns run` continue in Python.
 
-Introduce `AcpServer` with factory-only agent registration and programmatic session execution. `HrnsServer` extends it with read-only AG-UI observation. Sessions run independently of client connections. One ACP client may attach to a session to interact with it; any number of AG-UI subscribers may observe it.
+The native composer should become editable sooner than Textual, with faster typing and scrolling response during long, streaming sessions. Measure both clients with the same deterministic workload. Keep the Textual implementation available for comparison until cutover.
 
-Mounting is explicit and independent:
+## Proposed architecture
 
-```python
-server.mount_acp(app, prefix="/acp")
-server.mount_ag_ui(app, prefix="/ag-ui")
-```
+- Share Rust application state, actions, Ratatui widgets, and ACP v1 session logic. Implement input, transport, clipboard, file selection, and persistence as target-specific services. Let input and drawing proceed independently of connection setup and ACP responses.
+- Pin the official Rust ACP SDK after checking the Python runtime's actual wire messages and extension support. The current server expects one JSON message per WebSocket text frame. Try the SDK transport on native and use the browser WebSocket API through a runtime-neutral SDK transport on WASM if needed. Keep JavaScript handles outside the SDK connection and pass owned messages across that boundary.
+- Preserve native bearer headers. The browser WebSocket API exposes URL and subprotocol arguments, so validate browser authentication early. Prefer a same-origin authenticated session or gateway that preserves the runtime principal and checks the browser origin on upgrade. Keep credentials out of URLs, bundles, logs, and persistent browser preferences.
+- Keep the Python dispatcher as the public CLI. Prefer a version-matched platform wheel for the Rust executable, with Maturin binary packaging as the first candidate. Keep one owner for native TOML validation, configuration precedence, and keyring resolution. Start by evaluating reuse of the current Python configuration services through a narrow process boundary that keeps credential and config work off the first-frame path. PyPI installation is the deliverable for Python users.
+- Keep native client I/O capability modes and MCP behavior. Use browser file selection and clipboard for user-initiated interactions. Host-only workspace, terminal, or MCP behavior in the browser uses a scoped remote service where needed for parity. The browser never launches a local agent. Advertise only capabilities that the current connection can serve.
+- Preserve plugin command and renderer workflows through a Rust/WASM-compatible presentation contract and readable fallback. Legacy Python widget binaries depend on Textual. Inventory the existing integrations early so their behavior has a demonstrable replacement at cutover.
+- Record architecture decisions proven in the early slices in [ARCHITECTURE.md](ARCHITECTURE.md). Update the affected architecture sections at cutover.
 
-`AcpServer` provides `mount_acp`; `HrnsServer` adds `mount_ag_ui`. Both mounts reference the same agent registrations and sessions. Mounting observation routes never starts an agent run.
+## Parity matrix
 
-## Scope and constraints
-
-- Replace the hosting API, extract session execution, update existing entry points, and add read-only observation routes.
-- Register factories only, called once per live conversation; reconnecting and observing reuse that conversation's agent.
-- Server execution survives ACP and AG-UI disconnects. Process restart recovery restores saved conversation state, not running tasks, pending interactions, or queued work.
-- All admitted users have equal server permissions/scope. Retain authentication, but do not introduce user-specific session partitions or roles.
-- Follow-ups execute after the active turn; no injection into an active model request.
-- One ACP attachment per session. No simultaneous ACP controllers, takeover protocol, or ACP observers.
-- Python owns queue inspection/resume/clear. No custom ACP queue-management methods or reconnect queue UI.
-- AG-UI routes accept no prompts, client tools, approval responses, history replacements, or state mutations. No frontend application is included.
-- Use Pydantic AI's public AG-UI converter and encoder. Do not reimplement its text/tool/reasoning event translation.
-- No compatibility aliases, legacy API wrappers, or dual implementations. Update repository callers directly.
-- Do not write new tests. Use existing lint/build gates and focused offline/manual checks. Avoid `Any`, casts, and type-ignore comments.
-- Put implemented architecture and decisions in `ARCHITECTURE.md` when the relevant implementation lands; do not describe this proposal as existing behavior there.
-
-## Current implementation and required changes
-
-| Current location | Behavior | Required change |
+| Workflow | Native terminal | Browser |
 | --- | --- | --- |
-| `hrns_slim/hrns/server/fastapi.py` | Factory and adapter per WebSocket; optional store per principal | Mount registered agents onto one shared runtime |
-| `hrns_slim/hrns/server/acp/adapter.py` | Owns connections, sessions, execution, approvals, replay | Keep wire dispatch; extract connection-independent execution/state |
-| `hrns_slim/hrns/server/acp/adapter.py:load_session` | Restores a separate state and cancels a prior resident turn | Attach to an existing live state; restore only when absent |
-| `hrns_slim/hrns/server/acp/adapter.py:prompt` | Request cancellation normally cancels its turn | Separate request waiter from server-owned task |
-| `hrns_slim/hrns/server/acp/session.py` | Configuration input requires an ACP client | Separate server session configuration from client attachment configuration |
-| `hrns_slim/hrns/server/acp/adapter.py:session_history` | Exposes committed history, generally updated at turn completion | Publish live events independently of committed model history |
-| `hrns_slim/hrns/client/turn.py` | Primarily derives turn completion from its own prompt response | Handle state of server-started turns after attachment |
-| `hrns_slim/hrns/server/acp/server.py` | Single-agent convenience entry points | Route stdio and network hosting through the new runtime |
+| Connection | Built-in Python agent, external stdio, remote WebSocket, profiles and overrides, reconnect, workspace and endpoint, initial session and cwd | Authenticated remote ACP, profiles and reconnect, remote workspace and endpoint, initial session and cwd |
+| Composer and transcript | Multiline editing, keybindings and paste, draft and prompt history, completion and help, streamed Markdown/code/thoughts, expandable tools, scroll, search, copy and attachments | Same workflows using browser input, clipboard and file chooser |
+| Sessions and turns | New/list/load/resume/rename/close/delete where supported, history and active-turn restoration, usage, plans, queue, steering and cancel | Same ACP-driven workflows |
+| Agent configuration | Built-in setup, provider/login and model selection, effort and session settings | Remote provider/login, model and session settings where advertised |
+| Interactions | Inline and modal approvals, permission modes, elicitation, client filesystem and terminal modes | Same approval and elicitation flows, with workspace operations scoped to the remote deployment |
+| Skills and extensions | Skill catalog and mentions, advertised agent commands, command/tool/approval renderers and fallback | Same workflows using WASM-compatible renderers and fallback |
+| MCP | Health, export and scoped consent, filters, auth and request routing | Same operator workflow using remote services for host-only transports |
+| Preferences | Existing TOML precedence, profiles, last connection, theme, sidebar and transcript settings | Remote profiles and browser preferences with deployment-owned secrets |
 
-## Public Python API
+Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/commands.py), [widgets and workflows](hrns_slim/hrns/client/tui), [configuration reference](docs/configuration.md), [MCP behavior](docs/mcp.md) and [ACP contract](docs/acp.md). Use the resulting checklist for release verification.
 
-The public API is implemented in `hrns_slim/hrns/server/acp/host.py` and `hrns_slim/hrns/server/host.py`.
+## Tasks
 
-```python
-from contextlib import asynccontextmanager
+Paths under `rust/` are proposed locations. Size estimates count implementation files. Use existing checks and manual or ephemeral verification in accordance with the repo's test policy. The build commands and platform matrix for the new targets are outputs of the early slices.
 
-from fastapi import FastAPI
-from hrns.server import HrnsServer
-from hrns.server.agent import build_agent
+### T01 — Record the Textual baseline
 
+- [ ] **Acceptance** Inventory every supported workflow, keybinding, fallback and platform dependency. Record median time from launch to editable composer and p95 typing and scrolling input-to-render latencies under a deterministic long-history ACP stream.
+- **Verify** Repeat on fixed hardware, terminal dimensions, message history and stream rate. Record the sample count and run-to-run variation for bare `hrns` and `hrns connect`.
+- **Depends on** None. **Files** `PLAN.md`. **Size** S.
 
-def make_coder_agent():
-    return build_agent("provider:model", cwd="/srv/project")
+### T02 — Stream a remote prompt on both targets
 
+- [ ] **Acceptance** A native Ratatui preview and Ratzilla browser preview share the composer and transcript, establish ACP v1 against the same Python mount, and stream a prompt.
+- **Verify** Build the native and `wasm32-unknown-unknown` targets, serve the browser bundle, and check that text arrives incrementally. Close the socket and check the disconnect state. Record the dependency pins and the browser transport approach.
+- **Depends on** None. **Files** `rust/Cargo.toml`, `rust/src/app.rs`, `rust/src/native.rs`, `rust/src/web.rs`, `rust/index.html`. **Size** M.
 
-server = HrnsServer()
-coder = server.add_agent("coder", factory=make_coder_agent)
+### T03 — Launch a native preview from a Python wheel
 
+- [ ] **Acceptance** A version-matched platform wheel installs without a Rust toolchain. A development dispatch path in the Python CLI launches it with inherited terminal streams and propagates exit status. The server-only extra installs independently of the binary wheel.
+- **Verify** Build and install in a clean environment. Exercise normal exit and Ctrl-C, verify terminal restoration, and record install commands, versioning and candidate wheel platforms.
+- **Depends on** T02. **Files** `rust/pyproject.toml`, `rust/Cargo.toml`, `hrns_slim/pyproject.toml`, `hrns_slim/hrns/cli.py`. **Size** M.
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    async with server:
-        yield
+**Checkpoint after T03**
 
+- [ ] Both previews stream against the Python mount, the wheel installs cleanly, and the Textual baseline is reproducible.
 
-app = FastAPI(lifespan=lifespan)
-server.mount_acp(app, prefix="/acp")
-server.mount_ag_ui(app, prefix="/ag-ui")
-```
+### T04 — Authenticate browser connections
 
-Registration returns a typed `RegisteredAgent` handle. Its `new_session(cwd=...)` and `get_session(session_id)` methods select the agent without repeatedly passing its ID. Preserve the existing dependency/output typing through registration/session/turn handles; heterogeneous registrations must not require exposing `Any`.
+- [ ] **Acceptance** A supported HTTPS deployment connects from the browser to the authenticated ACP mount, resolves the expected principal, and rejects unauthorized origins or missing credentials. Native bearer auth works against the same runtime.
+- **Verify** Exercise login, socket reconnect, expired credentials, and a rejected origin in a real browser. Inspect the bundle, handshake, errors and status UI for secret redaction.
+- **Depends on** T02. **Files** `rust/src/web/auth.rs`, browser deployment configuration, `docs/authentication.md`. **Size** M.
 
-`add_agent` accepts `factory`, per-agent session store, model resolver, permission policy, usage limits, and server/client configuration callbacks as needed from the existing adapter's options. Keep these as explicit typed keyword arguments rather than introducing a general plugin registry. Reject duplicate IDs and registration after server startup. Validate IDs as a single safe route segment.
+### T05 — Prove ACP extension interoperability
 
-```python
-session = await coder.new_session(cwd="/srv/project")
-turn = await session.submit("Investigate the deployment failure.")
+- [ ] **Acceptance** Check the pinned SDK against current session-state metadata/notifications, elicitation, providers, advertised commands and MCP-over-ACP. Record the schema features and any typed extension handlers required on each target.
+- **Verify** Compare captured messages with the current client and server. Connect to an agent without the optional capabilities and check the corresponding fallback. Confirm the MCP wire revision and inventory Textual renderer integrations.
+- **Depends on** T02, T04. **Files** `rust/Cargo.toml`, `rust/src/acp.rs`, `rust/src/acp/extensions.rs`, `ARCHITECTURE.md`. **Size** M.
 
-# Independent of any ACP connection:
-follow_up = await session.submit("Then inspect the migration.")
-result = await turn.result()
+### T06 — Start a local stdio agent
 
-await session.cancel()
-queued = await session.pending_prompts()
-await session.resume_queue()
-await session.clear_queue()
-```
+- [ ] **Acceptance** Native can launch the built-in Python agent and an external stdio command with the selected cwd and environment, accepts draft input while connecting, and retains the draft after a failed launch.
+- **Verify** Exercise both agent types, a child exit during startup, reconnect and clean shutdown. Check that owned child processes exit and that the WASM build still compiles.
+- **Depends on** T02, T03. **Files** `rust/src/native.rs`, `rust/src/native/stdio.rs`, `rust/src/app.rs`. **Size** M.
 
-`submit` accepts text and the supported typed prompt-content form. It accepts/schedules a turn and returns a `TurnHandle`; `result()` waits for that particular turn's outcome. Cancelling a waiter does not cancel the turn. Runtime failures complete the handle exceptionally; cancellation has a typed cancelled outcome translated into ACP's cancelled prompt response.
+**Checkpoint after T06**
 
-A registered factory takes no authenticated principal: server scope is fixed for the registration. The initial version can retain the existing adapter's supported dependency/output constraints where necessary; do not silently broaden supported output forms. Record any typing limitation during Task 1.
+- [ ] Authenticated web and both native transports work. Record the proven SDK and packaging decisions. Review required remote workspace and MCP integrations before implementing them.
 
-## Ownership and lifecycle
+### T07 — Restore connection profiles
 
-| Owner | Responsibilities |
-| --- | --- |
-| `AcpServer` | Registrations, live session lookup, lifecycle/task ownership, admission integration |
-| `RegisteredAgent` | Factory/configuration, model resolver and store scope, typed session access |
-| Session runtime | Agent instance, history, settings, todos/skills, transcript, active turn, FIFO queue, pending interactions |
-| ACP attachment | Outbound client, negotiated capabilities, MCP caller/channel, client toolsets, editor/terminal resources |
-| `HrnsServer` observer component | AG-UI conversion, current-run replay buffer, read-only snapshots/subscriptions |
-| Transport | Authentication, serialization, delivery, disconnect cleanup |
+- [ ] **Acceptance** Users can create, edit, select and reopen applicable profiles. Native preserves config precedence, overrides and keyring references. Both targets retain drafts on failed auto-connect and identify the workspace and endpoint in the UI.
+- **Verify** Exercise explicit and remembered profiles, removed profiles, an unreachable target and invalid native config. Relaunch both targets and confirm preference persistence and redaction.
+- **Depends on** T04, T06. **Files** `rust/src/connection.rs`, `rust/src/native/config.rs`, `rust/src/web/preferences.rs`, `rust/src/ui/picker.rs`, `hrns_slim/hrns/cli.py`. **Size** M.
 
-Use one canonical live session per `(agent_id, session_id)`, with synchronized restoration. A store configured for a registration must not let another registration load/list its sessions. Define agent scoping in the persistence contract; if a backend is shared, it must explicitly partition by agent. Never infer ownership from knowledge of a session ID alone.
+### T08 — Restore and manage sessions
 
-The base runtime exposes typed native events and lifecycle snapshots through a small internal subscription interface. The AG-UI component subscribes through composition. `AcpServer` must not import AG-UI types or require AG-UI at import time.
+- [ ] **Acceptance** New, list, load, resume, rename, close and delete work where advertised. Restored history and shared live state appear in order without duplication. Opening a remote session by ID without explicit cwd can resolve it through paginated listing.
+- **Verify** Load a prior session and join another during an active turn. Compare history and live state with Textual. Exercise an absent session, denied operation and unsupported capability.
+- **Depends on** T05, T07. **Files** `rust/src/acp/session.rs`, `rust/src/session.rs`, `rust/src/ui/sessions.rs`, `rust/src/transcript.rs`. **Size** M.
 
-Server context startup enables execution. Shutdown rejects new submissions, cancels active and queued work, resolves waiting handles, and closes owned resources. Client detach only removes connection-owned resources. Initial deployment is one process/worker per runtime; cross-worker task ownership and fan-out are out of scope.
+### T09 — Restore prompt lifecycle controls
 
-### Configuration split
+- [ ] **Acceptance** Queue, steer, cancel, clear and resume work as supported by the current client and agent. Drafts stay editable while busy. Disconnection, explicit cancellation and session close have their existing distinct effects.
+- **Verify** Queue multiple prompts, cancel mid-turn, resume or clear, then reconnect and check active-turn state and duplicate submissions.
+- **Depends on** T08. **Files** `rust/src/acp/turn.rs`, `rust/src/turn.rs`, `rust/src/ui/composer.rs`, `rust/src/ui/queue.rs`. **Size** M.
 
-A server `SessionContext` contains agent ID, session ID, and authoritative cwd, without requiring a client. Its configuration provides dependencies, server capabilities/toolsets, and workspace. An attachment configuration contains the outbound client, negotiated capabilities, MCP declarations, and caller/channel; it provides connection-owned resources only.
+**Checkpoint after T09**
 
-Run server configuration once for a new/restored live session. Run attachment configuration for each attachment. Detach must not replace server dependencies or workspace. Loading an existing session must validate its cwd rather than silently change its server workspace.
+- [ ] Both targets connect, manage and restore sessions, and complete or cancel a turn. Recheck native startup through the preview entry point.
 
-Client catalogs may change at model-step boundaries using upstream dynamic toolset support. Every client tool dispatch also validates its attachment generation, because control can change after a model request advertised its tools. Do not route an old call to a new client's same-named tool.
+### T10 — Render the complete transcript
 
-### Queue semantics
+- [ ] **Acceptance** Stream Markdown, code, thoughts and expandable tools. Preserve scroll position across streaming and resize. Find retained text and copy the latest completed response.
+- **Verify** Replay a large mixed transcript. Scroll back mid-stream, resize, find an older result and copy a multiline response on both targets. Check for stalled input or full-history reformatting on every update.
+- **Depends on** T09. **Files** `rust/src/transcript.rs`, `rust/src/ui/transcript.rs`, `rust/src/ui/format.rs`, `rust/src/native.rs`, `rust/src/web.rs`. **Size** M.
 
-- Programmatic and ACP submissions share one FIFO queue in acceptance order. At most one turn runs per session.
-- Queued prompts enter model history only when execution starts. Pending prompts are not replayed as completed conversation entries.
-- Accepted work survives connection loss; the disconnected JSON-RPC request/response association does not. Never automatically resubmit a disconnected prompt.
-- `cancel` stops the active turn and pauses queued follow-ups. `resume_queue` and `clear_queue` are Python-only operations; clear completes discarded handles as cancelled. An empty cancellation does not create work.
-- New submissions to a paused queue remain queued until explicit programmatic resume. The ACP client does not gain an implicit resume/clear extension.
-- Errors pause remaining queued work so failures cannot trigger an uncontrolled sequence of follow-ups. Explicit resume continues it.
-- Queues are process-local; no pending-work persistence or recovery across server restart.
-- Existing TUI-local drafts/queues remain separate; do not silently migrate them to server state.
+### T11 — Restore composer gestures
 
-### ACP attachment and interactions
+- [ ] **Acceptance** Restore multiline input, paste, draft and prompt history, completion, help and skill mentions. Restore attachment staging and removal with existing metadata and validation. Native uses file paths and browser uses an explicit file chooser.
+- **Verify** Check keyboard shortcuts in both targets, agent and local completion, skill references, text and image attachments, and unsupported or oversized input feedback.
+- **Depends on** T09. **Files** `rust/src/ui/composer.rs`, `rust/src/ui/completion.rs`, `rust/src/attachments.rs`, `rust/src/native/files.rs`, `rust/src/web/files.rs`. **Size** M.
 
-`session/new` creates and attaches a new session. `session/load` reserves the one ACP attachment, reuses/restores the live session, and replays published history before enabling ordinary live delivery and pending requests. Reject another live attachment; reconnect after detach is allowed. Scope load/list/delete to the endpoint's agent.
+### T12 — Restore status panels
 
-Replay includes current-turn ACP content through an atomic snapshot/subscription boundary. Persisted model history remains committed history; observation/replay does not commit incomplete content to future model context.
+- [ ] **Acceptance** Restore activity, usage, todo/plan and sidebar navigation. Persist theme, sidebar and transcript preferences. Preserve connection identity in narrow layouts.
+- **Verify** Drive usage and plan updates through a turn, toggle panels and preferences, then relaunch both targets at narrow and wide dimensions.
+- **Depends on** T08, T10. **Files** `rust/src/ui/status.rs`, `rust/src/ui/sidebar.rs`, `rust/src/ui/settings.rs`, `rust/src/preferences.rs`. **Size** M.
 
-Prompt handlers submit to the runtime and shield only their wait on the turn handle. Task cleanup belongs to the runtime. `session/cancel` cancels active work and pauses the queue according to the shared cancellation contract. Preserve ACP v1 `session/close` cancellation semantics; a transport disconnect is not a `session/close` request.
+**Checkpoint after T12**
 
-Server-started turns need lifecycle synchronization because an attaching client has no originating prompt request. Use a narrowly scoped, advertised `_hrns/session/state` notification and namespaced load-response `_meta` for status, active turn ID, revision, and last outcome. This extension is not queue management. Add support in the existing client without requiring it to understand or manage pending prompts.
+- [ ] Walk the transcript, composer and preferences rows on both targets. Measure long-history input and scrolling again and record regressions.
 
-Approvals and questions are session-owned pending interactions. With no ACP client, execution waits and observers see waiting state. Dispatch after attachment synchronization. Disconnect invalidates the old request but retains the pending decision for the next attachment. An attachment generation prevents late answers from affecting execution. Cancellation resolves waits and clears obsolete interactions.
+### T13 — Respond to interactive requests
 
-Distinguish no client from a connected client lacking the required capability: the latter follows the adapter's existing unsupported-interaction outcome instead of waiting indefinitely for an impossible response.
+- [ ] **Acceptance** Preserve inline approvals, modal fallback, approval modes and elicitation choices. Requests remain actionable across screen changes and resolve once across cancellation or disconnect.
+- **Verify** Exercise allow, deny, cancel, auto mode and concurrent interactions. Compare wire responses and displayed turn state on both targets.
+- **Depends on** T05, T09. **Files** `rust/src/acp/interactions.rs`, `rust/src/ui/approval.rs`, `rust/src/ui/elicitation.rs`, `rust/src/preferences.rs`. **Size** M.
 
-MCP registrations and terminal IDs belong to their connection. Missing/unavailable client tools fail through the normal tool error path; do not wait for a previous client or replay side-effecting executions. A lost result may mean execution outcome is unknown. Preserve MCP-over-ACP's distinction between unavailable registration, inner unknown-tool error, and a tool execution error.
+### T14 — Set agent models and session options
 
-Model/provider routing remains scoped to the registered agent. Existing `providers/set` and `providers/disable` mutate its resolver for all its sessions, because those ACP methods have no session ID. Notify affected attached sessions through the registration runtime. Do not introduce new provider authorization policy as part of this work.
+- [ ] **Acceptance** Discover, configure and select providers and models. Preserve applicable login and credential flows. Restore effort and other advertised session options.
+- **Verify** Start with missing credentials, configure a native built-in provider and a remote provider as supported, change model and effort in a running session, and reload the selected values.
+- **Depends on** T05, T07, T08. **Files** `rust/src/acp/providers.rs`, `rust/src/ui/providers.rs`, `rust/src/ui/models.rs`, `rust/src/native/config.rs`, `rust/src/web/auth.rs`. **Size** M.
 
-## Read-only AG-UI API
+### T15 — Apply workspace access policy
 
-| Method/path | Purpose |
-| --- | --- |
-| `WS /acp/{agent_id}` | Standard ACP connection to one registration |
-| `GET /ag-ui/{agent_id}/sessions/{session_id}` | Current read-only session/history snapshot |
-| `GET /ag-ui/{agent_id}/sessions/{session_id}/events` | Long-lived AG-UI SSE subscription |
+- [ ] **Acceptance** Native filesystem and terminal callbacks match `off`, `read` and `all`. Browser workspace and command operations address the remote workspace and follow the deployment and session policy.
+- **Verify** Use a disposable workspace to exercise allowed and denied reads, writes and terminal calls. Check cleanup, capability negotiation and the browser's remote workspace identity.
+- **Depends on** T04, T06, T13. **Files** `rust/src/acp/client_io.rs`, `rust/src/native/io.rs`, `rust/src/ui/settings.rs`, remote deployment wiring. **Size** M.
 
-Apply admission checks to both mounts with equal server scope. HTTP and WebSocket authentication must share a suitable typed connection abstraction; neither observation route is public merely because it is read-only. Snapshot responses use AG-UI message conversion, not a new parallel frontend message schema. Advertise read-only endpoint semantics through OpenAPI and explicit application metadata; do not invent a standard AG-UI read-only capability.
+**Checkpoint after T15**
 
-Do not mount `AGUIAdapter.dispatch_request` or accept `RunAgentInput`. Unsupported mutation methods receive 405. Subscribing while idle waits for future execution; disconnecting stops only that subscription.
+- [ ] Compare approval, elicitation, provider and workspace operations with the parity matrix. Review credential ownership and the capabilities each connection advertises.
 
-### Conversion and replay
+### T16 — Export native MCP tools
 
-Use `AGUIEventStream` once per native Pydantic AI run, with stable server-assigned thread/session and run IDs. Transform the same native events already sent to ACP and broadcast the converted output; never iterate a single native generator independently from two consumers or start a second run for an observer.
+- [ ] **Acceptance** Restore MCP health, auth, export consent, filters, request routing and progress. Preserve one-time, connection and persistent consent behavior.
+- **Verify** Use a deterministic MCP server to exercise each consent decision, credential failure, a filtered tool call, progress and reconnect. Compare framing to T05.
+- **Depends on** T05, T07, T13. **Files** `rust/src/acp/mcp.rs`, `rust/src/native/mcp.rs`, `rust/src/ui/mcp.rs`, `rust/src/preferences.rs`. **Size** M.
 
-An application turn can contain multiple native runs around deferred tool approvals. Give each native run its proper AG-UI start/finish/error lifecycle, and publish session-level waiting/running status via a documented `STATE_SNAPSHOT` payload. The next native run continues the same thread. Do not falsely mark an entire application turn complete when one native run pauses for approval.
+### T17 — Export browser MCP tools through the remote deployment
 
-For an observer joining during a native run, atomically capture the completed-history baseline from before that run plus its converted event prefix, then subscribe to later events. Send `MESSAGES_SNAPSHOT` for the baseline, replay the current run from its beginning (including start events), and then deliver live events. Include the submitted user message exactly once. This avoids inventing a custom partial-message reducer.
+- [ ] **Acceptance** Browser exposes the same applicable health, export and consent workflow through explicitly configured remote services. Host-only transports and credentials stay on the remote side, scoped to the current principal and session.
+- **Verify** Repeat the T16 user flow through the browser. Exercise failure, reconnect and attempted reuse from an unrelated session.
+- **Depends on** T04, T05, T16. **Files** `rust/src/web/mcp.rs`, `rust/src/ui/mcp.rs`, remote MCP integration and deployment documentation. **Size** M.
 
-Use `AGUIAdapter.dump_messages` for history conversion. Verify identity continuity between dumped messages and the live converter: reconnect or the next baseline must neither duplicate messages nor target deltas at unrelated IDs. Preserve any necessary ID bookkeeping in the observer component, without writing UI metadata into model-facing history indiscriminately.
+### T18 — Restore agent commands and presentations
 
-Retain only the completed-history baseline and event buffer required for the current native run. After completion, synchronize the next baseline using committed native history. Failure/cancellation must terminate the observer lifecycle and preserve already-visible display content without treating it as committed model history. An existing observer may receive several runs on one SSE connection.
+- [ ] **Acceptance** Restore advertised agent commands, name collision routing, structured command/tool/approval rendering and renderer fallback. Explicit user actions are required to invoke a command from a view.
+- **Verify** Run a colliding command, inspect a rendered tool and approval, replay without reinvoking a command, and exercise an unknown renderer on both targets.
+- **Depends on** T05, T10, T11, T13. **Files** `rust/src/acp/commands.rs`, `rust/src/ui/commands.rs`, `rust/src/ui/renderers.rs`, `rust/src/ui/approval.rs`. **Size** M.
 
-Per-subscriber queues are bounded. On overflow, disconnect that subscriber and allow a fresh snapshot/replay subscription; never silently drop arbitrary deltas. A slow subscriber cannot block model execution, ACP delivery, or other observers. Keep replay/subscribe ordering under short state locks, with no network I/O under a lock.
+**Checkpoint after T18**
 
-## Implementation order
+- [ ] Complete the parity walkthrough on both targets, including MCP scopes and plugin integrations. Resolve missing workflows before qualifying the release.
 
-Detailed acceptance criteria, verification, dependencies, and file scope are in [tasks/todo.md](tasks/todo.md).
+### T19 — Qualify responsiveness
 
-1. [T1](tasks/todo.md#t1--confirm-public-contracts-and-conversion-feasibility): public contracts and offline AG-UI feasibility.
-2. [T2](tasks/todo.md#t2--create-sessions-through-the-agent-registry): registration and client-independent session creation.
-3. [T3](tasks/todo.md#t3--execute-one-server-owned-turn): one programmatic turn with server-owned lifetime.
-4. [T4](tasks/todo.md#t4--schedule-programmatic-follow-ups): FIFO queue, cancellation, pause/resume/clear.
-5. [T5](tasks/todo.md#t5--attach-acp-to-live-sessions): per-agent mounting, attachment, replay.
-6. [T6](tasks/todo.md#t6--synchronize-server-started-turns-in-the-acp-client): lifecycle state and existing client integration.
-7. [T7](tasks/todo.md#t7--retain-pending-interactions-across-disconnects): disconnected approvals/questions.
-8. [T8](tasks/todo.md#t8--bind-client-tools-to-the-current-attachment): generation-aware client resources.
-9. [T9](tasks/todo.md#t9--publish-ag-ui-from-existing-execution): upstream conversion and native-run lifecycle.
-10. [T10](tasks/todo.md#t10--mount-read-only-observation): HTTP/SSE, history handoff, subscriber cleanup.
-11. [T11](tasks/todo.md#t11--move-existing-launchers-to-the-server-api): CLI, runtime, stdio, examples, direct API replacement.
-12. [T12](tasks/todo.md#t12--document-and-verify-the-complete-flow): user/API docs, architecture, final gates.
+- [ ] **Acceptance** Median native startup and p95 typing and scrolling latency improve beyond Textual's measured run-to-run variation. The browser meets a responsiveness target established from the preview. Both retain all input and transcript updates under the measured load.
+- **Verify** Repeat T01 with the release build, the installed Python entry point, and a browser loading the deployed bundle. Record medians, p95s, environment and workload. Measure composer and runtime readiness separately.
+- **Depends on** T12, T17, T18. **Files** `PLAN.md`. **Size** S for measurement. Track any necessary performance fixes as focused follow-up tasks.
 
-Sequential dependency chain: T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8 → T9 → T10 → T11 → T12. T9's conversion feasibility is checked in T1 so a protocol/identity mismatch is found before broad refactoring. Checkpoints follow every two tasks. No delegated agent work is required.
+### T20 — Produce paired release artifacts
 
-## Risks and decisions to resolve during the first slice
+- [ ] **Acceptance** CI produces native wheels for the supported platforms and a version-matched Ratzilla bundle. Deployment instructions cover HTTPS, authentication, and the remote ACP runtime. Python artifacts include the intended full, client-only and server-only install paths.
+- **Verify** Install staged wheels in empty Python environments, check native launch, and serve the built web bundle against a remote runtime. Inspect artifact version metadata and CI results.
+- **Depends on** T03, T04, T17, T19. **Files** `.github/workflows/ci.yml`, `.github/workflows/publish.yml`, `justfile`, `rust/pyproject.toml`, browser deployment docs. **Size** M.
 
-| Risk | Handling |
-| --- | --- |
-| Scope of extraction from a large adapter | Move execution semantics without rewriting provider, skill, approval, or tool behavior unnecessarily |
-| Generic typing across heterogeneous registrations | Typed registration/session handles and a small private non-generic management boundary; avoid `Any` or casts |
-| Current-run snapshot vs streamed message IDs | Offline prototype with join/rejoin and deferred runs before committing the observer storage contract |
-| ACP client's behavior when joining a running session | Explicit state synchronization and focused headless client verification |
-| Active-run replay buffer can grow large | Measure retention in the feasibility check and document its memory cost; do not silently truncate. If a replay reducer or disk spool becomes necessary, surface that substantial addition for a decision |
-| Unsupported capabilities or disappearing tools | Distinguish no attachment, unsupported attachment, unavailable binding, and uncertain execution result |
-| Same backend reused for two registrations | Explicit per-agent storage partitioning; reject unsupported ambiguous configuration |
-| Shutdown or cancellation leaves unresolved waiters | Runtime owns task teardown, pending interactions, queued handles, and subscriber cleanup |
+### T21 — Switch the interactive command
 
-T1 must resolve exact public type signatures, storage partitioning shape, AG-UI version constraints/extra placement, and replay identity behavior using public upstream APIs. If satisfying them needs substantial additional machinery beyond this plan, report the concrete gap for a decision rather than adding it silently.
+- [ ] **Acceptance** Bare `hrns` and `hrns connect` launch Ratatui. The paired browser artifact is ready for the same release. Retire Textual and its dependency after checking callers. Keep shared Python modules used by `hrns run`.
+- **Verify** Run `just check`, `just docs-build`, Rust and WASM CI checks, and installed-artifact smokes for interactive launch, a headless prompt and an agent launch. Repeat the deployed browser smoke with the final bundle.
+- **Depends on** T19, T20. **Files** `hrns_slim/hrns/cli.py`, `hrns_slim/pyproject.toml`, `uv.lock`, `ARCHITECTURE.md`, `README.md`. **Size** M for cutover. Remove the legacy UI package in a separate mechanical change in the same release.
 
-## Validation policy
+**Release checkpoint**
 
-No new tests. Each slice has a focused offline/manual scenario in the checklist, using a local `FunctionModel` or equivalent existing model facility rather than live providers. These are verification exercises, not new committed test suites. Run `just lint` and `just build` at implementation checkpoints; `just check` combines those gates. Run `just docs-build` when the public documentation is updated. Do not run implementation gates solely for this markdown-only planning change.
+- [ ] Both targets pass their parity checklist, startup and responsiveness checks, and installed-artifact verification at the same version.
 
-Final smoke flow: register two agents; start a session and turn in Python; subscribe two observers; join through ACP during execution; queue a follow-up; disconnect ACP; wait on an approval; reconnect and answer; verify continued execution and consistent messages; cancel with queued work; resume/clear in Python; close observers; shut down the server. Confirm agent/session isolation, rejected second ACP attachment, read-only HTTP behavior, and no duplicate model runs. Report offline validation separately from any later live-provider confirmation.
+## Early decisions and risks
 
-## Sources checked
+| Decision or risk | Resolve in | Required evidence |
+| --- | --- | --- |
+| SDK transport framing or unstable methods differ from the Python server | T02, T05 | Streaming prompt and extension interoperability against the real Python mount on both targets |
+| Browser cannot supply an arbitrary bearer header | T04 | Authenticated HTTPS deployment with origin validation, expiry behavior and principal mapping |
+| New wheels complicate the current Python release pipeline | T03 | Clean install, version resolution, one public CLI entry point, and a supported platform matrix |
+| Native-only I/O and MCP need equivalent browser workflows | T05, T15, T17 | Capability mapping and scoped remote execution and export |
+| Existing plugins return Textual widget objects | T05, T18 | Inventory and a demonstrated behavioral replacement for each supported renderer workflow |
+| Python dispatch or long-history rendering erases performance gains | T01, T12, T19 | Repeatable measurements through the shipped entry points |
 
-- [Pydantic AI UI event streams: encoding without a request](https://pydantic.dev/docs/ai/integrations/ui/overview/#encoding-events-without-a-request): standalone transformer and per-run lifetime.
-- [Pydantic AI AG-UI integration](https://pydantic.dev/docs/ai/integrations/ui/ag-ui/): conversion, encoding, deferred approval lifecycle.
-- [Pydantic AI AG-UI API](https://pydantic.dev/docs/ai/api/ui/ag_ui/): `AGUIEventStream`, `AGUIAdapter.dump_messages`.
-- [AG-UI events](https://docs.ag-ui.com/concepts/events): message snapshots and run lifecycle.
-- [ACP v1 session setup](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/session-setup.mdx): load/replay, resume, close.
-- [ACP v1 prompt turn](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/prompt-turn.mdx): prompt response lifecycle and cancellation; no queue-management contract.
-- [ACP extensibility](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v1/extensibility.mdx): advertised custom methods/notifications and namespaced metadata.
-- [MCP-over-ACP draft](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/rfds/mcp-over-acp.mdx): connection-owned registrations and error provenance.
+T01 and T02 can proceed independently. After T02, native installation and browser authentication can proceed independently. Keep session restoration and prompt lifecycle work in dependency order. Transcript rendering and composer gestures can proceed independently once prompt state is stable.
 
-Installed source was also inspected under `.venv/lib/python3.14/site-packages/pydantic_ai/ui/` and `pydantic_ai/toolsets/_dynamic.py`. Recheck against the declared dependency range during T1; installed support alone is not a dependency guarantee.
+## References
 
-## Implementation record
-
-T1–T12 are implemented. Concrete contracts are `AcpServer`, `RegisteredAgent[Deps, Output]`,
-`Session[Deps, Output]`, `TurnHandle[Output]`, and `TurnResult[Output]`. Server setup uses
-`SessionContext`/`AcpSessionConfig`; client setup uses `AcpSession`/`AcpAttachmentConfig`.
-The attachment config only accepts toolsets. Resolver instances cannot be reused across registrations. Shared persistence requires separately
-partitioned store instances; registering the same instance twice is rejected.
-
-Observation is an optional `ag-ui` extra using `pydantic-ai-slim[ag-ui]>=2.57.0,<3`.
-The public APIs were exercised at 2.57.0 with `ag-ui-protocol` 0.1.22. A standalone
-text run encoded six events in 728 bytes; replay storage grows linearly with current
-native-run event volume and is released on completion. Observer queues are bounded
-at 256 events. The implementation does not add a reducer
-or disk spool. Native response order, reasoning message order, and tool-call IDs map
-stream identities onto cached dumped messages without altering model history.
-
-Offline exercises covered typed output/dependencies, multiple registrations, duplicate
-IDs/store rejection, synchronized restoration, waiter shielding, FIFO, cancel/pause/
-resume/clear, failure propagation, interrupted display history, shutdown, real local
-ACP framing/WebSocket attachment, rejected second attachment, approval reconnect,
-question support/unavailability, replacement client tool catalogs, multi-session
-provider notifications, authenticated GET/SSE, matching observer events, and slow
-subscriber disconnection. The existing headless client reported one lifecycle per
-server-started and client-started turn. CLI help and example startup/import were checked.
-
-Verification: `just check` (format/lint/typing/build) and `just docs-build`. No new tests
-were committed, and no live-provider execution was used. Supplemental validation
-scripts were ephemeral files outside the repository.
-
-The implementation also updates stale README, example, configuration URL, and index
-references so removed APIs are not shown as supported. No compatibility shims were added.
+- [Official Rust ACP SDK](https://docs.rs/agent-client-protocol/latest/agent_client_protocol/) and [WASM support](https://docs.rs/crate/agent-client-protocol/latest#webassembly)
+- [Native Rust ACP WebSocket transport](https://docs.rs/crate/agent-client-protocol-http/latest)
+- [Ratatui](https://ratatui.rs/) and [Ratzilla build and deployment](https://github.com/ratatui/ratzilla)
+- [Browser WebSocket constructor](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/WebSocket)
+- [Maturin binary wheels](https://www.maturin.rs/bindings.html#bin)
