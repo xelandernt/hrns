@@ -70,6 +70,14 @@ ordinary ACP operations. Native clients can continue to use bearer headers
 through the same callback. Keep the WebSocket endpoint and its credentials in
 separate configuration.
 
+The browser build advertises no client filesystem, terminal or MCP capability
+and never launches a local agent, so the deployment needs no host-side client
+bridge. Query parameters select presentation only: `theme` accepts `hrns`,
+`textual-dark`, `textual-light`, `ansi-dark` or `ansi-light`, and `permission`
+accepts `ask`, `reads` or `all`. They never carry secrets. A rejected upgrade,
+expired cookie or dropped socket leaves the draft and transcript on screen and
+shows the disconnected state; `Ctrl-R` retries with the same endpoint.
+
 ## Implement a principal-aware store
 
 Pass your store through `server.add_agent(..., session_store=...)`. Each registration

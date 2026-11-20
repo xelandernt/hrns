@@ -59,19 +59,55 @@ and the browser with `trunk build --locked --release` from `rust/` with
 `wasm32-unknown-unknown` installed. The preview expects a remote ACP mount at
 the same origin under `/acp/agent`. For local development, set the `endpoint`
 and `cwd` page query parameters to a WebSocket URL and remote workspace.
-Put any deployment authentication upstream of the browser connection.
+Put any deployment authentication upstream of the browser connection. The
+browser advertises no client filesystem, terminal or MCP capability and serves
+no workspace callback; only its own file chooser and clipboard act on user
+input. Deployments that need those capabilities use the native client.
 The shared `/attach` command stages an embedded ACP resource when the runtime
 advertises embedded context. The native frontend reads the supplied path away
 from the event loop. The browser opens its file chooser, and the prompt carries
 the chosen content rather than a path to the browser device.
 
-The Python dispatcher can launch an installed native preview wheel when
-`HRNS_RUST_TUI_PREVIEW=1`. It resolves the target and existing credential
-references before replacing the Python process on POSIX. The native process
+Native advertises `clientCapabilities` from one mode: `off` offers nothing,
+`read` serves `fs/read_text_file`, and `all` also serves writes and the
+`terminal/*` lifecycle. Elicitation form support is always advertised on both
+targets. Reads and writes are confined to the session workspace; version
+control, `.hrns`, `.env`, secret and key paths are read-only. A terminal is
+spawned in its own process group, its output is capped, and release or
+disconnect kills the group. Both targets treat unsupported client requests as
+`method_not_found`, and the browser's absent capabilities are never advertised.
+
+The Python dispatcher launches an installed native wheel by default, because the
+release installs it with the Python client. `HRNS_TEXTUAL=1` keeps the Textual
+client available for comparison and for source installs without the wheel;
+`HRNS_RUST_TUI_PREVIEW=1` forces native and reports a missing wheel. The
+dispatcher resolves the target and existing credential references before
+replacing the Python process on POSIX. It also resolves `client_io` with the
+documented precedence (CLI, profile, `[tui]`) and passes the TOML theme and
+permission mode as launch defaults. The native process
 inherits the terminal and owns terminal restoration and the ACP connection.
-Build a development wheel with `uvx maturin build --manifest-path rust/Cargo.toml`
-and install it alongside the Python client. This wheel uses the Rust crate's
+The Rust state file is authoritative only for values the user changes in the
+native UI; unchanged values keep following the Python document. Build a
+development wheel with `uvx maturin build --manifest-path rust/Cargo.toml` and
+install it alongside the Python client. This wheel uses the Rust crate's
 preview version. Release version coordination remains part of the cutover.
+
+Approvals stay inline above the composer and show the tool kind, rendered
+input, diff or terminal detail, and the available options. `1`-`9` select by
+position; `y`, `a`, `n` and `N` map to the allow-once, allow-always,
+reject-once and reject-always kinds. `Esc` cancels the request. Modes `ask`,
+`reads` and `all` auto-approve nothing, read/search/think calls, or any request
+that offers an allow option; the decision uses the kind reported by the agent,
+never a tool name. Pending approvals and forms are cleared when their turn ends
+or the connection drops, so a request resolves exactly once.
+
+Agent forms (`elicitation/create`) render as a dock above the composer. A form
+walks its fields in order: typing edits text and number fields, `1`-`6` choose,
+toggle or advance a choice field, `y`/`n` answer booleans, `Enter` moves on and
+submits the last field, and `Esc` declines. Multi-select fields toggle without
+advancing. Required fields that are unanswered block submission with an inline
+error. A form the client cannot render is declined rather than ignored, so the
+agent receives a result instead of waiting forever.
 
 Both frontends keep one action queue for the process lifetime and can retry the
 transport after a disconnect. `Ctrl-R`, or the `/reconnect` command, starts
@@ -114,15 +150,47 @@ span to the first text block's `_meta`, leaving the typed text unchanged for
 the agent to expand. Paste, draft history and attachment staging stay shared;
 native reads paths while the browser opens its file chooser.
 
-`Ctrl-B` opens a sidebar with the connection identity, session, model, usage,
-plan, local queue, skills and recent activity. `Ctrl-O` expands tool details
-and the sidebar records tool transitions and turn outcomes. Both frontends
-persist the sidebar state, its width, automatic tool expansion and reasoning
-visibility without touching connection configuration: native writes JSON under
+`Ctrl-B` opens a sidebar with the connection identity, client I/O mode,
+session title, model, mode, permission mode, usage, cost, plan, local queue,
+skills and recent activity. `Ctrl-O` expands tool details and the sidebar
+records tool transitions and turn outcomes. Both frontends persist sidebar,
+width, tool expansion, reasoning visibility, theme and permission mode without
+touching connection configuration: native writes JSON under
 `$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
-local storage. The sidebar is suppressed below 72 columns; the header keeps the
-destination, status and workspace visible on narrow layouts. Theme selection
-stays with the Python TUI settings until cutover.
+local storage. The sidebar is suppressed below 96 columns; the header keeps the
+destination, status, title or workspace, model, usage and cost visible on
+narrow layouts. `/theme`, `/permissions`, `/settings` and the `theme` and
+`permission` page parameters expose the same values. The built-in themes are
+`hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
+
+Remote provider routing uses the `providers/list`, `providers/set` and
+`providers/disable` methods. `/providers` reads the live advertisement and
+`/provider set` or `/provider disable` applies a change for the connection.
+Models and effort remain session config options; a value must be one of the
+advertised choices. Device login and TOML provider editing remain Python
+commands (`hrns login`, `hrns config`) rather than being duplicated in Rust.
+
+### ACP SDK pin and extension surface
+
+The Rust client pins `agent-client-protocol = 5.4.0` (schema 1.19.0) and uses
+the stable v1 types. It sends `clientCapabilities` and reads the agent's
+`loadSession`, prompt, MCP and session capabilities at initialize. It handles
+`session/update` for user, agent and thought chunks (including non-text blocks
+as labels), tool calls and updates, plans, session titles, current mode, config
+options, available commands and usage with cost. It reads `_hrns/session/state`
+as a notification and from the `session/new` or `session/load` `_meta`, along
+with `hrns/skills`. It sends `hrns/skills` mentions on the first prompt text
+block. It answers `session/request_permission`, `elicitation/create`, `fs/*` and
+`terminal/*` through the active session stream, which is where the SDK routes
+session-scoped requests. Provider methods and extension requests use the SDK's
+untyped message type because the stable schema does not expose them.
+
+The server advertises no `available_commands_update` and no `session/resume` or
+rename method. `/agent` therefore stays empty unless an agent advertises
+commands, and `/rename` reports that standard ACP has no rename operation.
+`session/delete` returning `-32002` is treated as success. Listing scopes to
+the current workspace. Titles arrive through `session_info_update` and the
+server's derived title.
 
 ## ACP dependency
 

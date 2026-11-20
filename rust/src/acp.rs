@@ -766,7 +766,13 @@ pub async fn connect(
 
 #[cfg(not(target_family = "wasm"))]
 fn io_error(message: String) -> Error {
-    Error::new(ErrorCode::INVALID_PARAMS, message)
+    // The I/O service reports an unadvertised capability with this wording; map it
+    // to the JSON-RPC method-not-found the ACP contract expects.
+    if message.ends_with("is not advertised") {
+        Error::method_not_found()
+    } else {
+        Error::new(ErrorCode::INVALID_PARAMS, message)
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]

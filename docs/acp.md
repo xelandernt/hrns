@@ -93,6 +93,13 @@ The adapter calls these methods on the connected client:
 | `mcp/message` | When the adapter uses a client-provided (`type: "acp"`) server; the caller sends requests and receives request-scoped notifications |
 | `elicitation/create` | When the model calls `ask_user_question` and the client advertised `elicitation.form`; one form per call, session-scoped to the tool call |
 
+The native Ratatui client implements these client methods directly. It advertises
+`fs` and `terminal` according to `--client-io` (`off`, `read` or `all`), always
+advertises form elicitation, and keeps reads and writes inside the session workspace.
+The browser client advertises form elicitation only and answers no filesystem,
+terminal or MCP request. Both show approvals with the tool kind and options and render
+agent forms inline.
+
 The ACP-backed filesystem and terminal are opt-in through `attachment_config` on
 `server.add_agent`; the default `build_agent` runs file and shell tools on the server.
 `client_io` only *advertises* the capabilities: the agent must install

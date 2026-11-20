@@ -23,6 +23,32 @@ For a minimal installation, use `hrns-slim`, adding `[client]` for the terminal 
 
 For local development, run `just install`.
 
+## Terminal clients
+
+The interactive client is being replaced by a native [Ratatui](https://ratatui.rs/)
+frontend with a [Ratzilla](https://github.com/ratatui/ratzilla) browser build. Both use
+the official Rust ACP SDK and the same composer, transcript, session and approval
+state. Native supports the built-in agent, external stdio commands and remote
+WebSocket targets; the browser connects only to an authenticated remote ACP mount and
+advertises no client filesystem, terminal or MCP capability.
+
+The release installs the `hrns-tui` wheel alongside `hrns`, so bare `hrns` and
+`hrns connect` launch the native client. `HRNS_TEXTUAL=1` forces the Textual client for
+comparison or when the wheel is unavailable; `HRNS_RUST_TUI_PREVIEW=1` forces the native
+client and reports a missing wheel. Install it in development with:
+
+```sh
+uvx maturin build --manifest-path rust/Cargo.toml
+pip install target/wheels/hrns_tui-*.whl
+```
+
+The launcher resolves the target and passes `client_io` (CLI, profile, then `[tui]`),
+the TOML theme, permission mode and credentials, then replaces itself with the native
+executable. Build the browser bundle with
+`trunk build --locked --release` from `rust/` and serve `rust/dist/` from the ACP origin.
+See [architecture](ARCHITECTURE.md#rust-terminal-preview) and
+[browser deployment](docs/authentication.md#serve-the-ratzilla-client-with-acp-authentication).
+
 ## Define the agent
 
 ```python

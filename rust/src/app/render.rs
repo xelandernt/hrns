@@ -94,7 +94,7 @@ impl App {
             let cost = self
                 .usage_cost
                 .as_ref()
-                .map(|cost| format!(" · ${cost}"))
+                .map(|cost| format!(" · {cost}"))
                 .unwrap_or_default();
             header_spans.push(format!("{tokens}{cost}").into());
         }
@@ -288,7 +288,7 @@ impl App {
             lines.push(Line::from(format!("usage {used}/{size}")).fg(palette.muted));
         }
         if let Some(cost) = &self.usage_cost {
-            lines.push(Line::from(format!("cost ${cost}")).fg(palette.muted));
+            lines.push(Line::from(format!("cost {cost}")).fg(palette.muted));
         }
         lines.push(Line::from(""));
         lines.push(heading("Plan"));
