@@ -876,6 +876,7 @@ dependencies = [
  "crossterm",
  "futures",
  "js-sys",
+ "libc",
  "mime_guess",
  "percent-encoding",
  "ratatui",

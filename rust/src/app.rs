@@ -1,17 +1,22 @@
 mod commands;
 mod render;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
-use agent_client_protocol::v1::schema::SessionConfigOption;
+use agent_client_protocol::v1::schema::{ElicitationContentValue, SessionConfigOption, ToolKind};
 use futures::channel::{mpsc, oneshot};
 
-use crate::acp::{Action, Event, ExecutionState, ExecutionStatus, SessionTarget};
+use crate::acp::{
+    Action, ClientIoMode, Event, ExecutionState, ExecutionStatus, PermissionRequest, ProviderInfo,
+    SessionTarget,
+};
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
-use crate::preferences::Preferences;
+use crate::elicitation::FormState;
+use crate::preferences::{ApprovalMode, Preferences};
 use crate::skills::{self, Skill};
+use crate::theme::{self, Palette};
 use crate::transcript::{Role, Transcript};
 
 pub enum LocalEffect {
@@ -20,6 +25,23 @@ pub enum LocalEffect {
     Reconnect,
     Switch(SessionTarget),
     SavePreferences(Preferences),
+}
+
+#[derive(Clone)]
+pub struct Startup {
+    pub client_io: ClientIoMode,
+    pub theme: Option<String>,
+    pub permission: Option<ApprovalMode>,
+}
+
+impl Default for Startup {
+    fn default() -> Self {
+        Self {
+            client_io: ClientIoMode::Off,
+            theme: None,
+            permission: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +76,11 @@ struct Completion {
     selected: usize,
 }
 
+pub struct PendingElicitation {
+    pub state: FormState,
+    pub respond: oneshot::Sender<Option<BTreeMap<String, ElicitationContentValue>>>,
+}
+
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "List commands"),
     ("/sessions", "List saved sessions"),
@@ -65,6 +92,11 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/models", "Show the session models"),
     ("/model", "Select a model"),
     ("/effort", "Show the reasoning effort"),
+    ("/providers", "List remote provider routing"),
+    ("/provider", "Configure a remote provider"),
+    ("/permissions", "Show or set the approval mode"),
+    ("/settings", "Show or set terminal settings"),
+    ("/theme", "Show or select a theme"),
     ("/todo", "Show the current plan"),
     ("/find", "Find transcript text"),
     ("/copy", "Copy the latest reply"),
@@ -78,14 +110,15 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/sidebar", "Toggle the activity sidebar"),
     ("/thoughts", "Show or hide reasoning"),
     ("/agent", "Run an advertised agent command"),
+    ("/rename", "Explain session rename support"),
 ];
-
-type Approval = (Vec<String>, oneshot::Sender<Option<usize>>);
 
 pub struct App {
     destination: String,
     workspace: Option<String>,
     session: Option<String>,
+    session_title: Option<String>,
+    mode: Option<String>,
     status: &'static str,
     ready: bool,
     turns: usize,
@@ -102,7 +135,8 @@ pub struct App {
     queue_paused: bool,
     draft: Composer,
     transcript: Transcript,
-    approvals: VecDeque<Approval>,
+    approvals: VecDeque<PermissionRequest>,
+    elicitations: VecDeque<PendingElicitation>,
     local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
@@ -110,7 +144,13 @@ pub struct App {
     completion: Option<Completion>,
     plan: Vec<String>,
     usage: Option<(u64, u64)>,
+    usage_cost: Option<String>,
+    last_usage_tokens: Option<u64>,
+    providers: Vec<ProviderInfo>,
     preferences: Preferences,
+    theme: String,
+    approval_mode: ApprovalMode,
+    client_io: ClientIoMode,
     activity: VecDeque<String>,
     actions: mpsc::UnboundedSender<Action>,
 }
@@ -120,13 +160,25 @@ impl App {
         destination: String,
         actions: mpsc::UnboundedSender<Action>,
         preferences: Preferences,
+        startup: Startup,
     ) -> Self {
         let mut transcript = Transcript::new();
         transcript.set_tools_expanded(preferences.expand_tools);
+        let theme = preferences
+            .theme
+            .clone()
+            .or(startup.theme)
+            .unwrap_or_else(|| "hrns".into());
+        let approval_mode = preferences
+            .permission_mode
+            .or(startup.permission)
+            .unwrap_or_default();
         Self {
             destination,
             workspace: None,
             session: None,
+            session_title: None,
+            mode: None,
             status: "Connecting",
             ready: false,
             turns: 0,
@@ -144,6 +196,7 @@ impl App {
             draft: Composer::default(),
             transcript,
             approvals: VecDeque::new(),
+            elicitations: VecDeque::new(),
             local_effect: None,
             options: Vec::new(),
             commands: Vec::new(),
@@ -151,10 +204,20 @@ impl App {
             completion: None,
             plan: Vec::new(),
             usage: None,
+            usage_cost: None,
+            last_usage_tokens: None,
+            providers: Vec::new(),
             preferences,
+            theme,
+            approval_mode,
+            client_io: startup.client_io,
             activity: VecDeque::new(),
             actions,
         }
+    }
+
+    pub fn palette(&self) -> Palette {
+        theme::palette(&self.theme)
     }
 
     pub fn event(&mut self, event: Event) {
@@ -176,6 +239,9 @@ impl App {
                 self.close_supported = close_supported;
                 self.delete_supported = delete_supported;
                 self.loaded = loaded;
+                if !loaded {
+                    self.session_title = None;
+                }
                 self.workspace = Some(workspace.display().to_string());
                 self.session = Some(session);
                 self.ready = true;
@@ -193,6 +259,9 @@ impl App {
                     old.session_id != state.session_id || old.revision < state.revision
                 });
                 if matches && newer {
+                    if let Some(usage) = &state.last_usage {
+                        self.last_usage_tokens = usage.total_tokens;
+                    }
                     self.execution = Some(state);
                     self.update_execution();
                 }
@@ -202,6 +271,13 @@ impl App {
             Event::Skills(skills) => {
                 self.skills = skills;
                 self.refresh_completion();
+            }
+            Event::SessionTitle(title) => self.session_title = title,
+            Event::Mode(mode) => self.mode = Some(mode),
+            Event::Providers(providers) => {
+                self.providers = providers;
+                let text = self.provider_summary();
+                self.transcript.push(Role::Note, text);
             }
             Event::LoadingAttachment => self.attachment_reads += 1,
             Event::Attachment(attachment) => {
@@ -235,7 +311,10 @@ impl App {
                 }
             }
             Event::Plan(plan) => self.plan = plan,
-            Event::Usage { used, size } => self.usage = Some((used, size)),
+            Event::Usage { used, size, cost } => {
+                self.usage = Some((used, size));
+                self.usage_cost = cost;
+            }
             Event::SessionClosed(id) => {
                 self.transcript.push(
                     Role::Note,
@@ -289,6 +368,7 @@ impl App {
                 self.trim_activity();
                 if self.turns == 0 {
                     self.approvals.clear();
+                    self.elicitations.clear();
                     self.status = "Connected";
                     self.update_execution();
                     self.flush_queue();
@@ -305,6 +385,7 @@ impl App {
                 self.execution = None;
                 self.queue_paused = true;
                 self.approvals.clear();
+                self.elicitations.clear();
                 self.status = "Disconnected";
                 self.activity.push_back("disconnected".into());
                 self.trim_activity();
@@ -314,21 +395,92 @@ impl App {
                 self.turns = 0;
                 self.execution = None;
                 self.approvals.clear();
+                self.elicitations.clear();
                 self.status = "Reconnecting";
             }
-            Event::Permission {
-                title,
-                options,
-                respond,
-            } => {
+            Event::Permission(request) => self.request_permission(request),
+            Event::Elicitation { form, respond } => {
                 self.transcript
-                    .push(Role::Note, format!("Permission requested · {title}"));
-                self.approvals.push_back((options, respond));
+                    .push(Role::Note, format!("Agent question · {}", form.message));
+                self.elicitations.push_back(PendingElicitation {
+                    state: FormState::new(form),
+                    respond,
+                });
             }
         }
     }
 
+    pub fn provider_summary(&self) -> String {
+        if self.providers.is_empty() {
+            return "The agent did not advertise provider routing".into();
+        }
+        self.providers
+            .iter()
+            .map(|provider| {
+                let current = provider.current.as_ref().map_or_else(
+                    || "disabled".to_owned(),
+                    |current| match &current.base_url {
+                        Some(url) => format!("{} · {url}", current.api_type),
+                        None => current.api_type.clone(),
+                    },
+                );
+                format!(
+                    "{} · {} · {} · {current}",
+                    provider.id,
+                    provider.supported.join("/"),
+                    if provider.required {
+                        "required"
+                    } else {
+                        "optional"
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn request_permission(&mut self, request: PermissionRequest) {
+        if let Some(answer) = self.auto_permission(&request) {
+            let _ = request.respond.send(answer);
+            return;
+        }
+        self.transcript.push(
+            Role::Note,
+            format!("Permission requested · {}", request.title),
+        );
+        self.approvals.push_back(request);
+    }
+
+    fn auto_permission(&self, request: &PermissionRequest) -> Option<Option<usize>> {
+        let allowed = |kind: agent_client_protocol::v1::schema::PermissionOptionKind| {
+            matches!(
+                kind,
+                agent_client_protocol::v1::schema::PermissionOptionKind::AllowOnce
+                    | agent_client_protocol::v1::schema::PermissionOptionKind::AllowAlways
+            )
+        };
+        let allow = request
+            .options
+            .iter()
+            .position(|option| allowed(option.kind))?;
+        match self.approval_mode {
+            ApprovalMode::Ask => None,
+            ApprovalMode::Reads => matches!(
+                request.kind,
+                Some(ToolKind::Read | ToolKind::Search | ToolKind::Think)
+            )
+            .then_some(Some(allow)),
+            ApprovalMode::All => Some(Some(allow)),
+        }
+    }
+
     pub fn paste(&mut self, text: &str) {
+        if self.elicitations.front().is_some() {
+            if let Some(pending) = self.elicitations.front_mut() {
+                pending.state.insert(text);
+            }
+            return;
+        }
         self.draft.insert(text);
         self.refresh_completion();
     }
@@ -369,6 +521,10 @@ impl App {
         self.ready = false;
         self.replay_from = Some(self.transcript.len());
         self.status = "Connecting";
+        self.session_title = None;
+        self.usage = None;
+        self.usage_cost = None;
+        self.plan.clear();
         self.local_effect = Some(LocalEffect::Switch(SessionTarget {
             cwd: Some(PathBuf::from(workspace)),
             session: None,
@@ -464,20 +620,49 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) {
-        if let Some((options, _)) = self.approvals.front() {
+        if self.elicitations.front().is_some() {
+            self.elicitation_key(key);
+            return;
+        }
+
+        if let Some(request) = self.approvals.front() {
             let answer = match key {
                 Key::Escape => Some(None),
+                Key::Text('y') => kind_index(request, |kind| {
+                    matches!(
+                        kind,
+                        agent_client_protocol::v1::schema::PermissionOptionKind::AllowOnce
+                    )
+                }),
+                Key::Text('a') => kind_index(request, |kind| {
+                    matches!(
+                        kind,
+                        agent_client_protocol::v1::schema::PermissionOptionKind::AllowAlways
+                    )
+                }),
+                Key::Text('n') => kind_index(request, |kind| {
+                    matches!(
+                        kind,
+                        agent_client_protocol::v1::schema::PermissionOptionKind::RejectOnce
+                    )
+                }),
+                Key::Text('N') => kind_index(request, |kind| {
+                    matches!(
+                        kind,
+                        agent_client_protocol::v1::schema::PermissionOptionKind::RejectAlways
+                    )
+                }),
                 Key::Text(digit) => digit
                     .to_digit(10)
                     .and_then(|digit| digit.checked_sub(1))
                     .map(|index| index as usize)
-                    .filter(|index| *index < options.len())
+                    .filter(|index| *index < request.options.len())
                     .map(Some),
                 _ => None,
             };
             if let Some(answer) = answer {
-                if let Some((_, sender)) = self.approvals.pop_front() {
-                    let _ = sender.send(answer);
+                if let Some(request) = self.approvals.pop_front() {
+                    let _ = request.respond.send(answer);
                 }
                 return;
             }
@@ -538,6 +723,60 @@ impl App {
         self.refresh_completion();
     }
 
+    fn elicitation_key(&mut self, key: Key) {
+        enum Done {
+            None,
+            Decline,
+            Accept(BTreeMap<String, ElicitationContentValue>),
+        }
+        let mut done = Done::None;
+        if let Some(pending) = self.elicitations.front_mut() {
+            match key {
+                Key::Escape => done = Done::Decline,
+                Key::Enter => {
+                    if let Some(answers) = pending.state.enter() {
+                        done = Done::Accept(answers);
+                    }
+                }
+                Key::Newline => pending.state.insert("\n"),
+                Key::Backspace => pending.state.backspace(),
+                Key::Tab => pending.state.move_field(true),
+                Key::HistoryDown | Key::ScrollDown => pending.state.move_field(true),
+                Key::HistoryUp | Key::ScrollUp => pending.state.move_field(false),
+                Key::Text(character) => {
+                    let handled = if pending.state.is_boolean() {
+                        match character {
+                            'y' | 'Y' => pending.state.choose_boolean(true),
+                            'n' | 'N' => pending.state.choose_boolean(false),
+                            _ => false,
+                        }
+                    } else {
+                        character
+                            .to_digit(10)
+                            .is_some_and(|digit| pending.state.choose(digit as usize))
+                    };
+                    if !handled {
+                        pending.state.insert(character.encode_utf8(&mut [0; 4]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        match done {
+            Done::None => {}
+            Done::Decline => {
+                if let Some(pending) = self.elicitations.pop_front() {
+                    let _ = pending.respond.send(None);
+                }
+            }
+            Done::Accept(answers) => {
+                if let Some(pending) = self.elicitations.pop_front() {
+                    let _ = pending.respond.send(Some(answers));
+                }
+            }
+        }
+    }
+
     fn refresh_completion(&mut self) {
         self.completion = suggestions(self.draft.text(), &self.skills)
             .map(|items| Completion { items, selected: 0 });
@@ -557,6 +796,18 @@ impl App {
         };
         self.transcript
             .push(Role::Note, format!("Reasoning is now {shown}"));
+        self.save_preferences();
+    }
+
+    pub fn set_theme(&mut self, name: String) {
+        self.theme.clone_from(&name);
+        self.preferences.theme = Some(name);
+        self.save_preferences();
+    }
+
+    pub fn set_approval_mode(&mut self, mode: ApprovalMode) {
+        self.approval_mode = mode;
+        self.preferences.permission_mode = Some(mode);
         self.save_preferences();
     }
 
@@ -697,6 +948,17 @@ impl App {
         self.trim_activity();
         Ok(())
     }
+}
+
+fn kind_index(
+    request: &PermissionRequest,
+    predicate: impl Fn(agent_client_protocol::v1::schema::PermissionOptionKind) -> bool,
+) -> Option<Option<usize>> {
+    request
+        .options
+        .iter()
+        .position(|option| predicate(option.kind))
+        .map(Some)
 }
 
 fn suggestions(text: &str, skills: &[Skill]) -> Option<Vec<Suggestion>> {

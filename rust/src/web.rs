@@ -12,9 +12,10 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, window};
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
-use crate::acp::{self, Connection, Event, SessionTarget};
-use crate::app::{App, Key, LocalEffect};
+use crate::acp::{self, ClientIoMode, Connection, Event, Services, SessionTarget};
+use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments::{Attachment, MAX_FILE_BYTES};
+use crate::preferences::ApprovalMode;
 use crate::socket;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,10 +27,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|(endpoint, _)| endpoint.host())
         .unwrap_or_else(|_| "Remote".into());
+    let startup = startup_config();
     let app = Rc::new(RefCell::new(App::new(
         label,
         action_tx,
         crate::preferences::load(),
+        startup,
     )));
     let terminal = Terminal::new(DomBackend::new_by_id("terminal")?)?;
     bind_input(Rc::clone(&app), requests_tx.clone())?;
@@ -114,10 +117,41 @@ async fn connect_attempt(
             WsMessage::Text,
             message_text
         ),
-        acp::connect(transport, target, actions, events),
+        acp::connect(
+            transport,
+            target,
+            actions,
+            events,
+            Services {
+                client_io: ClientIoMode::Off,
+            },
+        ),
     );
     wire?;
     session.map_err(|error| error.message)
+}
+
+fn startup_config() -> Startup {
+    let Some(window) = window() else {
+        return Startup::default();
+    };
+    let Ok(search) = window.location().search() else {
+        return Startup::default();
+    };
+    let query = web_sys::UrlSearchParams::new_with_str(&search).ok();
+    let theme = query
+        .as_ref()
+        .and_then(|query| query.get("theme"))
+        .filter(|name| crate::theme::NAMES.contains(&name.as_str()));
+    let permission = query
+        .as_ref()
+        .and_then(|query| query.get("permission"))
+        .and_then(|value| ApprovalMode::parse(&value));
+    Startup {
+        client_io: ClientIoMode::Off,
+        theme,
+        permission,
+    }
 }
 
 fn web_config() -> Result<(Url, SessionTarget), String> {

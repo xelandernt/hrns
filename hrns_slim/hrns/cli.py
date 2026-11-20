@@ -1040,15 +1040,29 @@ def _initial_connection(
 def _command_connect(args: SimpleNamespace) -> int:
     _require_client_extra()
     config = _config(args)
-    if os.environ.get("HRNS_RUST_TUI_PREVIEW") == "1":
+    from .client.rust_preview import native_executable
+
+    # The release installs the native client, so it is the default. A source install
+    # without the wheel, or HRNS_TEXTUAL=1, keeps the Textual client available.
+    use_native = os.environ.get("HRNS_RUST_TUI_PREVIEW") == "1" or (
+        os.environ.get("HRNS_TEXTUAL") != "1" and native_executable() is not None
+    )
+    if use_native:
         from .client.rust_preview import run_rust_preview
 
-        if args.client_io:
-            raise HrnsClientError("The Rust preview does not yet accept --client-io.")
         target, reason = _initial_connection(config, args)
         if target is None:
             raise HrnsClientError(reason or "The Rust preview needs a connection target.")
-        return run_rust_preview(target, session=args.session, explicit_cwd=args.cwd)
+        # Precedence matches the Textual client: CLI flag, then profile, then [tui].
+        client_io = args.client_io or target.profile.client_io or config.tui.client_io
+        return run_rust_preview(
+            target,
+            session=args.session,
+            explicit_cwd=args.cwd,
+            client_io=client_io or "all",
+            theme=config.tui.theme,
+            permission_mode=config.tui.permission_mode,
+        )
 
     from .client.tui.app import run_terminal
 

@@ -3,29 +3,53 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_family = "wasm")]
 const WASM_KEY: &str = "hrns.tui.preferences.v1";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    #[default]
+    Ask,
+    Reads,
+    All,
+}
+
+impl ApprovalMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ask" => Some(Self::Ask),
+            "reads" => Some(Self::Reads),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Reads => "reads",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub sidebar: bool,
     pub sidebar_width: u16,
     pub expand_tools: bool,
     pub show_thoughts: bool,
-}
-
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            sidebar: false,
-            sidebar_width: 40,
-            expand_tools: false,
-            show_thoughts: false,
-        }
-    }
+    pub theme: Option<String>,
+    pub permission_mode: Option<ApprovalMode>,
 }
 
 impl Preferences {
     pub fn sidebar_width(&self, available: u16) -> u16 {
-        self.sidebar_width.clamp(24, 70).min(available / 2)
+        let width = if self.sidebar_width == 0 {
+            40
+        } else {
+            self.sidebar_width
+        };
+        width.clamp(24, 76).min(available / 2)
     }
 }
 

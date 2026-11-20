@@ -32,7 +32,19 @@ pub fn summary(option: &SessionConfigOption) -> String {
 
 pub fn value(option: &SessionConfigOption, input: &str) -> Option<SessionConfigOptionValue> {
     match &option.kind {
-        SessionConfigKind::Select(_) => Some(SessionConfigOptionValue::value_id(input.to_owned())),
+        SessionConfigKind::Select(select) => {
+            let values = match &select.options {
+                SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
+                SessionConfigSelectOptions::Grouped(groups) => groups
+                    .iter()
+                    .flat_map(|group| group.options.iter())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let known =
+                values.is_empty() || values.iter().any(|value| value.value.to_string() == input);
+            known.then(|| SessionConfigOptionValue::value_id(input.to_owned()))
+        }
         SessionConfigKind::Boolean(_) => match input {
             "true" | "on" => Some(SessionConfigOptionValue::boolean(true)),
             "false" | "off" => Some(SessionConfigOptionValue::boolean(false)),

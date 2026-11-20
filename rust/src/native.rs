@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{self, stdout};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
@@ -11,13 +12,16 @@ use futures::channel::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use crate::acp::{self, Actions, Connection, Event, Events, SessionTarget};
-use crate::app::{App, Key, LocalEffect};
+use crate::acp::{self, Actions, ClientIoMode, Connection, Event, Events, Services, SessionTarget};
+use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments;
+use crate::client_io::ClientIo;
+use crate::preferences::ApprovalMode;
 use crate::socket;
 
 const HELP: &str =
     "Usage: hrns-tui [--cwd PATH] [--session ID] [--server URL | --stdio COMMAND [ARGS...]]
+       [--client-io off|read|all] [--theme NAME] [--permission-mode ask|reads|all]
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
 
@@ -29,6 +33,9 @@ enum Target {
 struct Options {
     session: SessionTarget,
     target: Target,
+    client_io: ClientIoMode,
+    theme: Option<String>,
+    permission: Option<ApprovalMode>,
 }
 
 impl Options {
@@ -37,9 +44,27 @@ impl Options {
         let mut cwd = None;
         let mut target = None;
         let mut session = None;
+        let mut client_io = None;
+        let mut theme = None;
+        let mut permission = None;
         while let Some(arg) = argv.next() {
             match arg.as_str() {
                 "--help" | "-h" => return Ok(None),
+                "--client-io" if client_io.is_none() => {
+                    client_io = Some(ClientIoMode::parse(
+                        &argv.next().ok_or("--client-io requires a mode")?,
+                    ));
+                }
+                "--theme" if theme.is_none() => {
+                    theme = Some(argv.next().ok_or("--theme requires a name")?);
+                }
+                "--permission-mode" if permission.is_none() => {
+                    let value = argv.next().ok_or("--permission-mode requires a mode")?;
+                    permission = Some(
+                        ApprovalMode::parse(&value)
+                            .ok_or("--permission-mode expects ask, reads or all")?,
+                    );
+                }
                 "--cwd" if cwd.is_none() => {
                     cwd = Some(PathBuf::from(argv.next().ok_or("--cwd requires a path")?));
                 }
@@ -79,6 +104,9 @@ impl Options {
         Ok(Some(Self {
             session: SessionTarget { cwd, session },
             target,
+            client_io: client_io.unwrap_or(ClientIoMode::All),
+            theme,
+            permission,
         }))
     }
 
@@ -119,6 +147,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let local_events = event_tx.clone();
     let (requests_tx, requests_rx) = mpsc::unbounded();
     let destination = options.label();
+    let startup = Startup {
+        client_io: options.client_io,
+        theme: options.theme.clone(),
+        permission: options.permission,
+    };
+    let services = Services {
+        client_io: options.client_io,
+    };
+    let io = Arc::new(Mutex::new(ClientIo::new(match options.client_io {
+        ClientIoMode::Off => crate::client_io::Mode::Off,
+        ClientIoMode::Read => crate::client_io::Mode::Read,
+        ClientIoMode::All => crate::client_io::Mode::All,
+    })));
+    let worker_io = Arc::clone(&io);
     let (shutdown, stop_rx) = mpsc::unbounded();
     let mut terminal = ratatui::try_init()?;
     let worker = std::thread::spawn(move || {
@@ -133,6 +175,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     event_tx.clone(),
                     requests_rx,
                     stop_rx,
+                    services,
+                    worker_io,
                 ));
             });
         if let Err(error) = result {
@@ -140,7 +184,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = event_tx.unbounded_send(Event::Disconnected);
         }
     });
-    let mut app = App::new(destination, action_tx, crate::preferences::load());
+    let mut app = App::new(destination, action_tx, crate::preferences::load(), startup);
     let result = (|| -> io::Result<()> {
         crossterm::execute!(stdout(), EnableBracketedPaste)?;
         let mut dirty = true;
@@ -165,7 +209,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             match event::read()? {
                 TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => {
-                    if key.code == KeyCode::Char('c')
+                    if matches!(key.code, KeyCode::Char('c' | 'q'))
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         break;
@@ -248,6 +292,8 @@ async fn supervise(
     events: Events,
     mut requests: mpsc::UnboundedReceiver<Connection>,
     mut stop: mpsc::UnboundedReceiver<()>,
+    services: Services,
+    io: Arc<Mutex<ClientIo>>,
 ) {
     use futures::{FutureExt, StreamExt, select_biased};
     let mut target = options.session.clone();
@@ -258,7 +304,7 @@ async fn supervise(
                 Some(request) => apply(&mut target, request, &events),
                 None => return,
             },
-            result = connect(options, target.clone(), actions, events.clone()).fuse() => {
+            result = connect(options, target.clone(), actions, events.clone(), services, Arc::clone(&io)).fuse() => {
                 finish(&events, result);
                 select_biased! {
                     _ = stop.next() => return,
@@ -284,11 +330,13 @@ async fn connect(
     target: SessionTarget,
     actions: &mut Actions,
     events: Events,
+    services: Services,
+    io: Arc<Mutex<ClientIo>>,
 ) -> Result<(), String> {
     match &options.target {
         Target::Stdio { command, args } => {
             let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));
-            acp::connect(agent, target, actions, events)
+            acp::connect(agent, target, actions, events, services, io)
                 .await
                 .map_err(|error| error.message)
         }
@@ -324,7 +372,7 @@ async fn connect(
             let (transport, bridge) = Channel::duplex();
             let (wire, session) = futures::join!(
                 socket::pump(ws, bridge, |text| Message::Text(text.into()), message_text),
-                acp::connect(transport, target, actions, events),
+                acp::connect(transport, target, actions, events, services, io),
             );
             wire?;
             session.map_err(|error| error.message)

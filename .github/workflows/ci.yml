@@ -32,7 +32,53 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
       - run: cargo +stable fmt --check
       - run: cargo +stable clippy --locked -- -D warnings
+      - run: cargo +stable build --locked
       - run: cargo +stable build --locked --target wasm32-unknown-unknown
+
+  rust-wheels:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --locked --out dist
+          working-directory: rust
+          target: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: rust/dist/*.whl
+          if-no-files-found: error
+
+  web-bundle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+      - run: trunk build --locked --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-bundle
+          path: rust/dist/
+          if-no-files-found: error
 
   docs:
     runs-on: ubuntu-latest

@@ -46,8 +46,87 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  rust-wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+      - name: Match the crate version to the tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$TAG" <<'PY'
+          import pathlib
+          import sys
+          version = sys.argv[1].removeprefix("v")
+          path = pathlib.Path("rust/Cargo.toml")
+          text = path.read_text()
+          marker = '[package]\nname = "hrns-tui"\n'
+          if marker not in text:
+              raise SystemExit("unexpected rust/Cargo.toml layout")
+          head, tail = text.split(marker, 1)
+          lines = tail.splitlines(keepends=True)
+          for index, line in enumerate(lines):
+              if line.startswith("version = "):
+                  lines[index] = f'version = "{version}"\n'
+                  break
+          else:
+              raise SystemExit("no version in rust/Cargo.toml")
+          path.write_text(head + marker + "".join(lines))
+          PY
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          working-directory: rust
+          target: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: rust/dist/*.whl
+          if-no-files-found: error
+
+  web-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+      - run: trunk build --locked --release
+        working-directory: rust
+      - name: Package the browser bundle
+        run: |
+          cd rust
+          zip -r hrns-web.zip dist
+      - name: Attach the browser bundle to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rust/hrns-web.zip
+
   publish:
-    needs: build
+    needs: [build, rust-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -60,6 +139,11 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/

@@ -12,21 +12,33 @@ from .launch import ConnectionTarget
 from .transport import secret_value
 
 
+def native_executable() -> str | None:
+    """The native client installed in this environment, if any."""
+    scripts = sysconfig.get_path("scripts")
+    return shutil.which("hrns-tui", path=scripts) or shutil.which("hrns-tui")
+
+
 def run_rust_preview(
     target: ConnectionTarget,
     *,
     session: str | None,
     explicit_cwd: str | None,
+    client_io: str = "all",
+    theme: str | None = None,
+    permission_mode: str | None = None,
 ) -> int:
-    scripts = sysconfig.get_path("scripts")
-    executable = shutil.which("hrns-tui", path=scripts) or shutil.which("hrns-tui")
+    executable = native_executable()
     if executable is None:
-        raise HrnsClientError("Install the hrns-tui preview wheel in this Python environment.")
+        raise HrnsClientError("Install the hrns-tui wheel in this Python environment.")
 
     profile = target.profile
     env = dict(os.environ)
     env.pop("HRNS_TUI_TOKEN", None)
-    argv = [executable]
+    argv = [executable, "--client-io", client_io]
+    if theme:
+        argv.extend(("--theme", theme))
+    if permission_mode:
+        argv.extend(("--permission-mode", permission_mode))
     if session:
         argv.extend(("--session", session))
     if target.kind != "remote" or session is None or explicit_cwd is not None:
