@@ -10,6 +10,7 @@ use futures::channel::{mpsc, oneshot};
 use crate::acp::{Action, Event, ExecutionState, ExecutionStatus, SessionTarget};
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
+use crate::skills::{self, Skill};
 use crate::transcript::{Role, Transcript};
 
 pub enum LocalEffect {
@@ -19,6 +20,7 @@ pub enum LocalEffect {
     Switch(SessionTarget),
 }
 
+#[derive(Clone, Copy)]
 pub enum Key {
     Text(char),
     Enter,
@@ -33,10 +35,45 @@ pub enum Key {
     HistoryDown,
     ScrollUp,
     ScrollDown,
+    Tab,
     ToggleTools,
     Reconnect,
     Escape,
 }
+
+struct Suggestion {
+    insert: String,
+    description: String,
+}
+
+struct Completion {
+    items: Vec<Suggestion>,
+    selected: usize,
+}
+
+const COMMANDS: &[(&str, &str)] = &[
+    ("/help", "List commands"),
+    ("/sessions", "List saved sessions"),
+    ("/sessions next", "Next session page"),
+    ("/new", "Start a new session"),
+    ("/load", "Load a session by id"),
+    ("/close", "Close a session"),
+    ("/delete", "Delete a saved session"),
+    ("/models", "Show the session models"),
+    ("/model", "Select a model"),
+    ("/effort", "Show the reasoning effort"),
+    ("/todo", "Show the current plan"),
+    ("/find", "Find transcript text"),
+    ("/copy", "Copy the latest reply"),
+    ("/reconnect", "Reconnect the transport"),
+    ("/queue", "Queue a follow-up"),
+    ("/resume-queue", "Resume the local queue"),
+    ("/clear-queue", "Clear the local queue"),
+    ("/attach", "Stage a file"),
+    ("/detach", "Remove a staged file"),
+    ("/skills", "List available skills"),
+    ("/agent", "Run an advertised agent command"),
+];
 
 type Approval = (Vec<String>, oneshot::Sender<Option<usize>>);
 
@@ -64,6 +101,8 @@ pub struct App {
     local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
+    skills: Vec<Skill>,
+    completion: Option<Completion>,
     plan: Vec<String>,
     usage: Option<(u64, u64)>,
     actions: mpsc::UnboundedSender<Action>,
@@ -95,6 +134,8 @@ impl App {
             local_effect: None,
             options: Vec::new(),
             commands: Vec::new(),
+            skills: Vec::new(),
+            completion: None,
             plan: Vec::new(),
             usage: None,
             actions,
@@ -141,6 +182,10 @@ impl App {
             }
             Event::Options(options) => self.options = options,
             Event::AgentCommands(commands) => self.commands = commands,
+            Event::Skills(skills) => {
+                self.skills = skills;
+                self.refresh_completion();
+            }
             Event::LoadingAttachment => self.attachment_reads += 1,
             Event::Attachment(attachment) => {
                 self.attachment_reads = self.attachment_reads.saturating_sub(1);
@@ -252,6 +297,7 @@ impl App {
 
     pub fn paste(&mut self, text: &str) {
         self.draft.insert(text);
+        self.refresh_completion();
     }
 
     pub fn take_local_effect(&mut self) -> Option<LocalEffect> {
@@ -404,6 +450,28 @@ impl App {
             }
         }
 
+        if self.completion.is_some() {
+            match key {
+                Key::Escape => {
+                    self.completion = None;
+                    return;
+                }
+                Key::Tab => {
+                    self.accept_completion();
+                    return;
+                }
+                Key::HistoryUp => {
+                    self.select_completion(false);
+                    return;
+                }
+                Key::HistoryDown => {
+                    self.select_completion(true);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key {
             Key::Text(ch) => self.draft.insert(ch.encode_utf8(&mut [0; 4])),
             Key::Newline => self.draft.insert("\n"),
@@ -428,8 +496,43 @@ impl App {
                 }
             }
             Key::Enter if !self.draft.text().trim().is_empty() => self.submit(),
+            Key::Tab => self.draft.insert("\t"),
             Key::Escape | Key::Enter => {}
         }
+        self.refresh_completion();
+    }
+
+    fn refresh_completion(&mut self) {
+        self.completion = suggestions(self.draft.text(), &self.skills)
+            .map(|items| Completion { items, selected: 0 });
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        let Some(suggestion) = completion.items.get(completion.selected) else {
+            return;
+        };
+        let text = self.draft.text();
+        if let Some(start) = last_token_start(text).filter(|start| text[*start..].starts_with('$'))
+        {
+            self.draft.replace_from(start, &suggestion.insert);
+        } else {
+            self.draft.set_text(&suggestion.insert);
+        }
+    }
+
+    fn select_completion(&mut self, forward: bool) {
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        let len = completion.items.len();
+        completion.selected = if forward {
+            (completion.selected + 1) % len
+        } else {
+            (completion.selected + len - 1) % len
+        };
     }
 
     fn update_execution(&mut self) {
@@ -494,6 +597,7 @@ impl App {
             return None;
         }
         Some(Prompt {
+            skill_meta: skills::prompt_meta(&text, &self.skills),
             text,
             attachments: std::mem::take(&mut self.attachments),
         })
@@ -528,4 +632,47 @@ impl App {
         self.status = "Streaming";
         Ok(())
     }
+}
+
+fn suggestions(text: &str, skills: &[Skill]) -> Option<Vec<Suggestion>> {
+    if text.contains('\n') || text.trim().is_empty() {
+        return None;
+    }
+    let start = last_token_start(text)?;
+    let token = &text[start..];
+    if let Some(prefix) = token.strip_prefix('$') {
+        let items: Vec<Suggestion> = skills
+            .iter()
+            .filter(|skill| {
+                skill.user_invocable && skill.id.starts_with(prefix) && skill.id != prefix
+            })
+            .map(|skill| Suggestion {
+                insert: format!("${} ", skill.id),
+                description: skill.description.clone(),
+            })
+            .collect();
+        return (!items.is_empty()).then_some(items);
+    }
+    if start == 0 && token.starts_with('/') {
+        let items: Vec<Suggestion> = COMMANDS
+            .iter()
+            .filter(|(command, _)| command.starts_with(token) && *command != token)
+            .map(|(command, description)| Suggestion {
+                insert: format!("{command} "),
+                description: (*description).to_owned(),
+            })
+            .collect();
+        return (!items.is_empty()).then_some(items);
+    }
+    None
+}
+
+fn last_token_start(text: &str) -> Option<usize> {
+    let mut start = 0;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            start = index + character.len_utf8();
+        }
+    }
+    (start < text.len()).then_some(start)
 }

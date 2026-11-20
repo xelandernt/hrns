@@ -311,6 +311,7 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
         "PageUp" => Some(Key::ScrollUp),
         "PageDown" => Some(Key::ScrollDown),
         "Escape" => Some(Key::Escape),
+        "Tab" => Some(Key::Tab),
         text => {
             let mut chars = text.chars();
             let character = chars.next()?;

@@ -105,6 +105,15 @@ Scrolling anchors to the entry and byte offset, so streaming, a width change or
 toggling tool details keeps the reader near the same text; reaching the bottom
 resumes follow mode.
 
+Composer completion reads the draft. A first token starting with `/` offers the
+local commands, while a `$token` offers user-invocable skills from the agent's
+`hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
+selection while it is open, and Escape dismisses it before cancelling a turn.
+Submitting a draft that names a catalog skill attaches the skill id and mention
+span to the first text block's `_meta`, leaving the typed text unchanged for
+the agent to expand. Paste, draft history and attachment staging stay shared;
+native reads paths while the browser opens its file chooser.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`

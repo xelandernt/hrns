@@ -363,6 +363,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Char('o') if key.modifiers == KeyModifiers::CONTROL => Some(Key::ToggleTools),
         KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Reconnect),
         KeyCode::Esc => Some(Key::Escape),
+        KeyCode::Tab => Some(Key::Tab),
         KeyCode::Char(c)
             if !key
                 .modifiers

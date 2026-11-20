@@ -3,6 +3,7 @@ mod app;
 mod attachments;
 mod composer;
 mod options;
+mod skills;
 mod socket;
 mod transcript;
 

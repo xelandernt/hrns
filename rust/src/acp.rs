@@ -20,6 +20,7 @@ use futures::{FutureExt, StreamExt, select_biased};
 use serde::{Deserialize, Serialize};
 
 use crate::attachments::{Attachment, Prompt};
+use crate::skills::Skill;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonRpcNotification)]
 #[notification(method = "_hrns/session/state")]
@@ -60,6 +61,7 @@ pub enum Event {
     Execution(ExecutionState),
     Options(Vec<SessionConfigOption>),
     AgentCommands(Vec<(String, String)>),
+    Skills(Vec<Skill>),
     LoadingAttachment,
     Attachment(Result<Box<Attachment>, String>),
     Plan(Vec<String>),
@@ -153,6 +155,11 @@ pub async fn connect(
                 (setup.session, cwd, setup.response.config_options, setup.response.meta)
             };
             let _ = events.unbounded_send(Event::Options(options.unwrap_or_default()));
+            let skills = meta
+                .as_ref()
+                .map(crate::skills::catalog)
+                .unwrap_or_default();
+            let _ = events.unbounded_send(Event::Skills(skills));
             let _ = events.unbounded_send(Event::Ready {
                 session: session.session_id().to_string(),
                 workspace: cwd,

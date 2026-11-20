@@ -13,7 +13,7 @@ impl App {
                 self.draft.submit();
                 let mut commands = vec![
                     "/sessions [next] · /new · /load <id> · /models · /effort · /todo".to_owned(),
-                    "/find <text> · /copy · /reconnect".to_owned(),
+                    "/find <text> · /copy · /reconnect · /skills".to_owned(),
                     "/queue <prompt> · /resume-queue · /clear-queue".to_owned(),
                     "/attach [path] · /detach <filename> · /close [id] · /delete <id>".to_owned(),
                 ];
@@ -33,6 +33,22 @@ impl App {
             "/new" => {
                 self.draft.submit();
                 self.new_session();
+            }
+            "/skills" => {
+                self.draft.submit();
+                let text = if self.skills.is_empty() {
+                    "The agent advertises no skills".into()
+                } else {
+                    self.skills
+                        .iter()
+                        .filter(|skill| skill.user_invocable)
+                        .map(|skill| {
+                            format!("${} · {} · {}", skill.id, skill.label(), skill.description)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                self.transcript.push(Role::Note, text);
             }
             "/load" => {
                 self.draft.submit();

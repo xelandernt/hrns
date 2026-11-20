@@ -1,6 +1,6 @@
 use agent_client_protocol::v1::schema::{
-    BlobResourceContents, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
-    TextResourceContents,
+    BlobResourceContents, ContentBlock, EmbeddedResource, EmbeddedResourceResource, Meta,
+    TextContent, TextResourceContents,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
@@ -64,11 +64,18 @@ impl Attachment {
 pub struct Prompt {
     pub text: String,
     pub attachments: Vec<Attachment>,
+    pub skill_meta: Option<serde_json::Value>,
 }
 
 impl Prompt {
     pub fn into_blocks(self) -> Vec<ContentBlock> {
-        std::iter::once(self.text.into())
+        let mut text = TextContent::new(self.text);
+        if let Some(payload) = self.skill_meta {
+            let mut meta = Meta::new();
+            meta.insert(crate::skills::META_KEY.to_owned(), payload);
+            text = text.meta(meta);
+        }
+        std::iter::once(ContentBlock::Text(text))
             .chain(
                 self.attachments
                     .into_iter()

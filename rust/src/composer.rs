@@ -29,6 +29,20 @@ impl Composer {
         self.cursor += inserted.len();
     }
 
+    pub fn set_text(&mut self, text: &str) {
+        self.text.clear();
+        self.text.push_str(text);
+        self.cursor = self.text.len();
+        self.recalled = None;
+        self.saved_draft.clear();
+    }
+
+    pub fn replace_from(&mut self, start: usize, text: &str) {
+        self.text.replace_range(start.., text);
+        self.cursor = self.text.len();
+        self.recalled = None;
+    }
+
     pub fn submit(&mut self) -> String {
         self.cursor = 0;
         self.recalled = None;

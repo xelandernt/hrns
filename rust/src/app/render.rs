@@ -15,10 +15,14 @@ impl App {
         let approval_height = self.approvals.front().map_or(0, |(options, _)| {
             u16::try_from(options.len().min(9) + 1).unwrap_or(10)
         });
-        let [header, transcript, approval, composer, help] = Layout::vertical([
+        let completion_height = self.completion.as_ref().map_or(0, |completion| {
+            u16::try_from(completion.items.len().min(6)).unwrap_or(6)
+        });
+        let [header, transcript, approval, suggestions, composer, help] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(approval_height),
+            Constraint::Length(completion_height),
             Constraint::Length(prompt_height),
             Constraint::Length(1),
         ])
@@ -88,6 +92,28 @@ impl App {
             frame.render_widget(Paragraph::new(rows), approval);
         }
 
+        if let Some(completion) = &self.completion {
+            let rows: Vec<_> = completion
+                .items
+                .iter()
+                .take(6)
+                .enumerate()
+                .map(|(index, suggestion)| {
+                    let text = format!(
+                        " {}  {}",
+                        suggestion.insert.trim_end(),
+                        suggestion.description
+                    );
+                    if index == completion.selected {
+                        Line::from(text).cyan().bold()
+                    } else {
+                        Line::from(text).gray()
+                    }
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(rows), suggestions);
+        }
+
         let title = self.session.as_ref().map_or_else(
             || " Prompt ".to_owned(),
             |session| format!(" Prompt · {session} "),
@@ -108,7 +134,7 @@ impl App {
             Paragraph::new(if self.status == "Disconnected" {
                 " Ctrl-R reconnect · draft is kept · PgUp/PgDn scroll"
             } else {
-                " Enter send · Shift+Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-O tools · Ctrl-R reconnect"
+                " Enter send · Shift+Enter newline · Tab complete · PgUp/PgDn scroll · Esc cancel · Ctrl-O tools · Ctrl-R reconnect"
             })
             .gray(),
             help,

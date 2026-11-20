@@ -106,6 +106,14 @@ launch. The optimized browser bundle builds into `rust/dist/`.
   anchor across streaming and a width change, and found retained text and
   copied the latest reply. Native copy emitted an OSC52 payload; the browser
   used its clipboard API.
+- Composer completion on both targets listed slash commands and
+  agent-advertised skills from `hrns/skills`, accepted with Tab, navigated
+  with the arrow keys and dismissed with Escape before cancelling a turn. A
+  `$release-notes` mention reached the deterministic agent as a skill
+  expansion. Native bracketed paste inserted single- and multi-line drafts,
+  prompt history recalled a submitted prompt, and browser paste inserted
+  through its clipboard event. Attachment staging was verified earlier with
+  an agent that advertised embedded context.
 
 ### Next implementation pass
 
@@ -132,11 +140,11 @@ each extension's wire contract before implementing its UI.
    currently rejects. Define how the remote deployment scopes browser
    workspace operations and MCP exports, then verify permissions, consent,
    and tool filtering end to end.
-4. **Close UI and extension parity (T11, T12, T18).** Finish completion and
-   skill mentions, activity panels and persisted settings. Port supported
-   command and tool renderers. The Textual audit found inactive legacy
-   plugin-command UI and Textual-specific renderer entry points. Use working
-   Textual behavior and agent-advertised capabilities as the parity baseline.
+4. **Close UI and extension parity (T12, T18).** Finish activity panels and
+   persisted settings. Port supported command and tool renderers. The Textual
+   audit found inactive legacy plugin-command UI and Textual-specific renderer
+   entry points. Use working Textual behavior and agent-advertised
+   capabilities as the parity baseline.
 5. **Qualify both release artifacts (T01, T03, T19–T21).** Capture the
    long-stream Textual baseline while feature work proceeds. Then compare
    packaged native and browser release builds. Align versions and build
@@ -222,7 +230,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T11 — Restore composer gestures
 
-- [ ] **Acceptance** Restore multiline input, paste, draft and prompt history, completion, help and skill mentions. Restore attachment staging and removal with existing metadata and validation. Native uses file paths and browser uses an explicit file chooser.
+- [x] **Acceptance** Restore multiline input, paste, draft and prompt history, completion, help and skill mentions. Restore attachment staging and removal with existing metadata and validation. Native uses file paths and browser uses an explicit file chooser.
 - **Verify** Check keyboard shortcuts in both targets, agent and local completion, skill references, text and image attachments, and unsupported or oversized input feedback.
 - **Depends on** T09. **Files** `rust/src/ui/composer.rs`, `rust/src/ui/completion.rs`, `rust/src/attachments.rs`, `rust/src/native/files.rs`, `rust/src/web/files.rs`. **Size** M.
 
