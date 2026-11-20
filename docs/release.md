@@ -129,8 +129,9 @@ python -m venv /tmp/hrns-check
 `Requires-Dist: hrns-tui==<their own version>` with every supported platform marker, and
 unless `hrns-slim` declares no native dependency. The `pip install --find-links dist`
 step resolves the native wheel from `dist/` exactly as PyPI would. For local development,
-`just native-install` builds the release wheel with Maturin and installs it into the
-project environment; bare `hrns` then selects it and `HRNS_TEXTUAL=1` forces Textual.
+run `just native-install` after `just install` (a `uv sync` drops packages outside the
+lockfile); it builds the release wheel with Maturin and installs it into the project
+environment, after which bare `hrns` selects it and `HRNS_TEXTUAL=1` forces Textual.
 
 Install in an empty environment, launch the interactive client against the built-in
 agent, run one headless prompt, and serve the unpacked bundle against the deployed ACP

@@ -38,7 +38,8 @@ The release installs the `hrns-tui` wheel alongside `hrns`, so bare `hrns` and
 comparison or when the wheel is unavailable; `HRNS_RUST_TUI_PREVIEW=1` forces the native
 client and reports a missing wheel. Build and install it into the project environment
 with `just native-install`, which runs `uvx maturin build --release --locked` against
-`rust/Cargo.toml` and installs the resulting wheel. See
+`rust/Cargo.toml` and installs the resulting wheel; run it after `just install`, because
+`uv sync` drops packages that are not in the lockfile. See
 [release](docs/release.md#version-matched-native-dependency) for which platforms
 `pip install hrns` covers.
 
