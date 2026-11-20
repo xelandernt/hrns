@@ -18,14 +18,14 @@ docs-build:
     uv run --group docs zensical build --clean
 # apply automatic formatting and lint fixes
 fix:
-    uv run ruff format hrns_slim examples
+    uv run ruff format hrns_slim examples scripts
     uv run ruff check . --fix
     just --format
 # verify formatting, lint, and types without changing files
 lint:
-    uv run ruff format --check hrns_slim examples
+    uv run ruff format --check hrns_slim examples scripts
     uv run ruff check .
-    uv run pyrefly check hrns_slim examples --no-progress-bar
+    uv run pyrefly check hrns_slim examples scripts --no-progress-bar
     just --fmt --check
 # build the Python distributions
 # The wheel is built from the source tree, not from the source distribution: a wheel
@@ -34,6 +34,10 @@ lint:
 build:
     uv build --all-packages --sdist --clear
     uv build --all-packages --wheel
+# build and install the native client wheel for this machine
+native-install:
+    uvx maturin build --release --locked --manifest-path rust/Cargo.toml
+    uv pip install --python .venv --no-deps --force-reinstall "$(ls -t rust/target/wheels/hrns_tui-*.whl | head -1)"
 # check the project
 check:
     @just lint

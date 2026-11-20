@@ -15,7 +15,8 @@ for terminals and editors.
 uvx hrns
 ```
 
-Or install with `pip install hrns`. Both include the terminal client and server.
+Or install with `pip install hrns`. Both include the terminal client and server; `pip`
+also installs the native `hrns-tui` binary on Linux x64, macOS and Windows x64.
 
 For a minimal installation, use `hrns-slim`, adding `[client]` for the terminal or
 `[server]` for the agent and HTTP entry points. Without extras, it provides the shared
@@ -35,12 +36,11 @@ advertises no client filesystem, terminal or MCP capability.
 The release installs the `hrns-tui` wheel alongside `hrns`, so bare `hrns` and
 `hrns connect` launch the native client. `HRNS_TEXTUAL=1` forces the Textual client for
 comparison or when the wheel is unavailable; `HRNS_RUST_TUI_PREVIEW=1` forces the native
-client and reports a missing wheel. Install it in development with:
-
-```sh
-uvx maturin build --manifest-path rust/Cargo.toml
-pip install target/wheels/hrns_tui-*.whl
-```
+client and reports a missing wheel. Build and install it into the project environment
+with `just native-install`, which runs `uvx maturin build --release --locked` against
+`rust/Cargo.toml` and installs the resulting wheel. See
+[release](docs/release.md#version-matched-native-dependency) for which platforms
+`pip install hrns` covers.
 
 The launcher resolves the target and passes `client_io` (CLI, profile, then `[tui]`),
 the TOML theme, permission mode and credentials, then replaces itself with the native
