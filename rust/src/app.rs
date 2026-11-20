@@ -33,6 +33,7 @@ pub enum Key {
     HistoryDown,
     ScrollUp,
     ScrollDown,
+    ToggleTools,
     Reconnect,
     Escape,
 }
@@ -189,6 +190,12 @@ impl App {
                     self.new_session();
                 }
             }
+            Event::Tool {
+                id,
+                title,
+                status,
+                detail,
+            } => self.transcript.tool(id, title, status, detail),
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
             Event::Thought(text) => self.transcript.append(Role::Thought, text),
@@ -410,6 +417,9 @@ impl App {
             Key::HistoryDown => self.draft.recall(false),
             Key::ScrollUp => self.transcript.scroll_up(),
             Key::ScrollDown => self.transcript.scroll_down(),
+            Key::ToggleTools => {
+                self.transcript.toggle_tools();
+            }
             Key::Reconnect => self.reconnect(),
             Key::Escape if self.turns > 0 || self.remote_busy() => {
                 if self.actions.unbounded_send(Action::Cancel).is_ok() {

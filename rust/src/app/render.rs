@@ -108,7 +108,7 @@ impl App {
             Paragraph::new(if self.status == "Disconnected" {
                 " Ctrl-R reconnect · draft is kept · PgUp/PgDn scroll"
             } else {
-                " Enter send · Shift+Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-R reconnect"
+                " Enter send · Shift+Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-O tools · Ctrl-R reconnect"
             })
             .gray(),
             help,

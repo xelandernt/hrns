@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent_client_protocol::component::ConnectTo;
@@ -7,7 +7,7 @@ use agent_client_protocol::v1::schema::{
     Implementation, InitializeRequest, ListSessionsRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigOption, SessionConfigOptionValue, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, StopReason,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCallContent, ToolCallStatus,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
 use agent_client_protocol::{
@@ -69,6 +69,12 @@ pub enum Event {
     },
     SessionClosed(String),
     SessionDeleted(String),
+    Tool {
+        id: String,
+        title: String,
+        status: &'static str,
+        detail: String,
+    },
     UserChunk(String),
     Chunk(String),
     Thought(String),
@@ -163,6 +169,7 @@ pub async fn connect(
             }
 
             let mut decisions = FuturesUnordered::new();
+            let mut tools: HashMap<String, ToolState> = HashMap::new();
             let mut session_cursor: Option<String> = None;
             loop {
                 let decision = async {
@@ -280,7 +287,7 @@ pub async fn connect(
                         SessionMessage::Message(dispatch) => {
                             MatchDispatch::new(dispatch.into_raw())
                                 .if_notification(async |notification: SessionNotification| {
-                                    if let Some(event) = text_update(notification.update) {
+                                    if let Some(event) = text_update(notification.update, &mut tools) {
                                         let _ = events.unbounded_send(event);
                                     }
                                     Ok(())
@@ -368,7 +375,7 @@ fn respond(
     responder.respond(RequestPermissionResponse::new(outcome))
 }
 
-fn text_update(update: SessionUpdate) -> Option<Event> {
+fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) -> Option<Event> {
     match update {
         SessionUpdate::UserMessageChunk(ContentChunk {
             content: ContentBlock::Text(text),
@@ -400,8 +407,110 @@ fn text_update(update: SessionUpdate) -> Option<Event> {
             used: usage.used,
             size: usage.size,
         }),
-
-        SessionUpdate::ToolCall(call) => Some(Event::Note(format!("Tool: {}", call.title))),
+        SessionUpdate::ToolCall(call) => {
+            let id = call.tool_call_id.to_string();
+            let state = ToolState {
+                title: call.title,
+                status: call.status,
+                content: call.content,
+                raw_input: call.raw_input,
+                raw_output: call.raw_output,
+            };
+            let event = state.event(&id);
+            tools.insert(id, state);
+            Some(event)
+        }
+        SessionUpdate::ToolCallUpdate(update) => {
+            let id = update.tool_call_id.to_string();
+            let state = tools.entry(id.clone()).or_default();
+            if let Some(title) = update.fields.title {
+                state.title = title;
+            }
+            if let Some(status) = update.fields.status {
+                state.status = status;
+            }
+            if let Some(content) = update.fields.content {
+                state.content = content;
+            }
+            if let Some(raw_input) = update.fields.raw_input {
+                state.raw_input = Some(raw_input);
+            }
+            if let Some(raw_output) = update.fields.raw_output {
+                state.raw_output = Some(raw_output);
+            }
+            Some(state.event(&id))
+        }
         _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ToolState {
+    title: String,
+    status: ToolCallStatus,
+    content: Vec<ToolCallContent>,
+    raw_input: Option<serde_json::Value>,
+    raw_output: Option<serde_json::Value>,
+}
+
+impl ToolState {
+    fn event(&self, id: &str) -> Event {
+        let title = if self.title.is_empty() {
+            "Tool call".to_owned()
+        } else {
+            self.title.clone()
+        };
+        Event::Tool {
+            id: id.to_owned(),
+            title,
+            status: status_label(self.status),
+            detail: self.detail(),
+        }
+    }
+
+    fn detail(&self) -> String {
+        let mut parts = Vec::new();
+        for content in &self.content {
+            match content {
+                ToolCallContent::Content(content) => match &content.content {
+                    ContentBlock::Text(text) => parts.push(text.text.clone()),
+                    ContentBlock::Image(_) => parts.push("[image]".into()),
+                    ContentBlock::Audio(_) => parts.push("[audio]".into()),
+                    ContentBlock::ResourceLink(link) => {
+                        parts.push(format!("[resource] {}", link.name))
+                    }
+                    ContentBlock::Resource(_) => parts.push("[embedded resource]".into()),
+                    _ => {}
+                },
+                ToolCallContent::Diff(diff) => {
+                    parts.push(diff.path.display().to_string());
+                    if let Some(old) = &diff.old_text {
+                        parts.extend(old.lines().map(|line| format!("- {line}")));
+                    }
+                    parts.extend(diff.new_text.lines().map(|line| format!("+ {line}")));
+                }
+                ToolCallContent::Terminal(terminal) => {
+                    parts.push(format!("[terminal] {}", terminal.terminal_id));
+                }
+                _ => {}
+            }
+        }
+        if let Some(input) = &self.raw_input {
+            parts.push(format!("input: {input}"));
+        }
+        if let Some(output) = &self.raw_output {
+            parts.push(format!("output: {output}"));
+        }
+        parts.join("\n").chars().take(4000).collect()
+    }
+}
+
+fn status_label(status: ToolCallStatus) -> &'static str {
+    match status {
+        ToolCallStatus::Pending => "pending",
+        ToolCallStatus::InProgress => "running",
+        ToolCallStatus::Completed => "done",
+        ToolCallStatus::Failed => "failed",
+        _ => "unknown",
     }
 }

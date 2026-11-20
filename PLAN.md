@@ -98,6 +98,12 @@ launch. The optimized browser bundle builds into `rust/dist/`.
   resume only in Python, so new ACP prompts stay queued until the session is
   closed and restored; the Textual client behaves the same way. The client
   only resumes its local queue explicitly.
+- Transcript rendering on both targets styled a Markdown reply (heading,
+  bold, inline code, link and fenced code), showed ACP tool calls with their
+  status, expanded and collapsed tool details in place, kept the scroll
+  anchor across streaming and a width change, and found retained text and
+  copied the latest reply. Native copy emitted an OSC52 payload; the browser
+  used its clipboard API.
 
 ### Next implementation pass
 
@@ -124,12 +130,11 @@ each extension's wire contract before implementing its UI.
    currently rejects. Define how the remote deployment scopes browser
    workspace operations and MCP exports, then verify permissions, consent,
    and tool filtering end to end.
-4. **Close UI and extension parity (T10–T12, T18).** Finish formatted
-   transcript and expandable tool output, completion and skill mentions,
-   activity panels and persisted settings. Port supported command and
-   tool renderers. The Textual audit found inactive legacy plugin-command
-   UI and Textual-specific renderer entry points. Use working Textual
-   behavior and agent-advertised capabilities as the parity baseline.
+4. **Close UI and extension parity (T11, T12, T18).** Finish completion and
+   skill mentions, activity panels and persisted settings. Port supported
+   command and tool renderers. The Textual audit found inactive legacy
+   plugin-command UI and Textual-specific renderer entry points. Use working
+   Textual behavior and agent-advertised capabilities as the parity baseline.
 5. **Qualify both release artifacts (T01, T03, T19–T21).** Capture the
    long-stream Textual baseline while feature work proceeds. Then compare
    packaged native and browser release builds. Align versions and build
@@ -209,7 +214,7 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 ### T10 — Render the complete transcript
 
-- [ ] **Acceptance** Stream Markdown, code, thoughts and expandable tools. Preserve scroll position across streaming and resize. Find retained text and copy the latest completed response.
+- [x] **Acceptance** Stream Markdown, code, thoughts and expandable tools. Preserve scroll position across streaming and resize. Find retained text and copy the latest completed response.
 - **Verify** Replay a large mixed transcript. Scroll back mid-stream, resize, find an older result and copy a multiline response on both targets. Check for stalled input or full-history reformatting on every update.
 - **Depends on** T09. **Files** `rust/src/transcript.rs`, `rust/src/ui/transcript.rs`, `rust/src/ui/format.rs`, `rust/src/native.rs`, `rust/src/web.rs`. **Size** M.
 

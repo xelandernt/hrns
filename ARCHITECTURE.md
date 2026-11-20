@@ -95,6 +95,16 @@ restored history is not duplicated. A failed load rolls back to the old
 prefix, and its error is reported after the restored transcript. New sessions
 clear the transcript rather than replay it.
 
+Transcript entries keep their plain text for search and copy. Agent and thought
+entries render a small Markdown subset at draw time: fenced code, inline code,
+emphasis, links and headings. User and note entries stay literal. ACP tool
+calls are keyed by `tool_call_id`, merged from start and progress updates, and
+shown with their current status. `Ctrl-O` expands or collapses their content,
+diffs, terminal references and raw input and output. Rows are measured lazily.
+Scrolling anchors to the entry and byte offset, so streaming, a width change or
+toggling tool details keeps the reader near the same text; reaching the bottom
+resumes follow mode.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`

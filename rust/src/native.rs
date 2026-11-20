@@ -360,6 +360,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Down => Some(Key::HistoryDown),
         KeyCode::PageUp => Some(Key::ScrollUp),
         KeyCode::PageDown => Some(Key::ScrollDown),
+        KeyCode::Char('o') if key.modifiers == KeyModifiers::CONTROL => Some(Key::ToggleTools),
         KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Reconnect),
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::Char(c)

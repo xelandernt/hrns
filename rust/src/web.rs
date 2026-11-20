@@ -184,7 +184,7 @@ fn bind_input(
         let reconnect = requests.clone();
         Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
             if event.is_composing()
-                || (event.ctrl_key() && event.key() != "r")
+                || (event.ctrl_key() && !matches!(event.key().as_str(), "r" | "o"))
                 || event.alt_key()
                 || event.meta_key()
             {
@@ -290,8 +290,12 @@ async fn read_file(file: File) -> Result<Attachment, String> {
 
 fn translate(event: &KeyboardEvent) -> Option<Key> {
     let key = event.key();
-    if event.ctrl_key() && !event.alt_key() && !event.meta_key() && key == "r" {
-        return Some(Key::Reconnect);
+    if event.ctrl_key() && !event.alt_key() && !event.meta_key() {
+        return match key.as_str() {
+            "r" => Some(Key::Reconnect),
+            "o" => Some(Key::ToggleTools),
+            _ => None,
+        };
     }
     match key.as_str() {
         "Enter" if event.shift_key() => Some(Key::Newline),
