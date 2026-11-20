@@ -33,7 +33,7 @@ Audit this matrix against the [Textual commands](hrns_slim/hrns/client/tui/comma
 
 ## Implementation progress
 
-**Current state.** A working preview is on the `ratatui` branch through `8938964`.
+**Current state.** A working preview is on the `ratatui` branch through `c0e6e2f`.
 Install the separate `hrns-tui` wheel and set `HRNS_RUST_TUI_PREVIEW=1` to
 preview the Python launch path. Textual still handles the default interactive
 launch. The optimized browser bundle builds into `rust/dist/`.
@@ -49,6 +49,8 @@ launch. The optimized browser bundle builds into `rust/dist/`.
 | `6baaf0d` | CI job for Rust formatting, native Clippy, and the WASM build. |
 | `3eba27c` | Reconnect with `Ctrl-R`, keeping the draft, transcript and connection identity; verified native bearer and stdio startup cleanup. |
 | `8938964` | In-app new, load, close and delete with capability checks, replay replacement and failure rollback. |
+| `b06e8d8` | Turn lifecycle verification for steering, queueing, cancellation, reconnect and clear. |
+| `c0e6e2f` | Markdown transcript rendering, status-aware expandable tool calls, and scroll anchoring across streaming and resize. |
 
 ### What was verified
 
