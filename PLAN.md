@@ -399,13 +399,24 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 - CI now builds four native wheel targets and the browser bundle; publish rewrites
   the crate version to the tag and attaches `hrns-web.zip` to the release.
   Install and deployment instructions are in [docs/release.md](docs/release.md).
-  The local equivalents passed: a clean macOS arm64 install, a release bundle
-  served against a WebSocket runtime, and independent client/server extras.
-  The jobs still need one hosted run. The
-  publish workflow must also add `hrns-tui=={{ version }}` (with platform
-  markers) to the `hrns` wrapper once its wheels exist, so `pip install hrns`
-  installs the native client; the local uv workspace keeps excluding it until
-  then.
+- The published wrapper gains `hrns-tui=={{ version }}` with markers for the four
+  targets: `scripts/release_native_dependency.py` patches the hatch metadata
+  after `just check`, the job rebuilds `dist/`, and `--verify` asserts the pin in
+  the wheel and the sdist. The workspace still cannot declare it, because there
+  is no `hrns-tui` on the index during development and its version comes from the
+  crate; `hrns-slim[server]` and `hrns-slim[client]` stay free of the binary.
+- `just build` now builds the sdist and the wheel from the source tree instead of
+  building the wheel from the unpacked sdist. Without that, the metadata hook ran
+  without git history, fell back to `fallback-version`, and pinned `hrns-slim`
+  (and the new `hrns-tui`) to `0.0.1` in the released wheel.
+- Local equivalents passed: `pip install hrns` pulled `hrns-tui` at the same
+  version in an empty venv on macOS arm64; all four markers resolved for their
+  target platforms and skipped Linux arm64 and 32-bit Windows; `hrns-tui
+  --version` reported the release version; `hrns-slim[server]` installed without
+  `textual` or `hrns-tui`; `hrns-slim[client]` resolved with `textual`; and
+  `just native-install` plus the dispatcher selected native, with
+  `HRNS_TEXTUAL=1` still forcing Textual.
+- The jobs still need one hosted run.
 
 ### T21 — Switch the interactive command
 
@@ -414,6 +425,42 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 - The dispatcher now prefers the installed native wheel and keeps Textual as a
   fallback (`HRNS_TEXTUAL=1`). Removing Textual and the wheel-absent path waits
   for T20.
+- Removal inventory, measured against `b5c9b9b` plus the T20 packaging change.
+  Shared modules stay: everything `hrns run`, `hrns connect`, `hrns login`,
+  `hrns serve`, `hrns agent` and `hrns acp` reach must survive.
+  - Delete `hrns_slim/hrns/client/tui/`: 38 modules and 11 828 lines covering
+    `app.py`, `chat/`, `panels/`, dialogs, composer, transcript, status,
+    providers, extensions and the connection screen.
+  - `hrns_slim/pyproject.toml`: drop `textual>=8.2,<9` from the `client` extra.
+    Nothing else declares it, so `uv lock` only loses that entry.
+  - `hrns_slim/hrns/cli.py`: remove `textual` from `_require_client_extra`; remove
+    the `run_terminal` branch of `_command_connect` together with its
+    `explicit_target` pre-resolution; remove the `HRNS_TEXTUAL` check and make a
+    missing wheel an explicit `HrnsClientError`. Update the module docstring and
+    the `connect` help text, which still describe a Python terminal app.
+  - Keep `client/client.py`, `bus.py`, `constants.py`, `connection.py`,
+    `events.py`, `headless.py`, `interactions.py`, `io.py`, `launch.py`,
+    `login.py`, `mcp_provider.py`, `payloads.py`, `runtime.py`,
+    `rust_preview.py`, `session.py`, `skills.py`, `transport.py`, `turn.py`,
+    `updates.py`, `attachments.py`, plus `shared/**` and `server/**`. The TUI is
+    the only consumer of `client/renderers.py` and of `client/tui/**`; no other
+    module imports the legacy package.
+  - Decide `client/renderers.py`: its only callers are the Textual renderer views
+    and the `hrns.renderers` entry-point contract, so delete it with the TUI or
+    keep it for headless readable output. `client/__main__.py` stays.
+  - Prose that names Textual: `README.md` (terminal client section and
+    `HRNS_TEXTUAL`), `ARCHITECTURE.md` (dispatcher paragraph, the TUI sections,
+    and the theme list), `docs/release.md` (fallback paragraph),
+    `docs/skills.md` (`PromptWorkflow` row), `PLAN.md` notes and `AGENTS.md`
+    reference. The `textual-dark`/`textual-light` theme names stay: the Rust
+    client accepts them.
+- **Platforms without a native wheel.** With Textual removed, Linux arm64,
+  Windows arm64, 32-bit Python, musl Linux and FreeBSD lose the interactive
+  client; `hrns` and `hrns connect` must fail with an install hint rather than a
+  traceback. `hrns run`, `serve`, `agent`, `acp`, `login`, `config`, `profiles`,
+  `mcp` and `clean` keep working because they never import the TUI. The wrapper's
+  `hrns-tui` requirement already excludes those platforms, so `pip install hrns`
+  succeeds there without the binary.
 - **Depends on** T19, T20. **Files** `hrns_slim/hrns/cli.py`, `hrns_slim/pyproject.toml`, `uv.lock`, `ARCHITECTURE.md`, `README.md`. **Size** M for cutover. Remove the legacy UI package in a separate mechanical change in the same release.
 
 **Release checkpoint**
