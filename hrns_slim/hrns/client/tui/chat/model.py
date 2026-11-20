@@ -705,19 +705,14 @@ class ModelWorkflow:
                 screen._set_standard_value(option.get("id"), value)
 
         reasoning = effort_option(screen.session.config_options)
-        subtitle = "Model selection is a standard ACP session config option."
-        if reasoning:
-            subtitle = (
-                "Model selection is a standard ACP session config option. "
-                f"Current effort: {config_option_value(reasoning)}."
-            )
+        subtitle = f"Current effort: {config_option_value(reasoning)}." if reasoning else ""
         screen.app.push_screen(
             ChoiceDialog(
                 "Model",
                 subtitle,
                 choices,
                 current=str(option.get("currentValue")) if option is not None else None,
-            ),
+            ).add_class("model-picker"),
             apply,
         )
 

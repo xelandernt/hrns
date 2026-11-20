@@ -554,6 +554,17 @@ class HrnsApp(App[int]):
         border: round $accent 65%;
     }
     .dialog-tall { height: 70%; }
+    .model-picker .dialog {
+        height: 90%;
+        padding: 0 2;
+    }
+    .model-picker .dialog-subtitle { padding-bottom: 0; }
+    .model-picker .dialog-hint { padding-top: 0; }
+    #model-options, .model-picker #choice-list {
+        height: 1fr;
+        max-height: 100%;
+        scrollbar-size-vertical: 1;
+    }
     .dialog-title {
         color: $accent;
         text-style: bold;

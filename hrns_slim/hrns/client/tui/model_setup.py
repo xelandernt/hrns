@@ -145,22 +145,23 @@ class ModelPickerDialog(_DialogBase):
     ]
 
     def __init__(self, settings: HrnsConfig, *, subtitle: str = "") -> None:
-        super().__init__("Models", subtitle or "The selection applies to the next message.")
+        super().__init__("Models", subtitle or "Applies to the next message.")
+        self.add_class("model-picker")
         self.settings = settings
         self.catalog = agent_model_catalog()
         self._rows: dict[str, _Row] = {}
         self._filter = Input(placeholder="Filter providers and models…", id="model-filter")
-        self._list = OptionList(id="model-options", markup=False)
+        self._list = OptionList(id="model-options", markup=False, compact=True)
         self._options: list[Option] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="dialog dialog-tall"):
+        with Vertical(classes="dialog"):
             yield from self.dialog_header()
             yield self._filter
             yield self._list
             yield self._error
             yield Static(
-                "Type to filter · ↑/↓ move · Enter select · Esc close",
+                "↑/↓ move · Enter select · Esc close",
                 markup=False,
                 classes="dialog-hint",
             )
@@ -168,6 +169,9 @@ class ModelPickerDialog(_DialogBase):
     def on_mount(self) -> None:
         self._fill("")
         self._filter.focus()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._list.scroll_to_highlight)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input is self._filter:
