@@ -52,6 +52,12 @@ impl Role {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ManualApproval {
+    Granted,
+    Rejected,
+}
+
 struct Entry {
     role: Role,
     text: String,
@@ -65,6 +71,7 @@ struct Entry {
     id: Option<String>,
     expanded: bool,
     tool_status: Option<ToolCallStatus>,
+    approval: Option<ManualApproval>,
     end: usize,
 }
 
@@ -79,13 +86,19 @@ impl Entry {
     }
 
     fn has_detail(&self) -> bool {
-        self.detail
-            .as_ref()
-            .is_some_and(|detail| !detail.is_empty())
+        self.approval.is_some()
+            || self
+                .detail
+                .as_ref()
+                .is_some_and(|detail| !detail.is_empty())
     }
 
     fn heading_rows(&self) -> usize {
         usize::from(!matches!(self.role, Role::Note | Role::Tool))
+    }
+
+    fn approval_rows(&self) -> usize {
+        usize::from(self.expanded && self.approval.is_some())
     }
 
     fn line(&self, mut row: usize, palette: &Palette) -> Line<'_> {
@@ -107,6 +120,7 @@ impl Entry {
             let text = &self.text[range.clone()];
             if let Some(status) = self.tool_status {
                 let (marker, color) = match status {
+                    _ if self.approval == Some(ManualApproval::Rejected) => ("–", palette.muted),
                     ToolCallStatus::Pending => ("○", palette.muted),
                     ToolCallStatus::InProgress => ("◐", palette.warning),
                     ToolCallStatus::Completed => ("✓", palette.success),
@@ -125,7 +139,16 @@ impl Entry {
                 } else {
                     "▸"
                 };
-                let mut spans = vec![bullet, " ".into(), disclosure.fg(palette.muted), " ".into()];
+                let mut spans = vec![bullet, " ".into()];
+                if let Some(approval) = self.approval {
+                    let diamond = match (row, approval) {
+                        (0, ManualApproval::Granted) => "◆".fg(palette.accent),
+                        (0, ManualApproval::Rejected) => "◇".fg(palette.error),
+                        _ => " ".into(),
+                    };
+                    spans.extend([diamond, " ".into()]);
+                }
+                spans.extend([disclosure.fg(palette.muted), " ".into()]);
                 if row == 0 {
                     let (verb, subject) = text.split_once(' ').unwrap_or((text, ""));
                     spans.push(verb.fg(palette.foreground).bold());
@@ -186,7 +209,18 @@ impl Entry {
             }
             return Line::raw(text);
         }
-        let detail_row = row - self.rows.len();
+        let body_row = row - self.rows.len();
+        if body_row == 0
+            && self.expanded
+            && let Some(approval) = self.approval
+        {
+            let (label, color) = match approval {
+                ManualApproval::Granted => ("Approval · Manual", palette.accent),
+                ManualApproval::Rejected => ("Approval · Rejected", palette.error),
+            };
+            return Line::from(vec!["    ".into(), label.fg(color)]);
+        }
+        let detail_row = body_row - self.approval_rows();
         if detail_row == self.detail_rows.len() && self.has_more_output() {
             return Line::from("    … more output").fg(palette.muted);
         }
@@ -283,6 +317,7 @@ enum AnchorRow {
     Spacer,
     Text { byte: usize, line_offset: usize },
     Detail(usize),
+    Approval,
 }
 
 #[derive(Default)]
@@ -324,6 +359,7 @@ impl Transcript {
             id: None,
             expanded: false,
             tool_status: None,
+            approval: None,
             end: 0,
         });
     }
@@ -361,13 +397,11 @@ impl Transcript {
             text.push_str("  ·  ");
             text.push_str(crate::acp::status_label(status));
         }
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.id.as_deref() == Some(id.as_str()))
-        {
+        if let Some(index) = self.tool_index(&id) {
             let entry = &mut self.entries[index];
-            entry.text = text;
+            if entry.approval != Some(ManualApproval::Rejected) {
+                entry.text = text;
+            }
             entry.tool_status = Some(status);
             entry.shell = shell;
             entry.detail = Some(detail);
@@ -388,8 +422,47 @@ impl Transcript {
             id: Some(id),
             expanded: false,
             tool_status: Some(status),
+            approval: None,
             end: 0,
         });
+    }
+
+    fn tool_index(&self, id: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .rposition(|entry| entry.id.as_deref() == Some(id))
+    }
+
+    pub fn record_approval(
+        &mut self,
+        id: String,
+        title: String,
+        detail: String,
+        shell: bool,
+        approval: ManualApproval,
+    ) {
+        let index = self.tool_index(&id).unwrap_or_else(|| {
+            self.tool(
+                id,
+                ToolDisplay {
+                    title: title.clone(),
+                    subject: String::new(),
+                    status: ToolCallStatus::Pending,
+                    detail,
+                    output: String::new(),
+                    preview_output: false,
+                    shell,
+                },
+            );
+            self.entries.len() - 1
+        });
+        let entry = &mut self.entries[index];
+        entry.approval = Some(approval);
+        if approval == ManualApproval::Rejected {
+            entry.text = title;
+        }
+        self.output_pending |= !self.following;
+        self.measured = self.measured.min(index);
     }
 
     pub fn toggle_tools(&mut self) {
@@ -519,10 +592,14 @@ impl Transcript {
                     line_offset: row - first,
                 }
             }
-            Some(row) => entry
-                .detail_rows
-                .get(row - entry.rows.len())
-                .map_or(AnchorRow::Spacer, |range| AnchorRow::Detail(range.start)),
+            Some(row) => row
+                .checked_sub(entry.rows.len() + entry.approval_rows())
+                .map_or(AnchorRow::Approval, |detail| {
+                    entry
+                        .detail_rows
+                        .get(detail)
+                        .map_or(AnchorRow::Spacer, |range| AnchorRow::Detail(range.start))
+                }),
             None => AnchorRow::Start,
         };
         Some((index, anchor))
@@ -551,7 +628,14 @@ impl Transcript {
                 start + entry.heading_rows() + row
             }
             AnchorRow::Detail(byte) if !entry.detail_rows.is_empty() => {
-                start + entry.heading_rows() + entry.rows.len() + row_at(&entry.detail_rows, byte)
+                start
+                    + entry.heading_rows()
+                    + entry.rows.len()
+                    + entry.approval_rows()
+                    + row_at(&entry.detail_rows, byte)
+            }
+            AnchorRow::Approval if entry.approval_rows() > 0 => {
+                start + entry.heading_rows() + entry.rows.len()
             }
             _ => start,
         }
@@ -665,7 +749,9 @@ impl Transcript {
                         .as_deref()
                         .is_some_and(|detail| detail[range.clone()].to_lowercase().contains(&query))
                 })
-                .map_or(0, |row| row + label + entry.rows.len())
+                .map_or(0, |row| {
+                    row + label + entry.rows.len() + entry.approval_rows()
+                })
         };
         self.top = index
             .checked_sub(1)
@@ -749,7 +835,7 @@ impl Transcript {
                 entry.table_rows = layout.table_rows;
             } else {
                 let indent = match entry.role {
-                    Role::Tool => 4,
+                    Role::Tool => 4 + 2 * usize::from(entry.approval.is_some()),
                     Role::Command(_) => 2,
                     _ => 0,
                 };
@@ -775,6 +861,7 @@ impl Transcript {
             };
             end += entry.rows.len()
                 + entry.detail_rows.len()
+                + entry.approval_rows()
                 + usize::from(entry.has_more_output())
                 + 1
                 + entry.heading_rows();

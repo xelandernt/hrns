@@ -173,9 +173,11 @@ pub struct PermissionChoice {
 }
 
 pub struct PermissionRequest {
+    pub tool_call_id: String,
     pub title: String,
     pub kind: Option<ToolKind>,
     pub detail: String,
+    pub shell: bool,
     pub options: Vec<PermissionChoice>,
     pub respond: oneshot::Sender<Option<usize>>,
 }
@@ -639,7 +641,8 @@ pub async fn connect(
                                 .await
                                 .if_request(async |request: RequestPermissionRequest, responder| {
                                     let (sender, receiver) = oneshot::channel();
-                                    let mut state = tools.get(&request.tool_call.tool_call_id.to_string()).cloned().unwrap_or_default();
+                                    let tool_call_id = request.tool_call.tool_call_id.to_string();
+                                    let mut state = tools.get(&tool_call_id).cloned().unwrap_or_default();
                                     state.apply(&request.tool_call);
                                     let mut display = state.display();
                                     let operation = if display.shell { "Run" } else { display.title.as_str() };
@@ -647,9 +650,11 @@ pub async fn connect(
                                     title.retain(|ch| !ch.is_control());
                                     display.prepare_detail();
                                     let _ = events.unbounded_send(Event::Permission(PermissionRequest {
+                                        tool_call_id,
                                         title,
                                         kind: request.tool_call.fields.kind,
                                         detail: display.detail,
+                                        shell: display.shell,
                                         options: request.options.iter().map(|option| PermissionChoice {
                                             name: option.name.clone(),
                                             kind: option.kind,

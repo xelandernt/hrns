@@ -22,7 +22,7 @@ use crate::mcp_types::{ConsentDecision, Health};
 use crate::preferences::{ApprovalMode, Preferences};
 use crate::skills::{self, Skill};
 use crate::theme::{self, Palette};
-use crate::transcript::{Role, Transcript};
+use crate::transcript::{ManualApproval, Role, Transcript};
 
 pub enum LocalEffect {
     Copy(String),
@@ -658,10 +658,6 @@ impl App {
             let _ = request.respond.send(answer);
             return;
         }
-        self.transcript.push(
-            Role::Note,
-            format!("Permission requested · {}", request.title),
-        );
         self.approvals.push_back(PendingApproval {
             request,
             selected: 0,
@@ -996,7 +992,29 @@ impl App {
         if let Some(answer) = answer
             && let Some(pending) = self.approvals.pop_front()
         {
-            let _ = pending.request.respond.send(answer);
+            use agent_client_protocol::v1::schema::PermissionOptionKind;
+
+            let request = pending.request;
+            let decision = answer.and_then(|index| match request.options[index].kind {
+                PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways => {
+                    Some(ManualApproval::Granted)
+                }
+                PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways => {
+                    Some(ManualApproval::Rejected)
+                }
+                _ => None,
+            });
+            if request.respond.send(answer).is_ok()
+                && let Some(decision) = decision
+            {
+                self.transcript.record_approval(
+                    request.tool_call_id,
+                    request.title,
+                    request.detail,
+                    request.shell,
+                    decision,
+                );
+            }
         }
     }
 
