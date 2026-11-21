@@ -31,7 +31,7 @@ impl ApprovalMode {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub sidebar: bool,
@@ -39,6 +39,18 @@ pub struct Preferences {
     pub show_thoughts: bool,
     pub theme: Option<String>,
     pub permission_mode: Option<ApprovalMode>,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            sidebar: false,
+            sidebar_width: 0,
+            show_thoughts: true,
+            theme: None,
+            permission_mode: None,
+        }
+    }
 }
 
 impl Preferences {

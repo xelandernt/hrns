@@ -252,9 +252,8 @@ Tool entries use ACP kind, location and arguments to summarize each operation.
 Expanding an entry group with Ctrl+O reveals formatted arguments, results,
 diffs, and terminal references. Shell entries show the command and expose
 multiline output on expansion. The shell's exit record supplies the failure
-status when available. The transcript retains reasoning chunks
-independently of assistant replies. `/thoughts` controls their visibility
-during streaming and replay. The transcript uses titled panels for command
+status when available. The transcript shows reasoning chunks independently of assistant replies by
+default. `/thoughts` controls their visibility during streaming and replay. The transcript uses titled panels for command
 output such as `/help` and `/settings`.
 
 ## ACP dependency
