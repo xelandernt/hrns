@@ -191,7 +191,7 @@ impl Entry {
             let style = match &detail[start..] {
                 line if line.starts_with("+ ") => Style::default().fg(palette.success),
                 line if line.starts_with("- ") => Style::default().fg(palette.error),
-                _ if matches!(text, "Arguments" | "Output") => {
+                _ if matches!(text, "Arguments" | "Changes" | "Contents" | "Output") => {
                     Style::default().fg(palette.accent).bold()
                 }
                 _ => Style::default().fg(palette.muted),

@@ -252,8 +252,10 @@ the current ACP config options, and offers built-in options for `/theme`,
 advertised for the session and the client's current approval mode.
 
 Tool entries use ACP kind, location and arguments to summarize each operation.
-Expanding an entry group with Ctrl+O reveals formatted arguments, results,
-diffs, and terminal references. Shell entries show the command and expose
+The built-in tools show the primary input in their collapsed headers and
+render arguments as labeled fields, file previews, or lists on expansion.
+Approval prompts use the same input formatting. Ctrl+O reveals formatted
+arguments, results, diffs, and terminal references. Shell entries show the command and expose
 multiline output on expansion. The shell's exit record supplies the failure
 status when available. Reasoning headers are visible by default. Click a header
 to expand its text. `/thoughts` hides the reasoning headers or shows them in

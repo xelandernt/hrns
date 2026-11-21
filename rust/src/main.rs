@@ -9,6 +9,7 @@ mod preferences;
 mod skills;
 mod socket;
 mod theme;
+mod tool_input;
 mod transcript;
 
 #[cfg(not(target_family = "wasm"))]

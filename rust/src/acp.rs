@@ -28,6 +28,7 @@ use crate::elicitation::{self, Form};
 use crate::mcp_types::{AcpMcpNotification, AcpMcpResponse};
 use crate::mcp_types::{AcpMcpRequest, ConsentDecision, Health};
 use crate::skills::Skill;
+use crate::tool_input;
 
 #[cfg(not(target_family = "wasm"))]
 use std::sync::{Arc, Mutex};
@@ -652,10 +653,13 @@ pub async fn connect(
                                     let (sender, receiver) = oneshot::channel();
                                     let mut state = ToolState::default();
                                     state.apply(&request.tool_call);
+                                    let display = state.display();
+                                    let operation = if display.shell { "Run" } else { display.title.as_str() };
+                                    let title = if display.subject.is_empty() { operation.to_owned() } else { format!("{operation} {}", display.subject) };
                                     let _ = events.unbounded_send(Event::Permission(PermissionRequest {
-                                        title: request.tool_call.fields.title.clone().unwrap_or_else(|| "Tool call".into()),
+                                        title,
                                         kind: request.tool_call.fields.kind,
-                                        detail: state.detail(),
+                                        detail: display.detail,
                                         options: request.options.iter().map(|option| PermissionChoice {
                                             name: option.name.clone(),
                                             kind: option.kind,
@@ -1213,49 +1217,74 @@ impl ToolState {
     }
 
     fn event(&self, id: &str) -> Event {
-        let display = if self.is_shell() {
-            self.shell_display()
-        } else {
-            let (title, subject) = self.summary();
-            ToolDisplay {
-                title,
-                subject,
-                status: self.status,
-                detail: capped_tool_detail(self.detail()),
-                shell: false,
-            }
-        };
         Event::Tool {
             id: id.to_owned(),
-            display,
+            display: self.display(),
         }
     }
 
-    fn is_shell(&self) -> bool {
-        self.kind == Some(ToolKind::Execute)
-            || matches!(
-                self.title.as_str(),
-                "shell" | "bash" | "terminal" | "execute" | "run_command"
+    fn display(&self) -> ToolDisplay {
+        let decoded = self.raw_input.as_ref().map(tool_input::decode);
+        let input = decoded.as_deref().unwrap_or(&serde_json::Value::Null);
+        let has_diff = self
+            .content
+            .iter()
+            .any(|part| matches!(part, ToolCallContent::Diff(_)));
+        let presentation = tool_input::present(&self.title, input, has_diff);
+        if presentation.is_none() && self.is_shell(input) {
+            return self.shell_display(input);
+        }
+        let (title, subject, arguments) = if let Some(presentation) = presentation {
+            (
+                presentation.title.to_owned(),
+                presentation.summary,
+                presentation.detail,
             )
+        } else {
+            let (title, subject) = self.summary(input);
+            let arguments = match input {
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::Object(values) if values.is_empty() => String::new(),
+                _ if input.get("truncated").and_then(serde_json::Value::as_bool) == Some(true) => {
+                    tool_input::text(input, "preview").map_or_else(
+                        || tool_input::pretty_value(input),
+                        |preview| format!("… Input truncated\n{preview}"),
+                    )
+                }
+                _ => tool_input::pretty_value(input),
+            };
+            (title, subject, arguments)
+        };
+        ToolDisplay {
+            title,
+            subject,
+            status: self.status,
+            detail: capped_tool_detail(self.detail(arguments)),
+            shell: false,
+        }
     }
 
-    fn shell_display(&self) -> ToolDisplay {
-        let (_, fallback) = self.summary();
-        let command = self
-            .raw_input
-            .as_ref()
-            .and_then(|input| {
-                input
-                    .get("command")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        let parsed =
-                            serde_json::from_str::<serde_json::Value>(input.as_str()?).ok()?;
-                        parsed.get("command")?.as_str().map(str::to_owned)
-                    })
-            })
-            .unwrap_or(fallback);
+    fn is_shell(&self, input: &serde_json::Value) -> bool {
+        matches!(
+            self.title.as_str(),
+            "shell" | "bash" | "terminal" | "execute" | "run_command"
+        ) || (self.kind == Some(ToolKind::Execute)
+            && (tool_input::text(input, "command").is_some() || self.title.starts_with("Run ")))
+    }
+
+    fn shell_display(&self, input: &serde_json::Value) -> ToolDisplay {
+        let (_, fallback) = self.summary(input);
+        let command = tool_input::text(input, "command").unwrap_or(&fallback);
+        let mut arguments =
+            tool_input::fields(input, &[("mode", "Mode"), ("timeout", "Timeout (seconds)")]);
+        let summary = tool_input::preview(command);
+        if summary != command {
+            arguments = if arguments.is_empty() {
+                format!("Command\n{command}")
+            } else {
+                format!("Command\n{command}\n{arguments}")
+            };
+        }
         let content: Vec<_> = self
             .content
             .iter()
@@ -1269,7 +1298,7 @@ impl ToolState {
             .collect();
         let raw = self.raw_output.as_ref();
         let detail = if content.is_empty() {
-            raw.map_or_else(String::new, pretty_tool_value)
+            raw.map_or_else(String::new, tool_input::pretty_value)
         } else {
             content.join("\n")
         };
@@ -1288,19 +1317,26 @@ impl ToolState {
             _ => "Ran",
         };
         let subject = match exit_code {
-            Some(code) if code != 0 => format!("{command}  (exit {code})"),
-            _ => command,
+            Some(code) if code != 0 => format!("{summary}  (exit {code})"),
+            _ => summary,
+        };
+        let detail = if arguments.is_empty() {
+            output.to_owned()
+        } else if output.is_empty() {
+            arguments
+        } else {
+            format!("{arguments}\nOutput\n{output}")
         };
         ToolDisplay {
             title: title.into(),
             subject,
             status,
-            detail: capped_tool_detail(output.to_owned()),
+            detail: capped_tool_detail(detail),
             shell: true,
         }
     }
 
-    fn summary(&self) -> (String, String) {
+    fn summary(&self, arguments: &serde_json::Value) -> (String, String) {
         let verb = match self.kind {
             Some(ToolKind::Read) => "Read",
             Some(ToolKind::Edit) => "Edit",
@@ -1323,19 +1359,18 @@ impl ToolState {
             }
             path
         });
-        let input = self.raw_input.as_ref().and_then(|input| {
-            [
-                "command",
-                "path",
-                "file_path",
-                "query",
-                "pattern",
-                "url",
-                "target",
-            ]
-            .into_iter()
-            .find_map(|key| input.get(key)?.as_str())
-        });
+        let input = [
+            "command",
+            "path",
+            "file_path",
+            "query",
+            "pattern",
+            "url",
+            "target",
+            "command_id",
+        ]
+        .into_iter()
+        .find_map(|key| tool_input::text(arguments, key));
         let inferred = match self.title.as_str() {
             "read_file" | "read_text_file" => "Read",
             "write_file" | "write_text_file" | "edit_file" | "apply_patch" => "Edit",
@@ -1369,44 +1404,55 @@ impl ToolState {
                 } else {
                     location
                         .or_else(|| input.map(str::to_owned))
+                        .or_else(|| {
+                            (inferred.is_empty()
+                                && !self.title.is_empty()
+                                && !self.title.eq_ignore_ascii_case(verb))
+                            .then(|| self.title.clone())
+                        })
                         .unwrap_or_default()
                 };
             (verb.into(), subject)
         }
     }
 
-    fn detail(&self) -> String {
-        let mut parts = Vec::new();
+    fn detail(&self, arguments: String) -> String {
+        let mut changes = Vec::new();
+        let mut output = Vec::new();
         for content in &self.content {
             match content {
                 ToolCallContent::Content(content) => {
                     if let Some(text) = content_text(&content.content) {
-                        parts.push(text);
+                        output.push(text);
                     }
                 }
                 ToolCallContent::Diff(diff) => {
-                    parts.push(diff.path.display().to_string());
+                    changes.push(diff.path.display().to_string());
                     if let Some(old) = &diff.old_text {
-                        parts.extend(old.lines().map(|line| format!("- {line}")));
+                        changes.extend(old.lines().map(|line| format!("- {line}")));
                     }
-                    parts.extend(diff.new_text.lines().map(|line| format!("+ {line}")));
+                    changes.extend(diff.new_text.lines().map(|line| format!("+ {line}")));
                 }
                 ToolCallContent::Terminal(terminal) => {
-                    parts.push(format!("[terminal] {}", terminal.terminal_id));
+                    output.push(format!("Terminal {}", terminal.terminal_id));
                 }
                 _ => {}
             }
         }
-        let mut detail = Vec::new();
-        if let Some(input) = &self.raw_input {
-            detail.push(format!("Arguments\n{}", pretty_tool_value(input)));
+        if output.is_empty()
+            && let Some(raw) = self.raw_output.as_ref().filter(|v| !v.is_null())
+        {
+            output.push(tool_input::pretty_value(raw));
         }
-        if !parts.is_empty() {
-            detail.push(format!("Output\n{}", parts.join("\n")));
-        } else if let Some(output) = &self.raw_output {
-            detail.push(format!("Output\n{}", pretty_tool_value(output)));
-        }
-        detail.join("\n")
+        [
+            (!arguments.is_empty()).then(|| format!("Arguments\n{arguments}")),
+            (!changes.is_empty()).then(|| format!("Changes\n{}", changes.join("\n"))),
+            (!output.is_empty()).then(|| format!("Output\n{}", output.join("\n"))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
     }
 }
 
@@ -1449,12 +1495,6 @@ fn capped_tool_detail(detail: String) -> String {
         clipped.push_str("\n… output truncated");
     }
     clipped
-}
-
-fn pretty_tool_value(value: &serde_json::Value) -> String {
-    value.as_str().map(str::to_owned).unwrap_or_else(|| {
-        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-    })
 }
 
 pub fn status_label(status: ToolCallStatus) -> &'static str {
