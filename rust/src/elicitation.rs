@@ -17,14 +17,19 @@ pub struct OptionItem {
 
 #[derive(Clone, Debug)]
 pub enum FieldKind {
-    Text {
-        numeric: bool,
-    },
+    Text(TextKind),
     Choice {
         options: Vec<OptionItem>,
         multiple: bool,
     },
     Boolean,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TextKind {
+    String,
+    Integer,
+    Number,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +39,7 @@ pub struct Field {
     pub description: Option<String>,
     pub kind: FieldKind,
     pub required: bool,
+    pub custom_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -47,86 +53,90 @@ pub struct FormState {
     pub index: usize,
     pub draft: String,
     pub answers: BTreeMap<String, ElicitationContentValue>,
-    selected: Vec<Vec<bool>>,
+    pub choice: usize,
+    pub editing_custom: bool,
     pub error: Option<String>,
 }
 
 impl FormState {
     pub fn new(form: Form) -> Self {
-        let selected = form
-            .fields
-            .iter()
-            .map(|field| match &field.kind {
-                FieldKind::Choice { options, .. } => vec![false; options.len()],
-                _ => Vec::new(),
-            })
-            .collect();
-        let mut state = Self {
+        Self {
             form,
             index: 0,
             draft: String::new(),
             answers: BTreeMap::new(),
-            selected,
+            choice: 0,
+            editing_custom: false,
             error: None,
-        };
-        state.load_current();
-        state
+        }
     }
 
     pub fn current(&self) -> Option<&Field> {
         self.form.fields.get(self.index)
     }
 
-    pub fn is_boolean(&self) -> bool {
-        matches!(
-            self.current().map(|field| &field.kind),
-            Some(FieldKind::Boolean)
-        )
-    }
-
-    /// Commit the current row and either advance or finish the form.
     pub fn enter(&mut self) -> Option<BTreeMap<String, ElicitationContentValue>> {
-        if self.index >= self.form.fields.len() {
+        let Some(field) = self.current() else {
             return self.submit();
+        };
+        if self.editing_custom && self.draft.trim().is_empty() {
+            self.error = Some("Type your answer before continuing.".into());
+            return None;
         }
-        if !matches!(
-            self.current().map(|field| &field.kind),
-            Some(FieldKind::Choice { .. } | FieldKind::Boolean)
-        ) {
-            self.commit_draft();
+        match &field.kind {
+            FieldKind::Choice { options, .. }
+                if field.custom_key.is_some()
+                    && self.choice == options.len()
+                    && !self.editing_custom =>
+            {
+                self.editing_custom = true;
+                self.load_text();
+                return None;
+            }
+            FieldKind::Choice {
+                options,
+                multiple: false,
+            } => {
+                if let Some(option) = options.get(self.choice) {
+                    let key = field.key.clone();
+                    let value = ElicitationContentValue::String(option.value.clone());
+                    self.clear_custom();
+                    self.answers.insert(key, value);
+                }
+            }
+            FieldKind::Boolean => {
+                self.answers.insert(
+                    field.key.clone(),
+                    ElicitationContentValue::Boolean(self.choice == 0),
+                );
+            }
+            _ => {}
         }
-        self.advance();
-        if self.index >= self.form.fields.len() {
+        if !self.commit_text() {
+            return None;
+        }
+        if let Some(field) = self.current().filter(|field| self.missing(field)) {
+            self.error = Some(format!("Answer {} before continuing.", field.title));
+            return None;
+        }
+        if self.form.fields.len() <= 1 {
             self.submit()
         } else {
+            self.open(self.index + 1);
             None
         }
     }
 
     pub fn insert(&mut self, text: &str) {
-        let numeric = matches!(
-            self.current().map(|field| &field.kind),
-            Some(FieldKind::Text { numeric: true })
-        );
-        if matches!(
-            self.current().map(|field| &field.kind),
-            Some(FieldKind::Text { .. })
-        ) {
-            for character in text.chars() {
-                let allowed = if numeric {
-                    character.is_ascii_digit()
-                        || character == '.'
-                        || character == '-'
-                        || character == '+'
-                } else {
-                    !character.is_control() || character == '\n'
-                };
-                if allowed {
-                    self.draft.push(character);
-                }
-            }
+        if self.editing_custom
+            || self
+                .current()
+                .is_some_and(|field| matches!(field.kind, FieldKind::Text(_)))
+        {
+            self.draft
+                .extend(text.chars().filter(|character| !character.is_control()));
+            self.error = None;
         }
-        self.error = None;
     }
 
     pub fn backspace(&mut self) {
@@ -135,166 +145,234 @@ impl FormState {
     }
 
     pub fn move_field(&mut self, forward: bool) {
-        self.commit_draft();
-        if forward {
-            self.index = (self.index + 1).min(self.form.fields.len());
-        } else {
-            self.index = self.index.saturating_sub(1);
+        if !self.commit_text() {
+            return;
         }
-        self.load_current();
+        if forward && self.form.fields.len() <= 1 {
+            return;
+        }
+        let index = if forward {
+            (self.index + 1).min(self.form.fields.len())
+        } else {
+            self.index.saturating_sub(1)
+        };
+        self.open(index);
+    }
+
+    pub fn move_choice(&mut self, forward: bool) {
+        if self.editing_custom {
+            return;
+        }
+        let count = self.current().map_or(0, |field| match &field.kind {
+            FieldKind::Choice { options, .. } => {
+                options.len() + usize::from(field.custom_key.is_some())
+            }
+            FieldKind::Boolean => 2,
+            FieldKind::Text(_) => 0,
+        });
+        self.choice = if forward {
+            (self.choice + 1).min(count.saturating_sub(1))
+        } else {
+            self.choice.saturating_sub(1)
+        };
         self.error = None;
     }
 
-    /// Apply a digit pressed while the current field is a choice.
-    /// Returns true when the key was consumed.
-    pub fn choose(&mut self, digit: usize) -> bool {
+    pub fn choice_key(&mut self, character: char) -> bool {
+        if self.editing_custom {
+            return false;
+        }
         let Some(field) = self.current() else {
             return false;
         };
-        let FieldKind::Choice { options, multiple } = field.kind.clone() else {
-            return false;
-        };
-        if digit == 0 || digit > options.len() {
-            return false;
-        }
-        let choice = digit - 1;
-        let field_key = field.key.clone();
-        if multiple {
-            if let Some(row) = self.selected.get_mut(self.index) {
-                row[choice] = !row[choice];
+        match &field.kind {
+            FieldKind::Boolean => {
+                self.choice = match character {
+                    'y' | 'Y' => 0,
+                    'n' | 'N' => 1,
+                    _ => return false,
+                };
+                true
             }
-            self.answers.remove(&field_key);
-            let picked = self
-                .selected
-                .get(self.index)
-                .map(|row| {
-                    row.iter()
-                        .enumerate()
-                        .filter(|(_, active)| **active)
-                        .map(|(index, _)| options[index].value.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !picked.is_empty() {
-                self.answers
-                    .insert(field_key, ElicitationContentValue::StringArray(picked));
+            FieldKind::Choice { options, multiple } => {
+                let multiple = *multiple;
+                if character != ' ' {
+                    let Some(index) = character
+                        .to_digit(10)
+                        .and_then(|digit| digit.checked_sub(1))
+                    else {
+                        return false;
+                    };
+                    let index = index as usize;
+                    if index >= options.len() + usize::from(field.custom_key.is_some()) {
+                        return false;
+                    }
+                    self.choice = index;
+                }
+                if multiple {
+                    self.toggle_choice();
+                }
+                self.error = None;
+                true
             }
-        } else {
-            self.answers.insert(
-                field_key,
-                ElicitationContentValue::String(options[choice].value.clone()),
-            );
-            self.advance();
+            FieldKind::Text(_) => false,
         }
-        self.error = None;
-        true
     }
 
-    pub fn choose_boolean(&mut self, value: bool) -> bool {
+    fn toggle_choice(&mut self) {
         let Some(field) = self.current() else {
-            return false;
+            return;
         };
-        if !matches!(field.kind, FieldKind::Boolean) {
-            return false;
-        }
+        let FieldKind::Choice {
+            options,
+            multiple: true,
+        } = &field.kind
+        else {
+            return;
+        };
+        let Some(option) = options.get(self.choice) else {
+            return;
+        };
         let key = field.key.clone();
-        self.answers
-            .insert(key, ElicitationContentValue::Boolean(value));
-        self.advance();
-        true
+        let value = option.value.clone();
+        self.clear_custom();
+        let entry = self
+            .answers
+            .entry(key.clone())
+            .or_insert_with(|| ElicitationContentValue::StringArray(Vec::new()));
+        if let ElicitationContentValue::StringArray(values) = entry {
+            if let Some(index) = values.iter().position(|item| *item == value) {
+                values.remove(index);
+            } else {
+                values.push(value);
+            }
+            if values.is_empty() {
+                self.answers.remove(&key);
+            }
+        }
     }
 
-    pub fn submit(&mut self) -> Option<BTreeMap<String, ElicitationContentValue>> {
-        self.commit_draft();
-        let missing = self
+    fn clear_custom(&mut self) {
+        if let Some(key) = self.current().and_then(|field| field.custom_key.clone()) {
+            self.answers.remove(&key);
+        }
+    }
+
+    fn missing(&self, field: &Field) -> bool {
+        (field.required || field.custom_key.is_some()) && self.answer(field).is_none()
+    }
+
+    pub fn answer(&self, field: &Field) -> Option<&ElicitationContentValue> {
+        field
+            .custom_key
+            .as_ref()
+            .and_then(|key| self.answers.get(key))
+            .or_else(|| self.answers.get(&field.key))
+    }
+
+    fn submit(&mut self) -> Option<BTreeMap<String, ElicitationContentValue>> {
+        if let Some(index) = self
             .form
             .fields
             .iter()
-            .filter(|field| field.required && !self.answers.contains_key(&field.key))
-            .map(|field| field.title.clone())
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            self.error = Some(format!("Answer {}", missing.join(", ")));
-            return None;
-        }
-        if let Some(field) = self.current() {
-            let title = field.title.clone();
-            self.error = Some(format!("Answer {title}"));
+            .position(|field| self.missing(field))
+        {
+            self.open(index);
+            self.error = Some(format!(
+                "Answer {} before submitting.",
+                self.form.fields[index].title
+            ));
             return None;
         }
         Some(std::mem::take(&mut self.answers))
     }
 
-    fn advance(&mut self) {
-        self.index = (self.index + 1).min(self.form.fields.len());
-        self.load_current();
-    }
-
-    fn commit_draft(&mut self) {
-        if self.draft.is_empty() {
-            return;
-        }
+    fn commit_text(&mut self) -> bool {
         let Some(field) = self.current() else {
-            return;
+            return true;
         };
-        if !matches!(field.kind, FieldKind::Text { .. }) {
-            return;
+        let (key, kind) = match &field.kind {
+            _ if self.editing_custom => match &field.custom_key {
+                Some(key) => (key.clone(), TextKind::String),
+                None => return true,
+            },
+            FieldKind::Text(kind) => (field.key.clone(), *kind),
+            _ => return true,
+        };
+        let text = self.draft.trim();
+        if text.is_empty() {
+            self.answers.remove(&key);
+            return true;
         }
-        let key = field.key.clone();
-        let numeric = matches!(field.kind, FieldKind::Text { numeric: true });
-        let draft = self.draft.trim().to_owned();
-        if let Ok(value) = draft.parse::<i64>()
-            && numeric
-        {
-            self.answers
-                .insert(key, ElicitationContentValue::Integer(value));
-        } else if let Ok(value) = draft.parse::<f64>() {
-            if numeric {
-                self.answers
-                    .insert(key, ElicitationContentValue::Number(value));
-            } else {
-                self.answers
-                    .insert(key, ElicitationContentValue::String(draft));
-            }
-        } else {
-            self.answers
-                .insert(key, ElicitationContentValue::String(draft));
+        let value = match kind {
+            TextKind::String => Some(ElicitationContentValue::String(text.into())),
+            TextKind::Integer => text
+                .parse::<i64>()
+                .ok()
+                .map(ElicitationContentValue::Integer),
+            TextKind::Number => text
+                .parse::<f64>()
+                .ok()
+                .filter(|number| number.is_finite())
+                .map(ElicitationContentValue::Number),
+        };
+        let Some(value) = value else {
+            self.error = Some("Enter a valid number.".into());
+            return false;
+        };
+        if self.editing_custom {
+            let choice_key = field.key.clone();
+            self.answers.remove(&choice_key);
         }
-        self.draft.clear();
+        self.answers.insert(key, value);
+        true
     }
 
-    fn load_current(&mut self) {
-        self.draft.clear();
-        let Some(field) = self.current().cloned() else {
-            return;
-        };
-        let key = field.key.clone();
-        if let Some(ElicitationContentValue::String(text)) = self.answers.get(&key) {
-            self.draft = text.clone();
-        }
-        if let Some(ElicitationContentValue::Integer(value)) = self.answers.get(&key) {
-            self.draft = value.to_string();
-        }
-        if let Some(ElicitationContentValue::Number(value)) = self.answers.get(&key) {
-            self.draft = value.to_string();
-        }
-        if let (
-            FieldKind::Choice { options, .. },
-            Some(ElicitationContentValue::StringArray(picked)),
-        ) = (&field.kind, self.answers.get(&key))
-            && let Some(row) = self.selected.get_mut(self.index)
-        {
-            for (index, option) in options.iter().enumerate() {
-                row[index] = picked.contains(&option.value);
+    fn open(&mut self, index: usize) {
+        self.index = index;
+        self.error = None;
+        self.editing_custom = false;
+        self.choice = self.current().map_or(0, |field| {
+            if let FieldKind::Choice { options, .. } = &field.kind
+                && field
+                    .custom_key
+                    .as_ref()
+                    .is_some_and(|key| self.answers.contains_key(key))
+            {
+                return options.len();
             }
-        }
+            match (&field.kind, self.answer(field)) {
+                (
+                    FieldKind::Choice { options, .. },
+                    Some(ElicitationContentValue::String(value)),
+                ) => options
+                    .iter()
+                    .position(|option| &option.value == value)
+                    .unwrap_or(options.len()),
+                (FieldKind::Boolean, Some(ElicitationContentValue::Boolean(false))) => 1,
+                _ => 0,
+            }
+        });
+        self.load_text();
     }
 
-    pub fn selections(&self) -> &[bool] {
-        self.selected
-            .get(self.index)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+    fn load_text(&mut self) {
+        self.draft = self
+            .current()
+            .and_then(|field| {
+                let key = if self.editing_custom {
+                    field.custom_key.as_ref()?
+                } else {
+                    &field.key
+                };
+                match self.answers.get(key)? {
+                    ElicitationContentValue::String(value) => Some(value.clone()),
+                    ElicitationContentValue::Integer(value) => Some(value.to_string()),
+                    ElicitationContentValue::Number(value) => Some(value.to_string()),
+                    _ => None,
+                }
+            })
+            .unwrap_or_default();
     }
 }
 
@@ -307,6 +385,23 @@ impl Form {
                 .as_ref()
                 .is_some_and(|required| required.contains(key));
             fields.push(field_from_schema(key, property, required));
+        }
+        let companions = fields
+            .iter()
+            .filter_map(|field| {
+                let choice = field.key.strip_suffix("_text")?;
+                matches!(field.kind, FieldKind::Text(TextKind::String))
+                    .then(|| (choice.to_owned(), field.key.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (choice, key) in companions {
+            if let Some(field) = fields
+                .iter_mut()
+                .find(|field| field.key == choice && matches!(field.kind, FieldKind::Choice { .. }))
+            {
+                field.custom_key = Some(key.clone());
+                fields.retain(|field| field.key != key);
+            }
         }
         Self { message, fields }
     }
@@ -351,7 +446,7 @@ fn field_from_schema(key: &str, property: &ElicitationPropertySchema, required: 
                     options,
                     multiple: false,
                 },
-                _ => FieldKind::Text { numeric: false },
+                _ => FieldKind::Text(TextKind::String),
             }
         }
         ElicitationPropertySchema::Integer(schema) => {
@@ -359,14 +454,14 @@ fn field_from_schema(key: &str, property: &ElicitationPropertySchema, required: 
                 name.clone_into(&mut title);
             }
             description.clone_from(&schema.description);
-            FieldKind::Text { numeric: true }
+            FieldKind::Text(TextKind::Integer)
         }
         ElicitationPropertySchema::Number(schema) => {
             if let Some(name) = &schema.title {
                 name.clone_into(&mut title);
             }
             description.clone_from(&schema.description);
-            FieldKind::Text { numeric: true }
+            FieldKind::Text(TextKind::Number)
         }
         ElicitationPropertySchema::Boolean(schema) => {
             if let Some(name) = &schema.title {
@@ -408,7 +503,7 @@ fn field_from_schema(key: &str, property: &ElicitationPropertySchema, required: 
         }
         _ => {
             description = Some("This field needs a newer client".into());
-            FieldKind::Text { numeric: false }
+            FieldKind::Text(TextKind::String)
         }
     };
     Field {
@@ -417,6 +512,7 @@ fn field_from_schema(key: &str, property: &ElicitationPropertySchema, required: 
         description,
         kind,
         required,
+        custom_key: None,
     }
 }
 

@@ -126,12 +126,7 @@ impl App {
             }
             "/todo" | "/todos" => {
                 self.draft.submit();
-                let text = if self.plan.is_empty() {
-                    "No plan available".into()
-                } else {
-                    self.plan.join("\n")
-                };
-                self.transcript.push(Role::Note, text);
+                self.show_todos();
             }
             "/providers" | "/provider" => {
                 self.draft.submit();
@@ -507,6 +502,8 @@ impl App {
             ("sidebar", Some(value)) => {
                 if let Some(value) = parse_on_off(value) {
                     self.preferences.sidebar = value;
+                    self.todo_open = false;
+                    self.todo_scroll = None;
                     self.save_preferences();
                 }
             }

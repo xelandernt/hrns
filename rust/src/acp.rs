@@ -216,7 +216,7 @@ pub enum Event {
     Providers(Result<Vec<ProviderInfo>, String>),
     LoadingAttachment,
     Attachment(Result<Box<Attachment>, String>),
-    Plan(Vec<String>),
+    Plan(Vec<agent_client_protocol::v1::schema::PlanEntry>),
     Usage {
         used: u64,
         size: u64,
@@ -1123,12 +1123,7 @@ fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) ->
         SessionUpdate::CurrentModeUpdate(update) => {
             Some(Event::Mode(update.current_mode_id.to_string()))
         }
-        SessionUpdate::Plan(plan) => Some(Event::Plan(
-            plan.entries
-                .into_iter()
-                .map(|entry| format!("{:?} · {}", entry.status, entry.content))
-                .collect(),
-        )),
+        SessionUpdate::Plan(plan) => Some(Event::Plan(plan.entries)),
         SessionUpdate::UsageUpdate(usage) => Some(Event::Usage {
             used: usage.used,
             size: usage.size,

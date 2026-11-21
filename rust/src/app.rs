@@ -5,7 +5,9 @@ mod render;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
-use agent_client_protocol::v1::schema::{ElicitationContentValue, SessionConfigOption, ToolKind};
+use agent_client_protocol::v1::schema::{
+    ElicitationContentValue, PlanEntry, SessionConfigOption, ToolKind,
+};
 use futures::channel::{mpsc, oneshot};
 use ratatui::layout::{Position, Rect};
 
@@ -63,8 +65,11 @@ pub enum Key {
     HistoryDown,
     ScrollUp,
     ScrollDown,
+    PreviousPrompt,
+    NextPrompt,
     LatestOutput,
     Tab,
+    BackTab,
     ToggleTools,
     ToggleSidebar,
     Reconnect,
@@ -166,7 +171,11 @@ pub struct App {
     commands: Vec<(String, String)>,
     skills: Vec<Skill>,
     completion: Option<Completion>,
-    plan: Vec<String>,
+    plan: Vec<PlanEntry>,
+    replay_plan: Option<Vec<PlanEntry>>,
+    todo_open: bool,
+    todo_auto_opened: bool,
+    todo_scroll: Option<u16>,
     usage: Option<(u64, u64)>,
     usage_cost: Option<String>,
     last_usage_tokens: Option<u64>,
@@ -235,6 +244,10 @@ impl App {
             skills: Vec::new(),
             completion: None,
             plan: Vec::new(),
+            replay_plan: None,
+            todo_open: false,
+            todo_auto_opened: false,
+            todo_scroll: None,
             usage: None,
             usage_cost: None,
             last_usage_tokens: None,
@@ -279,6 +292,14 @@ impl App {
                     self.session_title = None;
                 }
                 self.workspace = Some(workspace.display().to_string());
+                if self.session.as_deref() != Some(&session) {
+                    self.plan.clear();
+                    self.todo_auto_opened = false;
+                    self.todo_scroll = self.todo_scroll.map(|_| 0);
+                }
+                if let Some(plan) = self.replay_plan.take() {
+                    self.update_plan(plan);
+                }
                 self.session = Some(session);
                 self.ready = true;
                 self.status = "Connected";
@@ -366,7 +387,13 @@ impl App {
                     );
                 }
             }
-            Event::Plan(plan) => self.plan = plan,
+            Event::Plan(plan) => {
+                if self.ready {
+                    self.update_plan(plan);
+                } else {
+                    self.replay_plan = Some(plan);
+                }
+            }
             Event::Usage { used, size, cost } => {
                 self.usage = Some((used, size));
                 self.usage_cost = cost;
@@ -430,6 +457,7 @@ impl App {
                     self.session_request,
                     Err("Disconnected from the agent".into()),
                 );
+                self.replay_plan = None;
                 if let Some(popup) = &mut self.providers {
                     popup.result = Some(Err("Disconnected from the agent".into()));
                 }
@@ -458,7 +486,9 @@ impl App {
                 self.loaded = false;
                 self.ready = false;
                 self.replay_from = Some(self.transcript.len());
+                self.replay_plan = None;
                 self.plan.clear();
+                self.todo_auto_opened = false;
                 self.usage = None;
                 self.usage_cost = None;
                 self.last_usage_tokens = None;
@@ -933,8 +963,20 @@ impl App {
             Key::End => self.draft.end(),
             Key::HistoryUp => self.draft.recall(true),
             Key::HistoryDown => self.draft.recall(false),
+            Key::ScrollUp if let Some(scroll) = &mut self.todo_scroll => {
+                *scroll = scroll.saturating_sub(3);
+            }
+            Key::ScrollDown if let Some(scroll) = &mut self.todo_scroll => {
+                *scroll = scroll.saturating_add(3);
+            }
+            Key::Escape if self.todo_scroll.is_some() => {
+                self.todo_open = false;
+                self.todo_scroll = None;
+            }
             Key::ScrollUp => self.transcript.scroll_page(false),
             Key::ScrollDown => self.transcript.scroll_page(true),
+            Key::PreviousPrompt => self.transcript.jump_prompt(false),
+            Key::NextPrompt => self.transcript.jump_prompt(true),
             Key::LatestOutput => self.transcript.follow(),
             Key::ToggleTools => self.transcript.toggle_tools(),
             Key::ToggleSidebar => self.toggle_sidebar(),
@@ -947,7 +989,7 @@ impl App {
             }
             Key::Enter if !self.draft.text().trim().is_empty() => self.submit(),
             Key::Tab => self.draft.insert("\t"),
-            Key::Escape | Key::Enter => {}
+            Key::Escape | Key::Enter | Key::BackTab => {}
         }
         self.refresh_completion();
     }
@@ -993,26 +1035,13 @@ impl App {
                         done = Done::Accept(answers);
                     }
                 }
-                Key::Newline => pending.state.insert("\n"),
                 Key::Backspace => pending.state.backspace(),
-                Key::Tab => pending.state.move_field(true),
-                Key::HistoryDown | Key::ScrollDown => pending.state.move_field(true),
-                Key::HistoryUp | Key::ScrollUp => pending.state.move_field(false),
-                Key::Text(character) => {
-                    let handled = if pending.state.is_boolean() {
-                        match character {
-                            'y' | 'Y' => pending.state.choose_boolean(true),
-                            'n' | 'N' => pending.state.choose_boolean(false),
-                            _ => false,
-                        }
-                    } else {
-                        character
-                            .to_digit(10)
-                            .is_some_and(|digit| pending.state.choose(digit as usize))
-                    };
-                    if !handled {
-                        pending.state.insert(character.encode_utf8(&mut [0; 4]));
-                    }
+                Key::Tab | Key::Right => pending.state.move_field(true),
+                Key::BackTab | Key::Left => pending.state.move_field(false),
+                Key::HistoryDown | Key::ScrollDown => pending.state.move_choice(true),
+                Key::HistoryUp | Key::ScrollUp => pending.state.move_choice(false),
+                Key::Text(character) if !pending.state.choice_key(character) => {
+                    pending.state.insert(character.encode_utf8(&mut [0; 4]));
                 }
                 _ => {}
             }
@@ -1115,7 +1144,27 @@ impl App {
         (!items.is_empty()).then_some(items)
     }
 
+    fn update_plan(&mut self, plan: Vec<PlanEntry>) {
+        if !plan.is_empty() && !self.todo_auto_opened {
+            self.todo_auto_opened = true;
+            self.todo_open = true;
+        }
+        self.plan = plan;
+    }
+
+    fn show_todos(&mut self) {
+        self.todo_open = true;
+        self.todo_scroll = Some(0);
+    }
+
     pub fn toggle_sidebar(&mut self) {
+        if self.todo_open {
+            self.todo_open = false;
+            self.todo_scroll = None;
+            self.preferences.sidebar = false;
+            self.save_preferences();
+            return;
+        }
         self.preferences.sidebar = !self.preferences.sidebar;
         self.save_preferences();
     }

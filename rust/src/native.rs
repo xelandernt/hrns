@@ -548,6 +548,8 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Home => Some(Key::Home),
         KeyCode::End if key.modifiers == KeyModifiers::CONTROL => Some(Key::LatestOutput),
         KeyCode::End => Some(Key::End),
+        KeyCode::Up if key.modifiers == KeyModifiers::ALT => Some(Key::PreviousPrompt),
+        KeyCode::Down if key.modifiers == KeyModifiers::ALT => Some(Key::NextPrompt),
         KeyCode::Up => Some(Key::HistoryUp),
         KeyCode::Down => Some(Key::HistoryDown),
         KeyCode::PageUp => Some(Key::ScrollUp),
@@ -556,6 +558,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Char('o') if key.modifiers == KeyModifiers::CONTROL => Some(Key::ToggleTools),
         KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Reconnect),
         KeyCode::Esc => Some(Key::Escape),
+        KeyCode::BackTab => Some(Key::BackTab),
         KeyCode::Tab => Some(Key::Tab),
         KeyCode::Char(c)
             if !key

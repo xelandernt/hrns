@@ -1,6 +1,8 @@
-use agent_client_protocol::v1::schema::{SessionConfigKind, SessionConfigOptionCategory, ToolKind};
+use agent_client_protocol::v1::schema::{
+    PlanEntryPriority, PlanEntryStatus, SessionConfigKind, SessionConfigOptionCategory, ToolKind,
+};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
@@ -14,20 +16,19 @@ impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
         let palette = self.palette();
         let area = frame.area();
-        let sidebar_width = if self.preferences.sidebar && area.width >= 96 {
-            self.preferences.sidebar_width(area.width)
+        frame.render_widget(
+            Block::default().style(
+                Style::default()
+                    .fg(palette.foreground)
+                    .bg(palette.background),
+            ),
+            area,
+        );
+        let prompt_height = if area.height >= 12 {
+            6
         } else {
-            0
+            area.height / 2
         };
-        let (area, sidebar) = if sidebar_width > 0 {
-            let [main, sidebar] =
-                Layout::horizontal([Constraint::Min(40), Constraint::Length(sidebar_width)])
-                    .areas(area);
-            (main, Some(sidebar))
-        } else {
-            (area, None)
-        };
-        let prompt_height = area.height.clamp(4, 12) / 2;
         let mcp_height = if self.mcp_consent.front().is_some() {
             7
         } else {
@@ -36,23 +37,33 @@ impl App {
         let approval_height = self.approvals.front().map_or(0, |request| {
             u16::try_from((request.options.len() + 4).min(12)).unwrap_or(12)
         });
-        let elicitation_height = self.elicitations.front().map_or(0, |pending| {
-            u16::try_from((pending.state.form.fields.len() + 6).min(16)).unwrap_or(16)
+        let question_limit = area.height.saturating_sub(prompt_height + 3).min(18);
+        let question = self.elicitations.front().map(|pending| {
+            elicitation_lines(
+                pending,
+                usize::from(question_limit.saturating_sub(2)),
+                area.width,
+                &palette,
+            )
+        });
+        let elicitation_height = question.as_ref().map_or(0, |lines| {
+            u16::try_from(lines.len() + 2)
+                .unwrap_or(u16::MAX)
+                .min(question_limit)
         });
         let completion_height = self.completion.as_ref().map_or(0, |completion| {
             u16::try_from(completion.items.len().min(6)).unwrap_or(6)
         });
         let [
-            header,
             transcript,
             mcp,
             approval,
             elicitation,
             suggestions,
             composer,
+            status,
             help,
         ] = Layout::vertical([
-            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(mcp_height),
             Constraint::Length(approval_height),
@@ -60,70 +71,36 @@ impl App {
             Constraint::Length(completion_height),
             Constraint::Length(prompt_height),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .areas(area);
 
-        let status_color = match self.status {
-            "Connected" => palette.success,
-            "Disconnected" => palette.error,
-            "Waiting" | "Cancelling" => palette.warning,
-            _ => palette.accent,
+        let sidebar_width = if (self.preferences.sidebar || self.todo_open) && area.width >= 96 {
+            self.preferences.sidebar_width(area.width)
+        } else {
+            0
         };
-        let mut header_spans = vec![
-            " hrns ".bold().fg(palette.accent),
-            format!(" · {} · ", self.destination).into(),
-            self.status.fg(status_color),
-        ];
-        if let Some(title) = &self.session_title {
-            header_spans.push(format!(" · {title}").into());
-        } else if let Some(workspace) = &self.workspace {
-            header_spans.push(format!(" · {workspace}").into());
+        let [transcript, mut sidebar] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(sidebar_width)])
+                .areas(transcript);
+        if self.todo_open && sidebar.width == 0 {
+            let width = (transcript.width / 2).max(36).min(transcript.width);
+            sidebar = Rect::new(
+                transcript.right() - width,
+                transcript.y,
+                width,
+                transcript.height,
+            );
         }
-        if let Some(model) = self.options.iter().find_map(|option| match &option.kind {
-            SessionConfigKind::Select(select)
-                if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
-            {
-                Some(format!(" · {}", select.current_value))
-            }
-            _ => None,
-        }) {
-            header_spans.push(model.into());
-        }
-        let tokens = self
-            .usage
-            .map(|(used, size)| format!(" · {used}/{size}"))
-            .or_else(|| {
-                self.last_usage_tokens
-                    .map(|tokens| format!(" · {tokens} tokens"))
-            })
-            .unwrap_or_default();
-        if !tokens.is_empty() || self.usage_cost.is_some() {
-            let cost = self
-                .usage_cost
-                .as_ref()
-                .map(|cost| format!(" · {cost}"))
-                .unwrap_or_default();
-            header_spans.push(format!("{tokens}{cost}").into());
-        }
-        if self.attachment_reads > 0 {
-            header_spans.push(" · Loading attachment".into());
-        } else if !self.attachments.is_empty() {
-            header_spans.push(format!(" · {} attached", self.attachments.len()).into());
-        }
-        if !self.queue.is_empty() {
-            let state = if self.queue_paused {
-                "queued · paused"
-            } else {
-                "queued"
-            };
-            header_spans.push(format!(" · {} {state}", self.queue.len()).into());
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(header_spans)).style(Style::default().bg(palette.background)),
-            header,
-        );
-
+        let gutter = Margin::new(if area.width >= 80 { 2 } else { 1 }, 0);
+        let transcript = transcript.inner(gutter);
         self.transcript_area = transcript;
+        if sidebar.width > 0 {
+            self.transcript_area.width = self
+                .transcript_area
+                .width
+                .min(sidebar.x.saturating_sub(transcript.x));
+        }
         let visible = self
             .transcript
             .visible(transcript.width, transcript.height, &palette);
@@ -155,11 +132,15 @@ impl App {
                 approval,
             );
         }
-        if let Some(pending) = self.elicitations.front() {
-            let lines = elicitation_lines(pending, &palette);
+        if let Some(lines) = question {
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(palette.accent))
+                .style(Style::default().bg(palette.surface))
+                .padding(ratatui::widgets::Padding::horizontal(1));
             frame.render_widget(
-                Paragraph::new(lines).wrap(Wrap { trim: false }),
-                elicitation,
+                Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+                elicitation.inner(gutter),
             );
         }
 
@@ -183,53 +164,77 @@ impl App {
                     }
                 })
                 .collect();
-            frame.render_widget(Paragraph::new(rows), suggestions);
+            frame.render_widget(Paragraph::new(rows), suggestions.inner(gutter));
         }
 
-        let title = self.session.as_ref().map_or_else(
-            || " Prompt ".to_owned(),
-            |session| format!(" Prompt · {session} "),
-        );
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(palette.border))
-            .style(Style::default().bg(palette.surface))
-            .title(title)
-            .title_style(Style::default().fg(palette.accent));
+        let composer = composer.inner(gutter);
+        let prompt_active = self.mcp_consent.is_empty()
+            && self.approvals.is_empty()
+            && self.elicitations.is_empty()
+            && self.providers.is_none()
+            && self.picker.is_none();
+        let border = if prompt_active {
+            palette.accent
+        } else {
+            palette.border
+        };
+        let mut block = Block::default().style(Style::default().bg(palette.surface));
+        if composer.width >= 6 && composer.height >= 3 {
+            block = block
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border));
+        }
         let input = block.inner(composer);
         frame.render_widget(block, composer);
-        if input.width > 0 && input.height > 0 {
+        if input.width > 2 && input.height > 0 {
+            let [prompt, input] =
+                Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(input);
+            frame.render_widget(Paragraph::new("›").fg(border).bold(), prompt);
             let (rows, (row, column)) = self.draft.display(input.width);
             let scroll = row.saturating_sub(input.height - 1);
-            let text = Paragraph::new(Text::from(
-                rows.into_iter().map(Line::raw).collect::<Vec<_>>(),
-            ))
-            .style(
-                Style::default()
-                    .fg(palette.foreground)
-                    .bg(palette.background),
-            );
-            frame.render_widget(text.scroll((scroll, 0)), input);
-            if self.providers.is_none() && self.picker.is_none() {
+            let text = if self.draft.text().is_empty() {
+                Text::from("Send a message…").fg(palette.muted)
+            } else {
+                Text::from(rows.into_iter().map(Line::raw).collect::<Vec<_>>())
+            };
+            frame.render_widget(Paragraph::new(text).scroll((scroll, 0)), input);
+            if prompt_active {
                 frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
             }
         }
+        self.draw_status(frame, status.inner(gutter), &palette);
+
         let help_text = if self.mcp_consent.front().is_some() {
-            " 1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
-        } else if !self.elicitations.is_empty() {
-            " type to answer · 1-9 choose · Enter next · Esc decline"
+            "1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
+        } else if let Some(pending) = self.elicitations.front() {
+            question_hint(&pending.state)
         } else if self.approvals.front().is_some() {
-            " 1-9 choose · y allow · a always · n reject · N always reject · Esc cancel"
+            "1-9 choose · y allow · a always · n reject · N always reject · Esc cancel"
         } else if self.transcript.output_pending() {
-            " New output below · Ctrl+End"
+            "New output ↓ · Ctrl+End"
         } else if self.status == "Disconnected" {
-            " Ctrl-R reconnect · draft is kept · Ctrl-B panel"
+            "Ctrl-R reconnect · Ctrl-B panel"
         } else {
             "Enter send · Wheel scroll · Click a header for details · /help commands"
         };
-        self.draw_footer(frame, help, Line::from(help_text).fg(palette.muted), &palette);
-        if let Some(sidebar) = sidebar {
-            self.draw_sidebar(frame, sidebar, &palette);
+        let help_color = if prompt_active && self.transcript.output_pending() {
+            palette.accent
+        } else {
+            palette.muted
+        };
+        self.draw_footer(
+            frame,
+            help.inner(gutter),
+            Line::from(help_text).fg(help_color),
+            &palette,
+        );
+        if sidebar.width > 0 {
+            if self.todo_open {
+                self.draw_todos(frame, sidebar, &palette);
+            } else {
+                self.draw_sidebar(frame, sidebar, &palette);
+            }
         }
         if self.approvals.is_empty() && self.elicitations.is_empty() && self.mcp_consent.is_empty()
         {
@@ -353,6 +358,73 @@ impl App {
         frame.render_widget(Paragraph::new(picker.hint()).fg(palette.muted), keys);
     }
 
+    fn draw_status(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let status_color = match self.status {
+            "Connected" => palette.success,
+            "Disconnected" => palette.error,
+            "Waiting" | "Cancelling" => palette.warning,
+            _ => palette.accent,
+        };
+        let mut left = vec!["● ".fg(status_color), self.status.fg(status_color)];
+        if self.attachment_reads > 0 {
+            left.push(" · Loading attachment".into());
+        } else if !self.attachments.is_empty() {
+            left.push(format!(" · {} attached", self.attachments.len()).into());
+        }
+        if !self.queue.is_empty() {
+            let state = if self.queue_paused {
+                "queued · paused"
+            } else {
+                "queued"
+            };
+            left.push(format!(" · {} {state}", self.queue.len()).into());
+        }
+        let context = self.session_title.as_deref().or(self.workspace.as_deref());
+        if let Some(context) = context {
+            left.push(format!(" · {context}").into());
+        }
+        left.push(format!(" · {}", self.destination).into());
+
+        let mut right = Line::default();
+        if let Some(model) = self.options.iter().find_map(|option| match &option.kind {
+            SessionConfigKind::Select(select)
+                if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
+            {
+                Some(select.current_value.to_string())
+            }
+            _ => None,
+        }) {
+            right.push_span(model.fg(palette.accent).bold());
+        }
+        let usage = self
+            .usage
+            .map(|(used, size)| format!("ctx {used}/{size}"))
+            .or_else(|| {
+                self.last_usage_tokens
+                    .map(|tokens| format!("{tokens} tokens"))
+            });
+        for item in [usage.as_deref(), self.usage_cost.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if !right.spans.is_empty() {
+                right.push_span(" · ");
+            }
+            right.push_span(item);
+        }
+        let right_width = right
+            .width()
+            .min(usize::from(area.width.saturating_sub(16)));
+        let [context, metrics] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(u16::try_from(right_width).unwrap_or(0)),
+        ])
+        .areas(area);
+        let style = Style::default().fg(palette.muted);
+        frame.render_widget(Paragraph::new(Line::from(left)).style(style), context);
+        frame.render_widget(Paragraph::new(right).style(style), metrics);
+    }
+
     fn approval_lines(
         &self,
         request: &crate::acp::PermissionRequest,
@@ -398,6 +470,64 @@ impl App {
         lines
     }
 
+    fn draw_todos(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let focused = self.todo_scroll.is_some();
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(palette.accent))
+            .style(Style::default().bg(palette.panel))
+            .title(" Todos ")
+            .title_style(Style::default().fg(palette.accent).bold());
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        let [summary, entries, hint] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(u16::from(focused)),
+        ])
+        .areas(inner);
+        let done = self
+            .plan
+            .iter()
+            .filter(|item| item.status == PlanEntryStatus::Completed)
+            .count();
+        let summary_text = if self.plan.is_empty() {
+            "No plan yet.".into()
+        } else {
+            format!("{done} of {} done", self.plan.len())
+        };
+        frame.render_widget(Paragraph::new(summary_text).fg(palette.muted), summary);
+        if let Some(offset) = &mut self.todo_scroll {
+            *offset =
+                (*offset).min(u16::try_from(self.plan.len().saturating_sub(1)).unwrap_or(u16::MAX));
+        }
+        let lines = self
+            .plan
+            .iter()
+            .skip(usize::from(self.todo_scroll.unwrap_or(0)))
+            .map(|item| {
+                let (marker, content) = match item.status {
+                    PlanEntryStatus::Completed => ("●", item.content.as_str().fg(palette.muted)),
+                    PlanEntryStatus::InProgress => ("◐", item.content.as_str().bold()),
+                    _ => ("○", item.content.as_str().fg(palette.foreground)),
+                };
+                let mut line = Line::from(vec![marker.fg(palette.muted), " ".into(), content]);
+                if item.priority == PlanEntryPriority::High {
+                    line.push_span("  high".fg(palette.warning).bold());
+                }
+                line
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), entries);
+        if focused {
+            frame.render_widget(
+                Paragraph::new("PgUp/PgDn scroll · Esc close").fg(palette.muted),
+                hint,
+            );
+        }
+    }
+
     fn draw_sidebar(&self, frame: &mut Frame, area: ratatui::layout::Rect, palette: &Palette) {
         let heading = |text: &'static str| Line::from(text).fg(palette.accent).bold();
         let mut lines = vec![
@@ -436,13 +566,6 @@ impl App {
         }
         if let Some(cost) = &self.usage_cost {
             lines.push(Line::from(format!("cost {cost}")).fg(palette.muted));
-        }
-        lines.push(Line::from(""));
-        lines.push(heading("Plan"));
-        if self.plan.is_empty() {
-            lines.push(Line::from("no plan").fg(palette.muted));
-        } else {
-            lines.extend(self.plan.iter().cloned().map(Line::from));
         }
         if !self.queue.is_empty() {
             lines.push(Line::from(""));
@@ -630,78 +753,180 @@ fn kind_label(kind: ToolKind) -> &'static str {
     }
 }
 
-fn elicitation_lines(pending: &super::PendingElicitation, palette: &Palette) -> Vec<Line<'static>> {
+fn question_hint(state: &crate::elicitation::FormState) -> &'static str {
+    if state.current().is_none() {
+        "Enter submit · Shift+Tab previous · Esc decline"
+    } else if state.editing_custom {
+        "Type your answer · Enter save · Esc decline"
+    } else if state
+        .current()
+        .is_some_and(|field| matches!(field.kind, FieldKind::Choice { multiple: true, .. }))
+    {
+        "↑/↓ choose · Space toggle · Enter continue · Esc decline"
+    } else if state.form.fields.len() > 1 {
+        "↑/↓ choose · Tab/Shift+Tab switch · Enter next · Esc decline"
+    } else {
+        "↑/↓ choose · Enter send · Esc decline"
+    }
+}
+
+fn elicitation_lines(
+    pending: &super::PendingElicitation,
+    limit: usize,
+    width: u16,
+    palette: &Palette,
+) -> Vec<Line<'static>> {
     let state = &pending.state;
-    let mut lines = vec![
-        Line::from(format!(" Question · {}", state.form.message))
-            .fg(palette.accent)
-            .bold(),
-    ];
-    for (index, field) in state.form.fields.iter().enumerate() {
-        let marker = if index == state.index { "›" } else { " " };
-        let value = state
-            .answers
-            .get(&field.key)
-            .map(answer_text)
-            .unwrap_or_default();
-        let current = index == state.index;
-        let mut line = format!("{marker} {}", field.title);
-        if !value.is_empty() {
-            line.push_str(&format!(" · {value}"));
+    let mut lines = Vec::new();
+    let tabs = state.form.fields.len() > 1;
+    let current = state.current();
+    if !state.form.message.is_empty()
+        && (tabs
+            || current
+                .is_none_or(|field| field.description.as_deref() != Some(&state.form.message)))
+    {
+        lines.push(Line::from(state.form.message.clone()).bold());
+    }
+    if tabs {
+        let mut labels = state
+            .form
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| format!("{}. {}", index + 1, field.title))
+            .chain(std::iter::once("Confirm".into()))
+            .collect::<Vec<_>>();
+        let mut start = 0;
+        let budget = usize::from(width.saturating_sub(8));
+        while start < state.index
+            && labels[start..=state.index]
+                .iter()
+                .map(|label| unicode_width::UnicodeWidthStr::width(label.as_str()) + 3)
+                .sum::<usize>()
+                > budget
+        {
+            start += 1;
         }
-        lines.push(if current {
-            Line::from(line).fg(palette.foreground)
-        } else {
-            Line::from(line).fg(palette.muted)
-        });
-        if !current {
-            continue;
+        let mut line = Line::default();
+        for (index, label) in labels.drain(..).enumerate().skip(start) {
+            if index != start {
+                line.push_span(" · ".fg(palette.muted));
+            }
+            line.push_span(if index == state.index {
+                label.fg(palette.accent).bold()
+            } else {
+                label.fg(palette.muted)
+            });
         }
+        lines.push(line);
+    }
+    let available = limit.saturating_sub(lines.len() + usize::from(state.error.is_some()));
+    if let Some(field) = current {
+        lines.push(Line::from(field.title.clone()).bold());
         if let Some(description) = &field.description {
-            lines.push(Line::from(format!("  {description}")).fg(palette.muted));
+            lines.push(Line::from(description.clone()));
         }
         match &field.kind {
             FieldKind::Choice { options, multiple } => {
-                let selections = state.selections();
-                for (index, option) in options.iter().take(6).enumerate() {
-                    let selected = selections.get(index).copied().unwrap_or(false);
-                    let marker = if selected { "●" } else { "○" };
-                    let suffix = option
-                        .detail
-                        .as_ref()
-                        .map(|detail| format!(" · {detail}"))
-                        .unwrap_or_default();
-                    lines.push(
-                        Line::from(format!(
-                            "  [{}] {marker} {}{suffix}",
-                            index + 1,
-                            option.label
-                        ))
-                        .fg(if selected {
-                            palette.success
-                        } else {
-                            palette.foreground
+                let answer = state.answer(field);
+                let options = options.iter().map(|option| {
+                    let selected = match answer {
+                        Some(
+                            agent_client_protocol::v1::schema::ElicitationContentValue::StringArray(
+                                values,
+                            ),
+                        ) => values.contains(&option.value),
+                        Some(
+                            agent_client_protocol::v1::schema::ElicitationContentValue::String(
+                                value,
+                            ),
+                        ) if field
+                            .custom_key
+                            .as_ref()
+                            .is_none_or(|key| !state.answers.contains_key(key)) =>
+                        {
+                            *value == option.value
+                        }
+                        _ => false,
+                    };
+                    let label = match &option.detail {
+                        Some(detail) => format!("{} · {detail}", option.label),
+                        None => option.label.clone(),
+                    };
+                    (label, selected)
+                });
+                let custom = field.custom_key.as_ref().map(|key| {
+                    let answer = state.answers.get(key);
+                    let label = if state.editing_custom {
+                        format!("Type your own answer › {}", state.draft)
+                    } else if let Some(value) = answer {
+                        format!("Type your own answer · {}", answer_text(value))
+                    } else {
+                        "Type your own answer".into()
+                    };
+                    (label, answer.is_some())
+                });
+                let slots = available
+                    .saturating_sub(1 + usize::from(field.description.is_some()))
+                    .max(1);
+                lines.extend(
+                    options
+                        .chain(custom)
+                        .enumerate()
+                        .skip(state.choice.saturating_sub(slots - 1))
+                        .take(slots)
+                        .map(|(index, (label, selected))| {
+                            let focused = state.choice == index;
+                            let pointer = if focused { "›" } else { " " };
+                            let mark = match (*multiple, selected) {
+                                (true, true) => "☑",
+                                (true, false) => "☐",
+                                (false, true) => "●",
+                                (false, false) => "○",
+                            };
+                            let line =
+                                Line::from(format!("{pointer} {mark} {}. {label}", index + 1));
+                            if focused {
+                                line.fg(palette.accent).bold()
+                            } else {
+                                line
+                            }
                         }),
-                    );
-                }
-                if *multiple {
-                    lines.push(Line::from("  toggle with 1-6, Enter continues").fg(palette.muted));
-                }
-            }
-            FieldKind::Boolean => {
-                lines.push(Line::from("  [y] yes   [n] no").fg(palette.foreground))
-            }
-            FieldKind::Text { .. } => {
-                lines.push(
-                    Line::from(format!("  {}", state.draft))
-                        .fg(palette.foreground)
-                        .italic(),
                 );
             }
+            FieldKind::Boolean => {
+                lines.extend(["Yes", "No"].into_iter().enumerate().map(|(index, label)| {
+                    if state.choice == index {
+                        Line::from(format!("› {label}")).fg(palette.accent).bold()
+                    } else {
+                        Line::from(format!("  {label}"))
+                    }
+                }));
+            }
+            FieldKind::Text(_) => {
+                lines.push(Line::from(format!("› {}", state.draft)).fg(palette.accent))
+            }
         }
+    } else if tabs {
+        lines.push(Line::from("Review your answers").bold());
+        lines.extend(
+            state
+                .form
+                .fields
+                .iter()
+                .take(available.saturating_sub(1))
+                .enumerate()
+                .map(|(index, field)| {
+                    let answer = state
+                        .answer(field)
+                        .map(answer_text)
+                        .unwrap_or_else(|| "(unanswered)".into());
+                    Line::from(format!("{}. {} · {answer}", index + 1, field.title))
+                }),
+        );
     }
     if let Some(error) = &state.error {
-        lines.push(Line::from(format!(" {error}")).fg(palette.error));
+        lines.push(Line::from(error.clone()).fg(palette.error));
     }
     lines
 }

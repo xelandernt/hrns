@@ -178,6 +178,13 @@ the visible entry and byte offset through streaming, resize and expansion.
 The wheel scrolls by rows, Page Up and Page Down move by the viewport height,
 and scrolling down to the latest output resumes follow mode.
 
+The conversation layout follows the former Textual screen. The transcript and
+optional sidebar sit above a rounded, full-width composer and a bottom status
+bar. `Alt+Up` and `Alt+Down` select earlier and later user prompts without
+moving the composer cursor. Incoming output stays below the selected prompt
+or scrolled viewport and shows a footer notice until the reader returns to the
+bottom or presses `Ctrl+End`.
+
 Composer completion reads the draft. A first token starting with `/` offers the
 local commands, while a `$token` offers user-invocable skills from the agent's
 `hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
@@ -188,17 +195,25 @@ the agent to expand. Paste, draft history and attachment staging stay shared;
 native reads paths while the browser opens its file chooser.
 
 `Ctrl-B` opens a sidebar with the connection identity, client I/O mode,
-session title, model, mode, permission mode, usage, cost, plan, local queue,
+session title, model, mode, permission mode, usage, cost, local queue,
 skills and recent activity. `Ctrl-O` expands tool details and the sidebar
 records tool transitions and turn outcomes. Both frontends persist sidebar,
 width, reasoning visibility, theme and permission mode without
 touching connection configuration: native writes JSON under
 `$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
-local storage. The sidebar is suppressed below 96 columns; the header keeps the
-destination, status, title or workspace, model, usage and cost visible on
-narrow layouts. `/theme`, `/permissions`, `/settings` and the `theme` and
+local storage. The activity sidebar is suppressed below 96 columns. The status bar
+allocates separate space for connection and session context and for model,
+usage and cost. `/theme`, `/permissions`, `/settings` and the `theme` and
 `permission` page parameters expose the same values. The built-in themes are
 `hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
+
+ACP plan snapshots populate the Todos panel with completion counts, item
+status and priority. The first nonempty snapshot for a session opens Todos.
+`/todo` focuses it for scrolling, and narrow layouts render it as a drawer.
+
+Form elicitation uses a question dock with a tab per field and a confirmation
+view for multiple questions. Harness choice fields and their `_text` companions
+share a tab and submit an ordinary ACP form response.
 
 Provider routing uses the `providers/list`, `providers/set` and
 `providers/disable` methods. `/providers` opens a dialog with the live routes.

@@ -292,11 +292,7 @@ fn bind_input(
         let app = Rc::clone(&app);
         let reconnect = requests.clone();
         Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
-            if event.is_composing()
-                || (event.ctrl_key() && !matches!(event.key().as_str(), "r" | "o" | "b"))
-                || event.alt_key()
-                || event.meta_key()
-            {
+            if event.is_composing() {
                 return;
             }
             if let Some(key) = translate(&event) {
@@ -451,11 +447,22 @@ async fn read_file(file: File) -> Result<Attachment, String> {
 
 fn translate(event: &KeyboardEvent) -> Option<Key> {
     let key = event.key();
-    if event.ctrl_key() && !event.alt_key() && !event.meta_key() {
+    if event.meta_key() || (event.ctrl_key() && event.alt_key()) {
+        return None;
+    }
+    if event.alt_key() {
+        return match key.as_str() {
+            "ArrowUp" => Some(Key::PreviousPrompt),
+            "ArrowDown" => Some(Key::NextPrompt),
+            _ => None,
+        };
+    }
+    if event.ctrl_key() {
         return match key.as_str() {
             "r" => Some(Key::Reconnect),
             "o" => Some(Key::ToggleTools),
             "b" => Some(Key::ToggleSidebar),
+            "End" => Some(Key::LatestOutput),
             _ => None,
         };
     }
@@ -467,13 +474,13 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
         "ArrowLeft" => Some(Key::Left),
         "ArrowRight" => Some(Key::Right),
         "Home" => Some(Key::Home),
-        "End" if event.ctrl_key() => Some(Key::LatestOutput),
         "End" => Some(Key::End),
         "ArrowUp" => Some(Key::HistoryUp),
         "ArrowDown" => Some(Key::HistoryDown),
         "PageUp" => Some(Key::ScrollUp),
         "PageDown" => Some(Key::ScrollDown),
         "Escape" => Some(Key::Escape),
+        "Tab" if event.shift_key() => Some(Key::BackTab),
         "Tab" => Some(Key::Tab),
         text => {
             let mut chars = text.chars();

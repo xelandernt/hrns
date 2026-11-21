@@ -283,6 +283,7 @@ pub struct Transcript {
     top: usize,
     following: bool,
     output_pending: bool,
+    selected_prompt: Option<usize>,
     show_thoughts: bool,
 }
 
@@ -405,7 +406,7 @@ impl Transcript {
         entry.expanded = !entry.expanded;
         self.measured = self.measured.min(index);
         self.following = false;
-
+        self.selected_prompt = None;
         true
     }
 
@@ -438,6 +439,7 @@ impl Transcript {
     }
 
     pub fn scroll(&mut self, rows: i32) {
+        self.selected_prompt = None;
         let end = self.total.saturating_sub(self.viewport_height);
         self.top = self.top.saturating_add_signed(rows as isize).min(end);
         if rows > 0 && self.top == end {
@@ -469,6 +471,7 @@ impl Transcript {
         self.laid_out = 0;
         self.total = 0;
         self.top = 0;
+        self.selected_prompt = None;
     }
 
     fn anchor(&self) -> Option<(usize, AnchorRow)> {
@@ -525,10 +528,43 @@ impl Transcript {
     pub fn follow(&mut self) {
         self.following = true;
         self.output_pending = false;
+        self.selected_prompt = None;
     }
 
     pub fn output_pending(&self) -> bool {
         self.output_pending
+    }
+
+    pub fn jump_prompt(&mut self, forward: bool) {
+        self.measure();
+        let prompts = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.role == Role::User);
+        let target = if let Some(selected) = self.selected_prompt {
+            if forward {
+                prompts
+                    .map(|(index, _)| index)
+                    .find(|&index| index > selected)
+            } else {
+                prompts
+                    .map(|(index, _)| index)
+                    .rfind(|&index| index < selected)
+            }
+        } else if forward {
+            prompts
+                .map(|(index, _)| index)
+                .find(|&index| self.entry_start(index) > self.top)
+        } else {
+            prompts
+                .map(|(index, _)| index)
+                .rfind(|&index| self.following || self.entry_start(index) < self.top)
+        };
+        if let Some(target) = target {
+            self.selected_prompt = Some(target);
+            self.following = false;
+        }
     }
 
     fn entry_start(&self, index: usize) -> usize {
@@ -604,6 +640,7 @@ impl Transcript {
             .map_or(0, |prev| self.entries[prev].end)
             + row;
         self.following = false;
+        self.selected_prompt = None;
         true
     }
 
@@ -627,7 +664,9 @@ impl Transcript {
             self.top = self.restore(anchor);
         }
         let end = self.total.saturating_sub(self.viewport_height);
-        if self.following {
+        if let Some(selected) = self.selected_prompt {
+            self.top = self.entry_start(selected).min(end);
+        } else if self.following {
             self.top = end;
         } else {
             self.top = self.top.min(end);
@@ -640,7 +679,11 @@ impl Transcript {
             let start = self.entry_start(index);
             while row < entry.end {
                 let line = entry.line(row - start, palette);
-                lines.push(line);
+                lines.push(if self.selected_prompt == Some(index) {
+                    line.bg(palette.panel)
+                } else {
+                    line
+                });
                 if lines.len() == usize::from(height) {
                     return lines;
                 }
