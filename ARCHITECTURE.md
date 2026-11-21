@@ -248,7 +248,8 @@ their own store.
 The reasoning picker opens after model selection when the agent advertises
 effort choices. The composer completes `/model` and `/effort` arguments from
 the current ACP config options, and offers built-in options for `/theme`,
-`/permissions` and `/provider`.
+`/permissions` and `/provider`. The bottom footer displays the reasoning effort
+advertised for the session and the client's current approval mode.
 
 Tool entries use ACP kind, location and arguments to summarize each operation.
 Expanding an entry group with Ctrl+O reveals formatted arguments, results,

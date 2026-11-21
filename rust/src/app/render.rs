@@ -227,10 +227,7 @@ impl App {
         } else {
             "Enter send · Wheel scroll · Click a header for details · /help commands"
         };
-        frame.render_widget(
-            Paragraph::new(help_text).style(Style::default().fg(palette.muted)),
-            help,
-        );
+        self.draw_footer(frame, help, Line::from(help_text).fg(palette.muted), &palette);
         if let Some(sidebar) = sidebar {
             self.draw_sidebar(frame, sidebar, &palette);
         }
@@ -243,6 +240,48 @@ impl App {
                 self.draw_picker(frame, area, picker, &palette);
             }
         }
+    }
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect, hint: Line<'_>, palette: &Palette) {
+        let effort = self
+            .options
+            .iter()
+            .find(|option| {
+                options::matches_category(option, &SessionConfigOptionCategory::ThoughtLevel)
+            })
+            .and_then(|option| match &option.kind {
+                SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
+                SessionConfigKind::Boolean(toggle) => {
+                    Some(if toggle.current_value { "on" } else { "off" })
+                }
+                _ => None,
+            })
+            .unwrap_or("—");
+        let approvals = self.approval_mode.label();
+        let mut settings = Line::from(vec![
+            "Effort ".into(),
+            effort.fg(palette.accent),
+            " · Approvals ".into(),
+            approvals.fg(palette.accent),
+        ]);
+        if settings.width() > usize::from(area.width) {
+            settings = Line::from(vec![
+                "Effort ".into(),
+                effort.fg(palette.accent),
+                " · ".into(),
+                approvals.fg(palette.accent),
+            ]);
+        }
+        let width = settings.width().min(usize::from(area.width)) as u16;
+        let hints = Rect::new(
+            area.x,
+            area.y,
+            area.width.saturating_sub(width).saturating_sub(1),
+            area.height,
+        );
+        let values = Rect::new(area.right() - width, area.y, width, area.height);
+        frame.render_widget(Paragraph::new(hint), hints);
+        frame.render_widget(Paragraph::new(settings).fg(palette.muted), values);
     }
 
     fn draw_picker(
