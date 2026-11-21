@@ -832,7 +832,7 @@ impl App {
             return false;
         }
         self.transcript
-            .toggle_tool_at(position.y - self.transcript_area.y)
+            .toggle_disclosure_at(position.y - self.transcript_area.y)
     }
 
     pub fn key(&mut self, key: Key) {

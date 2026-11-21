@@ -225,7 +225,7 @@ impl App {
         } else if self.status == "Disconnected" {
             " Ctrl-R reconnect · draft is kept · Ctrl-B panel"
         } else {
-            "Enter send · Wheel scroll · Click a tool for output · /help commands"
+            "Enter send · Wheel scroll · Click a header for details · /help commands"
         };
         frame.render_widget(
             Paragraph::new(help_text).style(Style::default().fg(palette.muted)),

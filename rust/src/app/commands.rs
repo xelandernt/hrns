@@ -24,7 +24,8 @@ impl App {
                     "Agent  /skills · /agent <command>".to_owned(),
                     String::new(),
                     "Tab  Complete a command or argument".to_owned(),
-                    "Click a tool  Expand or collapse its output (Ctrl+O for all)".to_owned(),
+                    "Click a header  Toggle reasoning or tool output".to_owned(),
+                    "Ctrl+O  Toggle all tool output".to_owned(),
                     "Wheel / PgUp / PgDn  Scroll the transcript".to_owned(),
                     "Esc  Close a picker or cancel the turn".to_owned(),
                 ];

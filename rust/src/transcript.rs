@@ -21,11 +21,18 @@ pub enum Role {
 }
 
 impl Role {
-    fn label(&self, palette: &Palette) -> Option<Line<'_>> {
+    fn label(&self, palette: &Palette, expanded: bool) -> Option<Line<'_>> {
         let (name, color) = match self {
             Self::User => ("You", palette.accent),
             Self::Agent => ("Agent", palette.muted),
-            Self::Thought => ("Reasoning", palette.muted),
+            Self::Thought => (
+                if expanded {
+                    "▾ Reasoning"
+                } else {
+                    "▸ Reasoning"
+                },
+                palette.muted,
+            ),
             Self::Command(name) => {
                 return Some(
                     Line::from(vec![
@@ -68,7 +75,7 @@ impl Entry {
     }
 
     fn line(&self, mut row: usize, palette: &Palette) -> Line<'_> {
-        if let Some(heading) = self.role.label(palette) {
+        if let Some(heading) = self.role.label(palette, self.expanded) {
             if row == 0 {
                 return heading;
             }
@@ -365,7 +372,7 @@ impl Transcript {
         self.measured = 0;
     }
 
-    pub fn toggle_tool_at(&mut self, row: u16) -> bool {
+    pub fn toggle_disclosure_at(&mut self, row: u16) -> bool {
         let row = self.top.saturating_add(usize::from(row));
         let index = self.entries[..self.laid_out].partition_point(|entry| entry.end <= row);
         if index == self.laid_out {
@@ -373,7 +380,12 @@ impl Transcript {
         }
         let start = self.entry_start(index);
         let entry = &mut self.entries[index];
-        if entry.role != Role::Tool || !entry.has_detail() || row >= start + entry.rows.len() {
+        let header_hit = match entry.role {
+            Role::Tool => entry.has_detail() && row < start + entry.rows.len(),
+            Role::Thought => self.show_thoughts && row == start,
+            _ => false,
+        };
+        if !header_hit {
             return false;
         }
         entry.expanded = !entry.expanded;
@@ -386,6 +398,11 @@ impl Transcript {
     pub fn show_thoughts(&mut self, show: bool) {
         if self.show_thoughts != show {
             self.show_thoughts = show;
+            for entry in &mut self.entries {
+                if entry.role == Role::Thought {
+                    entry.expanded = false;
+                }
+            }
             self.measured = 0;
         }
     }
@@ -616,7 +633,10 @@ impl Transcript {
                 continue;
             }
             let width = usize::from(self.width);
-            if matches!(entry.role, Role::Agent | Role::Thought) {
+            if entry.role == Role::Thought && !entry.expanded {
+                entry.rows.clear();
+                entry.code_rows.clear();
+            } else if matches!(entry.role, Role::Agent | Role::Thought) {
                 (entry.rows, entry.code_rows) = wrap_markdown(&entry.text, width);
             } else {
                 let indent = match entry.role {
