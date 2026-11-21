@@ -1,8 +1,7 @@
 use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
-use std::path::PathBuf;
 
 use super::{App, LocalEffect};
-use crate::acp::Action;
+use crate::acp::{Action, ConnectTarget};
 use crate::options;
 use crate::preferences::ApprovalMode;
 use crate::theme;
@@ -15,27 +14,31 @@ impl App {
             "/help" => {
                 self.draft.submit();
                 let mut commands = vec![
-                    "/sessions [next] · /new · /load <id> · /models · /effort · /todo".to_owned(),
-                    "/find <text> · /copy · /reconnect · /skills · /rename <title>".to_owned(),
-                    "/sidebar · /thoughts · /queue <prompt> · /resume-queue · /clear-queue"
+                    "Sessions  /sessions · /new · /load <id> · /close · /delete <id>".to_owned(),
+                    "Connection  /connect · /reconnect · /providers · /mcp".to_owned(),
+                    "Model  /models · /effort · /provider".to_owned(),
+                    "Transcript  /thoughts · /find <text> · /copy · /todo".to_owned(),
+                    "Composer  /attach · /detach · /queue · /resume-queue · /clear-queue"
                         .to_owned(),
-                    "/attach [path] · /detach <filename> · /close [id] · /delete <id>".to_owned(),
-                    "/providers · /provider set <id> <type> [url|disable]".to_owned(),
-                    "/permissions [ask|reads|all] · /settings · /theme [name]".to_owned(),
+                    "Settings  /settings · /permissions · /theme · /sidebar".to_owned(),
+                    "Agent  /skills · /agent <command>".to_owned(),
+                    String::new(),
+                    "Tab  Complete a command or argument".to_owned(),
+                    "Ctrl+O  Expand or collapse tool details".to_owned(),
+                    "PgUp / PgDn  Scroll the transcript".to_owned(),
+                    "Esc  Close a picker or cancel the turn".to_owned(),
                 ];
                 commands.extend(
                     self.commands
                         .iter()
-                        .map(|(name, description)| format!("/agent {name} · {description}")),
+                        .map(|(name, description)| format!("/agent {name}  {description}")),
                 );
-                self.transcript.push(Role::Note, commands.join("\n"));
+                self.transcript
+                    .push(Role::Command("/help".into()), commands.join("\n"));
             }
-            command @ ("/sessions" | "/sessions next") => {
+            "/sessions" | "/load" => {
                 self.draft.submit();
-                let _ = self.actions.unbounded_send(Action::ListSessions {
-                    more: command.ends_with(" next"),
-                    cwd: self.workspace.clone().map(PathBuf::from),
-                });
+                self.show_sessions();
             }
             "/new" => {
                 self.draft.submit();
@@ -63,12 +66,7 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                self.transcript.push(Role::Note, text);
-            }
-            "/load" => {
-                self.draft.submit();
-                self.transcript
-                    .push(Role::Note, "Use /load <session id>".into());
+                self.transcript.push(Role::Command("/skills".into()), text);
             }
             text if text.starts_with("/load ") => {
                 self.draft.submit();
@@ -123,7 +121,7 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                self.transcript.push(Role::Note, text);
+                self.transcript.push(Role::Command("/mcp".into()), text);
             }
             "/todo" | "/todos" => {
                 self.draft.submit();
@@ -134,21 +132,55 @@ impl App {
                 };
                 self.transcript.push(Role::Note, text);
             }
-            "/providers" => {
+            "/providers" | "/provider" => {
                 self.draft.submit();
-                if self.ready {
-                    let _ = self.actions.unbounded_send(Action::ListProviders);
-                } else {
-                    let text = self.provider_summary();
-                    self.transcript.push(Role::Note, text);
-                }
+                self.show_providers();
             }
-            "/provider" | "/provider set" | "/provider disable" => {
+            "/provider add" | "/provider edit" | "/provider remove" | "/provider set"
+            | "/provider disable" => {
                 self.draft.submit();
-                self.transcript.push(
-                    Role::Note,
-                    "Use /provider set <id> <api-type> [base-url] or /provider disable <id>".into(),
-                );
+                self.provider_usage();
+            }
+            text if text.starts_with("/provider add ") || text.starts_with("/provider edit ") => {
+                self.draft.set_text("");
+                let mut words = text.split_whitespace().skip(1);
+                let (Some(operation), Some(id), Some(api_type), Some(base_url)) =
+                    (words.next(), words.next(), words.next(), words.next())
+                else {
+                    self.provider_usage();
+                    return;
+                };
+                let models = words.next().map(|value| {
+                    if value == "-" {
+                        Vec::new()
+                    } else {
+                        value.split(',').map(str::to_owned).collect()
+                    }
+                });
+                let api_key_env = words
+                    .next()
+                    .map(|value| if value == "-" { "" } else { value }.to_owned());
+                if words.next().is_some() {
+                    self.provider_usage();
+                    return;
+                }
+                self.edit_local_provider(Action::EditProvider {
+                    id: id.to_owned(),
+                    create: operation == "add",
+                    api_type: api_type.to_owned(),
+                    base_url: if base_url == "-" {
+                        String::new()
+                    } else {
+                        base_url.to_owned()
+                    },
+                    models,
+                    api_key_env,
+                });
+            }
+            text if text.starts_with("/provider remove ") => {
+                self.draft.submit();
+                let id = text["/provider remove ".len()..].trim();
+                self.edit_local_provider(Action::RemoveProvider(id.to_owned()));
             }
             text if text.starts_with("/provider set ") => {
                 self.draft.submit();
@@ -266,19 +298,55 @@ impl App {
                     );
                 }
             }
-            "/model" | "/models" => self.config_command(SessionConfigOptionCategory::Model, ""),
-            "/effort" => self.config_command(SessionConfigOptionCategory::ThoughtLevel, ""),
-            text if text.starts_with("/model ") => {
-                self.config_command(
+            "/model" | "/models" => {
+                self.draft.submit();
+                self.show_setting(SessionConfigOptionCategory::Model);
+            }
+            "/effort" => {
+                self.draft.submit();
+                self.show_setting(SessionConfigOptionCategory::ThoughtLevel);
+            }
+            text if text.starts_with("/model ") || text.starts_with("/models ") => {
+                self.draft.submit();
+                self.set_config(
                     SessionConfigOptionCategory::Model,
-                    text["/model ".len()..].trim(),
+                    text.split_once(' ').map_or("", |(_, value)| value.trim()),
+                    false,
                 );
             }
             text if text.starts_with("/effort ") => {
-                self.config_command(
+                self.draft.submit();
+                self.set_config(
                     SessionConfigOptionCategory::ThoughtLevel,
                     text["/effort ".len()..].trim(),
+                    false,
                 );
+            }
+            "/connect" => {
+                self.draft.submit();
+                self.transcript.push(
+                    Role::Command("/connect".into()),
+                    "Remote   /connect wss://host/acp/agent [workspace]\nNative   /connect local [workspace]".into(),
+                );
+            }
+            text if text.starts_with("/connect ") => {
+                self.draft.set_text("");
+                if !self.can_switch() {
+                    self.transcript.push(
+                        Role::Error,
+                        "Stop the running turn before changing the connection".into(),
+                    );
+                    return;
+                }
+                let (endpoint, workspace) = text["/connect ".len()..]
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((text["/connect ".len()..].trim(), ""));
+                let cwd = (!workspace.trim().is_empty()).then(|| workspace.trim().into());
+                self.local_effect = Some(LocalEffect::Connect(ConnectTarget {
+                    endpoint: endpoint.into(),
+                    cwd,
+                }));
             }
             "/reconnect" => {
                 self.draft.submit();
@@ -360,6 +428,32 @@ impl App {
         }
     }
 
+    pub(super) fn provider_usage(&mut self) {
+        let text = if self.provider_editor {
+            "/provider add <id> <type> <url|-> [model,model] [key-env]\n/provider edit <id> <type> <url|-> [model,model] [key-env]\n/provider remove <id>\nUse - for a provider default URL or to clear an optional field."
+        } else {
+            "/provider set <id> <type> [url]\n/provider disable <id>"
+        };
+        self.transcript
+            .push(Role::Command("/providers".into()), text.into());
+    }
+
+    fn edit_local_provider(&mut self, action: Action) {
+        if !self.ready || !self.provider_editor {
+            self.transcript.push(
+                Role::Error,
+                "Provider configuration requires the built-in stdio agent".into(),
+            );
+        } else if !self.can_switch() {
+            self.transcript.push(
+                Role::Error,
+                "Stop the running turn before changing providers".into(),
+            );
+        } else {
+            let _ = self.actions.unbounded_send(action);
+        }
+    }
+
     fn print_settings(&mut self) {
         let model = self
             .options
@@ -380,7 +474,8 @@ impl App {
                 .as_ref()
                 .map_or("none", |session| session.as_str()),
         );
-        self.transcript.push(Role::Note, text);
+        self.transcript
+            .push(Role::Command("/settings".into()), text);
     }
 
     fn apply_setting(&mut self, setting: &str) {
@@ -439,8 +534,12 @@ impl App {
         self.save_preferences();
     }
 
-    fn config_command(&mut self, category: SessionConfigOptionCategory, input: &str) {
-        self.draft.submit();
+    pub(super) fn set_config(
+        &mut self,
+        category: SessionConfigOptionCategory,
+        input: &str,
+        choose_effort: bool,
+    ) {
         let selected = self
             .options
             .iter()
@@ -449,9 +548,11 @@ impl App {
             Some(option) if input.is_empty() => options::summary(option),
             Some(option) => match options::value(option, input) {
                 Some(value) => {
-                    let _ = self
-                        .actions
-                        .unbounded_send(Action::SetOption(option.id.clone(), value));
+                    let _ = self.actions.unbounded_send(Action::SetOption(
+                        option.id.clone(),
+                        value,
+                        choose_effort,
+                    ));
                     return;
                 }
                 None => "Invalid configuration value".into(),

@@ -1,4 +1,5 @@
 mod commands;
+mod picker;
 mod render;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -8,8 +9,8 @@ use agent_client_protocol::v1::schema::{ElicitationContentValue, SessionConfigOp
 use futures::channel::{mpsc, oneshot};
 
 use crate::acp::{
-    Action, ClientIoMode, Event, ExecutionState, ExecutionStatus, PermissionRequest, ProviderInfo,
-    SessionTarget,
+    Action, ClientIoMode, ConnectTarget, Event, ExecutionState, ExecutionStatus, PermissionRequest,
+    ProviderInfo, SessionTarget,
 };
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
@@ -25,6 +26,7 @@ pub enum LocalEffect {
     Attach(String),
     Reconnect,
     Switch(SessionTarget),
+    Connect(ConnectTarget),
     SavePreferences(Preferences),
 }
 
@@ -67,6 +69,11 @@ pub enum Key {
     Escape,
 }
 
+struct ProviderPopup {
+    result: Option<Result<Vec<ProviderInfo>, String>>,
+    selected: usize,
+}
+
 struct Suggestion {
     insert: String,
     description: String,
@@ -91,17 +98,16 @@ pub struct PendingMcpConsent {
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "List commands"),
-    ("/sessions", "List saved sessions"),
-    ("/sessions next", "Next session page"),
+    ("/sessions", "Search and resume saved sessions"),
     ("/new", "Start a new session"),
     ("/load", "Load a session by id"),
     ("/close", "Close a session"),
     ("/delete", "Delete a saved session"),
-    ("/models", "Show the session models"),
+    ("/models", "Search and select a model"),
     ("/model", "Select a model"),
-    ("/effort", "Show the reasoning effort"),
-    ("/providers", "List remote provider routing"),
-    ("/provider", "Configure a remote provider"),
+    ("/effort", "Select reasoning effort"),
+    ("/providers", "Browse and manage providers"),
+    ("/provider", "Add, edit or remove a provider"),
     ("/permissions", "Show or set the approval mode"),
     ("/settings", "Show or set terminal settings"),
     ("/theme", "Show or select a theme"),
@@ -109,6 +115,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/todo", "Show the current plan"),
     ("/find", "Find transcript text"),
     ("/copy", "Copy the latest reply"),
+    ("/connect", "Connect to an ACP endpoint"),
     ("/reconnect", "Reconnect the transport"),
     ("/queue", "Queue a follow-up"),
     ("/resume-queue", "Resume the local queue"),
@@ -139,6 +146,7 @@ pub struct App {
     load_supported: bool,
     close_supported: bool,
     delete_supported: bool,
+    provider_editor: bool,
     loaded: bool,
     replay_from: Option<usize>,
     queue_paused: bool,
@@ -159,7 +167,9 @@ pub struct App {
     usage: Option<(u64, u64)>,
     usage_cost: Option<String>,
     last_usage_tokens: Option<u64>,
-    providers: Vec<ProviderInfo>,
+    providers: Option<ProviderPopup>,
+    picker: Option<picker::Picker>,
+    session_request: u64,
     preferences: Preferences,
     theme: String,
     approval_mode: ApprovalMode,
@@ -177,6 +187,7 @@ impl App {
     ) -> Self {
         let mut transcript = Transcript::new();
         transcript.set_tools_expanded(preferences.expand_tools);
+        transcript.show_thoughts(preferences.show_thoughts);
         let theme = preferences
             .theme
             .clone()
@@ -203,6 +214,7 @@ impl App {
             load_supported: false,
             close_supported: false,
             delete_supported: false,
+            provider_editor: false,
             loaded: false,
             replay_from: None,
             queue_paused: false,
@@ -223,7 +235,9 @@ impl App {
             usage: None,
             usage_cost: None,
             last_usage_tokens: None,
-            providers: Vec::new(),
+            providers: None,
+            picker: None,
+            session_request: 0,
             preferences,
             theme,
             approval_mode,
@@ -247,6 +261,7 @@ impl App {
                 load_supported,
                 close_supported,
                 delete_supported,
+                provider_editor,
             } => {
                 if let Some(from) = self.replay_from.take() {
                     self.transcript.replace(from);
@@ -255,6 +270,7 @@ impl App {
                 self.load_supported = load_supported;
                 self.close_supported = close_supported;
                 self.delete_supported = delete_supported;
+                self.provider_editor = provider_editor;
                 self.loaded = loaded;
                 if !loaded {
                     self.session_title = None;
@@ -283,7 +299,24 @@ impl App {
                     self.update_execution();
                 }
             }
-            Event::Options(options) => self.options = options,
+            Event::ModelSelected(options) => {
+                self.event(Event::Options(options));
+                if self.draft.text().is_empty() && self.picker.is_none() && self.providers.is_none()
+                {
+                    self.choose_model_effort();
+                }
+            }
+            Event::Options(options) => {
+                self.options = options;
+                self.refresh_completion();
+                if let Some(picker) = self.picker.as_ref() {
+                    let last = self.picker_rows(picker).len().saturating_sub(1);
+                    if let Some(picker) = self.picker.as_mut() {
+                        picker.selected = picker.selected.min(last);
+                    }
+                }
+            }
+            Event::Sessions { request_id, result } => self.sessions_received(request_id, result),
             Event::AgentCommands(commands) => self.commands = commands,
             Event::Skills(skills) => {
                 self.skills = skills;
@@ -291,10 +324,11 @@ impl App {
             }
             Event::SessionTitle(title) => self.session_title = title,
             Event::Mode(mode) => self.mode = Some(mode),
-            Event::Providers(providers) => {
-                self.providers = providers;
-                let text = self.provider_summary();
-                self.transcript.push(Role::Note, text);
+            Event::Providers(result) => {
+                if let Some(popup) = &mut self.providers {
+                    popup.result = Some(result);
+                    popup.selected = 0;
+                }
             }
             Event::LoadingAttachment => self.attachment_reads += 1,
             Event::Attachment(attachment) => {
@@ -351,20 +385,18 @@ impl App {
             Event::Tool {
                 id,
                 title,
+                subject,
                 status,
                 detail,
             } => {
-                self.activity.push_back(format!("{status} · {title}"));
+                self.activity
+                    .push_back(format!("{} · {title}", crate::acp::status_label(status)));
                 self.trim_activity();
-                self.transcript.tool(id, title, status, detail);
+                self.transcript.tool(id, title, subject, status, detail);
             }
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
-            Event::Thought(text) => {
-                if self.preferences.show_thoughts {
-                    self.transcript.append(Role::Thought, text);
-                }
-            }
+            Event::Thought(text) => self.transcript.append(Role::Thought, text),
             Event::Note(text) => self.transcript.push(Role::Note, text),
             Event::Error(text) => {
                 if !self.ready
@@ -392,6 +424,13 @@ impl App {
                 }
             }
             Event::Disconnected => {
+                self.sessions_received(
+                    self.session_request,
+                    Err("Disconnected from the agent".into()),
+                );
+                if let Some(popup) = &mut self.providers {
+                    popup.result = Some(Err("Disconnected from the agent".into()));
+                }
                 if let Some(from) = self.replay_from.take() {
                     self.transcript.trim(from);
                     self.transcript
@@ -407,6 +446,31 @@ impl App {
                 self.status = "Disconnected";
                 self.activity.push_back("disconnected".into());
                 self.trim_activity();
+            }
+            Event::ConnectionChanged(destination) => {
+                self.destination = destination;
+                self.workspace = None;
+                self.session = None;
+                self.session_title = None;
+                self.mode = None;
+                self.loaded = false;
+                self.ready = false;
+                self.replay_from = Some(self.transcript.len());
+                self.plan.clear();
+                self.usage = None;
+                self.usage_cost = None;
+                self.last_usage_tokens = None;
+                self.options.clear();
+                self.commands.clear();
+                self.skills.clear();
+                self.mcp_health.clear();
+                self.load_supported = false;
+                self.close_supported = false;
+                self.delete_supported = false;
+                self.provider_editor = false;
+                self.attachments_supported = false;
+                self.queue_paused = !self.queue.is_empty();
+                self.refresh_completion();
             }
             Event::Connecting => {
                 self.ready = false;
@@ -465,33 +529,90 @@ impl App {
         }
     }
 
-    pub fn provider_summary(&self) -> String {
-        if self.providers.is_empty() {
-            return "The agent did not advertise provider routing".into();
+    fn show_providers(&mut self) {
+        let loading = self.ready && self.actions.unbounded_send(Action::ListProviders).is_ok();
+        self.providers = Some(ProviderPopup {
+            result: (!loading).then(|| Err("Connect to an agent to list providers".into())),
+            selected: 0,
+        });
+    }
+
+    fn provider_key(&mut self, key: Key) {
+        if matches!(key, Key::Escape) {
+            self.providers = None;
+            return;
         }
-        self.providers
-            .iter()
-            .map(|provider| {
-                let current = provider.current.as_ref().map_or_else(
-                    || "disabled".to_owned(),
-                    |current| match &current.base_url {
-                        Some(url) => format!("{} · {url}", current.api_type),
-                        None => current.api_type.clone(),
-                    },
-                );
-                format!(
-                    "{} · {} · {} · {current}",
-                    provider.id,
-                    provider.supported.join("/"),
-                    if provider.required {
-                        "required"
-                    } else {
-                        "optional"
-                    },
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let Some(popup) = &mut self.providers else {
+            return;
+        };
+        let Some(Ok(providers)) = &popup.result else {
+            return;
+        };
+        if matches!(key, Key::Text('a')) && self.provider_editor {
+            self.providers = None;
+            self.provider_usage();
+            self.draft.set_text("/provider add ");
+            self.refresh_completion();
+            return;
+        }
+        let Some(provider) = providers.get(popup.selected) else {
+            return;
+        };
+        let action = match key {
+            Key::Enter => {
+                let api_type = provider
+                    .current
+                    .as_ref()
+                    .map(|current| current.api_type.as_str())
+                    .or_else(|| {
+                        (provider.supported.len() == 1).then(|| provider.supported[0].as_str())
+                    });
+                let operation = if self.provider_editor { "edit" } else { "set" };
+                let mut command = match api_type {
+                    Some(api_type) => format!("/provider {operation} {} {api_type} ", provider.id),
+                    None => format!("/provider {operation} {} ", provider.id),
+                };
+                if let Some(url) = provider
+                    .current
+                    .as_ref()
+                    .and_then(|current| current.base_url.as_deref())
+                {
+                    command.push_str(url);
+                }
+                if self.provider_editor && command.ends_with(' ') {
+                    command.push('-');
+                }
+                Some(command)
+            }
+            Key::Text('d') if self.provider_editor && !provider.required => {
+                Some(format!("/provider remove {}", provider.id))
+            }
+            Key::Text('d') if !provider.required => {
+                Some(format!("/provider disable {}", provider.id))
+            }
+            Key::HistoryUp => {
+                popup.selected = popup.selected.saturating_sub(1);
+                None
+            }
+            Key::HistoryDown => {
+                popup.selected = (popup.selected + 1).min(providers.len() - 1);
+                None
+            }
+            Key::Home => {
+                popup.selected = 0;
+                None
+            }
+            Key::End => {
+                popup.selected = providers.len() - 1;
+                None
+            }
+            _ => None,
+        };
+        if let Some(command) = action {
+            self.providers = None;
+            self.draft.set_text(&command);
+            self.refresh_completion();
+        }
     }
 
     fn request_permission(&mut self, request: PermissionRequest) {
@@ -534,6 +655,17 @@ impl App {
             if let Some(pending) = self.elicitations.front_mut() {
                 pending.state.insert(text);
             }
+            return;
+        }
+        if self.providers.is_some() || !self.approvals.is_empty() || !self.mcp_consent.is_empty() {
+            return;
+        }
+        if let Some(picker) = &mut self.picker {
+            picker
+                .query
+                .extend(text.chars().filter(|ch| !ch.is_control()));
+            picker.selected = 0;
+            self.maybe_page_sessions();
             return;
         }
         self.draft.insert(text);
@@ -684,6 +816,17 @@ impl App {
             return;
         }
 
+        if self.approvals.is_empty() {
+            if self.providers.is_some() {
+                self.provider_key(key);
+                return;
+            }
+            if self.picker.is_some() {
+                self.picker_key(key);
+                return;
+            }
+        }
+
         if let Some(request) = self.approvals.front() {
             let answer = match key {
                 Key::Escape => Some(None),
@@ -735,6 +878,7 @@ impl App {
                 }
                 Key::Tab => {
                     self.accept_completion();
+                    self.refresh_completion();
                     return;
                 }
                 Key::HistoryUp => {
@@ -863,7 +1007,39 @@ impl App {
     }
 
     fn refresh_completion(&mut self) {
-        self.completion = suggestions(self.draft.text(), &self.skills)
+        let input = self.draft.text();
+        let arguments = input.split_once(' ').and_then(|(command, prefix)| {
+            let category = match command {
+                "/effort" => {
+                    agent_client_protocol::v1::schema::SessionConfigOptionCategory::ThoughtLevel
+                }
+                "/model" | "/models" => {
+                    agent_client_protocol::v1::schema::SessionConfigOptionCategory::Model
+                }
+                _ => return None,
+            };
+            let option = self
+                .options
+                .iter()
+                .find(|option| crate::options::matches_category(option, &category))?;
+            let items: Vec<_> = crate::options::choices(option)
+                .into_iter()
+                .filter_map(|choice| {
+                    let value = choice.value.to_string();
+                    (value != prefix && value.to_lowercase().starts_with(&prefix.to_lowercase()))
+                        .then(|| Suggestion {
+                            insert: format!("{command} {value}"),
+                            description: choice
+                                .description
+                                .clone()
+                                .unwrap_or_else(|| choice.name.clone()),
+                        })
+                })
+                .collect();
+            (!items.is_empty()).then_some(items)
+        });
+        self.completion = arguments
+            .or_else(|| suggestions(input, &self.skills))
             .map(|items| Completion { items, selected: 0 });
     }
 
@@ -874,6 +1050,8 @@ impl App {
 
     pub fn toggle_thoughts(&mut self) {
         self.preferences.show_thoughts = !self.preferences.show_thoughts;
+        self.transcript
+            .show_thoughts(self.preferences.show_thoughts);
         let shown = if self.preferences.show_thoughts {
             "shown"
         } else {

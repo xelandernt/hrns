@@ -26,6 +26,7 @@ const HELP: &str =
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
 
+#[derive(Clone)]
 enum Target {
     Remote(String),
     Stdio { command: String, args: Vec<String> },
@@ -165,6 +166,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let local_events = event_tx.clone();
     let (requests_tx, requests_rx) = mpsc::unbounded();
     let destination = options.label();
+    let startup_transport = options.target.clone();
     let startup = Startup {
         client_io: options.client_io,
         theme: options.theme.clone(),
@@ -217,7 +219,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 dirty = true;
             }
             if let Some(effect) = app.take_local_effect() {
-                local_effect(effect, &mut app, &local_events, &requests_tx);
+                local_effect(
+                    effect,
+                    &mut app,
+                    &local_events,
+                    &requests_tx,
+                    &startup_transport,
+                );
                 dirty = true;
             }
             if dirty {
@@ -237,7 +245,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(key) = translate(key) {
                         app.key(key);
                         if let Some(effect) = app.take_local_effect() {
-                            local_effect(effect, &mut app, &local_events, &requests_tx);
+                            local_effect(
+                                effect,
+                                &mut app,
+                                &local_events,
+                                &requests_tx,
+                                &startup_transport,
+                            );
                         }
                         dirty = true;
                     }
@@ -267,11 +281,26 @@ fn local_effect(
     app: &mut App,
     events: &Events,
     requests: &mpsc::UnboundedSender<Connection>,
+    startup: &Target,
 ) {
     match effect {
         LocalEffect::Reconnect => {
             let _ = requests.unbounded_send(Connection::Reconnect);
         }
+        LocalEffect::Connect(target) => match connection_target(startup, &target) {
+            Ok((transport, cwd, _)) => {
+                if matches!(transport, Target::Stdio { .. })
+                    && let Err(error) = env::set_current_dir(cwd)
+                {
+                    app.event(Event::Error(format!(
+                        "Could not open the local workspace: {error}"
+                    )));
+                    return;
+                }
+                let _ = requests.unbounded_send(Connection::Connect(target));
+            }
+            Err(error) => app.event(Event::Error(error)),
+        },
         LocalEffect::Switch(target) => {
             let _ = requests.unbounded_send(Connection::Switch(target));
         }
@@ -317,19 +346,20 @@ async fn supervise(
 ) {
     use futures::{FutureExt, StreamExt, select_biased};
     let mut target = options.session.clone();
+    let mut transport = options.target.clone();
     loop {
         select_biased! {
             _ = stop.next() => return,
             request = requests.next() => match request {
-                Some(request) => apply(&mut target, request, &events),
+                Some(request) => apply(options, &mut transport, &mut target, request, &events),
                 None => return,
             },
-            result = connect(options, target.clone(), actions, events.clone(), services.clone(), Arc::clone(&io)).fuse() => {
+            result = connect(&transport, &options.target, target.clone(), actions, events.clone(), services.clone(), Arc::clone(&io)).fuse() => {
                 finish(&events, result);
                 select_biased! {
                     _ = stop.next() => return,
                     request = requests.next() => match request {
-                        Some(request) => apply(&mut target, request, &events),
+                        Some(request) => apply(options, &mut transport, &mut target, request, &events),
                         None => return,
                     },
                 }
@@ -338,22 +368,84 @@ async fn supervise(
     }
 }
 
-fn apply(target: &mut SessionTarget, request: Connection, events: &Events) {
-    if let Connection::Switch(next) = request {
-        *target = next;
+fn apply(
+    options: &Options,
+    transport: &mut Target,
+    target: &mut SessionTarget,
+    request: Connection,
+    events: &Events,
+) {
+    match request {
+        Connection::Reconnect => {}
+        Connection::Switch(next) => *target = next,
+        Connection::Connect(next) => match connection_target(&options.target, &next) {
+            Ok((next_transport, cwd, label)) => {
+                *transport = next_transport;
+                *target = SessionTarget {
+                    cwd: Some(cwd),
+                    session: None,
+                };
+                let _ = events.unbounded_send(Event::ConnectionChanged(label));
+            }
+            Err(error) => {
+                let _ = events.unbounded_send(Event::Error(error));
+            }
+        },
     }
     let _ = events.unbounded_send(Event::Connecting);
 }
 
+fn connection_target(
+    startup: &Target,
+    next: &acp::ConnectTarget,
+) -> Result<(Target, PathBuf, String), String> {
+    if next.endpoint == "local" {
+        let cwd = next
+            .cwd
+            .as_ref()
+            .map_or_else(env::current_dir, std::path::absolute)
+            .map_err(|error| error.to_string())?;
+        let target = match startup {
+            target @ Target::Stdio { .. } => target.clone(),
+            Target::Remote(_) => Target::Stdio {
+                command: "hrns".into(),
+                args: vec!["agent".into()],
+            },
+        };
+        return Ok((target, cwd, "local".into()));
+    }
+    let uri = next
+        .endpoint
+        .parse::<tokio_tungstenite::tungstenite::http::Uri>()
+        .map_err(|_| "Invalid ACP endpoint")?;
+    let host = uri.host().ok_or("Invalid ACP endpoint")?;
+    let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
+    if !(uri.scheme_str() == Some("wss") || uri.scheme_str() == Some("ws") && loopback)
+        || uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().contains('@'))
+        || uri.query().is_some()
+        || next.endpoint.contains('#')
+    {
+        return Err("Use a wss:// ACP endpoint without credentials, query or fragment (ws:// works on loopback)".into());
+    }
+    let cwd = next.cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
+    if !cwd.to_string_lossy().starts_with('/') {
+        return Err("Enter an absolute remote workspace path".into());
+    }
+    Ok((Target::Remote(next.endpoint.clone()), cwd, host.to_owned()))
+}
+
 async fn connect(
-    options: &Options,
+    transport: &Target,
+    startup: &Target,
     target: SessionTarget,
     actions: &mut Actions,
     events: Events,
     services: Services,
     io: Arc<Mutex<ClientIo>>,
 ) -> Result<(), String> {
-    match &options.target {
+    match transport {
         Target::Stdio { command, args } => {
             let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));
             acp::connect(agent, target, actions, events, services, io)
@@ -370,7 +462,9 @@ async fn connect(
             if uri.scheme_str() != Some("wss") && !loopback {
                 return Err("Use wss:// for remote ACP connections".into());
             }
-            if let Ok(token) = env::var("HRNS_TUI_TOKEN") {
+            if matches!(startup, Target::Remote(original) if original == url)
+                && let Ok(token) = env::var("HRNS_TUI_TOKEN")
+            {
                 let mut header = format!("Bearer {token}")
                     .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
                     .map_err(|_| "Invalid ACP bearer token")?;

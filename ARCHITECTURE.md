@@ -198,12 +198,12 @@ narrow layouts. `/theme`, `/permissions`, `/settings` and the `theme` and
 `permission` page parameters expose the same values. The built-in themes are
 `hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
 
-Remote provider routing uses the `providers/list`, `providers/set` and
-`providers/disable` methods. `/providers` reads the live advertisement and
-`/provider set` or `/provider disable` applies a change for the connection.
-Models and effort remain session config options; a value must be one of the
-advertised choices. Device login and TOML provider editing remain Python
-commands (`hrns login`, `hrns config`) rather than being duplicated in Rust.
+Provider routing uses the `providers/list`, `providers/set` and
+`providers/disable` methods. `/providers` opens a dialog with the live routes.
+Selecting a route or disable action prepares a command in the composer.
+Submitting `/provider set` or `/provider disable` applies the change.
+Models and effort remain session config options. Device login uses `hrns login`.
+Local provider document editing uses the built-in stdio agent's ACP extension.
 
 ### ACP SDK pin and extension surface
 
@@ -223,9 +223,36 @@ untyped message type because the stable schema does not expose them.
 The server advertises no `available_commands_update` and no `session/resume` or
 rename method. `/agent` therefore stays empty unless an agent advertises
 commands, and `/rename` reports that standard ACP has no rename operation.
-`session/delete` returning `-32002` is treated as success. Listing scopes to
+`session/delete` returning `-32002` is treated as success. Listing defaults to
 the current workspace. Titles arrive through `session_info_update` and the
 server's derived title.
+
+### Terminal command workflows
+
+`/connect` switches the active ACP transport. Native accepts a WebSocket URL
+or `local` and an optional workspace. The browser accepts a WebSocket URL.
+WebSocket connections use TLS outside loopback. Native startup bearer
+credentials stay scoped to the startup endpoint. Switching creates a session
+and pauses queued prompts from the previous connection.
+
+`/sessions` searches paged ACP session summaries by title, ID and workspace.
+Tab switches between the current workspace and all accessible workspaces.
+The picker shows the latest activity timestamp and opens the selected session
+through `session/load`. The built-in stdio agent uses the configured SQLite
+store so a new process can restore a session. Server registrations can supply
+their own store.
+
+`/models` searches the advertised model choices and marks the current model.
+The reasoning picker opens after model selection when the agent advertises
+effort choices. The composer also completes arguments for `/model` and `/effort`
+from the current ACP config options.
+
+Tool entries use ACP kind, location and arguments to summarize each operation.
+Expanding an entry group with Ctrl+O reveals formatted arguments, results,
+diffs, and terminal references. The transcript retains reasoning chunks
+independently of assistant replies. `/thoughts` controls their visibility
+during streaming and replay. The transcript uses titled panels for command
+output such as `/help` and `/settings`.
 
 ## ACP dependency
 
@@ -479,21 +506,17 @@ provider config is what builds it, leaving `list_models` and `build_model` to th
 ids from `settings.model_targets()`, and raises `ProviderDisabled` instead of silently
 falling back to a configured endpoint.
 
-ACP's provider payload reports routing endpoints, not the models behind them, so the
-model→provider link travels separately: each `ModelChoice.provider_id` becomes
-`_meta.providerId` on the model option. `hrns agent` derives it from the `entry:model` id;
-the client's `/providers` table groups the option's values by that tag, and `/models`
-appends it to any model name that does not already read `provider:model`.
+ACP model options carry `_meta.providerId` when the resolver supplies a provider
+association. The model picker uses that metadata as context for the advertised
+display name and value.
 
-The terminal can open Local mode before a provider and model are selected. It launches
-the built-in ACP runtime in setup mode with a model-free, in-memory session. The chat
-composer accepts `/provider` (also `/providers`) and `/models` to configure the agent.
-Selecting a model saves the configuration and starts the configured runtime with a new
-session. Headless prompts still require a configured model.
-
-The native client has no modal model picker. `/model` accepts an advertised value,
-`/effort` selects a thought level, and `/providers` / `/provider` list and update routing
-when the connected agent advertises it.
+The built-in stdio agent advertises `hrns/providers/manage` for document-backed
+configuration. Its private `_hrns/providers/save` and
+`_hrns/providers/remove` requests validate provider entries, atomically update
+the TOML document and refresh the model options. Configuration stores API-key
+environment variable names. The configured default provider remains required.
+The first provider added in setup mode also establishes a default model.
+Remote agents use the advertised ACP provider routing methods.
 
 ## Session settings
 

@@ -85,6 +85,8 @@ class LocalSessionStore:
         return await asyncio.to_thread(self._list, cwd, _cursor_offset(cursor))
 
     def _list(self, cwd: str | None, offset: int) -> tuple[list[SessionSummary], str | None]:
+        if cwd is not None:
+            cwd = str(Path(cwd).resolve())
         with self._connect() as db:
             rows = db.execute(
                 """

@@ -1,9 +1,9 @@
 use agent_client_protocol::v1::schema::{SessionConfigKind, SessionConfigOptionCategory, ToolKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use super::App;
 use crate::elicitation::FieldKind;
@@ -123,7 +123,9 @@ impl App {
             header,
         );
 
-        let visible = self.transcript.visible(transcript.width, transcript.height);
+        let visible = self
+            .transcript
+            .visible(transcript.width, transcript.height, &palette);
         frame.render_widget(
             Paragraph::new(visible).style(
                 Style::default()
@@ -164,8 +166,9 @@ impl App {
             let rows: Vec<_> = completion
                 .items
                 .iter()
-                .take(6)
                 .enumerate()
+                .skip(completion.selected.saturating_sub(5))
+                .take(6)
                 .map(|(index, suggestion)| {
                     let text = format!(
                         " {}  {}",
@@ -206,7 +209,9 @@ impl App {
                     .bg(palette.background),
             );
             frame.render_widget(text.scroll((scroll, 0)), input);
-            frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
+            if self.providers.is_none() && self.picker.is_none() {
+                frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
+            }
         }
         let help_text = if self.mcp_consent.front().is_some() {
             " 1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
@@ -226,6 +231,84 @@ impl App {
         if let Some(sidebar) = sidebar {
             self.draw_sidebar(frame, sidebar, &palette);
         }
+        if self.approvals.is_empty() && self.elicitations.is_empty() && self.mcp_consent.is_empty()
+        {
+            if let Some(popup) = &self.providers {
+                draw_providers(frame, area, popup, self.provider_editor, &palette);
+            }
+            if let Some(picker) = &self.picker {
+                self.draw_picker(frame, area, picker, &palette);
+            }
+        }
+    }
+
+    fn draw_picker(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        picker: &super::picker::Picker,
+        palette: &Palette,
+    ) {
+        let width = area.width.saturating_sub(2).min(88);
+        let height = area.height.saturating_sub(2).min(26);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let panel = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(palette.accent))
+            .style(Style::default().fg(palette.foreground).bg(palette.surface))
+            .title(format!(" {} ", picker.title()));
+        let inner = panel.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(panel, popup);
+        let [search, list, status, keys] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let search_text = if picker.query.is_empty() {
+            Line::from("  Search…").fg(palette.muted)
+        } else {
+            Line::from(format!("  Search  {}", picker.query)).fg(palette.accent)
+        };
+        frame.render_widget(Paragraph::new(search_text), search);
+
+        let rows = self.picker_rows(picker);
+        let page = usize::from(list.height / 2).max(1);
+        let start = picker.selected.saturating_sub(page.saturating_sub(1));
+        let lines: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(page)
+            .flat_map(|(index, row)| {
+                let selected = index == picker.selected;
+                let marker = if selected { "›" } else { " " };
+                let active = if row.active { "  ✓ current" } else { "" };
+                let title = Line::from(format!(" {marker}  {}{active}", row.label));
+                let detail = Line::from(format!("    {}", row.detail.trim())).fg(palette.muted);
+                if selected {
+                    [
+                        title.fg(palette.accent).bold().bg(palette.panel),
+                        detail.bg(palette.panel),
+                    ]
+                } else {
+                    [title, detail]
+                }
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), list);
+        frame.render_widget(
+            Paragraph::new(picker.status(rows.is_empty())).fg(palette.muted),
+            status,
+        );
+        frame.render_widget(Paragraph::new(picker.hint()).fg(palette.muted), keys);
     }
 
     fn approval_lines(
@@ -369,6 +452,126 @@ impl App {
             area,
         );
     }
+}
+
+fn draw_providers(
+    frame: &mut Frame,
+    area: Rect,
+    popup: &super::ProviderPopup,
+    editable: bool,
+    palette: &Palette,
+) {
+    let providers = popup
+        .result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok());
+    let rows = providers.map_or(1, |providers| providers.len().clamp(1, 8));
+    let width = area.width.saturating_sub(2).min(76);
+    let height = (rows as u16 + 9).min(area.height);
+    let popup_area = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.accent))
+        .style(Style::default().fg(palette.foreground).bg(palette.surface))
+        .title(" Providers ")
+        .title_style(Style::default().fg(palette.accent).bold());
+    let inner = block.inner(popup_area);
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(block, popup_area);
+    let [listing, details, help] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(5),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let lines = match &popup.result {
+        None => vec![Line::from(" Loading providers…").fg(palette.muted)],
+        Some(Err(error)) => vec![Line::from(error.as_str()).fg(palette.error)],
+        Some(Ok(providers)) if providers.is_empty() => {
+            vec![Line::from(" No providers available").fg(palette.muted)]
+        }
+        Some(Ok(providers)) => {
+            let rows = usize::from(listing.height);
+            providers
+                .iter()
+                .enumerate()
+                .skip(popup.selected.saturating_sub(rows.saturating_sub(1)))
+                .take(rows)
+                .map(|(index, provider)| {
+                    let current = provider
+                        .current
+                        .as_ref()
+                        .map_or("disabled", |config| config.api_type.as_str());
+                    let selected = index == popup.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let line = Line::from(format!(" {marker} {}  ·  {current}", provider.id));
+                    if selected {
+                        line.fg(palette.accent).bold()
+                    } else {
+                        line
+                    }
+                })
+                .collect()
+        }
+    };
+    if providers.is_some() {
+        frame.render_widget(Paragraph::new(lines), listing);
+    } else {
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: true }),
+            listing.union(details),
+        );
+    }
+    if let Some(provider) = providers.and_then(|providers| providers.get(popup.selected)) {
+        let mut lines = vec![
+            Line::from(format!(
+                " {} · {}",
+                if provider.required {
+                    "Required"
+                } else {
+                    "Optional"
+                },
+                provider.supported.join(", ")
+            ))
+            .fg(palette.muted),
+        ];
+        if let Some(url) = provider
+            .current
+            .as_ref()
+            .and_then(|config| config.base_url.as_deref())
+        {
+            lines.push(Line::from(format!(" {url}")));
+        }
+        let command = if editable {
+            format!(
+                " /provider edit {} <type> <url|-> [models] [key-env]",
+                provider.id
+            )
+        } else {
+            format!(" /provider set {} <type> [url]", provider.id)
+        };
+        lines.push(Line::from(command).fg(palette.muted));
+        frame.render_widget(Paragraph::new(lines), details);
+    }
+    let selected = providers.and_then(|providers| providers.get(popup.selected));
+    let hint = match (editable, selected) {
+        (true, Some(provider)) if !provider.required => {
+            " ↑/↓ select · Enter edit · a add · d remove · Esc close"
+        }
+        (true, Some(_)) => " ↑/↓ select · Enter edit · a add · Esc close",
+        (true, None) if providers.is_some() => " a add · Esc close",
+        (false, Some(provider)) if !provider.required => {
+            " ↑/↓ select · Enter route · d disable · Esc close"
+        }
+        (false, Some(_)) => " ↑/↓ select · Enter route · Esc close",
+        _ => " Esc close",
+    };
+    frame.render_widget(Paragraph::new(hint).fg(palette.muted), help);
 }
 
 fn kind_label(kind: ToolKind) -> &'static str {

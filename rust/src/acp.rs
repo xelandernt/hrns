@@ -8,8 +8,9 @@ use agent_client_protocol::v1::schema::{
     InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer, NewSessionRequest,
     PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigOption,
-    SessionConfigOptionValue, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, StopReason, ToolCallContent, ToolCallStatus, ToolKind,
+    SessionConfigOptionValue, SessionId, SessionInfo, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, StopReason, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
 use agent_client_protocol::{
@@ -133,9 +134,10 @@ pub struct Services {
 pub enum Action {
     Prompt(Prompt),
     Cancel,
-    SetOption(SessionConfigId, SessionConfigOptionValue),
+    SetOption(SessionConfigId, SessionConfigOptionValue, bool),
     ListSessions {
-        more: bool,
+        request_id: u64,
+        cursor: Option<String>,
         cwd: Option<PathBuf>,
     },
     CloseSession(String),
@@ -147,6 +149,15 @@ pub enum Action {
         base_url: Option<String>,
     },
     DisableProvider(String),
+    EditProvider {
+        id: String,
+        create: bool,
+        api_type: String,
+        base_url: String,
+        models: Option<Vec<String>>,
+        api_key_env: Option<String>,
+    },
+    RemoveProvider(String),
 }
 
 pub struct PermissionChoice {
@@ -185,14 +196,16 @@ pub enum Event {
         load_supported: bool,
         close_supported: bool,
         delete_supported: bool,
+        provider_editor: bool,
     },
     Execution(ExecutionState),
     Options(Vec<SessionConfigOption>),
+    ModelSelected(Vec<SessionConfigOption>),
     AgentCommands(Vec<(String, String)>),
     Skills(Vec<Skill>),
     SessionTitle(Option<String>),
     Mode(String),
-    Providers(Vec<ProviderInfo>),
+    Providers(Result<Vec<ProviderInfo>, String>),
     LoadingAttachment,
     Attachment(Result<Box<Attachment>, String>),
     Plan(Vec<String>),
@@ -201,12 +214,17 @@ pub enum Event {
         size: u64,
         cost: Option<String>,
     },
+    Sessions {
+        request_id: u64,
+        result: Result<SessionPage, String>,
+    },
     SessionClosed(String),
     SessionDeleted(String),
     Tool {
         id: String,
         title: String,
-        status: &'static str,
+        subject: String,
+        status: ToolCallStatus,
         detail: String,
     },
     UserChunk(String),
@@ -218,6 +236,7 @@ pub enum Event {
     },
     Error(String),
     Connecting,
+    ConnectionChanged(String),
     Disconnected,
     Permission(PermissionRequest),
     Elicitation {
@@ -235,9 +254,20 @@ pub enum Event {
     McpHealth(Vec<Health>),
 }
 
+pub struct SessionPage {
+    pub items: Vec<SessionInfo>,
+    pub cursor: Option<String>,
+}
+
 pub enum Connection {
     Reconnect,
     Switch(SessionTarget),
+    Connect(ConnectTarget),
+}
+
+pub struct ConnectTarget {
+    pub endpoint: String,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -338,6 +368,10 @@ pub async fn connect(
                 .block_task()
                 .await?;
 
+            let provider_editor = initialized.meta.as_ref()
+                .and_then(|meta| meta.get("hrns/providers/manage"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let caps = initialized.agent_capabilities;
             let loaded = target.session.is_some();
             let load_supported = caps.load_session;
@@ -405,6 +439,7 @@ pub async fn connect(
                 load_supported,
                 close_supported,
                 delete_supported,
+                provider_editor,
             });
             if let Some(state) = meta.and_then(|mut meta| meta.remove("hrns/session/state"))
                 .and_then(|state| serde_json::from_value(state).ok())
@@ -415,7 +450,6 @@ pub async fn connect(
             let mut permissions = FuturesUnordered::new();
             let mut elicitations = FuturesUnordered::new();
             let mut tools: HashMap<String, ToolState> = HashMap::new();
-            let mut session_cursor: Option<String> = None;
             loop {
                 let permission = async {
                     if permissions.is_empty() {
@@ -459,48 +493,28 @@ pub async fn connect(
                                 CancelNotification::new(session.session_id().clone())
                             )?;
                         }
-                        Some(Action::SetOption(id, value)) => {
+                        Some(Action::SetOption(id, value, choose_effort)) => {
                             let request = SetSessionConfigOptionRequest::new(session.session_id().clone(), id, value);
                             let reply = session.connection().send_request(request).block_task().await;
                             let event = match reply {
+                                Ok(reply) if choose_effort => Event::ModelSelected(reply.config_options),
                                 Ok(reply) => Event::Options(reply.config_options),
                                 Err(error) => Event::Error(error.message),
                             };
                             let _ = events.unbounded_send(event);
                         }
-                        Some(Action::ListSessions { more, cwd }) => {
-                            let event = if caps.session_capabilities.list.is_none() {
-                                Event::Error("The agent does not advertise session listing".into())
-                            } else if more && session_cursor.is_none() {
-                                Event::Note("No further session pages".into())
+                        Some(Action::ListSessions { request_id, cursor, cwd }) => {
+                            let result = if caps.session_capabilities.list.is_none() {
+                                Err("The agent does not advertise session listing".into())
                             } else {
-                                let cursor = if more { session_cursor.take() } else { None };
-                                let reply = session.connection().send_request(
-                                    ListSessionsRequest::new().cursor(cursor.clone()).cwd(cwd)
-                                ).block_task().await;
-                                match reply {
-                                    Ok(page) => {
-                                        session_cursor = page.next_cursor;
-                                        let mut lines = page.sessions.into_iter().map(|item| {
-                                            format!("{} · {} · {}", item.session_id, item.title.as_deref().unwrap_or("Untitled"), item.cwd.display())
-                                        }).collect::<Vec<_>>();
-                                        if lines.is_empty() {
-                                            lines.push("No saved sessions".into());
-                                        } else {
-                                            lines.push("/load <id> to open one".into());
-                                        }
-                                        if session_cursor.is_some() {
-                                            lines.push("/sessions next to see more".into());
-                                        }
-                                        Event::Note(lines.join("\n"))
-                                    }
-                                    Err(error) => {
-                                        session_cursor = cursor;
-                                        Event::Error(error.message)
-                                    }
-                                }
+                                session.connection().send_request(
+                                    ListSessionsRequest::new().cursor(cursor).cwd(cwd)
+                                ).block_task().await.map(|page| SessionPage {
+                                    items: page.sessions,
+                                    cursor: page.next_cursor,
+                                }).map_err(|error| error.message)
                             };
-                            let _ = events.unbounded_send(event);
+                            let _ = events.unbounded_send(Event::Sessions { request_id, result });
                         }
                         Some(Action::CloseSession(id)) => {
                             let event = if !close_supported {
@@ -544,16 +558,14 @@ pub async fn connect(
                             let _ = events.unbounded_send(event);
                         }
                         Some(Action::ListProviders) => {
-                            let event = list_providers(session.connection()).await;
+                            let event = Event::Providers(list_providers(session.connection()).await);
                             let _ = events.unbounded_send(event);
                         }
                         Some(Action::SetProvider { id, api_type, base_url }) => {
                             let mut params = serde_json::Map::new();
                             params.insert("providerId".into(), id.into());
                             params.insert("apiType".into(), api_type.into());
-                            if let Some(base_url) = base_url {
-                                params.insert("baseUrl".into(), base_url.into());
-                            }
+                            params.insert("baseUrl".into(), base_url.unwrap_or_default().into());
                             let event = match provider_call(session.connection(), "providers/set", params.into()).await {
                                 Ok(_) => Event::Note("Provider updated".into()),
                                 Err(error) => Event::Error(error),
@@ -565,6 +577,23 @@ pub async fn connect(
                             params.insert("providerId".into(), id.into());
                             let event = match provider_call(session.connection(), "providers/disable", params.into()).await {
                                 Ok(_) => Event::Note("Provider disabled".into()),
+                                Err(error) => Event::Error(error),
+                            };
+                            let _ = events.unbounded_send(event);
+                        }
+                        Some(Action::EditProvider { id, create, api_type, base_url, models, api_key_env }) => {
+                            let params = serde_json::json!({ "id": id, "create": create, "api_type": api_type,
+                                "base_url": base_url, "models": models, "api_key_env": api_key_env });
+                            let event = match provider_call(session.connection(), "_hrns/providers/save", params).await {
+                                Ok(_) => Event::Note(if create { "Provider added".into() } else { "Provider saved".into() }),
+                                Err(error) => Event::Error(error),
+                            };
+                            let _ = events.unbounded_send(event);
+                        }
+                        Some(Action::RemoveProvider(id)) => {
+                            let params = serde_json::json!({ "id": id });
+                            let event = match provider_call(session.connection(), "_hrns/providers/remove", params).await {
+                                Ok(_) => Event::Note("Provider removed".into()),
                                 Err(error) => Event::Error(error),
                             };
                             let _ = events.unbounded_send(event);
@@ -910,65 +939,58 @@ fn exit_status(exit: client_io::Exit) -> agent_client_protocol::v1::schema::Term
     }
 }
 
-async fn list_providers(connection: &ConnectionTo<Agent>) -> Event {
-    let request = match UntypedMessage::new("providers/list", serde_json::json!({})) {
-        Ok(request) => request,
-        Err(error) => return Event::Error(error.message),
-    };
-    let reply = match connection.send_request(request).block_task().await {
-        Ok(reply) => reply,
-        Err(error) => {
-            return Event::Error(format!(
-                "The agent does not support provider routing: {}",
-                error.message
-            ));
-        }
-    };
-    let Some(providers) = reply.get("providers").and_then(|value| value.as_array()) else {
-        return Event::Error("The agent returned an invalid provider list".into());
-    };
-    Event::Providers(
-        providers
-            .iter()
-            .filter_map(|provider| {
-                let id = provider.get("providerId")?.as_str()?.to_owned();
-                let supported = provider
-                    .get("supported")
-                    .and_then(|value| value.as_array())
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(|value| value.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let required = provider
-                    .get("required")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                let current = provider
-                    .get("current")
-                    .filter(|value| !value.is_null())
-                    .map(|current| ProviderConfig {
-                        api_type: current
-                            .get("apiType")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("custom")
-                            .to_owned(),
-                        base_url: current
-                            .get("baseUrl")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_owned),
-                    });
-                Some(ProviderInfo {
-                    id,
-                    supported,
-                    required,
-                    current,
+async fn list_providers(connection: &ConnectionTo<Agent>) -> Result<Vec<ProviderInfo>, String> {
+    let request = UntypedMessage::new("providers/list", serde_json::json!({}))
+        .map_err(|error| error.message)?;
+    let reply = connection
+        .send_request(request)
+        .block_task()
+        .await
+        .map_err(|error| format!("Could not list providers: {}", error.message))?;
+    let providers = reply
+        .get("providers")
+        .and_then(|value| value.as_array())
+        .ok_or("The agent returned an invalid provider list")?;
+    Ok(providers
+        .iter()
+        .filter_map(|provider| {
+            let id = provider.get("providerId")?.as_str()?.to_owned();
+            let supported = provider
+                .get("supported")
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect()
                 })
+                .unwrap_or_default();
+            let required = provider
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let current = provider
+                .get("current")
+                .filter(|value| !value.is_null())
+                .map(|current| ProviderConfig {
+                    api_type: current
+                        .get("apiType")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("custom")
+                        .to_owned(),
+                    base_url: current
+                        .get("baseUrl")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned),
+                });
+            Some(ProviderInfo {
+                id,
+                supported,
+                required,
+                current,
             })
-            .collect(),
-    )
+        })
+        .collect())
 }
 
 async fn provider_call(
@@ -982,7 +1004,15 @@ async fn provider_call(
         .block_task()
         .await
         .map(|_| ())
-        .map_err(|error| error.message)
+        .map_err(|error| {
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or(error.message)
+        })
 }
 
 async fn find_workspace(
@@ -1081,6 +1111,7 @@ fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) ->
                 status: call.status,
                 kind: Some(call.kind),
                 content: call.content,
+                locations: call.locations,
                 raw_input: call.raw_input,
                 raw_output: call.raw_output,
             };
@@ -1115,6 +1146,7 @@ struct ToolState {
     status: ToolCallStatus,
     kind: Option<ToolKind>,
     content: Vec<ToolCallContent>,
+    locations: Vec<ToolCallLocation>,
     raw_input: Option<serde_json::Value>,
     raw_output: Option<serde_json::Value>,
 }
@@ -1130,6 +1162,9 @@ impl ToolState {
         if let Some(kind) = update.fields.kind {
             self.kind = Some(kind);
         }
+        if let Some(locations) = &update.fields.locations {
+            self.locations.clone_from(locations);
+        }
         if let Some(content) = update.fields.content.clone() {
             self.content = content;
         }
@@ -1142,24 +1177,93 @@ impl ToolState {
     }
 
     fn event(&self, id: &str) -> Event {
-        let title = if self.title.is_empty() {
-            "Tool call".to_owned()
-        } else {
-            self.title.clone()
-        };
+        let (title, subject) = self.summary();
         Event::Tool {
             id: id.to_owned(),
             title,
-            status: status_label(self.status),
+            subject,
+            status: self.status,
             detail: self.detail(),
+        }
+    }
+
+    fn summary(&self) -> (String, String) {
+        let verb = match self.kind {
+            Some(ToolKind::Read) => "Read",
+            Some(ToolKind::Edit) => "Edit",
+            Some(ToolKind::Delete) => "Delete",
+            Some(ToolKind::Move) => "Move",
+            Some(ToolKind::Search) => "Search",
+            Some(ToolKind::Execute) => "Run",
+            Some(ToolKind::Think) => "Think",
+            Some(ToolKind::Fetch) => "Fetch",
+            Some(ToolKind::SwitchMode) => "Switch mode",
+            _ => "",
+        };
+        let location = self.locations.first().map(|location| {
+            let mut path = location.path.display().to_string();
+            if let Some(line) = location.line {
+                path.push_str(&format!(":{line}"));
+            }
+            if self.locations.len() > 1 {
+                path.push_str(&format!(" (+{})", self.locations.len() - 1));
+            }
+            path
+        });
+        let input = self.raw_input.as_ref().and_then(|input| {
+            [
+                "command",
+                "path",
+                "file_path",
+                "query",
+                "pattern",
+                "url",
+                "target",
+            ]
+            .into_iter()
+            .find_map(|key| input.get(key)?.as_str())
+        });
+        let inferred = match self.title.as_str() {
+            "read_file" | "read_text_file" => "Read",
+            "write_file" | "write_text_file" | "edit_file" | "apply_patch" => "Edit",
+            "list_files" | "list_directory" => "List",
+            "grep" | "glob" | "search_files" | "find_files" => "Search",
+            "shell" | "bash" | "terminal" | "execute" | "run_command" => "Run",
+            _ => "",
+        };
+        let verb = if verb.is_empty() { inferred } else { verb };
+        if verb.is_empty() {
+            (
+                if self.title.is_empty() {
+                    "Tool call".into()
+                } else {
+                    self.title.clone()
+                },
+                location
+                    .or_else(|| input.map(str::to_owned))
+                    .unwrap_or_default(),
+            )
+        } else {
+            let subject =
+                if !self.title.is_empty() && inferred.is_empty() && self.title.contains(' ') {
+                    let (leading, remainder) =
+                        self.title.split_once(' ').unwrap_or((&self.title, ""));
+                    if leading.eq_ignore_ascii_case(verb) {
+                        remainder.to_owned()
+                    } else {
+                        self.title.clone()
+                    }
+                } else {
+                    location
+                        .or_else(|| input.map(str::to_owned))
+                        .unwrap_or_default()
+                };
+            (verb.into(), subject)
         }
     }
 
     fn detail(&self) -> String {
         let mut parts = Vec::new();
-        if let Some(kind) = self.kind {
-            parts.push(format!("{kind:?}"));
-        }
         for content in &self.content {
             match content {
                 ToolCallContent::Content(content) => {
@@ -1180,17 +1284,31 @@ impl ToolState {
                 _ => {}
             }
         }
+        let mut detail = Vec::new();
         if let Some(input) = &self.raw_input {
-            parts.push(format!("input: {input}"));
+            detail.push(format!("Arguments\n{}", pretty_tool_value(input)));
         }
-        if let Some(output) = &self.raw_output {
-            parts.push(format!("output: {output}"));
+        if !parts.is_empty() {
+            detail.push(format!("Output\n{}", parts.join("\n")));
+        } else if let Some(output) = &self.raw_output {
+            detail.push(format!("Output\n{}", pretty_tool_value(output)));
         }
-        parts.join("\n").chars().take(4000).collect()
+        let detail = detail.join("\n");
+        let mut clipped: String = detail.chars().take(12_000).collect();
+        if clipped.len() < detail.len() {
+            clipped.push_str("\n… output truncated");
+        }
+        clipped
     }
 }
 
-fn status_label(status: ToolCallStatus) -> &'static str {
+fn pretty_tool_value(value: &serde_json::Value) -> String {
+    value.as_str().map(str::to_owned).unwrap_or_else(|| {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    })
+}
+
+pub fn status_label(status: ToolCallStatus) -> &'static str {
     match status {
         ToolCallStatus::Pending => "pending",
         ToolCallStatus::InProgress => "running",

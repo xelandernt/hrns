@@ -455,8 +455,8 @@ def run(
         raise SystemExit("No models are configured. Add a provider and model first.")
     # Resolve the selected catalog entry at prompt time, including after local setup.
     run_acp_stdio(
-        lambda _session: build_agent(
-            cwd=cwd,
+        lambda session: build_agent(
+            cwd=session.cwd if cwd == "." else cwd,
             skills=settings.skills,
             model_settings=ModelSettings(**settings.model_settings),
             _allow_unconfigured=True,

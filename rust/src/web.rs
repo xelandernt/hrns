@@ -51,6 +51,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 LocalEffect::Reconnect => {
                     let _ = requests_tx.unbounded_send(Connection::Reconnect);
                 }
+                LocalEffect::Connect(target) => {
+                    send_connect(&mut app, &requests_tx, target);
+                }
                 LocalEffect::Switch(target) => {
                     let _ = requests_tx.unbounded_send(Connection::Switch(target));
                 }
@@ -65,6 +68,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     wasm_bindgen_futures::spawn_local(async move {
         use futures::{FutureExt, select_biased};
+        let mut config = config;
         let mut target =
             config
                 .as_ref()
@@ -92,6 +96,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             match request {
                 Some(Connection::Reconnect) => {}
                 Some(Connection::Switch(next)) => target = next,
+                Some(Connection::Connect(next)) => match connection_target(&next) {
+                    Ok((endpoint, cwd)) => {
+                        let _ = event_tx.unbounded_send(Event::ConnectionChanged(endpoint.host()));
+                        target = SessionTarget {
+                            cwd: Some(cwd),
+                            session: None,
+                        };
+                        config = Ok((endpoint, target.clone()));
+                    }
+                    Err(error) => {
+                        let _ = event_tx.unbounded_send(Event::Error(error));
+                    }
+                },
                 None => return,
             }
             let _ = event_tx.unbounded_send(Event::Connecting);
@@ -178,17 +195,7 @@ fn web_config() -> Result<(Url, SessionTarget), String> {
             endpoint
         }
     };
-    let supported = match endpoint.protocol().as_str() {
-        "wss:" => true,
-        "ws:" => matches!(
-            endpoint.hostname().as_str(),
-            "localhost" | "127.0.0.1" | "[::1]"
-        ),
-        _ => false,
-    };
-    if !supported || !endpoint.username().is_empty() || !endpoint.password().is_empty() {
-        return Err("Use a wss:// endpoint without embedded credentials (ws:// is allowed for loopback development)".into());
-    }
+    let endpoint = validate_endpoint(endpoint)?;
     endpoint.set_hash("");
     let session = query.get("session").filter(|id| !id.is_empty());
     let cwd = query
@@ -204,6 +211,49 @@ fn web_config() -> Result<(Url, SessionTarget), String> {
             session,
         },
     ))
+}
+
+fn send_connect(
+    app: &mut App,
+    requests: &mpsc::UnboundedSender<Connection>,
+    target: acp::ConnectTarget,
+) {
+    match connection_target(&target) {
+        Ok(_) => {
+            let _ = requests.unbounded_send(Connection::Connect(target));
+        }
+        Err(error) => app.event(Event::Error(error)),
+    }
+}
+
+fn connection_target(next: &acp::ConnectTarget) -> Result<(Url, PathBuf), String> {
+    let endpoint = Url::new(&next.endpoint)
+        .map_err(|_| "Enter a secure ACP WebSocket URL".to_owned())
+        .and_then(validate_endpoint)?;
+    let cwd = next.cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
+    // Browser paths are remote POSIX paths, including on Windows.
+    if !cwd.to_string_lossy().starts_with('/') {
+        return Err("Enter an absolute remote workspace path".into());
+    }
+    if !endpoint.search().is_empty() || !endpoint.hash().is_empty() {
+        return Err("Enter an ACP endpoint without a query or fragment".into());
+    }
+    Ok((endpoint, cwd))
+}
+
+fn validate_endpoint(endpoint: Url) -> Result<Url, String> {
+    let supported = match endpoint.protocol().as_str() {
+        "wss:" => true,
+        "ws:" => matches!(
+            endpoint.hostname().as_str(),
+            "localhost" | "127.0.0.1" | "[::1]"
+        ),
+        _ => false,
+    };
+    if !supported || !endpoint.username().is_empty() || !endpoint.password().is_empty() {
+        return Err("Use a wss:// endpoint without embedded credentials (ws:// is allowed for loopback development)".into());
+    }
+    Ok(endpoint)
 }
 
 fn message_text(message: WsMessage) -> Result<Option<String>, String> {
@@ -245,6 +295,9 @@ fn bind_input(
                     Some(LocalEffect::Copy(text)) => copy(&app, &text),
                     Some(LocalEffect::Reconnect) => {
                         let _ = reconnect.unbounded_send(Connection::Reconnect);
+                    }
+                    Some(LocalEffect::Connect(target)) => {
+                        send_connect(&mut app.borrow_mut(), &reconnect, target);
                     }
                     Some(LocalEffect::Switch(target)) => {
                         let _ = reconnect.unbounded_send(Connection::Switch(target));

@@ -1,19 +1,12 @@
 use agent_client_protocol::v1::schema::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOptions,
+    SessionConfigSelectOption, SessionConfigSelectOptions,
 };
 
 pub fn summary(option: &SessionConfigOption) -> String {
     match &option.kind {
         SessionConfigKind::Select(select) => {
-            let values = match &select.options {
-                SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
-                SessionConfigSelectOptions::Grouped(groups) => groups
-                    .iter()
-                    .flat_map(|group| group.options.iter())
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            };
+            let values = choices(option);
             if values.is_empty() {
                 format!("{} · {}", option.name, select.current_value)
             } else {
@@ -32,15 +25,8 @@ pub fn summary(option: &SessionConfigOption) -> String {
 
 pub fn value(option: &SessionConfigOption, input: &str) -> Option<SessionConfigOptionValue> {
     match &option.kind {
-        SessionConfigKind::Select(select) => {
-            let values = match &select.options {
-                SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
-                SessionConfigSelectOptions::Grouped(groups) => groups
-                    .iter()
-                    .flat_map(|group| group.options.iter())
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            };
+        SessionConfigKind::Select(_) => {
+            let values = choices(option);
             let known =
                 values.is_empty() || values.iter().any(|value| value.value.to_string() == input);
             known.then(|| SessionConfigOptionValue::value_id(input.to_owned()))
@@ -65,5 +51,19 @@ pub fn matches_category(
             SessionConfigOptionCategory::ThoughtLevel => option.id.0.as_ref() == "effort",
             _ => false,
         },
+    }
+}
+
+pub fn choices(option: &SessionConfigOption) -> Vec<&SessionConfigSelectOption> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return Vec::new();
+    };
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .collect(),
+        _ => Vec::new(),
     }
 }
