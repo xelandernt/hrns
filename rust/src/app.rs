@@ -450,7 +450,7 @@ impl App {
                 });
                 self.trim_activity();
                 if self.turns == 0 {
-                    self.approvals.clear();
+                    self.clear_approvals();
                     self.elicitations.clear();
                     self.status = "Connected";
                     self.update_execution();
@@ -475,7 +475,7 @@ impl App {
                 self.turns = 0;
                 self.execution = None;
                 self.queue_paused = true;
-                self.approvals.clear();
+                self.clear_approvals();
                 self.elicitations.clear();
                 self.mcp_consent.clear();
                 self.status = "Disconnected";
@@ -514,7 +514,7 @@ impl App {
                 self.ready = false;
                 self.turns = 0;
                 self.execution = None;
-                self.approvals.clear();
+                self.clear_approvals();
                 self.elicitations.clear();
                 self.mcp_consent.clear();
                 self.status = "Reconnecting";
@@ -658,11 +658,20 @@ impl App {
             let _ = request.respond.send(answer);
             return;
         }
+        self.transcript.show_pending_approval(&request);
         self.approvals.push_back(PendingApproval {
             request,
             selected: 0,
             detail_scroll: 0,
         });
+    }
+
+    fn clear_approvals(&mut self) {
+        for pending in self.approvals.drain(..) {
+            let request = pending.request;
+            self.transcript
+                .resolve_approval(&request.tool_call_id, &request.title, None);
+        }
     }
 
     fn auto_permission(&self, request: &PermissionRequest) -> Option<Option<usize>> {
@@ -1004,17 +1013,13 @@ impl App {
                 }
                 _ => None,
             });
-            if request.respond.send(answer).is_ok()
-                && let Some(decision) = decision
-            {
-                self.transcript.record_approval(
-                    request.tool_call_id,
-                    request.title,
-                    request.detail,
-                    request.shell,
-                    decision,
-                );
-            }
+            let decision = if request.respond.send(answer).is_ok() {
+                decision
+            } else {
+                None
+            };
+            self.transcript
+                .resolve_approval(&request.tool_call_id, &request.title, decision);
         }
     }
 

@@ -112,10 +112,10 @@ that offers an allow option; the decision uses the kind reported by the agent,
 never a tool name. Pending approvals and forms are cleared when their turn ends
 or the connection drops, so a request resolves exactly once.
 
-The transcript records explicit approvals and rejections against the tool call
-ID. A solid diamond marks approval and a hollow diamond marks rejection.
-Expanded calls show the decision in words. Automatic approvals and cancelled
-requests carry no diamond.
+The transcript marks a pending manual approval with `◈` in the approval
+panel's warning color. A solid diamond marks approval and a hollow diamond
+marks rejection. Expanded calls show the approval state in words. Automatic
+approvals and cancelled requests carry no diamond.
 
 ### Native MCP export
 

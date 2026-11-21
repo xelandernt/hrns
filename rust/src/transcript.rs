@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::acp::ToolDisplay;
+use crate::acp::{PermissionRequest, ToolDisplay};
 use crate::theme::Palette;
 
 #[derive(PartialEq)]
@@ -54,6 +54,7 @@ impl Role {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ManualApproval {
+    Pending,
     Granted,
     Rejected,
 }
@@ -121,6 +122,7 @@ impl Entry {
             if let Some(status) = self.tool_status {
                 let (marker, color) = match status {
                     _ if self.approval == Some(ManualApproval::Rejected) => ("–", palette.muted),
+                    _ if self.approval == Some(ManualApproval::Pending) => ("○", palette.muted),
                     ToolCallStatus::Pending => ("○", palette.muted),
                     ToolCallStatus::InProgress => ("◐", palette.warning),
                     ToolCallStatus::Completed => ("✓", palette.success),
@@ -142,6 +144,7 @@ impl Entry {
                 let mut spans = vec![bullet, " ".into()];
                 if let Some(approval) = self.approval {
                     let diamond = match (row, approval) {
+                        (0, ManualApproval::Pending) => "◈".fg(palette.warning),
                         (0, ManualApproval::Granted) => "◆".fg(palette.accent),
                         (0, ManualApproval::Rejected) => "◇".fg(palette.error),
                         _ => " ".into(),
@@ -151,6 +154,11 @@ impl Entry {
                 spans.extend([disclosure.fg(palette.muted), " ".into()]);
                 if row == 0 {
                     let (verb, subject) = text.split_once(' ').unwrap_or((text, ""));
+                    let verb = if self.shell && self.approval == Some(ManualApproval::Pending) {
+                        "Run"
+                    } else {
+                        verb
+                    };
                     spans.push(verb.fg(palette.foreground).bold());
                     if !subject.is_empty() {
                         spans.push(" ".into());
@@ -215,6 +223,7 @@ impl Entry {
             && let Some(approval) = self.approval
         {
             let (label, color) = match approval {
+                ManualApproval::Pending => ("Approval · Waiting for your choice", palette.warning),
                 ManualApproval::Granted => ("Approval · Manual", palette.accent),
                 ManualApproval::Rejected => ("Approval · Rejected", palette.error),
             };
@@ -433,33 +442,38 @@ impl Transcript {
             .rposition(|entry| entry.id.as_deref() == Some(id))
     }
 
-    pub fn record_approval(
-        &mut self,
-        id: String,
-        title: String,
-        detail: String,
-        shell: bool,
-        approval: ManualApproval,
-    ) {
-        let index = self.tool_index(&id).unwrap_or_else(|| {
+    pub fn show_pending_approval(&mut self, request: &PermissionRequest) {
+        let index = self.tool_index(&request.tool_call_id).unwrap_or_else(|| {
             self.tool(
-                id,
+                request.tool_call_id.clone(),
                 ToolDisplay {
-                    title: title.clone(),
+                    title: request.title.clone(),
                     subject: String::new(),
                     status: ToolCallStatus::Pending,
-                    detail,
+                    detail: request.detail.clone(),
                     output: String::new(),
                     preview_output: false,
-                    shell,
+                    shell: request.shell,
                 },
             );
             self.entries.len() - 1
         });
+        self.entries[index].approval = Some(ManualApproval::Pending);
+        self.output_pending |= !self.following;
+        self.measured = self.measured.min(index);
+    }
+
+    pub fn resolve_approval(&mut self, id: &str, title: &str, decision: Option<ManualApproval>) {
+        let Some(index) = self.tool_index(id) else {
+            return;
+        };
         let entry = &mut self.entries[index];
-        entry.approval = Some(approval);
-        if approval == ManualApproval::Rejected {
-            entry.text = title;
+        if entry.approval != Some(ManualApproval::Pending) {
+            return;
+        }
+        entry.approval = decision;
+        if decision == Some(ManualApproval::Rejected) {
+            entry.text = title.to_owned();
         }
         self.output_pending |= !self.following;
         self.measured = self.measured.min(index);
