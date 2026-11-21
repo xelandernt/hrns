@@ -5,12 +5,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Wrap};
 
-use super::{App, slash_command};
+use super::{App, PendingApproval, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
 use crate::theme::Palette;
+use crate::transcript::wrap;
 
 impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -24,7 +25,13 @@ impl App {
             ),
             area,
         );
-        let prompt_height = if area.height >= 12 {
+        let approval_active = !self.approvals.is_empty()
+            && self.mcp_consent.is_empty()
+            && self.elicitations.is_empty();
+        let gutter = Margin::new(if area.width >= 80 { 2 } else { 1 }, 0);
+        let prompt_height = if approval_active {
+            0
+        } else if area.height >= 12 {
             6
         } else {
             area.height / 2
@@ -34,9 +41,18 @@ impl App {
         } else {
             0
         };
-        let approval_height = self.approvals.front().map_or(0, |request| {
-            u16::try_from((request.options.len() + 4).min(12)).unwrap_or(12)
-        });
+        let approval_height =
+            self.approvals
+                .front()
+                .filter(|_| approval_active)
+                .map_or(0, |pending| {
+                    let width = usize::from(area.inner(gutter).width.saturating_sub(4).max(1));
+                    let request = &pending.request;
+                    let details =
+                        wrap(&request.title, width).len() + wrap(&request.detail, width).len();
+                    (3 + details.min(8) + request.options.len().min(9))
+                        .min(usize::from(area.height.saturating_sub(3))) as u16
+                });
         let question_limit = area.height.saturating_sub(prompt_height + 3).min(18);
         let question = self.elicitations.front().map(|pending| {
             elicitation_lines(
@@ -51,9 +67,13 @@ impl App {
                 .unwrap_or(u16::MAX)
                 .min(question_limit)
         });
-        let completion_height = self.completion.as_ref().map_or(0, |completion| {
-            u16::try_from(completion.items.len().min(6)).unwrap_or(6)
-        });
+        let completion_height = self
+            .completion
+            .as_ref()
+            .filter(|_| !approval_active)
+            .map_or(0, |completion| {
+                u16::try_from(completion.items.len().min(6)).unwrap_or(6)
+            });
         let [
             transcript,
             mcp,
@@ -92,7 +112,6 @@ impl App {
                 transcript.height,
             );
         }
-        let gutter = Margin::new(if area.width >= 80 { 2 } else { 1 }, 0);
         let transcript = transcript.inner(gutter);
         self.transcript_area = transcript;
         if sidebar.width > 0 {
@@ -126,11 +145,8 @@ impl App {
             ];
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), mcp);
         }
-        if let Some(request) = self.approvals.front() {
-            frame.render_widget(
-                Paragraph::new(self.approval_lines(request, &palette)).wrap(Wrap { trim: false }),
-                approval,
-            );
+        if approval_active && let Some(pending) = self.approvals.front_mut() {
+            draw_approval(frame, approval.inner(gutter), pending, &palette);
         }
         if let Some(lines) = question {
             let block = Block::bordered()
@@ -222,7 +238,7 @@ impl App {
         } else if let Some(pending) = self.elicitations.front() {
             question_hint(&pending.state)
         } else if self.approvals.front().is_some() {
-            "1-9 choose · y allow · a always · n reject · N always reject · Esc cancel"
+            "PgUp/PgDn approval details"
         } else if self.transcript.output_pending() {
             "New output ↓ · Ctrl+End"
         } else if self.status == "Disconnected" {
@@ -462,51 +478,6 @@ impl App {
             (None, Some(cost)) => Line::from(cost),
             (None, None) => Line::default(),
         }
-    }
-
-    fn approval_lines(
-        &self,
-        request: &crate::acp::PermissionRequest,
-        palette: &Palette,
-    ) -> Vec<Line<'static>> {
-        let kind = request
-            .kind
-            .map(|kind| format!(" · {}", kind_label(kind)))
-            .unwrap_or_default();
-        let mut lines = vec![
-            Line::from(format!(" Permission · {}{kind}", request.title))
-                .fg(palette.warning)
-                .bold(),
-        ];
-        let room = request.options.len().saturating_add(3);
-        let detail: Vec<&str> = request
-            .detail
-            .lines()
-            .take(room.saturating_sub(1))
-            .collect();
-        lines.extend(
-            detail
-                .into_iter()
-                .map(|line| Line::from(format!(" {line}")).fg(palette.muted)),
-        );
-        let options = request
-            .options
-            .iter()
-            .take(9)
-            .enumerate()
-            .map(|(index, option)| {
-                let shortcut = match option.kind {
-                    agent_client_protocol::v1::schema::PermissionOptionKind::AllowOnce => "y",
-                    agent_client_protocol::v1::schema::PermissionOptionKind::AllowAlways => "a",
-                    agent_client_protocol::v1::schema::PermissionOptionKind::RejectOnce => "n",
-                    agent_client_protocol::v1::schema::PermissionOptionKind::RejectAlways => "N",
-                    _ => "",
-                };
-                format!(" {} {shortcut}  {}", index + 1, option.name)
-            })
-            .collect::<Vec<_>>();
-        lines.push(Line::from(options.join("   ")).fg(palette.foreground));
-        lines
     }
 
     fn draw_todos(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
@@ -775,6 +746,80 @@ fn draw_providers(
         _ => " Esc close",
     };
     frame.render_widget(Paragraph::new(hint).fg(palette.muted), help);
+}
+
+fn draw_approval(frame: &mut Frame, area: Rect, pending: &mut PendingApproval, palette: &Palette) {
+    let request = &pending.request;
+    let title = request.kind.map_or_else(
+        || " Approval ".into(),
+        |kind| format!(" Approval · {} ", kind_label(kind)),
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.warning))
+        .style(Style::default().bg(palette.surface))
+        .title(title)
+        .title_style(Style::default().fg(palette.warning).bold())
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
+    let hint_height = u16::from(inner.height >= 3);
+    let list_height = request.options.len().min(usize::from(
+        inner
+            .height
+            .saturating_sub(hint_height + u16::from(inner.height >= 2)),
+    )) as u16;
+    let [preview, choices, hint] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(list_height),
+        Constraint::Length(hint_height),
+    ])
+    .areas(inner);
+    let width = usize::from(preview.width.max(1));
+    let mut details = wrap(&request.title, width)
+        .into_iter()
+        .map(|range| {
+            Line::from(&request.title[range])
+                .fg(palette.foreground)
+                .bold()
+        })
+        .collect::<Vec<_>>();
+    details.extend(
+        wrap(&request.detail, width)
+            .into_iter()
+            .map(|range| Line::from(&request.detail[range]).fg(palette.muted)),
+    );
+    pending.detail_scroll = pending
+        .detail_scroll
+        .min(details.len().saturating_sub(usize::from(preview.height)));
+    let visible = details
+        .into_iter()
+        .skip(pending.detail_scroll)
+        .take(usize::from(preview.height))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible), preview);
+
+    let options = request.options.iter().enumerate().map(|(index, option)| {
+        let name = option.name.lines().next().unwrap_or_default();
+        if index < 9 {
+            Line::from(format!("{}. {name}", index + 1))
+        } else {
+            Line::from(format!("   {name}"))
+        }
+    });
+    let list = List::new(options)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().fg(palette.accent).bg(palette.panel).bold());
+    let mut state = ListState::default()
+        .with_selected((!request.options.is_empty()).then_some(pending.selected));
+    frame.render_stateful_widget(list, choices, &mut state);
+    frame.render_widget(
+        Paragraph::new("↑/↓ move · Enter choose · Esc cancel").fg(palette.muted),
+        hint,
+    );
 }
 
 fn kind_label(kind: ToolKind) -> &'static str {

@@ -103,10 +103,10 @@ The publish workflow sets the release pin in the wrapper metadata with
 asserts the result. See
 [the release guide](docs/release.md#version-matched-native-dependency).
 
-Approvals stay inline above the composer and show the tool kind, rendered
-input, diff or terminal detail, and the available options. `1`-`9` select by
-position; `y`, `a`, `n` and `N` map to the allow-once, allow-always,
-reject-once and reject-always kinds. `Esc` cancels the request. Modes `ask`,
+The approval panel takes the composer's place while a tool approval is in
+focus. It shows the tool kind and a scrollable preview above numbered choices.
+Up and Down move the selection, Enter confirms it, and `1`–`9` select by
+position. Page Up and Page Down scroll details. `Esc` cancels the request. Modes `ask`,
 `reads` and `all` auto-approve nothing, read/search/think calls, or any request
 that offers an allow option; the decision uses the kind reported by the agent,
 never a tool name. Pending approvals and forms are cleared when their turn ends
@@ -169,7 +169,10 @@ User and note entries stay literal. ACP tool
 calls are keyed by `tool_call_id`, merged from start and progress updates, and
 shown as compact rows with status markers and disclosure arrows. Click a tool
 header to expand or collapse its output. `Ctrl-O` toggles details in bulk for
-the current transcript. New tool calls start collapsed. The transcript tracks
+the current transcript. New tool calls start collapsed. Shell, read, list,
+search, and failed calls show up to two output rows and an indicator when
+more is available. Expanding shows all details received from the agent.
+The transcript tracks
 the visible entry and byte offset through streaming, resize and expansion.
 The wheel scrolls by rows, Page Up and Page Down move by the viewport height,
 and scrolling down to the latest output resumes follow mode.

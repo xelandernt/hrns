@@ -60,6 +60,7 @@ struct Entry {
     table_rows: BTreeMap<usize, Line<'static>>,
     detail: Option<String>,
     detail_rows: Vec<Range<usize>>,
+    preview_start: Option<usize>,
     shell: bool,
     id: Option<String>,
     expanded: bool,
@@ -68,6 +69,15 @@ struct Entry {
 }
 
 impl Entry {
+    fn has_more_output(&self) -> bool {
+        !self.expanded
+            && self.detail_rows.last().is_some_and(|row| {
+                self.detail
+                    .as_ref()
+                    .is_some_and(|detail| row.end < detail.len())
+            })
+    }
+
     fn has_detail(&self) -> bool {
         self.detail
             .as_ref()
@@ -177,11 +187,14 @@ impl Entry {
             return Line::raw(text);
         }
         let detail_row = row - self.rows.len();
+        if detail_row == self.detail_rows.len() && self.has_more_output() {
+            return Line::from("    … more output").fg(palette.muted);
+        }
         if let Some(detail) = &self.detail
             && let Some(range) = self.detail_rows.get(detail_row)
         {
             let text = &detail[range.clone()];
-            if self.shell {
+            if self.shell || !self.expanded {
                 let prefix = if detail_row == 0 { "  ↳ " } else { "    " };
                 return Line::from(vec![prefix.fg(palette.border), text.fg(palette.muted)]);
             }
@@ -306,6 +319,7 @@ impl Transcript {
             table_rows: BTreeMap::new(),
             detail: None,
             detail_rows: Vec::new(),
+            preview_start: None,
             shell: false,
             id: None,
             expanded: false,
@@ -314,13 +328,21 @@ impl Transcript {
         });
     }
 
-    pub fn tool(&mut self, id: String, display: ToolDisplay) {
+    pub fn tool(&mut self, id: String, mut display: ToolDisplay) {
+        let preview_start = display.prepare_detail().filter(|_| {
+            display.preview_output
+                && matches!(
+                    display.status,
+                    ToolCallStatus::Completed | ToolCallStatus::Failed
+                )
+        });
         let ToolDisplay {
             title,
             subject,
             status,
-            mut detail,
+            detail,
             shell,
+            ..
         } = display;
         self.output_pending |= !self.following;
         let mut text = if subject.is_empty() {
@@ -339,8 +361,6 @@ impl Transcript {
             text.push_str("  ·  ");
             text.push_str(crate::acp::status_label(status));
         }
-        detail.retain(|ch| ch == '\n' || ch == '\t' || !ch.is_control());
-        let detail = detail.trim_end().replace('\t', "    ");
         if let Some(index) = self
             .entries
             .iter()
@@ -351,6 +371,7 @@ impl Transcript {
             entry.tool_status = Some(status);
             entry.shell = shell;
             entry.detail = Some(detail);
+            entry.preview_start = preview_start;
             self.measured = self.measured.min(index);
             return;
         }
@@ -362,6 +383,7 @@ impl Transcript {
             table_rows: BTreeMap::new(),
             detail: Some(detail),
             detail_rows: Vec::new(),
+            preview_start,
             shell,
             id: Some(id),
             expanded: false,
@@ -396,7 +418,17 @@ impl Transcript {
         let start = self.entry_start(index);
         let entry = &mut self.entries[index];
         let header_hit = match entry.role {
-            Role::Tool => entry.has_detail() && row < start + entry.rows.len(),
+            Role::Tool => {
+                entry.has_detail()
+                    && row
+                        < start
+                            + entry.rows.len()
+                            + if entry.expanded {
+                                0
+                            } else {
+                                entry.detail_rows.len() + usize::from(entry.has_more_output())
+                            }
+            }
             Role::Thought => self.show_thoughts && row == start,
             _ => false,
         };
@@ -729,10 +761,23 @@ impl Transcript {
                 entry.detail.as_deref().map_or_else(Vec::new, |detail| {
                     wrap(detail, width.saturating_sub(indent).max(1))
                 })
+            } else if let Some(start) = entry.preview_start
+                && let Some(detail) = entry.detail.as_deref()
+            {
+                let mut rows = wrap_up_to(&detail[start..], width.saturating_sub(4).max(1), 2);
+                for range in &mut rows {
+                    range.start += start;
+                    range.end += start;
+                }
+                rows
             } else {
                 Vec::new()
             };
-            end += entry.rows.len() + entry.detail_rows.len() + 1 + entry.heading_rows();
+            end += entry.rows.len()
+                + entry.detail_rows.len()
+                + usize::from(entry.has_more_output())
+                + 1
+                + entry.heading_rows();
             entry.end = end;
         }
         self.measured = self.entries.len();
@@ -783,13 +828,20 @@ impl MarkdownLayout {
     }
 }
 
-fn wrap(text: &str, width: usize) -> Vec<Range<usize>> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<Range<usize>> {
+    wrap_up_to(text, width, usize::MAX)
+}
+
+fn wrap_up_to(text: &str, width: usize, limit: usize) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
     let mut line_start = 0;
     let mut columns = 0;
     for (index, grapheme) in text.grapheme_indices(true) {
         if grapheme == "\n" {
             rows.push(line_start..index);
+            if rows.len() == limit {
+                return rows;
+            }
             line_start = index + 1;
             columns = 0;
             continue;
@@ -797,6 +849,9 @@ fn wrap(text: &str, width: usize) -> Vec<Range<usize>> {
         let next = grapheme.width();
         if columns != 0 && columns + next > width {
             rows.push(line_start..index);
+            if rows.len() == limit {
+                return rows;
+            }
             line_start = index;
             columns = 0;
         }

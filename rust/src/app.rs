@@ -96,6 +96,12 @@ pub struct PendingElicitation {
     pub respond: oneshot::Sender<Option<BTreeMap<String, ElicitationContentValue>>>,
 }
 
+struct PendingApproval {
+    request: PermissionRequest,
+    selected: usize,
+    detail_scroll: usize,
+}
+
 pub struct PendingMcpConsent {
     pub name: String,
     pub transport: String,
@@ -159,7 +165,7 @@ pub struct App {
     draft: Composer,
     transcript: Transcript,
     transcript_area: Rect,
-    approvals: VecDeque<PermissionRequest>,
+    approvals: VecDeque<PendingApproval>,
     elicitations: VecDeque<PendingElicitation>,
     mcp_consent: VecDeque<PendingMcpConsent>,
     mcp_grants: HashSet<String>,
@@ -656,7 +662,11 @@ impl App {
             Role::Note,
             format!("Permission requested · {}", request.title),
         );
-        self.approvals.push_back(request);
+        self.approvals.push_back(PendingApproval {
+            request,
+            selected: 0,
+            detail_scroll: 0,
+        });
     }
 
     fn auto_permission(&self, request: &PermissionRequest) -> Option<Option<usize>> {
@@ -875,58 +885,17 @@ impl App {
             return;
         }
 
-        if self.approvals.is_empty() {
-            if self.providers.is_some() {
-                self.provider_key(key);
-                return;
-            }
-            if self.picker.is_some() {
-                self.picker_key(key);
-                return;
-            }
+        if !self.approvals.is_empty() {
+            self.approval_key(key);
+            return;
         }
-
-        if let Some(request) = self.approvals.front() {
-            let answer = match key {
-                Key::Escape => Some(None),
-                Key::Text('y') => kind_index(request, |kind| {
-                    matches!(
-                        kind,
-                        agent_client_protocol::v1::schema::PermissionOptionKind::AllowOnce
-                    )
-                }),
-                Key::Text('a') => kind_index(request, |kind| {
-                    matches!(
-                        kind,
-                        agent_client_protocol::v1::schema::PermissionOptionKind::AllowAlways
-                    )
-                }),
-                Key::Text('n') => kind_index(request, |kind| {
-                    matches!(
-                        kind,
-                        agent_client_protocol::v1::schema::PermissionOptionKind::RejectOnce
-                    )
-                }),
-                Key::Text('N') => kind_index(request, |kind| {
-                    matches!(
-                        kind,
-                        agent_client_protocol::v1::schema::PermissionOptionKind::RejectAlways
-                    )
-                }),
-                Key::Text(digit) => digit
-                    .to_digit(10)
-                    .and_then(|digit| digit.checked_sub(1))
-                    .map(|index| index as usize)
-                    .filter(|index| *index < request.options.len())
-                    .map(Some),
-                _ => None,
-            };
-            if let Some(answer) = answer {
-                if let Some(request) = self.approvals.pop_front() {
-                    let _ = request.respond.send(answer);
-                }
-                return;
-            }
+        if self.providers.is_some() {
+            self.provider_key(key);
+            return;
+        }
+        if self.picker.is_some() {
+            self.picker_key(key);
+            return;
         }
 
         if self.completion.is_some() {
@@ -992,6 +961,43 @@ impl App {
             Key::Escape | Key::Enter | Key::BackTab => {}
         }
         self.refresh_completion();
+    }
+
+    fn approval_key(&mut self, key: Key) {
+        let Some(pending) = self.approvals.front_mut() else {
+            return;
+        };
+        let count = pending.request.options.len();
+        let answer = match key {
+            Key::HistoryUp => {
+                pending.selected = pending.selected.saturating_sub(1);
+                None
+            }
+            Key::HistoryDown => {
+                pending.selected = (pending.selected + 1).min(count.saturating_sub(1));
+                None
+            }
+            Key::ScrollUp => {
+                pending.detail_scroll = pending.detail_scroll.saturating_sub(3);
+                None
+            }
+            Key::ScrollDown => {
+                pending.detail_scroll = pending.detail_scroll.saturating_add(3);
+                None
+            }
+            Key::Enter if pending.selected < count => Some(Some(pending.selected)),
+            Key::Text(digit @ '1'..='9') => {
+                let index = usize::from(digit as u8 - b'1');
+                (index < count).then_some(Some(index))
+            }
+            Key::Escape => Some(None),
+            _ => None,
+        };
+        if let Some(answer) = answer
+            && let Some(pending) = self.approvals.pop_front()
+        {
+            let _ = pending.request.respond.send(answer);
+        }
     }
 
     fn mcp_consent_key(&mut self, key: Key) {
@@ -1350,17 +1356,6 @@ impl App {
         self.trim_activity();
         Ok(())
     }
-}
-
-fn kind_index(
-    request: &PermissionRequest,
-    predicate: impl Fn(agent_client_protocol::v1::schema::PermissionOptionKind) -> bool,
-) -> Option<Option<usize>> {
-    request
-        .options
-        .iter()
-        .position(|option| predicate(option.kind))
-        .map(Some)
 }
 
 fn is_local_command(command: &str) -> bool {

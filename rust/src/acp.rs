@@ -639,11 +639,13 @@ pub async fn connect(
                                 .await
                                 .if_request(async |request: RequestPermissionRequest, responder| {
                                     let (sender, receiver) = oneshot::channel();
-                                    let mut state = ToolState::default();
+                                    let mut state = tools.get(&request.tool_call.tool_call_id.to_string()).cloned().unwrap_or_default();
                                     state.apply(&request.tool_call);
-                                    let display = state.display();
+                                    let mut display = state.display();
                                     let operation = if display.shell { "Run" } else { display.title.as_str() };
-                                    let title = if display.subject.is_empty() { operation.to_owned() } else { format!("{operation} {}", display.subject) };
+                                    let mut title = if display.subject.is_empty() { operation.to_owned() } else { format!("{operation} {}", display.subject) };
+                                    title.retain(|ch| !ch.is_control());
+                                    display.prepare_detail();
                                     let _ = events.unbounded_send(Event::Permission(PermissionRequest {
                                         title,
                                         kind: request.tool_call.fields.kind,
@@ -1107,10 +1109,35 @@ pub struct ToolDisplay {
     pub subject: String,
     pub status: ToolCallStatus,
     pub detail: String,
+    pub output: String,
+    pub preview_output: bool,
     pub shell: bool,
 }
 
-#[derive(Default)]
+impl ToolDisplay {
+    pub fn prepare_detail(&mut self) -> Option<usize> {
+        for text in [&mut self.detail, &mut self.output] {
+            text.retain(|ch| matches!(ch, '\n' | '\t') || !ch.is_control());
+            *text = text.trim_end().replace('\t', "    ");
+        }
+        if self.output.is_empty() {
+            return None;
+        }
+        if self.shell && self.detail.is_empty() {
+            self.detail = std::mem::take(&mut self.output);
+            return Some(0);
+        }
+        if !self.detail.is_empty() {
+            self.detail.push('\n');
+        }
+        self.detail.push_str("Output\n");
+        let start = self.detail.len();
+        self.detail.push_str(&self.output);
+        Some(start)
+    }
+}
+
+#[derive(Clone, Default)]
 struct ToolState {
     title: String,
     status: ToolCallStatus,
@@ -1185,11 +1212,26 @@ impl ToolState {
             };
             (title, subject, arguments)
         };
+        let (detail, output) = self.detail(arguments);
         ToolDisplay {
             title,
             subject,
             status: self.status,
-            detail: capped_tool_detail(self.detail(arguments)),
+            detail,
+            output,
+            preview_output: self.status == ToolCallStatus::Failed
+                || matches!(self.kind, Some(ToolKind::Read | ToolKind::Search))
+                || matches!(
+                    self.title.as_str(),
+                    "read_file"
+                        | "read_text_file"
+                        | "list_files"
+                        | "list_directory"
+                        | "glob"
+                        | "grep"
+                        | "search_files"
+                        | "find_files"
+                ),
             shell: false,
         }
     }
@@ -1250,18 +1292,13 @@ impl ToolState {
             Some(code) if code != 0 => format!("{summary}  (exit {code})"),
             _ => summary,
         };
-        let detail = if arguments.is_empty() {
-            output.to_owned()
-        } else if output.is_empty() {
-            arguments
-        } else {
-            format!("{arguments}\nOutput\n{output}")
-        };
         ToolDisplay {
             title: title.into(),
             subject,
             status,
-            detail: capped_tool_detail(detail),
+            detail: arguments,
+            output: output.to_owned(),
+            preview_output: true,
             shell: true,
         }
     }
@@ -1346,7 +1383,7 @@ impl ToolState {
         }
     }
 
-    fn detail(&self, arguments: String) -> String {
+    fn detail(&self, arguments: String) -> (String, String) {
         let mut changes = Vec::new();
         let mut output = Vec::new();
         for content in &self.content {
@@ -1374,15 +1411,15 @@ impl ToolState {
         {
             output.push(tool_input::pretty_value(raw));
         }
-        [
+        let detail = [
             (!arguments.is_empty()).then(|| format!("Arguments\n{arguments}")),
             (!changes.is_empty()).then(|| format!("Changes\n{}", changes.join("\n"))),
-            (!output.is_empty()).then(|| format!("Output\n{}", output.join("\n"))),
         ]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+        (detail, output.join("\n"))
     }
 }
 
@@ -1417,14 +1454,6 @@ fn shell_result(text: &str) -> (&str, Option<i64>) {
         return (output, Some(code));
     }
     (text, None)
-}
-
-fn capped_tool_detail(detail: String) -> String {
-    let mut clipped: String = detail.chars().take(12_000).collect();
-    if clipped.len() < detail.len() {
-        clipped.push_str("\n… output truncated");
-    }
-    clipped
 }
 
 pub fn status_label(status: ToolCallStatus) -> &'static str {
