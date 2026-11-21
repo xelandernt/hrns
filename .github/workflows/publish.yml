@@ -38,9 +38,8 @@ jobs:
             echo "::error::Tag $TAG does not match the built version $actual. Tag the release with the version uv-dynamic-versioning should produce (for example 0.1.0)."
             exit 1
           fi
-      # The workspace cannot depend on the native wheel, so the published wrapper
-      # gains the version-matched requirement here and dist/ is rebuilt. Do not run
-      # `uv sync`/`uv run` or `just check` after this step: the lock has no hrns-tui.
+      # Add the published wrapper's version-matched requirement and rebuild dist/.
+      # Use the unpatched development metadata for uv sync, uv run and just check.
       - name: Add the version-matched native dependency
         run: python scripts/release_native_dependency.py
       - name: Rebuild the distributions with release metadata

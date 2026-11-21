@@ -22,7 +22,7 @@ For a minimal installation, use `hrns-slim`, adding `[client]` for the terminal 
 `[server]` for the agent and HTTP entry points. Without extras, it provides the shared
 `hrns config`, `profiles`, and `mcp` commands. Python imports and the command remain `hrns`.
 
-For local development, run `just install`.
+For local development, install Rust 1.90 or newer and run `just install`.
 
 ## Terminal clients
 
@@ -33,13 +33,11 @@ state. Native supports the built-in agent, external stdio commands and remote
 WebSocket targets; the browser connects only to an authenticated remote ACP mount and
 advertises no client filesystem, terminal or MCP capability.
 
-The release installs the `hrns-tui` wheel alongside `hrns`, so bare `hrns` and
-`hrns connect` always launch the native client. Build and install it into the project
-environment with `just native-install`, which runs `uvx maturin build --release --locked`
-against `rust/Cargo.toml` and installs the resulting wheel; run it after `just install`,
-because `uv sync` drops packages that are not in the lockfile. See
-[release](docs/release.md#version-matched-native-dependency) for which platforms
-`pip install hrns` covers.
+Bare `hrns` and `hrns connect` launch the installed native client. In a source
+checkout, `just install` and `uv sync --frozen --all-extras` build it from the
+local Rust source. Run either command after editing the TUI to refresh the
+executable. Published wheels are available on the platforms listed in the
+[release guide](docs/release.md#version-matched-native-dependency).
 
 The launcher resolves the target and passes `client_io` (CLI, profile, then `[tui]`),
 the TOML theme, permission mode and credentials, then replaces itself with the native

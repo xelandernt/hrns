@@ -20,11 +20,10 @@ move the native wheels to their own publish job when the projects differ.
 ## Version-matched native dependency
 
 `pip install hrns` installs the native client at exactly the version of the wheel, while
-`hrns-slim[server]` and `hrns-slim[client]` stay free of it. The workspace cannot declare
-that requirement: `hrns-tui` is not on the index during development and its version comes
-from the Rust crate rather than from `uv-dynamic-versioning`, so `uv lock` and `uv sync`
-would fail. The publish workflow therefore patches the wrapper metadata after the tree
-has been validated and rebuilds `dist/`:
+`hrns-slim[server]` and `hrns-slim[client]` stay free of it. Source installs build
+the local Rust crate through the default uv development group. The publish
+workflow adds the release-version requirement to the wrapper metadata after
+validation, then rebuilds `dist/`:
 
 | Step | Command |
 | --- | --- |
@@ -59,8 +58,8 @@ python scripts/release_native_dependency.py --verify dist
 python scripts/release_native_dependency.py --revert
 ```
 
-`--revert` is required before `uv run` or `uv sync`: the lock has no `hrns-tui` entry, so
-a patched tree no longer resolves.
+Use `--revert` before running `uv run` or `uv sync` to restore the development
+metadata used by the lockfile.
 
 ## Install
 
@@ -131,10 +130,8 @@ python -m venv /tmp/hrns-check
 `--verify` fails unless the `hrns` wheel and sdist each declare
 `Requires-Dist: hrns-tui==<their own version>` with every supported platform marker, and
 unless `hrns-slim` declares no native dependency. The `pip install --find-links dist`
-step resolves the native wheel from `dist/` exactly as PyPI would. For local development,
-run `just native-install` after `just install` (a `uv sync` drops packages outside the
-lockfile); it builds the release wheel with Maturin and installs it into the project
-environment, after which bare `hrns` selects it.
+step resolves the native wheel from `dist/` exactly as PyPI would. For local
+development, `just install` builds the native binary from the checkout through uv.
 
 Install in an empty environment, launch the interactive client against the built-in
 agent, run one headless prompt, and serve the unpacked bundle against the deployed ACP

@@ -723,6 +723,7 @@ ag-ui = [
 [package.dev-dependencies]
 dev = [
     { name = "build" },
+    { name = "hrns-tui" },
     { name = "httpx" },
     { name = "prek" },
     { name = "pyrefly" },
@@ -744,6 +745,7 @@ provides-extras = ["ag-ui"]
 [package.metadata.requires-dev]
 dev = [
     { name = "build", specifier = ">=1.2" },
+    { name = "hrns-tui", directory = "rust" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "prek", specifier = ">=0.5.7" },
     { name = "pyrefly", specifier = ">=1.4.0" },
@@ -817,6 +819,10 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'server'", specifier = ">=13,<16" },
 ]
 provides-extras = ["ag-ui", "client", "server"]
+
+[[package]]
+name = "hrns-tui"
+source = { directory = "rust" }
 
 [[package]]
 name = "httpcore"

@@ -89,17 +89,16 @@ documented precedence (CLI, profile, `[tui]`) and passes the TOML theme and
 permission mode as launch defaults. The native process
 inherits the terminal and owns terminal restoration and the ACP connection.
 The Rust state file is authoritative only for values the user changes in the
-native UI; unchanged values keep following the Python document. `just
-native-install` builds a development wheel with Maturin and installs it into the
-project environment; it reports the Rust crate's preview version because the
-release, not the tree, rewrites that version to the tag.
+native UI; unchanged values keep following the Python document. The default uv
+development group resolves `hrns-tui` from `rust/`. Maturin builds the local
+wheel. uv tracks the Cargo manifests and Rust sources when deciding whether to
+rebuild it. The local binary reports the crate's preview version.
 
 The published `hrns` wheel declares `hrns-tui==<version>` with markers for Linux
 x64, macOS arm64/x64 and Windows x64, so `pip install hrns` installs the native
 client at the same version while `hrns-slim[server]` and `hrns-slim[client]`
-stay Python-only. The workspace cannot hold that requirement: there is no
-`hrns-tui` on the index during development and its version comes from the crate.
-The publish workflow patches the wrapper metadata with
+stay Python-only. Source installs use the local development dependency.
+The publish workflow sets the release pin in the wrapper metadata with
 `scripts/release_native_dependency.py` after `just check`, rebuilds `dist/`, and
 asserts the result. See
 [the release guide](docs/release.md#version-matched-native-dependency).

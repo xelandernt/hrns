@@ -1042,7 +1042,7 @@ def _command_connect(args: SimpleNamespace) -> int:
     if native_executable() is None:
         raise HrnsClientError(
             "The native client is not installed. Install it with "
-            "`python -m pip install hrns-tui`, or run `just native-install` in a source "
+            "`python -m pip install hrns-tui`, or run `just install` in a source "
             "checkout."
         )
     target, reason = _initial_connection(config, args)
