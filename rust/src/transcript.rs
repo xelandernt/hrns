@@ -9,8 +9,6 @@ use unicode_width::UnicodeWidthStr;
 use crate::acp::ToolDisplay;
 use crate::theme::Palette;
 
-const SHELL_PREVIEW_ROWS: usize = 4;
-
 #[derive(PartialEq)]
 pub enum Role {
     User,
@@ -52,7 +50,6 @@ struct Entry {
     detail: Option<String>,
     detail_rows: Vec<Range<usize>>,
     shell: bool,
-    more_output: bool,
     id: Option<String>,
     expanded: bool,
     tool_status: Option<ToolCallStatus>,
@@ -60,6 +57,16 @@ struct Entry {
 }
 
 impl Entry {
+    fn has_detail(&self) -> bool {
+        self.detail
+            .as_ref()
+            .is_some_and(|detail| !detail.is_empty())
+    }
+
+    fn heading_rows(&self) -> usize {
+        usize::from(!matches!(self.role, Role::Note | Role::Tool))
+    }
+
     fn line(&self, mut row: usize, palette: &Palette) -> Line<'_> {
         if let Some(heading) = self.role.label(palette) {
             if row == 0 {
@@ -82,7 +89,14 @@ impl Entry {
                 } else {
                     " ".into()
                 };
-                let mut spans = vec![bullet, " ".into()];
+                let disclosure = if row != 0 || !self.has_detail() {
+                    " "
+                } else if self.expanded {
+                    "▾"
+                } else {
+                    "▸"
+                };
+                let mut spans = vec![bullet, " ".into(), disclosure.fg(palette.muted), " ".into()];
                 if row == 0 {
                     let (verb, subject) = text.split_once(' ').unwrap_or((text, ""));
                     spans.push(verb.fg(palette.foreground).bold());
@@ -144,9 +158,6 @@ impl Entry {
             return Line::raw(text);
         }
         let detail_row = row - self.rows.len();
-        if self.more_output && detail_row == self.detail_rows.len() {
-            return Line::from("    … Ctrl+O for more output").fg(palette.muted);
-        }
         if let Some(detail) = &self.detail
             && let Some(range) = self.detail_rows.get(detail_row)
         {
@@ -235,15 +246,24 @@ fn link(text: &str) -> Option<(&str, &str, &str)> {
     Some((&tail[..close], &rest[..end], &rest[end + 1..]))
 }
 
+enum AnchorRow {
+    Start,
+    Spacer,
+    Text(usize),
+    Detail(usize),
+}
+
 #[derive(Default)]
 pub struct Transcript {
     entries: Vec<Entry>,
     measured: usize,
+    laid_out: usize,
+    viewport_height: usize,
     width: u16,
     total: usize,
     top: usize,
     following: bool,
-    expanded_tools: bool,
+    output_pending: bool,
     show_thoughts: bool,
 }
 
@@ -256,6 +276,7 @@ impl Transcript {
     }
 
     pub fn push(&mut self, role: Role, mut text: String) {
+        self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
         text.retain(|ch| ch == '\n' || !ch.is_control());
         self.entries.push(Entry {
             role,
@@ -265,7 +286,6 @@ impl Transcript {
             detail: None,
             detail_rows: Vec::new(),
             shell: false,
-            more_output: false,
             id: None,
             expanded: false,
             tool_status: None,
@@ -281,6 +301,7 @@ impl Transcript {
             mut detail,
             shell,
         } = display;
+        self.output_pending |= !self.following;
         let mut text = if subject.is_empty() {
             title
         } else {
@@ -320,35 +341,46 @@ impl Transcript {
             detail: Some(detail),
             detail_rows: Vec::new(),
             shell,
-            more_output: false,
             id: Some(id),
-            expanded: self.expanded_tools,
+            expanded: false,
             tool_status: Some(status),
             end: 0,
         });
     }
 
-    pub fn toggle_tools(&mut self) -> bool {
-        self.expanded_tools = !self.expanded_tools;
-        for entry in &mut self.entries {
-            if entry.role == Role::Tool {
-                entry.expanded = self.expanded_tools;
-            }
-        }
-        self.measured = 0;
-        self.total = 0;
-        self.expanded_tools
+    pub fn toggle_tools(&mut self) {
+        self.set_tools_expanded(
+            self.entries
+                .iter()
+                .any(|entry| entry.has_detail() && !entry.expanded),
+        );
     }
 
     pub fn set_tools_expanded(&mut self, expanded: bool) {
-        self.expanded_tools = expanded;
         for entry in &mut self.entries {
             if entry.role == Role::Tool {
                 entry.expanded = expanded;
             }
         }
         self.measured = 0;
-        self.total = 0;
+    }
+
+    pub fn toggle_tool_at(&mut self, row: u16) -> bool {
+        let row = self.top.saturating_add(usize::from(row));
+        let index = self.entries[..self.laid_out].partition_point(|entry| entry.end <= row);
+        if index == self.laid_out {
+            return false;
+        }
+        let start = self.entry_start(index);
+        let entry = &mut self.entries[index];
+        if entry.role != Role::Tool || !entry.has_detail() || row >= start + entry.rows.len() {
+            return false;
+        }
+        entry.expanded = !entry.expanded;
+        self.measured = self.measured.min(index);
+        self.following = false;
+
+        true
     }
 
     pub fn show_thoughts(&mut self, show: bool) {
@@ -359,6 +391,7 @@ impl Transcript {
     }
 
     pub fn append(&mut self, role: Role, mut text: String) {
+        self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
         if let Some(entry) = self.entries.last_mut().filter(|entry| entry.role == role) {
             text.retain(|ch| ch == '\n' || !ch.is_control());
             entry.text.push_str(&text);
@@ -368,9 +401,19 @@ impl Transcript {
         }
     }
 
-    pub fn scroll_up(&mut self) {
-        self.following = false;
-        self.top = self.top.saturating_sub(6);
+    pub fn scroll_page(&mut self, down: bool) {
+        let distance = self.viewport_height.saturating_sub(2).max(1) as i32;
+        self.scroll(if down { distance } else { -distance });
+    }
+
+    pub fn scroll(&mut self, rows: i32) {
+        let end = self.total.saturating_sub(self.viewport_height);
+        self.top = self.top.saturating_add_signed(rows as isize).min(end);
+        if rows > 0 && self.top == end {
+            self.follow();
+        } else {
+            self.following = false;
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -392,51 +435,53 @@ impl Transcript {
 
     fn reset_layout(&mut self) {
         self.measured = 0;
+        self.laid_out = 0;
         self.total = 0;
         self.top = 0;
     }
 
-    fn anchor(&self) -> (usize, usize) {
-        let index = self
-            .entries
-            .partition_point(|entry| entry.end <= self.top)
-            .min(self.entries.len().saturating_sub(1));
-        let Some(entry) = self.entries.get(index) else {
-            return (0, 0);
+    fn anchor(&self) -> Option<(usize, AnchorRow)> {
+        let index = self.entries[..self.laid_out].partition_point(|entry| entry.end <= self.top);
+        let entry = self.entries.get(index)?;
+        let row = self.top.saturating_sub(self.entry_start(index));
+        let anchor = match row.checked_sub(entry.heading_rows()) {
+            Some(row) if row < entry.rows.len() => AnchorRow::Text(entry.rows[row].start),
+            Some(row) => entry
+                .detail_rows
+                .get(row - entry.rows.len())
+                .map_or(AnchorRow::Spacer, |range| AnchorRow::Detail(range.start)),
+            None => AnchorRow::Start,
         };
-        let start = index
-            .checked_sub(1)
-            .map_or(0, |previous| self.entries[previous].end);
-        let row = self.top.saturating_sub(start);
-        let label = usize::from(!matches!(entry.role, Role::Note | Role::Tool));
-        let byte = row
-            .checked_sub(label)
-            .and_then(|row| entry.rows.get(row))
-            .map_or(0, |range| range.start);
-        (index, byte)
+        Some((index, anchor))
     }
 
-    fn restore(&self, (index, byte): (usize, usize)) -> usize {
-        let Some(entry) = self.entries.get(index) else {
-            return self.top;
+    fn restore(&self, (index, anchor): (usize, AnchorRow)) -> usize {
+        let entry = &self.entries[index];
+        let start = self.entry_start(index);
+        if entry.end == start {
+            return start;
+        }
+        let row_at = |rows: &[Range<usize>], byte: usize| {
+            rows.partition_point(|range| range.start <= byte)
+                .saturating_sub(1)
         };
-        let start = index
-            .checked_sub(1)
-            .map_or(0, |previous| self.entries[previous].end);
-        let row = entry
-            .rows
-            .iter()
-            .position(|range| range.start <= byte && byte < range.end.max(range.start + 1))
-            .unwrap_or_else(|| entry.rows.len().saturating_sub(1));
-        start + usize::from(!matches!(entry.role, Role::Note | Role::Tool)) + row
-    }
-
-    pub fn scroll_down(&mut self) {
-        self.top = self.top.saturating_add(6);
+        match anchor {
+            AnchorRow::Spacer => entry.end.saturating_sub(1),
+            AnchorRow::Text(byte) => start + entry.heading_rows() + row_at(&entry.rows, byte),
+            AnchorRow::Detail(byte) if !entry.detail_rows.is_empty() => {
+                start + entry.heading_rows() + entry.rows.len() + row_at(&entry.detail_rows, byte)
+            }
+            _ => start,
+        }
     }
 
     pub fn follow(&mut self) {
         self.following = true;
+        self.output_pending = false;
+    }
+
+    pub fn output_pending(&self) -> bool {
+        self.output_pending
     }
 
     fn entry_start(&self, index: usize) -> usize {
@@ -488,7 +533,7 @@ impl Transcript {
             self.measure();
         }
         let entry = &self.entries[index];
-        let label = usize::from(!matches!(entry.role, Role::Note | Role::Tool));
+        let label = entry.heading_rows();
         let row = if in_text {
             entry
                 .rows
@@ -519,21 +564,26 @@ impl Transcript {
         if width == 0 || height == 0 {
             return Vec::new();
         }
+        let reflow = self.width != width || self.measured < self.entries.len();
+        let anchor = if reflow && !self.following {
+            self.anchor()
+        } else {
+            None
+        };
         if self.width != width {
-            let anchor = (!self.following).then(|| self.anchor());
             self.width = width;
             self.measured = 0;
-            self.measure();
-            if let Some(anchor) = anchor {
-                self.top = self.restore(anchor);
-            }
-        } else {
-            self.measure();
         }
-        let end = self.total.saturating_sub(usize::from(height));
-        if self.following || self.top >= end {
+        self.viewport_height = usize::from(height);
+        self.measure();
+        if let Some(anchor) = anchor {
+            self.top = self.restore(anchor);
+        }
+        let end = self.total.saturating_sub(self.viewport_height);
+        if self.following {
             self.top = end;
-            self.follow();
+        } else {
+            self.top = self.top.min(end);
         }
 
         let mut row = self.top;
@@ -569,15 +619,15 @@ impl Transcript {
             if matches!(entry.role, Role::Agent | Role::Thought) {
                 (entry.rows, entry.code_rows) = wrap_markdown(&entry.text, width);
             } else {
-                let indent = if matches!(entry.role, Role::Tool | Role::Command(_)) {
-                    2
-                } else {
-                    0
+                let indent = match entry.role {
+                    Role::Tool => 4,
+                    Role::Command(_) => 2,
+                    _ => 0,
                 };
                 entry.rows = wrap(&entry.text, width.saturating_sub(indent).max(1));
                 entry.code_rows.clear();
             }
-            entry.detail_rows = if entry.expanded || entry.shell {
+            entry.detail_rows = if entry.expanded {
                 let indent = if entry.shell { 4 } else { 2 };
                 entry.detail.as_deref().map_or_else(Vec::new, |detail| {
                     wrap(detail, width.saturating_sub(indent).max(1))
@@ -585,19 +635,11 @@ impl Transcript {
             } else {
                 Vec::new()
             };
-            entry.more_output =
-                entry.shell && !entry.expanded && entry.detail_rows.len() > SHELL_PREVIEW_ROWS;
-            if entry.more_output {
-                entry.detail_rows.truncate(SHELL_PREVIEW_ROWS);
-            }
-            end += entry.rows.len()
-                + entry.detail_rows.len()
-                + usize::from(entry.more_output)
-                + 1
-                + usize::from(!matches!(entry.role, Role::Note | Role::Tool));
+            end += entry.rows.len() + entry.detail_rows.len() + 1 + entry.heading_rows();
             entry.end = end;
         }
         self.measured = self.entries.len();
+        self.laid_out = self.measured;
         self.total = end;
     }
 }

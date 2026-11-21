@@ -24,8 +24,8 @@ impl App {
                     "Agent  /skills · /agent <command>".to_owned(),
                     String::new(),
                     "Tab  Complete a command or argument".to_owned(),
-                    "Ctrl+O  Expand or collapse tool details".to_owned(),
-                    "PgUp / PgDn  Scroll the transcript".to_owned(),
+                    "Click a tool  Expand or collapse its output (Ctrl+O for all)".to_owned(),
+                    "Wheel / PgUp / PgDn  Scroll the transcript".to_owned(),
                     "Esc  Close a picker or cancel the turn".to_owned(),
                 ];
                 commands.extend(
@@ -462,12 +462,11 @@ impl App {
             .map(options::summary)
             .unwrap_or_else(|| "none advertised".into());
         let text = format!(
-            "theme {} · /theme <name>\npermissions {} · /permissions <mode>\nclient I/O {} (applies to the next connection)\nsidebar {} · tools {} · thoughts {}\nworkspace {}\nsession {}\nmodel {model}\n/settings theme <name> · permissions <ask|reads|all> · sidebar on|off · tools on|off · thoughts on|off",
+            "theme {} · /theme <name>\npermissions {} · /permissions <mode>\nclient I/O {} (applies to the next connection)\nsidebar {} · thoughts {}\nworkspace {}\nsession {}\nmodel {model}\n/settings theme <name> · permissions <ask|reads|all> · sidebar on|off · tools on|off · thoughts on|off",
             self.theme,
             self.approval_mode.label(),
             self.client_io.label(),
             on_off(self.preferences.sidebar),
-            on_off(self.preferences.expand_tools),
             on_off(self.preferences.show_thoughts),
             self.workspace.as_deref().unwrap_or("none"),
             self.session
@@ -518,20 +517,12 @@ impl App {
                 }
             }
             ("tools", Some(value)) => {
-                if let Some(value) = parse_on_off(value)
-                    && value != self.preferences.expand_tools
-                {
-                    self.toggle_tools_setting();
+                if let Some(value) = parse_on_off(value) {
+                    self.transcript.set_tools_expanded(value);
                 }
             }
             _ => self.print_settings(),
         }
-    }
-
-    fn toggle_tools_setting(&mut self) {
-        let expanded = self.transcript.toggle_tools();
-        self.preferences.expand_tools = expanded;
-        self.save_preferences();
     }
 
     pub(super) fn set_config(

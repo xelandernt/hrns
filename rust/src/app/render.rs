@@ -123,6 +123,7 @@ impl App {
             header,
         );
 
+        self.transcript_area = transcript;
         let visible = self
             .transcript
             .visible(transcript.width, transcript.height, &palette);
@@ -219,10 +220,12 @@ impl App {
             " type to answer · 1-9 choose · Enter next · Esc decline"
         } else if self.approvals.front().is_some() {
             " 1-9 choose · y allow · a always · n reject · N always reject · Esc cancel"
+        } else if self.transcript.output_pending() {
+            " New output below · Ctrl+End"
         } else if self.status == "Disconnected" {
             " Ctrl-R reconnect · draft is kept · Ctrl-B panel"
         } else {
-            " Enter send · Shift+Enter newline · Tab complete · PgUp/PgDn scroll · Esc cancel · Ctrl-O tools · Ctrl-B panel · Ctrl-R reconnect"
+            "Enter send · Wheel scroll · Click a tool for output · /help commands"
         };
         frame.render_widget(
             Paragraph::new(help_text).style(Style::default().fg(palette.muted)),

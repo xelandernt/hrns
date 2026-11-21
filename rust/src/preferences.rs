@@ -36,7 +36,6 @@ impl ApprovalMode {
 pub struct Preferences {
     pub sidebar: bool,
     pub sidebar_width: u16,
-    pub expand_tools: bool,
     pub show_thoughts: bool,
     pub theme: Option<String>,
     pub permission_mode: Option<ApprovalMode>,

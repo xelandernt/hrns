@@ -6,9 +6,13 @@ use std::time::Duration;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
 use crossterm::clipboard::CopyToClipboard;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    MouseButton, MouseEventKind,
+};
 use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::channel::mpsc;
+use ratatui::layout::Position;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -208,7 +212,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut app = App::new(destination, action_tx, crate::preferences::load(), startup);
     let result = (|| -> io::Result<()> {
-        crossterm::execute!(stdout(), EnableBracketedPaste)?;
+        crossterm::execute!(stdout(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut dirty = true;
         loop {
             for _ in 0..256 {
@@ -260,13 +264,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     app.paste(&text);
                     dirty = true;
                 }
+                TerminalEvent::Mouse(mouse) if mouse.modifiers.is_empty() => {
+                    let position = Position::new(mouse.column, mouse.row);
+                    dirty |= match mouse.kind {
+                        MouseEventKind::ScrollUp => app.pointer_scroll(position, -3),
+                        MouseEventKind::ScrollDown => app.pointer_scroll(position, 3),
+                        MouseEventKind::Down(MouseButton::Left) => app.pointer_click(position),
+                        _ => false,
+                    };
+                }
                 TerminalEvent::Resize(_, _) => dirty = true,
                 _ => {}
             }
         }
         Ok(())
     })();
-    let paste = crossterm::execute!(stdout(), DisableBracketedPaste);
+    let paste = crossterm::execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     let restore = ratatui::try_restore();
     let _ = shutdown.unbounded_send(());
     let _ = worker.join();
@@ -518,6 +531,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Left => Some(Key::Left),
         KeyCode::Right => Some(Key::Right),
         KeyCode::Home => Some(Key::Home),
+        KeyCode::End if key.modifiers == KeyModifiers::CONTROL => Some(Key::LatestOutput),
         KeyCode::End => Some(Key::End),
         KeyCode::Up => Some(Key::HistoryUp),
         KeyCode::Down => Some(Key::HistoryDown),

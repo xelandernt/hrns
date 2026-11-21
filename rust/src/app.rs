@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{ElicitationContentValue, SessionConfigOption, ToolKind};
 use futures::channel::{mpsc, oneshot};
+use ratatui::layout::{Position, Rect};
 
 use crate::acp::{
     Action, ClientIoMode, ConnectTarget, Event, ExecutionState, ExecutionStatus, PermissionRequest,
@@ -62,6 +63,7 @@ pub enum Key {
     HistoryDown,
     ScrollUp,
     ScrollDown,
+    LatestOutput,
     Tab,
     ToggleTools,
     ToggleSidebar,
@@ -152,6 +154,7 @@ pub struct App {
     queue_paused: bool,
     draft: Composer,
     transcript: Transcript,
+    transcript_area: Rect,
     approvals: VecDeque<PermissionRequest>,
     elicitations: VecDeque<PendingElicitation>,
     mcp_consent: VecDeque<PendingMcpConsent>,
@@ -186,7 +189,6 @@ impl App {
         startup: Startup,
     ) -> Self {
         let mut transcript = Transcript::new();
-        transcript.set_tools_expanded(preferences.expand_tools);
         transcript.show_thoughts(preferences.show_thoughts);
         let theme = preferences
             .theme
@@ -220,6 +222,7 @@ impl App {
             queue_paused: false,
             draft: Composer::default(),
             transcript,
+            transcript_area: Rect::default(),
             approvals: VecDeque::new(),
             elicitations: VecDeque::new(),
             mcp_consent: VecDeque::new(),
@@ -805,6 +808,33 @@ impl App {
         let _ = self.actions.unbounded_send(Action::DeleteSession(id));
     }
 
+    #[cfg(target_family = "wasm")]
+    pub fn transcript_page_height(&self) -> f64 {
+        f64::from(self.transcript_area.height.saturating_sub(2).max(1))
+    }
+
+    pub fn pointer_scroll(&mut self, position: Position, rows: i32) -> bool {
+        if self.picker.is_some()
+            || self.providers.is_some()
+            || !self.transcript_area.contains(position)
+        {
+            return false;
+        }
+        self.transcript.scroll(rows);
+        true
+    }
+
+    pub fn pointer_click(&mut self, position: Position) -> bool {
+        if self.picker.is_some()
+            || self.providers.is_some()
+            || !self.transcript_area.contains(position)
+        {
+            return false;
+        }
+        self.transcript
+            .toggle_tool_at(position.y - self.transcript_area.y)
+    }
+
     pub fn key(&mut self, key: Key) {
         if self.mcp_consent.front().is_some() {
             self.mcp_consent_key(key);
@@ -903,13 +933,10 @@ impl App {
             Key::End => self.draft.end(),
             Key::HistoryUp => self.draft.recall(true),
             Key::HistoryDown => self.draft.recall(false),
-            Key::ScrollUp => self.transcript.scroll_up(),
-            Key::ScrollDown => self.transcript.scroll_down(),
-            Key::ToggleTools => {
-                let expanded = self.transcript.toggle_tools();
-                self.preferences.expand_tools = expanded;
-                self.save_preferences();
-            }
+            Key::ScrollUp => self.transcript.scroll_page(false),
+            Key::ScrollDown => self.transcript.scroll_page(true),
+            Key::LatestOutput => self.transcript.follow(),
+            Key::ToggleTools => self.transcript.toggle_tools(),
             Key::ToggleSidebar => self.toggle_sidebar(),
             Key::Reconnect => self.reconnect(),
             Key::Escape if self.turns > 0 || self.remote_busy() => {

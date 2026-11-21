@@ -6,11 +6,15 @@ use std::rc::Rc;
 use agent_client_protocol::Channel;
 use futures::{StreamExt, channel::mpsc};
 use ratatui::Terminal;
+use ratatui::layout::Position;
 use ratzilla::backend::canvas::CanvasBackendOptions;
-use ratzilla::{CanvasBackend, WebRenderer};
+use ratzilla::event::{MouseButton, MouseEventKind};
+use ratzilla::{CanvasBackend, CellSized, WebRenderer};
 use wasm_bindgen::{JsCast, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, window};
+use web_sys::{
+    ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, WheelEvent, window,
+};
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
 use crate::acp::{self, ClientIoMode, Connection, Event, Services, SessionTarget};
@@ -36,8 +40,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         startup,
     )));
     let backend = CanvasBackend::new_with_options(CanvasBackendOptions::new().grid_id("terminal"))?;
-    let terminal = Terminal::new(backend)?;
-    bind_input(Rc::clone(&app), requests_tx.clone())?;
+    let cell_size = backend.cell_size_css_px();
+    let mut terminal = Terminal::new(backend)?;
+    let pointer_app = Rc::clone(&app);
+    terminal.on_mouse_event(move |event| {
+        if event.kind == MouseEventKind::SingleClick(MouseButton::Left) {
+            pointer_app
+                .borrow_mut()
+                .pointer_click(Position::new(event.col, event.row));
+        }
+    })?;
+    bind_input(Rc::clone(&app), requests_tx.clone(), cell_size)?;
     terminal.draw_web(move |frame| {
         let mut app = app.borrow_mut();
         for _ in 0..256 {
@@ -266,12 +279,14 @@ fn message_text(message: WsMessage) -> Result<Option<String>, String> {
 fn bind_input(
     app: Rc<RefCell<App>>,
     requests: mpsc::UnboundedSender<Connection>,
+    cell_size: (f32, f32),
 ) -> io::Result<()> {
     let terminal = window()
         .and_then(|window| window.document())
         .and_then(|document| document.get_element_by_id("terminal"))
         .and_then(|element| element.dyn_into::<HtmlElement>().ok())
         .ok_or_else(|| io::Error::other("Terminal element unavailable"))?;
+    bind_wheel(&terminal, Rc::clone(&app), cell_size)?;
     let input = bind_file_chooser(Rc::clone(&app))?;
     let keyboard = {
         let app = Rc::clone(&app);
@@ -331,6 +346,52 @@ fn bind_input(
         .map_err(|_| io::Error::other("Could not bind terminal clipboard input"))?;
     paste.forget();
     let _ = terminal.focus();
+    Ok(())
+}
+
+fn bind_wheel(
+    terminal: &HtmlElement,
+    app: Rc<RefCell<App>>,
+    (width, height): (f32, f32),
+) -> io::Result<()> {
+    let canvas = terminal
+        .query_selector("canvas")
+        .ok()
+        .flatten()
+        .ok_or_else(|| io::Error::other("Terminal canvas unavailable"))?;
+    let mut remainder = 0.0;
+    let wheel = Closure::<dyn FnMut(WheelEvent)>::new(move |event: WheelEvent| {
+        if event.ctrl_key() || event.delta_y() == 0.0 {
+            return;
+        }
+        // Ratzilla's canvas draws the terminal grid five CSS pixels inside the element.
+        let x = f64::from(event.offset_x() - 5) / f64::from(width);
+        let y = f64::from(event.offset_y() - 5) / f64::from(height);
+        if x < 0.0 || y < 0.0 {
+            return;
+        }
+        let delta = match event.delta_mode() {
+            WheelEvent::DOM_DELTA_LINE => event.delta_y(),
+            WheelEvent::DOM_DELTA_PAGE => event.delta_y() * app.borrow().transcript_page_height(),
+            _ => event.delta_y() / f64::from(height),
+        };
+        remainder += delta;
+        let rows = remainder.trunc() as i32;
+        if rows == 0 {
+            return;
+        }
+        remainder -= f64::from(rows);
+        if app
+            .borrow_mut()
+            .pointer_scroll(Position::new(x as u16, y as u16), rows)
+        {
+            event.prevent_default();
+        }
+    });
+    canvas
+        .add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())
+        .map_err(|_| io::Error::other("Could not bind the terminal wheel"))?;
+    wheel.forget();
     Ok(())
 }
 
@@ -406,6 +467,7 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
         "ArrowLeft" => Some(Key::Left),
         "ArrowRight" => Some(Key::Right),
         "Home" => Some(Key::Home),
+        "End" if event.ctrl_key() => Some(Key::LatestOutput),
         "End" => Some(Key::End),
         "ArrowUp" => Some(Key::HistoryUp),
         "ArrowDown" => Some(Key::HistoryDown),

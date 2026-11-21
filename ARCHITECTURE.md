@@ -169,11 +169,12 @@ Transcript entries keep their plain text for search and copy. Agent and thought
 entries render a small Markdown subset at draw time: fenced code, inline code,
 emphasis, links and headings. User and note entries stay literal. ACP tool
 calls are keyed by `tool_call_id`, merged from start and progress updates, and
-shown with their current status. `Ctrl-O` expands or collapses their content,
-diffs, terminal references and raw input and output. Rows are measured lazily.
-Scrolling anchors to the entry and byte offset, so streaming, a width change or
-toggling tool details keeps the reader near the same text; reaching the bottom
-resumes follow mode.
+shown as compact rows with status markers and disclosure arrows. Click a tool
+header to expand or collapse its output. `Ctrl-O` toggles details in bulk for
+the current transcript. New tool calls start collapsed. The transcript tracks
+the visible entry and byte offset through streaming, resize and expansion.
+The wheel scrolls by rows, Page Up and Page Down move by the viewport height,
+and scrolling down to the latest output resumes follow mode.
 
 Composer completion reads the draft. A first token starting with `/` offers the
 local commands, while a `$token` offers user-invocable skills from the agent's
@@ -188,7 +189,7 @@ native reads paths while the browser opens its file chooser.
 session title, model, mode, permission mode, usage, cost, plan, local queue,
 skills and recent activity. `Ctrl-O` expands tool details and the sidebar
 records tool transitions and turn outcomes. Both frontends persist sidebar,
-width, tool expansion, reasoning visibility, theme and permission mode without
+width, reasoning visibility, theme and permission mode without
 touching connection configuration: native writes JSON under
 `$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
 local storage. The sidebar is suppressed below 96 columns; the header keeps the
@@ -249,9 +250,9 @@ the current ACP config options, and offers built-in options for `/theme`,
 
 Tool entries use ACP kind, location and arguments to summarize each operation.
 Expanding an entry group with Ctrl+O reveals formatted arguments, results,
-diffs, and terminal references. Shell entries show the command and a short
-multiline output preview. The shell's exit record supplies the failure status
-when available. The transcript retains reasoning chunks
+diffs, and terminal references. Shell entries show the command and expose
+multiline output on expansion. The shell's exit record supplies the failure
+status when available. The transcript retains reasoning chunks
 independently of assistant replies. `/thoughts` controls their visibility
 during streaming and replay. The transcript uses titled panels for command
 output such as `/help` and `/settings`.
