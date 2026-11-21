@@ -244,8 +244,9 @@ their own store.
 
 `/models` searches the advertised model choices and marks the current model.
 The reasoning picker opens after model selection when the agent advertises
-effort choices. The composer also completes arguments for `/model` and `/effort`
-from the current ACP config options.
+effort choices. The composer completes `/model` and `/effort` arguments from
+the current ACP config options, and offers built-in options for `/theme`,
+`/permissions` and `/provider`.
 
 Tool entries use ACP kind, location and arguments to summarize each operation.
 Expanding an entry group with Ctrl+O reveals formatted arguments, results,

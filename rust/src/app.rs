@@ -279,6 +279,8 @@ impl App {
                 self.session = Some(session);
                 self.ready = true;
                 self.status = "Connected";
+                self.load_waiting_sessions();
+                self.refresh_completion();
                 self.activity.push_back("connected".into());
                 self.trim_activity();
                 self.update_execution();
@@ -1008,39 +1010,85 @@ impl App {
 
     fn refresh_completion(&mut self) {
         let input = self.draft.text();
-        let arguments = input.split_once(' ').and_then(|(command, prefix)| {
-            let category = match command {
-                "/effort" => {
-                    agent_client_protocol::v1::schema::SessionConfigOptionCategory::ThoughtLevel
-                }
-                "/model" | "/models" => {
-                    agent_client_protocol::v1::schema::SessionConfigOptionCategory::Model
-                }
-                _ => return None,
-            };
-            let option = self
-                .options
+        self.completion = self
+            .argument_suggestions(input)
+            .or_else(|| suggestions(input, &self.skills))
+            .map(|items| Completion { items, selected: 0 });
+    }
+
+    fn argument_suggestions(&self, input: &str) -> Option<Vec<Suggestion>> {
+        use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
+
+        let (command, prefix) = input.split_once(' ')?;
+        let prefix = prefix.to_ascii_lowercase();
+        let choices: Vec<(String, String)> = match command {
+            "/theme" => theme::NAMES
                 .iter()
-                .find(|option| crate::options::matches_category(option, &category))?;
-            let items: Vec<_> = crate::options::choices(option)
-                .into_iter()
-                .filter_map(|choice| {
-                    let value = choice.value.to_string();
-                    (value != prefix && value.to_lowercase().starts_with(&prefix.to_lowercase()))
-                        .then(|| Suggestion {
-                            insert: format!("{command} {value}"),
-                            description: choice
+                .map(|name| (name.to_string(), "Terminal theme".into()))
+                .collect(),
+            "/permissions" => [
+                ("ask", "Ask before approving tools"),
+                ("reads", "Approve read-only tools"),
+                ("all", "Approve all tools"),
+            ]
+            .into_iter()
+            .map(|(value, description)| (value.into(), description.into()))
+            .collect(),
+            "/provider" if self.provider_editor => [
+                ("add", "Add a provider"),
+                ("edit", "Edit a provider"),
+                ("remove", "Remove a provider"),
+            ]
+            .into_iter()
+            .map(|(value, description)| (value.into(), description.into()))
+            .collect(),
+            "/provider" => [
+                ("set", "Set a provider route"),
+                ("disable", "Disable a provider route"),
+            ]
+            .into_iter()
+            .map(|(value, description)| (value.into(), description.into()))
+            .collect(),
+            "/effort" | "/model" | "/models" => {
+                let category = if command == "/effort" {
+                    SessionConfigOptionCategory::ThoughtLevel
+                } else {
+                    SessionConfigOptionCategory::Model
+                };
+                let option = self
+                    .options
+                    .iter()
+                    .find(|option| crate::options::matches_category(option, &category))?;
+                crate::options::choices(option)
+                    .into_iter()
+                    .map(|choice| {
+                        (
+                            choice.value.to_string(),
+                            choice
                                 .description
                                 .clone()
                                 .unwrap_or_else(|| choice.name.clone()),
-                        })
-                })
-                .collect();
-            (!items.is_empty()).then_some(items)
-        });
-        self.completion = arguments
-            .or_else(|| suggestions(input, &self.skills))
-            .map(|items| Completion { items, selected: 0 });
+                        )
+                    })
+                    .collect()
+            }
+            _ => return None,
+        };
+        let items: Vec<_> = choices
+            .into_iter()
+            .filter(|(value, _)| {
+                !value.eq_ignore_ascii_case(&prefix)
+                    && value.to_ascii_lowercase().starts_with(&prefix)
+            })
+            .map(|(value, description)| {
+                let suffix = if command == "/provider" { " " } else { "" };
+                Suggestion {
+                    insert: format!("{command} {value}{suffix}"),
+                    description,
+                }
+            })
+            .collect();
+        (!items.is_empty()).then_some(items)
     }
 
     pub fn toggle_sidebar(&mut self) {

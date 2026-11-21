@@ -94,6 +94,15 @@ impl App {
         self.request_sessions(false);
     }
 
+    pub(super) fn load_waiting_sessions(&mut self) {
+        if matches!(
+            self.picker.as_ref().map(|picker| &picker.source),
+            Some(Source::Sessions { loading: true, .. })
+        ) {
+            self.request_sessions(false);
+        }
+    }
+
     fn request_sessions(&mut self, next: bool) {
         let Some(Picker {
             source:
@@ -110,6 +119,11 @@ impl App {
             return;
         };
         self.session_request = self.session_request.wrapping_add(1);
+        if !self.ready && matches!(self.status, "Connecting" | "Reconnecting") {
+            *loading = true;
+            *error = None;
+            return;
+        }
         *loading = self.ready
             && self
                 .actions
