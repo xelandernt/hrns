@@ -45,7 +45,7 @@ def build_agent(
     so ACP can turn it into a permission request. Pass ``approval=False`` to
     disable that policy.
     """
-    selected = model or os.environ.get("HRNS_MODEL")
+    selected = model if _allow_unconfigured else model or os.environ.get("HRNS_MODEL")
     if selected is None and not _allow_unconfigured:
         raise ValueError("Pass model= or set HRNS_MODEL to a Pydantic AI model id.")
 
