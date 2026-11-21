@@ -222,10 +222,7 @@ pub enum Event {
     SessionDeleted(String),
     Tool {
         id: String,
-        title: String,
-        subject: String,
-        status: ToolCallStatus,
-        detail: String,
+        display: ToolDisplay,
     },
     UserChunk(String),
     Chunk(String),
@@ -1140,6 +1137,14 @@ fn content_text(block: &ContentBlock) -> Option<String> {
     }
 }
 
+pub struct ToolDisplay {
+    pub title: String,
+    pub subject: String,
+    pub status: ToolCallStatus,
+    pub detail: String,
+    pub shell: bool,
+}
+
 #[derive(Default)]
 struct ToolState {
     title: String,
@@ -1177,13 +1182,90 @@ impl ToolState {
     }
 
     fn event(&self, id: &str) -> Event {
-        let (title, subject) = self.summary();
+        let display = if self.is_shell() {
+            self.shell_display()
+        } else {
+            let (title, subject) = self.summary();
+            ToolDisplay {
+                title,
+                subject,
+                status: self.status,
+                detail: capped_tool_detail(self.detail()),
+                shell: false,
+            }
+        };
         Event::Tool {
             id: id.to_owned(),
-            title,
+            display,
+        }
+    }
+
+    fn is_shell(&self) -> bool {
+        self.kind == Some(ToolKind::Execute)
+            || matches!(
+                self.title.as_str(),
+                "shell" | "bash" | "terminal" | "execute" | "run_command"
+            )
+    }
+
+    fn shell_display(&self) -> ToolDisplay {
+        let (_, fallback) = self.summary();
+        let command = self
+            .raw_input
+            .as_ref()
+            .and_then(|input| {
+                input
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        let parsed =
+                            serde_json::from_str::<serde_json::Value>(input.as_str()?).ok()?;
+                        parsed.get("command")?.as_str().map(str::to_owned)
+                    })
+            })
+            .unwrap_or(fallback);
+        let content: Vec<_> = self
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ToolCallContent::Content(content) => content_text(&content.content),
+                ToolCallContent::Terminal(terminal) => {
+                    Some(format!("Terminal {}", terminal.terminal_id))
+                }
+                _ => None,
+            })
+            .collect();
+        let raw = self.raw_output.as_ref();
+        let detail = if content.is_empty() {
+            raw.map_or_else(String::new, pretty_tool_value)
+        } else {
+            content.join("\n")
+        };
+        let (output, exit_code) = shell_result(&detail);
+        let status = if self.status == ToolCallStatus::Completed
+            && exit_code.is_some_and(|code| code != 0)
+        {
+            ToolCallStatus::Failed
+        } else {
+            self.status
+        };
+        let title = match status {
+            ToolCallStatus::Pending => "Queued",
+            ToolCallStatus::InProgress => "Running",
+            ToolCallStatus::Failed if exit_code.is_none() => "Failed",
+            _ => "Ran",
+        };
+        let subject = match exit_code {
+            Some(code) if code != 0 => format!("{command}  (exit {code})"),
+            _ => command,
+        };
+        ToolDisplay {
+            title: title.into(),
             subject,
-            status: self.status,
-            detail: self.detail(),
+            status,
+            detail: capped_tool_detail(output.to_owned()),
+            shell: true,
         }
     }
 
@@ -1293,13 +1375,49 @@ impl ToolState {
         } else if let Some(output) = &self.raw_output {
             detail.push(format!("Output\n{}", pretty_tool_value(output)));
         }
-        let detail = detail.join("\n");
-        let mut clipped: String = detail.chars().take(12_000).collect();
-        if clipped.len() < detail.len() {
-            clipped.push_str("\n… output truncated");
-        }
-        clipped
+        detail.join("\n")
     }
+}
+
+// The workspace shell ends a completed result with its supervisor handles and exit record.
+fn shell_result(text: &str) -> (&str, Option<i64>) {
+    let text = text.trim_end();
+    let Some((handles, exit)) = text.rsplit_once('\n') else {
+        return (text, None);
+    };
+    let Some(exit) = serde_json::from_str::<serde_json::Value>(exit).ok() else {
+        return (text, None);
+    };
+    let (output, trailer) = handles
+        .rsplit_once("\nPID: ")
+        .unwrap_or(("", handles.strip_prefix("PID: ").unwrap_or("")));
+    let mut lines = trailer.lines();
+    let pid = lines
+        .next()
+        .and_then(|line| line.split_once(" (supervisor; use `"))
+        .and_then(|(pid, _)| pid.parse::<u64>().ok());
+    if pid.is_some()
+        && exit.get("pid").and_then(serde_json::Value::as_u64) == pid
+        && lines
+            .next()
+            .is_some_and(|line| line.starts_with("Output: "))
+        && lines
+            .next()
+            .is_some_and(|line| line.starts_with("Status: "))
+        && lines.next().is_none()
+        && let Some(code) = exit.get("exit_code").and_then(serde_json::Value::as_i64)
+    {
+        return (output, Some(code));
+    }
+    (text, None)
+}
+
+fn capped_tool_detail(detail: String) -> String {
+    let mut clipped: String = detail.chars().take(12_000).collect();
+    if clipped.len() < detail.len() {
+        clipped.push_str("\n… output truncated");
+    }
+    clipped
 }
 
 fn pretty_tool_value(value: &serde_json::Value) -> String {

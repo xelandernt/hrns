@@ -250,7 +250,9 @@ the current ACP config options, and offers built-in options for `/theme`,
 
 Tool entries use ACP kind, location and arguments to summarize each operation.
 Expanding an entry group with Ctrl+O reveals formatted arguments, results,
-diffs, and terminal references. The transcript retains reasoning chunks
+diffs, and terminal references. Shell entries show the command and a short
+multiline output preview. The shell's exit record supplies the failure status
+when available. The transcript retains reasoning chunks
 independently of assistant replies. `/thoughts` controls their visibility
 during streaming and replay. The transcript uses titled panels for command
 output such as `/help` and `/settings`.

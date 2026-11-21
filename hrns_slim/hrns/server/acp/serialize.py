@@ -57,6 +57,22 @@ def jsonable(value: object) -> object:
     return to_jsonable_python(value, fallback=str, bytes_mode="base64")
 
 
+def bounded_shell_output(text: str) -> str:
+    """Preserve line breaks and the shell's exit record within the ACP field budget."""
+    budget = MAX_RAW_FIELD_CHARS - 2  # JSON string delimiters.
+    marker = "[… earlier output truncated]\n"
+    tail_budget = budget - sum(map(_escaped_len, marker))
+    size = 0
+    tail_start = len(text)
+    for start in range(len(text) - 1, -1, -1):
+        size += _escaped_len(text[start])
+        if size > budget:
+            return marker + text[tail_start:]
+        if size <= tail_budget:
+            tail_start = start
+    return text
+
+
 def bounded_jsonable(value: object) -> object:
     """``jsonable``, but replace an oversized payload with a truncated marker."""
     payload = jsonable(value)

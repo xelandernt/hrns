@@ -6,7 +6,10 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::acp::ToolDisplay;
 use crate::theme::Palette;
+
+const SHELL_PREVIEW_ROWS: usize = 4;
 
 #[derive(PartialEq)]
 pub enum Role {
@@ -48,6 +51,8 @@ struct Entry {
     code_rows: Vec<bool>,
     detail: Option<String>,
     detail_rows: Vec<Range<usize>>,
+    shell: bool,
+    more_output: bool,
     id: Option<String>,
     expanded: bool,
     tool_status: Option<ToolCallStatus>,
@@ -83,10 +88,20 @@ impl Entry {
                     spans.push(verb.fg(palette.foreground).bold());
                     if !subject.is_empty() {
                         spans.push(" ".into());
-                        spans.push(subject.fg(palette.muted));
+                        let color = if self.shell {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        };
+                        spans.push(subject.fg(color));
                     }
                 } else {
-                    spans.push(text.fg(palette.muted));
+                    let color = if self.shell {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    };
+                    spans.push(text.fg(color));
                 }
                 return Line::from(spans);
             }
@@ -129,10 +144,17 @@ impl Entry {
             return Line::raw(text);
         }
         let detail_row = row - self.rows.len();
+        if self.more_output && detail_row == self.detail_rows.len() {
+            return Line::from("    … Ctrl+O for more output").fg(palette.muted);
+        }
         if let Some(detail) = &self.detail
             && let Some(range) = self.detail_rows.get(detail_row)
         {
             let text = &detail[range.clone()];
+            if self.shell {
+                let prefix = if detail_row == 0 { "  ↳ " } else { "    " };
+                return Line::from(vec![prefix.fg(palette.border), text.fg(palette.muted)]);
+            }
             let start = detail[..range.start]
                 .rfind('\n')
                 .map_or(0, |index| index + 1);
@@ -242,6 +264,8 @@ impl Transcript {
             code_rows: Vec::new(),
             detail: None,
             detail_rows: Vec::new(),
+            shell: false,
+            more_output: false,
             id: None,
             expanded: false,
             tool_status: None,
@@ -249,22 +273,27 @@ impl Transcript {
         });
     }
 
-    pub fn tool(
-        &mut self,
-        id: String,
-        title: String,
-        subject: String,
-        status: ToolCallStatus,
-        mut detail: String,
-    ) {
+    pub fn tool(&mut self, id: String, display: ToolDisplay) {
+        let ToolDisplay {
+            title,
+            subject,
+            status,
+            mut detail,
+            shell,
+        } = display;
         let mut text = if subject.is_empty() {
             title
         } else {
             format!("{title} {subject}")
         };
-        text.retain(|ch| !ch.is_control() || ch.is_whitespace());
-        text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if status != ToolCallStatus::Completed {
+        if shell {
+            text.retain(|ch| matches!(ch, '\n' | '\t') || !ch.is_control());
+            text = text.replace('\t', "    ");
+        } else {
+            text.retain(|ch| !ch.is_control() || ch.is_whitespace());
+            text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        }
+        if !shell && status != ToolCallStatus::Completed {
             text.push_str("  ·  ");
             text.push_str(crate::acp::status_label(status));
         }
@@ -278,6 +307,7 @@ impl Transcript {
             let entry = &mut self.entries[index];
             entry.text = text;
             entry.tool_status = Some(status);
+            entry.shell = shell;
             entry.detail = Some(detail);
             self.measured = self.measured.min(index);
             return;
@@ -289,6 +319,8 @@ impl Transcript {
             code_rows: Vec::new(),
             detail: Some(detail),
             detail_rows: Vec::new(),
+            shell,
+            more_output: false,
             id: Some(id),
             expanded: self.expanded_tools,
             tool_status: Some(status),
@@ -545,15 +577,22 @@ impl Transcript {
                 entry.rows = wrap(&entry.text, width.saturating_sub(indent).max(1));
                 entry.code_rows.clear();
             }
-            entry.detail_rows = if entry.expanded {
+            entry.detail_rows = if entry.expanded || entry.shell {
+                let indent = if entry.shell { 4 } else { 2 };
                 entry.detail.as_deref().map_or_else(Vec::new, |detail| {
-                    wrap(detail, usize::from(self.width).saturating_sub(2).max(1))
+                    wrap(detail, width.saturating_sub(indent).max(1))
                 })
             } else {
                 Vec::new()
             };
+            entry.more_output =
+                entry.shell && !entry.expanded && entry.detail_rows.len() > SHELL_PREVIEW_ROWS;
+            if entry.more_output {
+                entry.detail_rows.truncate(SHELL_PREVIEW_ROWS);
+            }
             end += entry.rows.len()
                 + entry.detail_rows.len()
+                + usize::from(entry.more_output)
                 + 1
                 + usize::from(!matches!(entry.role, Role::Note | Role::Tool));
             entry.end = end;

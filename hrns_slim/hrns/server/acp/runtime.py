@@ -92,7 +92,7 @@ from .presentation import (
     default_coding_presenter,
 )
 from .providers import ProviderDisabled
-from .serialize import bounded_jsonable, chunk_text, jsonable
+from .serialize import bounded_jsonable, bounded_shell_output, chunk_text, jsonable
 from .session import (
     AcpSession,
     AcpSessionConfig,
@@ -1141,7 +1141,11 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 updates.update_tool_call(
                     tool_call_id=part.tool_call_id,
                     status=status,
-                    raw_output=bounded_jsonable(raw_output),
+                    raw_output=(
+                        bounded_shell_output(raw_output)
+                        if part.tool_name == "shell" and isinstance(raw_output, str)
+                        else bounded_jsonable(raw_output)
+                    ),
                 ),
             )
 

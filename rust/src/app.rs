@@ -384,17 +384,14 @@ impl App {
                     self.new_session();
                 }
             }
-            Event::Tool {
-                id,
-                title,
-                subject,
-                status,
-                detail,
-            } => {
-                self.activity
-                    .push_back(format!("{} · {title}", crate::acp::status_label(status)));
+            Event::Tool { id, display } => {
+                self.activity.push_back(format!(
+                    "{} · {}",
+                    crate::acp::status_label(display.status),
+                    display.title
+                ));
                 self.trim_activity();
-                self.transcript.tool(id, title, subject, status, detail);
+                self.transcript.tool(id, display);
             }
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
