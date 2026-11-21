@@ -240,19 +240,17 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 | `url` | string | `""` | `http(s)` endpoint (HTTP only) |
 | `headers` | table of strings | `{}` | Request headers; `{env:NAME}` is expanded |
 | `enabled` | bool | `true` | Whether the server is loaded for new sessions |
-| `export` | bool | `false` | Offer this server to an ACP agent over MCP-over-ACP |
 | `always_allow` | bool | `false` | Skip the client consent prompt when exporting over ACP |
-| `defer_loading` | bool | `false` | Advertise the server's tools only after the model asks for them |
-| `description` | string | `""` | When the model should load a deferred server |
+| `description` | string | `""` | Description of this server |
 | `include_tools` | list of strings | `[]` | Only these tools (mutually exclusive with `exclude_tools`) |
 | `exclude_tools` | list of strings | `[]` | All tools except these |
 | `timeout` | float | `10.0` | Seconds before a request to the server fails |
 | `oauth` | bool or table | `true` | `true` uses OAuth with dynamic registration; `false` disables OAuth; a table sets `client_id`, `client_secret`, `scopes`, and `callback_port` |
 
-`export = true` makes the client offer an enabled server to an agent that advertises
-`mcpCapabilities.acp`: it launches the stdio command or connects to the URL, then proxies
-the server over the ACP connection. Default `false` keeps the server configured for the
-built-in agent only.
+The client offers enabled servers to local and remote agents that advertise
+`mcpCapabilities.acp`. Native sessions use stdio or Streamable HTTP upstreams
+that support MCP 2026-07-28. Configure HTTP credentials in `headers`.
+The token store and OAuth fields apply to the Python headless client.
 
 Exporting is still gated by the client's user. At session start an interactive client
 asks whether the agent may use the server: allow once, allow for this connection, always
@@ -337,8 +335,8 @@ hrns config keys                 # keyring accounts and environment sources
 hrns profiles list               # saved connections from the document
 hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN
 hrns profiles remove team
-hrns mcp add playwright --export -- npx -y @playwright/mcp@latest
-hrns mcp add playwright --export --always-allow -- npx -y @playwright/mcp@latest
+hrns mcp add project-tools -- project-tools
+hrns mcp add project-tools --always-allow -- project-tools
 hrns mcp list
 hrns login github-copilot
 ```

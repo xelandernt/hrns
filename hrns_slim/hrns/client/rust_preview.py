@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import sysconfig
 import tomllib
 
@@ -48,10 +47,8 @@ def run_rust_preview(
         argv.extend(("--theme", theme))
     if permission_mode:
         argv.extend(("--permission-mode", permission_mode))
-    if not target.local_setup:
-        argv.extend(("--mcp-sidecar", sys.executable))
-        if config.config_file:
-            argv.extend(("--mcp-config", str(config.config_file)))
+    if config.config_file:
+        argv.extend(("--mcp-config", str(config.path)))
     if session:
         argv.extend(("--session", session))
     if target.kind != "remote" or session is None or explicit_cwd is not None:

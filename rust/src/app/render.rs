@@ -586,10 +586,9 @@ impl App {
             lines.push(Line::from(""));
             lines.push(heading("MCP"));
             for item in &self.mcp_health {
-                let scope = if item.export { "export" } else { "local" };
                 lines.push(
                     Line::from(format!(
-                        "{} · {} · {} · {scope}",
+                        "{} · {} · {}",
                         item.name, item.transport, item.state
                     ))
                     .fg(palette.muted),

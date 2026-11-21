@@ -1,8 +1,8 @@
 """The one configuration document shared by the client and server.
 
 Both programs read the same file. Sections name their owner: ``[profile.<name>]`` and
-``[tui]`` belong to the client, while ``provider``/``model``, ``[providers.<name>]``,
-``[model_settings]``, ``[mcp]`` and ``store`` belong to the runtime.
+``[tui]``, and ``[mcp]`` belong to the client, while ``provider``/``model``, ``[providers.<name>]``,
+``[model_settings]`` and ``store`` belong to the runtime.
 A single pydantic-settings model parses the whole document, so a typo in any section
 fails the same way wherever it is read.
 

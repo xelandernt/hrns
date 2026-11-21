@@ -27,7 +27,7 @@ use crate::socket;
 const HELP: &str =
     "Usage: hrns-tui [--cwd PATH] [--session ID] [--server URL | --stdio COMMAND [ARGS...]]
        [--client-io off|read|all] [--theme NAME] [--permission-mode ask|reads|all]
-       [--mcp-sidecar PYTHON [--mcp-config PATH]]
+       [--mcp-config PATH]
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
 
@@ -43,7 +43,6 @@ struct Options {
     client_io: ClientIoMode,
     theme: Option<String>,
     permission: Option<ApprovalMode>,
-    mcp_sidecar: Option<PathBuf>,
     mcp_config: Option<PathBuf>,
     effort_profile: Option<EffortProfile>,
 }
@@ -57,7 +56,6 @@ impl Options {
         let mut client_io = None;
         let mut theme = None;
         let mut permission = None;
-        let mut mcp_sidecar = None;
         let mut mcp_config = None;
         let mut effort_profile = None;
         while let Some(arg) = argv.next() {
@@ -77,12 +75,6 @@ impl Options {
                         ApprovalMode::parse(&value)
                             .ok_or("--permission-mode expects ask, reads or all")?,
                     );
-                }
-                "--mcp-sidecar" if mcp_sidecar.is_none() => {
-                    mcp_sidecar = Some(PathBuf::from(
-                        argv.next()
-                            .ok_or("--mcp-sidecar requires a Python executable")?,
-                    ));
                 }
                 "--mcp-config" if mcp_config.is_none() => {
                     mcp_config = Some(PathBuf::from(
@@ -132,13 +124,17 @@ impl Options {
             command: "hrns".into(),
             args: vec!["agent".into()],
         });
+        let mcp_config = mcp_config
+            .or_else(|| env::var_os("HRNS_CONFIG_FILE").map(PathBuf::from))
+            .map(std::path::absolute)
+            .transpose()
+            .map_err(|error| error.to_string())?;
         Ok(Some(Self {
             session: SessionTarget { cwd, session },
             target,
             client_io: client_io.unwrap_or(ClientIoMode::All),
             theme,
             permission,
-            mcp_sidecar,
             mcp_config,
             effort_profile,
         }))
@@ -189,7 +185,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let services = Services {
         client_io: options.client_io,
-        mcp_sidecar: options.mcp_sidecar.clone(),
         mcp_config: options.mcp_config.clone(),
         effort_profile: options.effort_profile.clone(),
     };

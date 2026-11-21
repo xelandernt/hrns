@@ -478,6 +478,7 @@ impl App {
                 self.trim_activity();
             }
             Event::ConnectionChanged(destination) => {
+                self.mcp_grants.clear();
                 self.destination = destination;
                 self.workspace = None;
                 self.session = None;

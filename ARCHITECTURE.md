@@ -114,26 +114,22 @@ or the connection drops, so a request resolves exactly once.
 
 ### Native MCP export
 
-A non-local native target can offer configured MCP servers to an agent that
-advertises `agentCapabilities.mcpCapabilities.acp`. The Rust client does not
-speak MCP itself: it starts `python -m hrns.client.mcp_sidecar` with the resolved
-configuration, and the sidecar reuses `ClientMcpProvider` to own the stdio or
-HTTP upstreams, OAuth token store, consent policy, health, include/exclude
-filters and progress. The two processes exchange newline-delimited JSON on
-stdin/stdout; stdout is protocol-only and logs go to stderr. Rust declares the
-approved servers in `session/new` and `session/load`, forwards `mcp/message`
-requests to the sidecar, forwards request-scoped notifications back to the
-agent, and shows consent and health in the UI.
+The native TUI owns the `[mcp.servers.*]` configuration, consent, and upstream
+connections for local and remote agents. It opens configured stdio and
+Streamable HTTP servers with the Rust MCP SDK. HTTP headers and subprocess
+environment values resolve on the client. Approved servers are registered
+before `session/new` or `session/load` and declared as `type: "acp"`. Agents
+must advertise `mcpCapabilities.acp`. They use standard `mcp/message` on the
+existing ACP connection. The Rust provider uses ACP's cancellation marker,
+correlates progress with the originating request, and reports startup and
+protocol errors through the MCP health view.
 
-Consent options are allow once, allow for this connection, always allow and
-deny. The application keeps connection grants across reconnects and new
-sessions; `always allow` writes `always_allow = true` through the Python
-configuration document. A server that fails to start is reported by `/mcp` and
-the sidebar, and the session continues without it. The built-in local agent
-already loads `[mcp]` server-side, so the native client does not export to it;
-the browser advertises no MCP capability at all. The flags are `--mcp-sidecar
-PYTHON` and optional `--mcp-config PATH`; the Python launcher adds them for
-non-local targets.
+The native upstream transport negotiates MCP 2026-07-28. HTTP credentials
+can be passed through configured headers. The native client asks before
+starting an enabled server unless its configuration already grants consent.
+`always allow` updates the local TOML file. The built-in agent can launch
+locally through ACP stdio and consumes the same declarations as a remote
+agent. Browser sessions do not provide client-configured MCP servers.
 
 Agent forms (`elicitation/create`) render as a dock above the composer. A form
 walks its fields in order: typing edits text and number fields, `1`-`6` choose,
@@ -475,8 +471,8 @@ SDK's `MessageRouter` and sends raw stateless frames through the same
 connection. It is isolated so it can be removed when the Python SDK catches up
 with the RFD.
 
-On the client, `ClientMcpProvider` reads the `[mcp]` servers with
-`export = true`, launches the stdio command or connects to the HTTP/SSE URL,
+The Python headless client's `ClientMcpProvider` reads enabled `[mcp]` servers,
+launches the stdio command or connects to the HTTP/SSE URL,
 and serves the upstream session through `from_mcp_server`; the client includes
 the resulting declarations in `session/new`. On the agent, `acp_mcp_toolsets`
 turns every client declaration into an ordinary `MCPToolset`: standard
@@ -495,15 +491,11 @@ the negotiated revision is logged (legacy with a warning). Reverse requests
 bridged: they are not advertised, and the MCP SDK answers them with
 `INVALID_REQUEST` because MCP 2026-07-28 replaced them with MRTR.
 
-Export is also gated by the client's user, not only by configuration.
-`export = true` makes a server eligible; at session start the client asks whether
-the agent may use it (allow once, allow for the connection, always allow, deny)
-before the declaration goes into `session/new`, `session/load`, or
-`session/resume`. A denied server is left out of the declaration, and an
-unapproved server is never started. `always_allow = true` skips the prompt and
-is the only way a non-interactive client (`hrns run`) exports, because it cannot
-ask and therefore denies. The TUI renders the prompt through `ChoiceDialog`; the
-CLI leaves the consent handler unset.
+The client asks for consent before starting a server and including its declaration
+in session setup. The native TUI offers allow once, allow for the connection,
+always allow, and deny. The headless client (`hrns run`) uses only servers
+configured with `always_allow = true`.
+
 
 Binding internals and subscription requirements are documented in
 `docs/mcp-over-acp-analysis.md`; remaining work is tracked in `TODO.md`.

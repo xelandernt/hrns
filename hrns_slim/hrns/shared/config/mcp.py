@@ -19,7 +19,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 __all__ = [
     "MCP_NAME_PATTERN",
     "McpOAuthConfig",
-    "McpServerConfig",
     "McpServerSettings",
     "McpSettings",
     "build_client",
@@ -66,13 +65,6 @@ class McpServerSettings(BaseModel):
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
-    export: bool = False
-    """Offer this server to ACP agents over MCP-over-ACP.
-
-    This is the client-side provider switch. ``False`` keeps the server
-    configured for the built-in agent only; ``True`` makes the client register it
-    on a connection that advertises ``mcpCapabilities.acp``.
-    """
     always_allow: bool = False
     """Skip the client-side consent prompt when exporting over ACP.
 
@@ -81,10 +73,7 @@ class McpServerSettings(BaseModel):
     denied; set this to ``True`` to export it from ``hrns run`` or another
     headless client.
     """
-    defer_loading: bool = False
-    description: str = Field(
-        default="", description="Describe when the model should load this MCP server."
-    )
+    description: str = Field(default="", description="Describe this MCP server.")
     include_tools: list[str] = Field(default_factory=list)
     exclude_tools: list[str] = Field(default_factory=list)
     timeout: float = Field(default=10.0, gt=0)
@@ -123,13 +112,6 @@ class McpServerSettings(BaseModel):
         if self.oauth is True:
             return McpOAuthConfig()
         return self.oauth
-
-
-class McpServerConfig(McpServerSettings):
-    """The runtime view of one server, including where its OAuth tokens live."""
-
-    token_store: Literal["file", "keyring"] = "file"
-    token_store_path: str = ""
 
 
 class McpSettings(BaseModel):

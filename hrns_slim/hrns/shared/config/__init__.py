@@ -11,7 +11,7 @@ from .credentials import (
     stored_api_key_ref,
     stored_secret,
 )
-from .mcp import McpOAuthConfig, McpServerConfig, McpServerSettings, McpSettings
+from .mcp import McpOAuthConfig, McpServerSettings, McpSettings
 from .settings import (
     BUILTIN_CONNECTION,
     CONFIG_ENV_VAR,
@@ -53,7 +53,6 @@ __all__ = [
     "EffortLevel",
     "HrnsConfig",
     "McpOAuthConfig",
-    "McpServerConfig",
     "McpServerSettings",
     "McpSettings",
     "PermissionMode",

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -11,8 +10,7 @@ use agent_client_protocol::v1::schema::{
     SetSessionConfigOptionRequest,
 };
 use serde::Deserialize;
-use tempfile::NamedTempFile;
-use toml_edit::{DocumentMut, Item, Table, TableLike, value};
+use toml_edit::{Item, Table, TableLike, value};
 
 use crate::acp::{Event, Events};
 use crate::options;
@@ -105,44 +103,21 @@ impl EffortProfile {
 }
 
 fn save_effort(path: &Path, profile: Option<&str>, model: &str, effort: &str) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("Missing configuration directory"))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::other("Missing configuration filename"))?;
-    fs::create_dir_all(parent)?;
-    let mut lock_name = file_name.to_os_string();
-    lock_name.push(".lock");
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(parent.join(lock_name))?;
-    lock.lock()?;
-    let mut document = match fs::read_to_string(path) {
-        Ok(text) => text.parse::<DocumentMut>().map_err(io::Error::other)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(error) => return Err(error),
-    };
-    let values = if let Some(profile) = profile {
-        let saved = document
-            .get_mut("profile")
-            .and_then(Item::as_table_like_mut)
-            .and_then(|profiles| profiles.get_mut(profile))
-            .and_then(Item::as_table_like_mut)
-            .ok_or_else(|| io::Error::other("The saved profile no longer exists"))?;
-        effort_table(saved, "model_effort")?
-    } else {
-        effort_table(document.as_table_mut(), "local_model_effort")?
-    };
-    values.insert(model, value(effort));
-
-    let mut temp = NamedTempFile::new_in(parent)?;
-    temp.write_all(document.to_string().as_bytes())?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    crate::config_file::edit(path, |document| {
+        let values = if let Some(profile) = profile {
+            let saved = document
+                .get_mut("profile")
+                .and_then(Item::as_table_like_mut)
+                .and_then(|profiles| profiles.get_mut(profile))
+                .and_then(Item::as_table_like_mut)
+                .ok_or_else(|| io::Error::other("The saved profile no longer exists"))?;
+            effort_table(saved, "model_effort")?
+        } else {
+            effort_table(document.as_table_mut(), "local_model_effort")?
+        };
+        values.insert(model, value(effort));
+        Ok(())
+    })
 }
 
 fn effort_table<'a>(parent: &'a mut dyn TableLike, key: &str) -> io::Result<&'a mut dyn TableLike> {

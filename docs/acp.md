@@ -96,8 +96,8 @@ The adapter calls these methods on the connected client:
 The native Ratatui client implements these client methods directly. It advertises
 `fs` and `terminal` according to `--client-io` (`off`, `read` or `all`), always
 advertises form elicitation, and keeps reads and writes inside the session workspace.
-When a non-local agent advertises `mcpCapabilities.acp`, it also declares approved
-`[mcp]` servers and forwards `mcp/message` through a Python sidecar; see
+When a local or remote agent advertises `mcpCapabilities.acp`, the client declares
+approved `[mcp]` servers and serves `mcp/message` directly. See
 [MCP over ACP](mcp.md). The browser client advertises form elicitation only and answers
 no filesystem, terminal or MCP request. Both show approvals with the tool kind and
 options and render agent forms inline.

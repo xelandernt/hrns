@@ -189,7 +189,6 @@ def _target(
         kind="local",
         profile=profile,
         cwd=local_cwd(profile),
-        local_setup=local_setup,
     )
 
 

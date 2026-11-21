@@ -359,13 +359,11 @@ Paths under `rust/` are proposed locations. Size estimates count implementation 
 
 - [x] **Acceptance** Restore MCP health, auth, export consent, filters, request routing and progress. Preserve one-time, connection and persistent consent behavior.
 - **Verify** Use a deterministic MCP server to exercise each consent decision, credential failure, a filtered tool call, progress and reconnect. Compare framing to T05.
-- **Depends on** T05, T07, T13. **Files** `rust/src/mcp.rs`, `rust/src/mcp_types.rs`, `rust/src/acp.rs`, `rust/src/app.rs`, `hrns_slim/hrns/client/mcp_sidecar.py`, `hrns_slim/hrns/client/mcp_provider.py`. **Size** M.
-- The native client starts `python -m hrns.client.mcp_sidecar` for a non-local
-  target whose agent advertises `mcpCapabilities.acp`. The sidecar reuses
-  `ClientMcpProvider` for upstreams, OAuth, consent, health, include/exclude
-  filters and progress; Rust forwards `mcp/message` and declares servers in
-  `session/new` and `session/load`. One-time, connection and persistent consent
-  all work, and `always_allow` is written to the Python document.
+- The native client uses a Rust MCP provider for local and remote targets that
+  advertise `mcpCapabilities.acp`. It reads client TOML, opens stdio or Streamable
+  HTTP upstreams, and sends ACP declarations in `session/new` and
+  `session/load`.
+
 
 ### T17 — (withdrawn) Browser MCP export
 
