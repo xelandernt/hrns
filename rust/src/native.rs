@@ -1,7 +1,6 @@
 use std::env;
 use std::io::{self, stdout};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
@@ -19,7 +18,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use crate::acp::{self, Actions, ClientIoMode, Connection, Event, Events, Services, SessionTarget};
 use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments;
-use crate::client_io::ClientIo;
 use crate::effort::EffortProfile;
 use crate::preferences::ApprovalMode;
 use crate::socket;
@@ -188,12 +186,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         mcp_config: options.mcp_config.clone(),
         effort_profile: options.effort_profile.clone(),
     };
-    let io = Arc::new(Mutex::new(ClientIo::new(match options.client_io {
-        ClientIoMode::Off => crate::client_io::Mode::Off,
-        ClientIoMode::Read => crate::client_io::Mode::Read,
-        ClientIoMode::All => crate::client_io::Mode::All,
-    })));
-    let worker_io = Arc::clone(&io);
     let (shutdown, stop_rx) = mpsc::unbounded();
     let mut terminal = ratatui::try_init()?;
     let worker = std::thread::spawn(move || {
@@ -209,7 +201,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     requests_rx,
                     stop_rx,
                     services,
-                    worker_io,
                 ));
             });
         if let Err(error) = result {
@@ -362,7 +353,6 @@ async fn supervise(
     mut requests: mpsc::UnboundedReceiver<Connection>,
     mut stop: mpsc::UnboundedReceiver<()>,
     services: Services,
-    io: Arc<Mutex<ClientIo>>,
 ) {
     use futures::{FutureExt, StreamExt, select_biased};
     let mut target = options.session.clone();
@@ -374,7 +364,7 @@ async fn supervise(
                 Some(request) => apply(options, &mut transport, &mut target, request, &events),
                 None => return,
             },
-            result = connect(&transport, &options.target, target.clone(), actions, events.clone(), services.clone(), Arc::clone(&io)).fuse() => {
+            result = connect(&transport, &options.target, target.clone(), actions, events.clone(), services.clone()).fuse() => {
                 finish(&events, result);
                 select_biased! {
                     _ = stop.next() => return,
@@ -463,7 +453,6 @@ async fn connect(
     actions: &mut Actions,
     events: Events,
     mut services: Services,
-    io: Arc<Mutex<ClientIo>>,
 ) -> Result<(), String> {
     if transport != startup {
         services.effort_profile = None;
@@ -471,7 +460,7 @@ async fn connect(
     match transport {
         Target::Stdio { command, args } => {
             let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));
-            acp::connect(agent, target, actions, events, services, io)
+            acp::connect(agent, target, actions, events, services)
                 .await
                 .map_err(|error| error.message)
         }
@@ -509,7 +498,7 @@ async fn connect(
             let (transport, bridge) = Channel::duplex();
             let (wire, session) = futures::join!(
                 socket::pump(ws, bridge, |text| Message::Text(text.into()), message_text),
-                acp::connect(transport, target, actions, events, services, io),
+                acp::connect(transport, target, actions, events, services),
             );
             wire?;
             session.map_err(|error| error.message)

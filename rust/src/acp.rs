@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -102,25 +103,16 @@ impl ClientIoMode {
         }
     }
 
-    fn reads(self) -> bool {
+    pub(crate) fn reads(self) -> bool {
         matches!(self, Self::Read | Self::All)
     }
 
-    fn writes(self) -> bool {
+    pub(crate) fn writes(self) -> bool {
         matches!(self, Self::All)
     }
 
-    fn terminal(self) -> bool {
+    pub(crate) fn terminal(self) -> bool {
         matches!(self, Self::All)
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    fn native(self) -> client_io::Mode {
-        match self {
-            Self::Off => client_io::Mode::Off,
-            Self::Read => client_io::Mode::Read,
-            Self::All => client_io::Mode::All,
-        }
     }
 }
 
@@ -291,7 +283,6 @@ pub async fn connect(
     actions: &mut Actions,
     events: Events,
     services: Services,
-    #[cfg(not(target_family = "wasm"))] io: Arc<Mutex<ClientIo>>,
 ) -> Result<(), Error> {
     let notifications = events.clone();
     let elicit_events = events.clone();
@@ -416,10 +407,11 @@ pub async fn connect(
                 (setup.session, cwd, setup.response.config_options, setup.response.meta)
             };
             #[cfg(not(target_family = "wasm"))]
-            if let Ok(mut io) = io.lock() {
-                io.mode = services.client_io.native();
-                io.remember(&session.session_id().to_string(), &cwd);
-            }
+            let io = Arc::new(Mutex::new(ClientIo::new(
+                services.client_io,
+                session.session_id().to_string(),
+                &cwd,
+            )));
             let options = options.unwrap_or_default();
             #[cfg(not(target_family = "wasm"))]
             let options = if !loaded && let Some(profile) = &services.effort_profile {
@@ -686,17 +678,14 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::ReadTextFileRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = io.lock()
-                                            .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                            .and_then(|io| {
-                                                io.read(
-                                                    &request.session_id.to_string(),
-                                                    &request.path,
-                                                    request.line,
-                                                    request.limit,
-                                                )
-                                                .map_err(io_error)
-                                            });
+                                        let result = with_client_io(&io, |io| {
+                                            io.read(
+                                                &request.session_id.to_string(),
+                                                &request.path,
+                                                request.line,
+                                                request.limit,
+                                            )
+                                        });
                                         match result {
                                             Ok(content) => responder.respond(agent_client_protocol::v1::schema::ReadTextFileResponse::new(content)),
                                             Err(error) => responder.respond_with_error(error),
@@ -712,12 +701,9 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::WriteTextFileRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = io.lock()
-                                            .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                            .and_then(|io| {
-                                                io.write(&request.session_id.to_string(), &request.path, &request.content)
-                                                    .map_err(io_error)
-                                            });
+                                        let result = with_client_io(&io, |io| {
+                                            io.write(&request.session_id.to_string(), &request.path, &request.content)
+                                        });
                                         match result {
                                             Ok(()) => responder.respond(agent_client_protocol::v1::schema::WriteTextFileResponse::new()),
                                             Err(error) => responder.respond_with_error(error),
@@ -733,21 +719,17 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::CreateTerminalRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = io.lock()
-                                            .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                            .and_then(|mut io| {
-                                                let env = request.env.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect::<Vec<_>>();
-                                                let session_id = request.session_id.to_string();
-                                                io.create_terminal(
-                                                    &session_id,
-                                                    &request.command,
-                                                    &request.args,
-                                                    &env,
-                                                    request.cwd.as_deref(),
-                                                    request.output_byte_limit,
-                                                )
-                                                .map_err(io_error)
-                                            });
+                                        let result = with_client_io(&io, |io| {
+                                            let env = request.env.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect::<Vec<_>>();
+                                            io.create_terminal(
+                                                &request.session_id.to_string(),
+                                                &request.command,
+                                                &request.args,
+                                                &env,
+                                                request.cwd.as_deref(),
+                                                request.output_byte_limit,
+                                            )
+                                        });
                                         match result {
                                             Ok(id) => responder.respond(agent_client_protocol::v1::schema::CreateTerminalResponse::new(
                                                 agent_client_protocol::v1::schema::TerminalId::new(id),
@@ -765,14 +747,9 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::TerminalOutputRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = io.lock()
-                                            .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                            .and_then(|mut io| {
-                                                let session_id = request.session_id.to_string();
-                                                let terminal_id = request.terminal_id.to_string();
-                                                io.terminal_output(&session_id, &terminal_id)
-                                                    .map_err(io_error)
-                                            });
+                                        let result = with_client_io(&io, |io| {
+                                            io.terminal_output(&request.session_id.to_string(), &request.terminal_id.to_string())
+                                        });
                                         match result {
                                             Ok((output, truncated, status)) => responder.respond(
                                                 agent_client_protocol::v1::schema::TerminalOutputResponse::new(output, truncated)
@@ -791,32 +768,24 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::WaitForTerminalExitRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let session_id = request.session_id.to_string();
-                                        let terminal_id = request.terminal_id.to_string();
-                                        loop {
-                                            let result = io.lock()
-                                                .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                                .and_then(|mut io| {
-                                                    io.wait_for_exit(&session_id, &terminal_id)
-                                                        .map_err(io_error)
-                                                });
-                                            match result {
-                                                Ok(Some(exit)) => {
-                                                    responder.respond(
-                                                        agent_client_protocol::v1::schema::WaitForTerminalExitResponse::new(exit_status(exit)),
-                                                    )?;
-                                                    break;
-                                                }
-                                                Ok(None) => {
-                                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                                                }
-                                                Err(error) => {
-                                                    responder.respond_with_error(error)?;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        Ok(())
+                                        let io = Arc::clone(&io);
+                                        connection.spawn(async move {
+                                            let session_id = request.session_id.to_string();
+                                            let terminal_id = request.terminal_id.to_string();
+                                            let cancellation = responder.cancellation();
+                                            let result = tokio::select! {
+                                                biased;
+                                                _ = cancellation.cancelled() => Err(Error::request_cancelled()),
+                                                result = wait_for_terminal_exit(&io, &session_id, &terminal_id) => result,
+                                            };
+                                            let _ = match result {
+                                                Ok(exit) => responder.respond(
+                                                    agent_client_protocol::v1::schema::WaitForTerminalExitResponse::new(exit_status(exit)),
+                                                ),
+                                                Err(error) => responder.respond_with_error(error),
+                                            };
+                                            Ok(())
+                                        })
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
@@ -828,14 +797,9 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::KillTerminalRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = io.lock()
-                                            .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                            .and_then(|mut io| {
-                                                let session_id = request.session_id.to_string();
-                                                let terminal_id = request.terminal_id.to_string();
-                                                io.kill_terminal(&session_id, &terminal_id)
-                                                    .map_err(io_error)
-                                            });
+                                        let result = with_client_io(&io, |io| {
+                                            io.kill_terminal(&request.session_id.to_string(), &request.terminal_id.to_string())
+                                        });
                                         match result {
                                             Ok(()) => responder.respond(agent_client_protocol::v1::schema::KillTerminalResponse::new()),
                                             Err(error) => responder.respond_with_error(error),
@@ -851,14 +815,9 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::ReleaseTerminalRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = io.lock()
-                                            .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))
-                                            .and_then(|mut io| {
-                                                let session_id = request.session_id.to_string();
-                                                let terminal_id = request.terminal_id.to_string();
-                                                io.release_terminal(&session_id, &terminal_id)
-                                                    .map_err(io_error)
-                                            });
+                                        let result = with_client_io(&io, |io| {
+                                            io.release_terminal(&request.session_id.to_string(), &request.terminal_id.to_string())
+                                        });
                                         match result {
                                             Ok(()) => responder.respond(agent_client_protocol::v1::schema::ReleaseTerminalResponse::new()),
                                             Err(error) => responder.respond_with_error(error),
@@ -878,15 +837,35 @@ pub async fn connect(
                     _ = connection.incoming_closed().fuse() => break,
                 }
             }
-            #[cfg(not(target_family = "wasm"))]
-            {
-                if let Ok(mut io) = io.lock() {
-                    io.close();
-                }
-            }
             Ok(())
         })
         .await
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn wait_for_terminal_exit(
+    io: &Mutex<ClientIo>,
+    session_id: &str,
+    terminal_id: &str,
+) -> Result<client_io::Exit, Error> {
+    loop {
+        let status = with_client_io(io, |io| io.wait_for_exit(session_id, terminal_id))?;
+        if let Some(exit) = status {
+            return Ok(exit);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn with_client_io<T>(
+    io: &Mutex<ClientIo>,
+    operation: impl FnOnce(&mut ClientIo) -> Result<T, String>,
+) -> Result<T, Error> {
+    let mut io = io
+        .lock()
+        .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))?;
+    operation(&mut io).map_err(io_error)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1049,10 +1028,14 @@ fn respond(
 fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) -> Option<Event> {
     match update {
         SessionUpdate::UserMessageChunk(chunk) => {
-            content_text(&chunk.content).map(Event::UserChunk)
+            content_text(&chunk.content).map(|text| Event::UserChunk(text.into_owned()))
         }
-        SessionUpdate::AgentMessageChunk(chunk) => content_text(&chunk.content).map(Event::Chunk),
-        SessionUpdate::AgentThoughtChunk(chunk) => content_text(&chunk.content).map(Event::Thought),
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            content_text(&chunk.content).map(|text| Event::Chunk(text.into_owned()))
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            content_text(&chunk.content).map(|text| Event::Thought(text.into_owned()))
+        }
         SessionUpdate::ConfigOptionUpdate(update) => Some(Event::Options(update.config_options)),
         SessionUpdate::AvailableCommandsUpdate(update) => Some(Event::AgentCommands(
             update
@@ -1098,12 +1081,12 @@ fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) ->
     }
 }
 
-fn content_text(block: &ContentBlock) -> Option<String> {
+fn content_text(block: &ContentBlock) -> Option<Cow<'_, str>> {
     match block {
-        ContentBlock::Text(text) => Some(text.text.clone()),
+        ContentBlock::Text(text) => Some(text.text.as_str().into()),
         ContentBlock::Image(_) => Some("[image]".into()),
         ContentBlock::Audio(_) => Some("[audio]".into()),
-        ContentBlock::ResourceLink(link) => Some(format!("[resource] {}", link.name)),
+        ContentBlock::ResourceLink(link) => Some(format!("[resource] {}", link.name).into()),
         ContentBlock::Resource(_) => Some("[embedded resource]".into()),
         _ => None,
     }
@@ -1268,7 +1251,7 @@ impl ToolState {
             .filter_map(|part| match part {
                 ToolCallContent::Content(content) => content_text(&content.content),
                 ToolCallContent::Terminal(terminal) => {
-                    Some(format!("Terminal {}", terminal.terminal_id))
+                    Some(format!("Terminal {}", terminal.terminal_id).into())
                 }
                 _ => None,
             })
@@ -1406,7 +1389,7 @@ impl ToolState {
                     changes.extend(diff.new_text.lines().map(|line| format!("+ {line}")));
                 }
                 ToolCallContent::Terminal(terminal) => {
-                    output.push(format!("Terminal {}", terminal.terminal_id));
+                    output.push(format!("Terminal {}", terminal.terminal_id).into());
                 }
                 _ => {}
             }
@@ -1414,7 +1397,7 @@ impl ToolState {
         if output.is_empty()
             && let Some(raw) = self.raw_output.as_ref().filter(|v| !v.is_null())
         {
-            output.push(tool_input::pretty_value(raw));
+            output.push(tool_input::pretty_value(raw).into());
         }
         let detail = [
             (!arguments.is_empty()).then(|| format!("Arguments\n{arguments}")),

@@ -1,36 +1,16 @@
 //! Native client-side filesystem and terminal services for ACP.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::acp::ClientIoMode;
 
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const MAX_TERMINALS: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Off,
-    Read,
-    All,
-}
-
-impl Mode {
-    pub fn reads(self) -> bool {
-        matches!(self, Self::Read | Self::All)
-    }
-
-    pub fn writes(self) -> bool {
-        matches!(self, Self::All)
-    }
-
-    pub fn terminal(self) -> bool {
-        matches!(self, Self::All)
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Exit {
@@ -39,46 +19,71 @@ pub struct Exit {
 }
 
 struct Terminal {
-    session: String,
     child: Child,
     pid: u32,
-    output: Arc<Mutex<Vec<u8>>>,
-    truncated: Arc<AtomicBool>,
+    output: Arc<Mutex<TerminalOutput>>,
     status: Option<Exit>,
 }
 
+struct TerminalOutput {
+    bytes: VecDeque<u8>,
+    truncated: bool,
+    limit: usize,
+}
+
+impl TerminalOutput {
+    fn append(&mut self, chunk: &[u8]) {
+        let overflow = (self.bytes.len() + chunk.len()).saturating_sub(self.limit);
+        let discard = overflow.min(self.bytes.len());
+        self.bytes.drain(..discard);
+        self.bytes.extend(&chunk[overflow - discard..]);
+        self.truncated |= overflow > 0;
+    }
+
+    fn snapshot(&mut self) -> (String, bool) {
+        let bytes = self.bytes.make_contiguous();
+        let start = if self.truncated {
+            // A byte limit can bisect the first retained UTF-8 character.
+            bytes
+                .iter()
+                .take_while(|byte| **byte & 0b1100_0000 == 0b1000_0000)
+                .count()
+        } else {
+            0
+        };
+        let mut text = String::from_utf8_lossy(&bytes[start..]).into_owned();
+        // Replacement characters for invalid UTF-8 can increase the byte count.
+        let mut overflow = text.len().saturating_sub(self.limit);
+        while !text.is_char_boundary(overflow) {
+            overflow += 1;
+        }
+        text.drain(..overflow);
+        (text, self.truncated || overflow > 0)
+    }
+}
+
 pub struct ClientIo {
-    pub mode: Mode,
-    roots: HashMap<String, PathBuf>,
+    mode: ClientIoMode,
+    session: String,
+    root: Option<PathBuf>,
     terminals: HashMap<String, Terminal>,
     next_terminal: usize,
 }
 
 impl ClientIo {
-    pub fn new(mode: Mode) -> Self {
+    pub fn new(mode: ClientIoMode, session: String, cwd: &Path) -> Self {
+        let root = if mode.reads() {
+            cwd.canonicalize().ok()
+        } else {
+            None
+        };
         Self {
             mode,
-            roots: HashMap::new(),
+            session,
+            root,
             terminals: HashMap::new(),
             next_terminal: 0,
         }
-    }
-
-    pub fn remember(&mut self, session: &str, cwd: &Path) {
-        if self.mode == Mode::Off {
-            return;
-        }
-        if let Ok(root) = cwd.canonicalize() {
-            self.roots.insert(session.to_owned(), root);
-        }
-    }
-
-    pub fn close(&mut self) {
-        for terminal in self.terminals.values_mut() {
-            terminate(terminal);
-        }
-        self.terminals.clear();
-        self.roots.clear();
     }
 
     pub fn read(
@@ -92,16 +97,28 @@ impl ClientIo {
             return Err("fs/read_text_file is not advertised".into());
         }
         let target = self.resolve(session, path)?;
-        let size = std::fs::metadata(&target)
-            .map_err(|error| reason(path, error))?
-            .len();
-        if size > MAX_FILE_BYTES {
-            return Err(format!(
+        let metadata = target.metadata().map_err(|error| reason(path, error))?;
+        if !metadata.is_file() {
+            return Err(format!("{}: expected a regular file", path.display()));
+        }
+        let too_large = || {
+            format!(
                 "{}: file is larger than {MAX_FILE_BYTES} bytes",
                 path.display()
-            ));
+            )
+        };
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err(too_large());
         }
-        let content = std::fs::read_to_string(&target).map_err(|error| reason(path, error))?;
+        let mut content = String::new();
+        std::fs::File::open(&target)
+            .map_err(|error| reason(path, error))?
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_string(&mut content)
+            .map_err(|error| reason(path, error))?;
+        if content.len() as u64 > MAX_FILE_BYTES {
+            return Err(too_large());
+        }
         Ok(match (line, limit) {
             (None, None) => content,
             _ => window(&content, line, limit),
@@ -115,7 +132,7 @@ impl ClientIo {
         let target = self.resolve_for_write(session, path)?;
         let root = self.root(session)?;
         let relative = target
-            .strip_prefix(&root)
+            .strip_prefix(root)
             .map_err(|_| format!("{}: outside the session working directory", path.display()))?;
         if read_only(relative) {
             return Err(format!(
@@ -150,7 +167,7 @@ impl ClientIo {
         let working = match cwd {
             Some(path) if path.is_absolute() => normalize(path),
             Some(path) => normalize(&root.join(path)),
-            None => root,
+            None => root.to_path_buf(),
         };
         let limit = output_limit
             .and_then(|limit| usize::try_from(limit).ok())
@@ -175,54 +192,21 @@ impl ClientIo {
             .spawn()
             .map_err(|error| format!("{command}: {error}"))?;
         let pid = child.id();
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let truncated = Arc::new(AtomicBool::new(false));
-        for stream in [
-            child.stdout.take().map(StreamKind::Out),
-            child.stderr.take().map(StreamKind::Err),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let buffer = Arc::clone(&output);
-            let flag = Arc::clone(&truncated);
-            std::thread::spawn(move || {
-                let mut reader: Box<dyn Read + Send> = match stream {
-                    StreamKind::Out(stream) => Box::new(stream),
-                    StreamKind::Err(stream) => Box::new(stream),
-                };
-                let mut chunk = [0u8; 64 * 1024];
-                loop {
-                    match reader.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => {
-                            let Ok(mut buffer) = buffer.lock() else {
-                                break;
-                            };
-                            let room = limit.saturating_sub(buffer.len());
-                            if room == 0 {
-                                flag.store(true, Ordering::Relaxed);
-                            } else {
-                                buffer.extend_from_slice(&chunk[..read.min(room)]);
-                                if read > room {
-                                    flag.store(true, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        let output = Arc::new(Mutex::new(TerminalOutput {
+            bytes: VecDeque::new(),
+            truncated: false,
+            limit,
+        }));
+        capture_output(child.stdout.take(), &output);
+        capture_output(child.stderr.take(), &output);
         self.next_terminal = self.next_terminal.wrapping_add(1);
         let id = format!("term-{pid}-{}", self.next_terminal);
         self.terminals.insert(
             id.clone(),
             Terminal {
-                session: session.to_owned(),
                 child,
                 pid,
                 output,
-                truncated,
                 status: None,
             },
         );
@@ -239,12 +223,11 @@ impl ClientIo {
         }
         let terminal = self.terminal(session, id)?;
         let status = refresh_status(terminal);
-        let output = terminal
+        let (output, truncated) = terminal
             .output
             .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map(|mut output| output.snapshot())
             .unwrap_or_default();
-        let truncated = terminal.truncated.load(Ordering::Relaxed);
         Ok((output, truncated, status))
     }
 
@@ -269,20 +252,23 @@ impl ClientIo {
         if !self.mode.terminal() {
             return Err("terminal/release is not advertised".into());
         }
+        if self.session != session {
+            return if self.terminals.contains_key(id) {
+                Err("no such terminal".into())
+            } else {
+                Ok(())
+            };
+        }
         if let Some(mut terminal) = self.terminals.remove(id) {
-            if terminal.session != session {
-                self.terminals.insert(id.to_owned(), terminal);
-                return Err("no such terminal".into());
-            }
             terminate(&mut terminal);
         }
         Ok(())
     }
 
-    fn root(&self, session: &str) -> Result<PathBuf, String> {
-        self.roots
-            .get(session)
-            .cloned()
+    fn root(&self, session: &str) -> Result<&Path, String> {
+        self.root
+            .as_deref()
+            .filter(|_| self.session == session)
             .ok_or_else(|| format!("no working directory is known for session {session}"))
     }
 
@@ -296,7 +282,7 @@ impl ClientIo {
         let resolved = candidate
             .canonicalize()
             .map_err(|error| reason(path, error))?;
-        if !resolved.starts_with(&root) {
+        if !resolved.starts_with(root) {
             return Err(format!(
                 "{}: outside the session working directory",
                 path.display()
@@ -313,7 +299,7 @@ impl ClientIo {
             root.join(path)
         };
         let normalized = normalize(&candidate);
-        if !normalized.starts_with(&root) {
+        if !normalized.starts_with(root) {
             return Err(format!(
                 "{}: outside the session working directory",
                 path.display()
@@ -333,11 +319,11 @@ impl ClientIo {
                 .parent()
                 .ok_or_else(|| format!("{}: invalid path", path.display()))?;
         }
-        if !ancestor.starts_with(&root)
+        if !ancestor.starts_with(root)
             || !ancestor
                 .canonicalize()
                 .map_err(|error| reason(path, error))?
-                .starts_with(&root)
+                .starts_with(root)
         {
             return Err(format!(
                 "{}: outside the session working directory",
@@ -346,7 +332,7 @@ impl ClientIo {
         }
         std::fs::create_dir_all(parent).map_err(|error| reason(path, error))?;
         let parent = parent.canonicalize().map_err(|error| reason(path, error))?;
-        if !parent.starts_with(&root) {
+        if !parent.starts_with(root) {
             return Err(format!(
                 "{}: outside the session working directory",
                 path.display()
@@ -360,20 +346,37 @@ impl ClientIo {
     }
 
     fn terminal(&mut self, session: &str, id: &str) -> Result<&mut Terminal, String> {
-        let terminal = self
-            .terminals
+        self.terminals
             .get_mut(id)
-            .ok_or_else(|| format!("no such terminal {id}"))?;
-        if terminal.session != session {
-            return Err(format!("no such terminal {id}"));
-        }
-        Ok(terminal)
+            .filter(|_| self.session == session)
+            .ok_or_else(|| format!("no such terminal {id}"))
     }
 }
 
-enum StreamKind {
-    Out(std::process::ChildStdout),
-    Err(std::process::ChildStderr),
+impl Drop for ClientIo {
+    fn drop(&mut self) {
+        for terminal in self.terminals.values_mut() {
+            terminate(terminal);
+        }
+    }
+}
+
+fn capture_output(reader: Option<impl Read + Send + 'static>, output: &Arc<Mutex<TerminalOutput>>) {
+    let Some(mut reader) = reader else { return };
+    let output = Arc::clone(output);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let read = match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            let Ok(mut output) = output.lock() else { break };
+            output.append(&chunk[..read]);
+        }
+    });
 }
 
 fn refresh_status(terminal: &mut Terminal) -> Option<Exit> {

@@ -76,10 +76,13 @@ Native advertises `clientCapabilities` from one mode: `off` offers nothing,
 `read` serves `fs/read_text_file`, and `all` also serves writes and the
 `terminal/*` lifecycle. Elicitation form support is always advertised on both
 targets. Reads and writes are confined to the session workspace; version
-control, `.hrns`, `.env`, secret and key paths are read-only. A terminal is
-spawned in its own process group, its output is capped, and release or
-disconnect kills the group. Both targets treat unsupported client requests as
-`method_not_found`, and the browser's absent capabilities are never advertised.
+control, `.hrns`, `.env`, secret and key paths are read-only. A terminal retains
+the latest output within its byte limit and runs in its own process group on
+Unix. Native client I/O holds one workspace root for the active ACP session.
+Switching or dropping the connection releases its terminals. Exit waits run
+alongside other requests and honor request cancellation. Both targets treat
+unsupported client requests as `method_not_found`, and the browser's absent
+capabilities are never advertised.
 
 The Python dispatcher always launches the installed native wheel; the release
 installs it with the Python client. A source checkout without the wheel reports an

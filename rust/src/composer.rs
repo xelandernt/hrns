@@ -1,4 +1,4 @@
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Default)]
@@ -27,6 +27,7 @@ impl Composer {
         }
         self.text.insert_str(self.cursor, &inserted);
         self.cursor += inserted.len();
+        self.snap_cursor_to_boundary();
     }
 
     pub fn set_text(&mut self, text: &str) {
@@ -66,11 +67,13 @@ impl Composer {
         let next = self.previous_boundary();
         self.text.drain(next..self.cursor);
         self.cursor = next;
+        self.snap_cursor_to_boundary();
     }
 
     pub fn delete(&mut self) {
         let next = self.next_boundary();
         self.text.drain(self.cursor..next);
+        self.snap_cursor_to_boundary();
     }
 
     pub fn home(&mut self) {
@@ -148,17 +151,28 @@ impl Composer {
     }
 
     fn previous_boundary(&self) -> usize {
-        self.text[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(index, _)| index)
+        GraphemeCursor::new(self.cursor, self.text.len(), true)
+            .prev_boundary(&self.text, 0)
+            .expect("the full text is available")
+            .unwrap_or(0)
     }
 
     fn next_boundary(&self) -> usize {
-        self.text[self.cursor..]
-            .graphemes(true)
-            .next()
-            .map_or(self.cursor, |text| self.cursor + text.len())
+        GraphemeCursor::new(self.cursor, self.text.len(), true)
+            .next_boundary(&self.text, 0)
+            .expect("the full text is available")
+            .unwrap_or(self.text.len())
+    }
+
+    fn snap_cursor_to_boundary(&mut self) {
+        // An edit can join a grapheme across the cursor.
+        let mut cursor = GraphemeCursor::new(self.cursor, self.text.len(), true);
+        if !cursor
+            .is_boundary(&self.text, 0)
+            .expect("the full text is available")
+        {
+            self.cursor = self.next_boundary();
+        }
     }
 }
 

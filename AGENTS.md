@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Rust
+
+Always load and apply the `$rust-best-practices` skill when writing or editing Rust code.
+
 ## Typing
 
 To the best of the ability:
