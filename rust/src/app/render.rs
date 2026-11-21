@@ -4,10 +4,10 @@ use agent_client_protocol::v1::schema::{
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
-use super::App;
+use super::{App, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
 use crate::theme::Palette;
@@ -196,15 +196,27 @@ impl App {
             let text = if self.draft.text().is_empty() {
                 Text::from("Send a message…").fg(palette.muted)
             } else {
-                Text::from(rows.into_iter().map(Line::raw).collect::<Vec<_>>())
+                let mut remaining = slash_command(self.draft.text())
+                    .filter(|command| self.is_command(command))
+                    .map_or(0, str::len);
+                Text::from(
+                    rows.into_iter()
+                        .map(|row| {
+                            if remaining == 0 {
+                                return Line::raw(row);
+                            }
+                            let (command, rest) = row.split_at(remaining.min(row.len()));
+                            remaining -= command.len();
+                            Line::from(vec![Span::raw(command).fg(palette.accent), Span::raw(rest)])
+                        })
+                        .collect::<Vec<_>>(),
+                )
             };
             frame.render_widget(Paragraph::new(text).scroll((scroll, 0)), input);
             if prompt_active {
                 frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
             }
         }
-        self.draw_status(frame, status.inner(gutter), &palette);
-
         let help_text = if self.mcp_consent.front().is_some() {
             "1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
         } else if let Some(pending) = self.elicitations.front() {
@@ -215,6 +227,12 @@ impl App {
             "New output ↓ · Ctrl+End"
         } else if self.status == "Disconnected" {
             "Ctrl-R reconnect · Ctrl-B panel"
+        } else if self.has_unknown_command(self.draft.text()) {
+            if self.completion.is_some() {
+                "Tab complete · /help commands"
+            } else {
+                "Unknown command · /help commands"
+            }
         } else {
             "Enter send · Wheel scroll · Click a header for details · /help commands"
         };
@@ -223,12 +241,13 @@ impl App {
         } else {
             palette.muted
         };
-        self.draw_footer(
+        let remaining_metrics = self.draw_footer(
             frame,
             help.inner(gutter),
             Line::from(help_text).fg(help_color),
             &palette,
         );
+        self.draw_status(frame, status.inner(gutter), remaining_metrics, &palette);
         if sidebar.width > 0 {
             if self.todo_open {
                 self.draw_todos(frame, sidebar, &palette);
@@ -247,7 +266,13 @@ impl App {
         }
     }
 
-    fn draw_footer(&self, frame: &mut Frame, area: Rect, hint: Line<'_>, palette: &Palette) {
+    fn draw_footer(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        hint: Line<'_>,
+        palette: &Palette,
+    ) -> Line<'_> {
         let effort = self
             .options
             .iter()
@@ -277,6 +302,14 @@ impl App {
                 approvals.fg(palette.accent),
             ]);
         }
+        let mut metrics = self.usage_metrics();
+        if !metrics.spans.is_empty()
+            && metrics.width() + 3 + settings.width() <= usize::from(area.width)
+        {
+            metrics.push_span(" · ");
+            metrics.spans.append(&mut settings.spans);
+            settings = std::mem::take(&mut metrics);
+        }
         let width = settings.width().min(usize::from(area.width)) as u16;
         let hints = Rect::new(
             area.x,
@@ -287,6 +320,7 @@ impl App {
         let values = Rect::new(area.right() - width, area.y, width, area.height);
         frame.render_widget(Paragraph::new(hint), hints);
         frame.render_widget(Paragraph::new(settings).fg(palette.muted), values);
+        metrics
     }
 
     fn draw_picker(
@@ -358,7 +392,7 @@ impl App {
         frame.render_widget(Paragraph::new(picker.hint()).fg(palette.muted), keys);
     }
 
-    fn draw_status(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
+    fn draw_status(&self, frame: &mut Frame, area: Rect, metrics: Line<'_>, palette: &Palette) {
         let status_color = match self.status {
             "Connected" => palette.success,
             "Disconnected" => palette.error,
@@ -396,6 +430,25 @@ impl App {
         }) {
             right.push_span(model.fg(palette.accent).bold());
         }
+        let available = usize::from(area.width.saturating_sub(16));
+        let right_limit = available.max(metrics.width());
+        if !metrics.spans.is_empty() {
+            if right.spans.is_empty() || right.width() + 3 + metrics.width() > available {
+                right = metrics;
+            } else {
+                right.push_span(" · ");
+                right.spans.extend(metrics.spans);
+            }
+        }
+        let right_width = right.width().min(right_limit).min(usize::from(area.width)) as u16;
+        let [context, metrics] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
+        let style = Style::default().fg(palette.muted);
+        frame.render_widget(Paragraph::new(Line::from(left)).style(style), context);
+        frame.render_widget(Paragraph::new(right).style(style), metrics);
+    }
+
+    fn usage_metrics(&self) -> Line<'_> {
         let usage = self
             .usage
             .map(|(used, size)| format!("ctx {used}/{size}"))
@@ -403,26 +456,12 @@ impl App {
                 self.last_usage_tokens
                     .map(|tokens| format!("{tokens} tokens"))
             });
-        for item in [usage.as_deref(), self.usage_cost.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            if !right.spans.is_empty() {
-                right.push_span(" · ");
-            }
-            right.push_span(item);
+        match (usage, self.usage_cost.as_deref()) {
+            (Some(usage), Some(cost)) => Line::from(format!("{usage} · {cost}")),
+            (Some(usage), None) => Line::from(usage),
+            (None, Some(cost)) => Line::from(cost),
+            (None, None) => Line::default(),
         }
-        let right_width = right
-            .width()
-            .min(usize::from(area.width.saturating_sub(16)));
-        let [context, metrics] = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(u16::try_from(right_width).unwrap_or(0)),
-        ])
-        .areas(area);
-        let style = Style::default().fg(palette.muted);
-        frame.render_widget(Paragraph::new(Line::from(left)).style(style), context);
-        frame.render_widget(Paragraph::new(right).style(style), metrics);
     }
 
     fn approval_lines(

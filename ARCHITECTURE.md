@@ -181,8 +181,11 @@ moving the composer cursor. Incoming output stays below the selected prompt
 or scrolled viewport and shows a footer notice until the reader returns to the
 bottom or presses `Ctrl+End`.
 
-Composer completion reads the draft. A first token starting with `/` offers the
-local commands, while a `$token` offers user-invocable skills from the agent's
+Composer completion reads the draft. A slash in the first character starts a
+command. Recognized names use the theme accent. Partial and unknown names stay
+in the composer on Enter, including when used as the first token after
+`/queue`. Slashes elsewhere in a message are literal. The first token offers
+local command completions, while a `$token` offers user-invocable skills from the agent's
 `hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
 selection while it is open, and Escape dismisses it before cancelling a turn.
 Submitting a draft that names a catalog skill attaches the skill id and mention
@@ -197,9 +200,10 @@ records tool transitions and turn outcomes. Both frontends persist sidebar,
 width, reasoning visibility, theme and permission mode without
 touching connection configuration: native writes JSON under
 `$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
-local storage. The activity sidebar is suppressed below 96 columns. The status bar
-allocates separate space for connection and session context and for model,
-usage and cost. `/theme`, `/permissions`, `/settings` and the `theme` and
+local storage. The activity sidebar is suppressed below 96 columns. The status
+bar shows the connection, session and model. The footer shows context usage,
+cost, effort and approvals. At narrow widths, context usage and cost move to
+the status bar. `/theme`, `/permissions`, `/settings` and the `theme` and
 `permission` page parameters expose the same values. The built-in themes are
 `hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
 

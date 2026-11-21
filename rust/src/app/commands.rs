@@ -1,6 +1,6 @@
 use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
 
-use super::{App, LocalEffect};
+use super::{App, LocalEffect, is_local_command, slash_command};
 use crate::acp::{Action, ConnectTarget};
 use crate::options;
 use crate::preferences::ApprovalMode;
@@ -10,7 +10,20 @@ use crate::transcript::Role;
 impl App {
     pub(super) fn submit(&mut self) {
         let input = self.draft.text().to_owned();
-        match input.trim() {
+        let Some(command) = slash_command(&input) else {
+            self.send_message(input);
+            return;
+        };
+        if self.has_unknown_command(&input) {
+            return;
+        }
+        let arguments = input[command.len()..].trim();
+        let invocation = if arguments.is_empty() {
+            std::borrow::Cow::Borrowed(command)
+        } else {
+            std::borrow::Cow::Owned(format!("{command} {arguments}"))
+        };
+        match invocation.as_ref() {
             "/help" => {
                 self.draft.submit();
                 let mut commands = vec![
@@ -401,19 +414,22 @@ impl App {
                     self.flush_queue();
                 }
             }
-            _ => {
-                if !self.ready {
-                    self.transcript.push(
-                        Role::Note,
-                        "Not connected · use /reconnect, /new or /load <id>".into(),
-                    );
-                    return;
-                }
-                let available = self.status != "Cancelling";
-                if available {
-                    self.send_draft(input);
-                }
-            }
+            _ if !is_local_command(command) => self.send_message(input),
+            _ => self.transcript.push(
+                Role::Note,
+                format!("Check the arguments for {command} · /help commands"),
+            ),
+        }
+    }
+
+    fn send_message(&mut self, input: String) {
+        if !self.ready {
+            self.transcript.push(
+                Role::Note,
+                "Not connected · use /reconnect, /new or /load <id>".into(),
+            );
+        } else if self.status != "Cancelling" {
+            self.send_draft(input);
         }
     }
 

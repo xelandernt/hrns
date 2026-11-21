@@ -1069,6 +1069,24 @@ impl App {
             .map(|items| Completion { items, selected: 0 });
     }
 
+    fn is_command(&self, command: &str) -> bool {
+        is_local_command(command)
+            || self
+                .commands
+                .iter()
+                .any(|(name, _)| command.strip_prefix('/') == Some(name.as_str()))
+    }
+
+    fn has_unknown_command(&self, input: &str) -> bool {
+        let Some(command) = slash_command(input) else {
+            return false;
+        };
+        !self.is_command(command)
+            || command == "/queue"
+                && slash_command(input[command.len()..].trim_start())
+                    .is_some_and(|queued| !self.is_command(queued))
+    }
+
     fn argument_suggestions(&self, input: &str) -> Option<Vec<Suggestion>> {
         use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
 
@@ -1343,6 +1361,15 @@ fn kind_index(
         .iter()
         .position(|option| predicate(option.kind))
         .map(Some)
+}
+
+fn is_local_command(command: &str) -> bool {
+    command == "/todos" || COMMANDS.iter().any(|(name, _)| *name == command)
+}
+
+fn slash_command(text: &str) -> Option<&str> {
+    text.starts_with('/')
+        .then(|| &text[..text.find(char::is_whitespace).unwrap_or(text.len())])
 }
 
 fn suggestions(text: &str, skills: &[Skill]) -> Option<Vec<Suggestion>> {
