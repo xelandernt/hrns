@@ -14,6 +14,8 @@ mod transcript;
 #[cfg(not(target_family = "wasm"))]
 mod client_io;
 #[cfg(not(target_family = "wasm"))]
+mod effort;
+#[cfg(not(target_family = "wasm"))]
 mod mcp;
 #[cfg(not(target_family = "wasm"))]
 mod native;

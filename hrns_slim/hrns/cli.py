@@ -1060,7 +1060,7 @@ def _command_connect(args: SimpleNamespace) -> int:
         client_io=client_io or "all",
         theme=config.tui.theme,
         permission_mode=config.tui.permission_mode,
-        config_file=str(config.config_file) if config.config_file else None,
+        config=config,
     )
 
 

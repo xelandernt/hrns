@@ -540,11 +540,12 @@ impl App {
             Some(option) if input.is_empty() => options::summary(option),
             Some(option) => match options::value(option, input) {
                 Some(value) => {
-                    let _ = self.actions.unbounded_send(Action::SetOption(
-                        option.id.clone(),
+                    let _ = self.actions.unbounded_send(Action::SetOption {
+                        id: option.id.clone(),
                         value,
+                        category,
                         choose_effort,
-                    ));
+                    });
                     return;
                 }
                 None => "Invalid configuration value".into(),

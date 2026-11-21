@@ -20,6 +20,7 @@ use crate::acp::{self, Actions, ClientIoMode, Connection, Event, Events, Service
 use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments;
 use crate::client_io::ClientIo;
+use crate::effort::EffortProfile;
 use crate::preferences::ApprovalMode;
 use crate::socket;
 
@@ -30,7 +31,7 @@ const HELP: &str =
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum Target {
     Remote(String),
     Stdio { command: String, args: Vec<String> },
@@ -44,6 +45,7 @@ struct Options {
     permission: Option<ApprovalMode>,
     mcp_sidecar: Option<PathBuf>,
     mcp_config: Option<PathBuf>,
+    effort_profile: Option<EffortProfile>,
 }
 
 impl Options {
@@ -57,6 +59,7 @@ impl Options {
         let mut permission = None;
         let mut mcp_sidecar = None;
         let mut mcp_config = None;
+        let mut effort_profile = None;
         while let Some(arg) = argv.next() {
             match arg.as_str() {
                 "--help" | "-h" => return Ok(None),
@@ -85,6 +88,13 @@ impl Options {
                     mcp_config = Some(PathBuf::from(
                         argv.next().ok_or("--mcp-config requires a path")?,
                     ));
+                }
+                "--effort-profile" if effort_profile.is_none() => {
+                    let settings = argv.next().ok_or("--effort-profile requires settings")?;
+                    effort_profile = Some(
+                        serde_json::from_str(&settings)
+                            .map_err(|_| "Invalid effort profile settings")?,
+                    );
                 }
                 "--cwd" if cwd.is_none() => {
                     cwd = Some(PathBuf::from(argv.next().ok_or("--cwd requires a path")?));
@@ -130,6 +140,7 @@ impl Options {
             permission,
             mcp_sidecar,
             mcp_config,
+            effort_profile,
         }))
     }
 
@@ -180,6 +191,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         client_io: options.client_io,
         mcp_sidecar: options.mcp_sidecar.clone(),
         mcp_config: options.mcp_config.clone(),
+        effort_profile: options.effort_profile.clone(),
     };
     let io = Arc::new(Mutex::new(ClientIo::new(match options.client_io {
         ClientIoMode::Off => crate::client_io::Mode::Off,
@@ -455,9 +467,12 @@ async fn connect(
     target: SessionTarget,
     actions: &mut Actions,
     events: Events,
-    services: Services,
+    mut services: Services,
     io: Arc<Mutex<ClientIo>>,
 ) -> Result<(), String> {
+    if transport != startup {
+        services.effort_profile = None;
+    }
     match transport {
         Target::Stdio { command, args } => {
             let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));

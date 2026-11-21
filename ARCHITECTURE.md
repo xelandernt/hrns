@@ -555,6 +555,9 @@ restores a saved value through ACP after creating a session or switching models 
 agent still offers that value. A built-in model switch without an applicable preference
 uses the provider default. Loaded sessions retain their stored ACP selections, and
 external agents supply the session's effort when there is no applicable saved preference.
+The Python launcher supplies the resolved profile and its configuration file to the
+native client. Rust updates the profile's TOML table after a successful ACP option
+response. An in-app switch to a different transport has no saved profile.
 
 ## Usage reporting
 

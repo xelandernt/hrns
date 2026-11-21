@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import sysconfig
+import tomllib
 
+from ..shared.config import HrnsConfig
+from ..shared.config.settings import config_files, is_builtin_hrns
 from ..shared.errors import HrnsClientError
 from .launch import ConnectionTarget
 from .transport import secret_value
@@ -27,7 +31,7 @@ def run_rust_preview(
     client_io: str = "all",
     theme: str | None = None,
     permission_mode: str | None = None,
-    config_file: str | None = None,
+    config: HrnsConfig,
 ) -> int:
     executable = native_executable()
     if executable is None:
@@ -37,14 +41,17 @@ def run_rust_preview(
     env = dict(os.environ)
     env.pop("HRNS_TUI_TOKEN", None)
     argv = [executable, "--client-io", client_io]
+    effort = _effort_profile(config, target)
+    if effort is not None:
+        argv.extend(("--effort-profile", json.dumps(effort)))
     if theme:
         argv.extend(("--theme", theme))
     if permission_mode:
         argv.extend(("--permission-mode", permission_mode))
     if not target.local_setup:
         argv.extend(("--mcp-sidecar", sys.executable))
-        if config_file:
-            argv.extend(("--mcp-config", config_file))
+        if config.config_file:
+            argv.extend(("--mcp-config", str(config.config_file)))
     if session:
         argv.extend(("--session", session))
     if target.kind != "remote" or session is None or explicit_cwd is not None:
@@ -74,6 +81,36 @@ def run_rust_preview(
         return 130
     except OSError as exc:
         raise HrnsClientError(f"Could not launch the native TUI: {exc.strerror}") from exc
+
+
+def _effort_profile(config: HrnsConfig, target: ConnectionTarget) -> dict[str, object] | None:
+    """Resolve the named connection and its TOML source in the launcher's workspace."""
+    name = target.profile_name
+    builtin = is_builtin_hrns(target.profile)
+    if name is None and not builtin:
+        return None
+    paths = (config.path,) if config.config_file else config_files()
+    path = config.path
+    for source in paths:
+        if not source.is_file():
+            continue
+        with source.open("rb") as stream:
+            document = tomllib.load(stream)
+        profiles = document.get("profile", {})
+        owns_profile = (
+            "local_model_effort" in document
+            if name is None
+            else isinstance(profiles, dict) and name in profiles
+        )
+        if owns_profile:
+            path = source
+            break
+    return {
+        "path": str(path.resolve()),
+        "profile": name,
+        "builtin": builtin,
+        "values": config.local_model_effort if name is None else target.profile.model_effort,
+    }
 
 
 def _exec_at(executable: str, argv: list[str], env: dict[str, str], cwd: str) -> None:

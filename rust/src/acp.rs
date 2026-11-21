@@ -8,9 +8,9 @@ use agent_client_protocol::v1::schema::{
     InitializeRequest, ListSessionsRequest, LoadSessionRequest, McpServer, NewSessionRequest,
     PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigOption,
-    SessionConfigOptionValue, SessionId, SessionInfo, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, StopReason, ToolCallContent, ToolCallLocation, ToolCallStatus,
-    ToolKind,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionId, SessionInfo,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
 use agent_client_protocol::{
@@ -129,12 +129,19 @@ pub struct Services {
     pub client_io: ClientIoMode,
     pub mcp_sidecar: Option<PathBuf>,
     pub mcp_config: Option<PathBuf>,
+    #[cfg(not(target_family = "wasm"))]
+    pub effort_profile: Option<crate::effort::EffortProfile>,
 }
 
 pub enum Action {
     Prompt(Prompt),
     Cancel,
-    SetOption(SessionConfigId, SessionConfigOptionValue, bool),
+    SetOption {
+        id: SessionConfigId,
+        value: SessionConfigOptionValue,
+        category: SessionConfigOptionCategory,
+        choose_effort: bool,
+    },
     ListSessions {
         request_id: u64,
         cursor: Option<String>,
@@ -422,7 +429,14 @@ pub async fn connect(
                 io.mode = services.client_io.native();
                 io.remember(&session.session_id().to_string(), &cwd);
             }
-            let _ = events.unbounded_send(Event::Options(options.unwrap_or_default()));
+            let options = options.unwrap_or_default();
+            #[cfg(not(target_family = "wasm"))]
+            let options = if !loaded && let Some(profile) = &services.effort_profile {
+                profile.restore(session.connection(), session.session_id(), options, false, &events).await
+            } else {
+                options
+            };
+            let _ = events.unbounded_send(Event::Options(options));
             let skills = meta
                 .as_ref()
                 .map(crate::skills::catalog)
@@ -490,12 +504,29 @@ pub async fn connect(
                                 CancelNotification::new(session.session_id().clone())
                             )?;
                         }
-                        Some(Action::SetOption(id, value, choose_effort)) => {
+                        Some(Action::SetOption { id, value, category, choose_effort }) => {
                             let request = SetSessionConfigOptionRequest::new(session.session_id().clone(), id, value);
                             let reply = session.connection().send_request(request).block_task().await;
                             let event = match reply {
-                                Ok(reply) if choose_effort => Event::ModelSelected(reply.config_options),
-                                Ok(reply) => Event::Options(reply.config_options),
+                                Ok(reply) => {
+                                    let options = reply.config_options;
+                                    #[cfg(not(target_family = "wasm"))]
+                                    let options = if let Some(profile) = &services.effort_profile {
+                                        match category {
+                                            SessionConfigOptionCategory::Model => profile.restore(session.connection(), session.session_id(), options, true, &events).await,
+                                            SessionConfigOptionCategory::ThoughtLevel => {
+                                                profile.remember(&options, &events).await;
+                                                options
+                                            }
+                                            _ => options,
+                                        }
+                                    } else {
+                                        options
+                                    };
+                                    #[cfg(target_family = "wasm")]
+                                    let _ = category;
+                                    if choose_effort { Event::ModelSelected(options) } else { Event::Options(options) }
+                                }
                                 Err(error) => Event::Error(error.message),
                             };
                             let _ = events.unbounded_send(event);
