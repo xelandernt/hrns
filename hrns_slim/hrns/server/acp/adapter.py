@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Generic, Literal
 
@@ -30,6 +30,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         *,
         principal: PrincipalT | None = None,
     ) -> None:
+        self._provider_editor: Callable[[str, dict[str, object]], None] | None = None
         self._principal = principal
         self._registration = registration
         self._session_store = registration.store
@@ -234,7 +235,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
                 session_capabilities=session_capabilities,
             ),
             agent_info=schema.Implementation(name=self._name, version=self._version),
-            field_meta={"hrns/session/state": True},
+            field_meta={
+                "hrns/session/state": True,
+                "hrns/providers/manage": self._provider_editor is not None,
+            },
         )
 
     async def list_sessions(
@@ -503,8 +507,21 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         return None
 
     async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
-        """This adapter exposes no extension methods."""
-        raise acp.RequestError.method_not_found(method)
+        """Dispatch provider document edits when the stdio launcher supplies an editor."""
+        editor = self._provider_editor
+        if editor is None or method not in {"hrns/providers/save", "hrns/providers/remove"}:
+            raise acp.RequestError.method_not_found(method)
+        before = self._options_snapshot()
+        try:
+            editor(method, params)
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+        except OSError as exc:
+            raise acp.RequestError.internal_error(
+                {"reason": "Could not write provider configuration"}
+            ) from exc
+        await self._push_option_changes(before)
+        return {}
 
     async def ext_notification(self, method: str, params: dict[str, object]) -> None:
         """This adapter exposes no extension notifications."""

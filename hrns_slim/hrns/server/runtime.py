@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -10,12 +11,12 @@ from typing import Annotated
 
 from acp import schema
 from cyclopts import App, Parameter
-from pydantic_ai import Agent
+from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import infer_model, infer_model_profile, known_model_names
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers import infer_provider_class
-from pydantic_ai.settings import ModelSettings, merge_model_settings
+from pydantic_ai.settings import ModelSettings
 
 from hrns.shared.config import (
     EFFORT_DEFAULT,
@@ -23,6 +24,11 @@ from hrns.shared.config import (
     THINKING_LEVELS,
     HrnsConfig,
     ProviderEntry,
+)
+from hrns.shared.config.settings import (
+    check_provider_name,
+    config_files,
+    write_config_document,
 )
 
 from .acp import (
@@ -41,6 +47,7 @@ from .acp import (
     run_acp_stdio,
 )
 from .agent import build_agent
+from .local_sessions import LocalSessionStore
 
 __all__ = ["RuntimeModelResolver", "main"]
 
@@ -90,6 +97,21 @@ def _thinking_support(pydantic_id: str) -> str | None:
     return "supported" if profile.get("supports_thinking") else None
 
 
+class _ProviderEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    create: bool
+    api_type: str
+    base_url: str
+    models: list[str] | None = None
+    api_key_env: str | None = None
+
+
+class _ProviderRemoval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+
+
 class RuntimeModelResolver(ProviderModelResolver):
     """The built-in configuration, exposed as the models and providers ACP can use.
 
@@ -116,6 +138,108 @@ class RuntimeModelResolver(ProviderModelResolver):
             ]
         )
         self.settings = settings
+
+    def edit_provider_document(self, method: str, params: dict[str, object]) -> None:
+        """Change a built-in stdio provider and the same entry's runtime catalog."""
+        edit = _ProviderEdit.model_validate(params) if method == "hrns/providers/save" else None
+        name = check_provider_name(
+            edit.id if edit is not None else _ProviderRemoval.model_validate(params).id
+        )
+        existing = self.settings.providers.get(name)
+        if edit is not None and edit.create != (existing is None):
+            raise ValueError(
+                "A provider with this name already exists."
+                if edit.create
+                else "Provider does not exist."
+            )
+        if edit is None and (existing is None or self.settings.provider == name):
+            raise ValueError("Choose an existing provider other than the configured default.")
+
+        paths = (self.settings.path,) if self.settings.config_file else config_files()
+        sources: list[tuple[Path, dict[str, object], dict[str, object]]] = []
+        for path in paths:
+            if path.is_file():
+                with path.open("rb") as stream:
+                    document = tomllib.load(stream)
+                entries = document.get("providers", {})
+                if not isinstance(entries, dict):
+                    raise ValueError("The providers section must be a TOML table.")
+                if name in entries:
+                    sources.append((path, document, entries))
+        if edit is None and len(sources) != 1:
+            raise ValueError("Remove this provider from its configuration sources directly.")
+
+        if sources:
+            target, document, entries = sources[0]
+        else:
+            target = self.settings.path
+            if target.is_file():
+                with target.open("rb") as stream:
+                    document = tomllib.load(stream)
+            else:
+                document = {}
+            entries = document.get("providers", {})
+            if not isinstance(entries, dict):
+                raise ValueError("The providers section must be a TOML table.")
+
+        if edit is None:
+            del entries[name]
+            write_config_document(target, document)
+            del self.settings.providers[name]
+            self._providers.pop(name, None)
+            self._configs.pop(name, None)
+            return
+
+        fields: dict[str, object] = {"type": edit.api_type, "base_url": edit.base_url}
+        if edit.models is not None:
+            fields["custom_models"] = edit.models
+        if edit.api_key_env is not None:
+            fields["api_key_env"] = edit.api_key_env
+        try:
+            entry = ProviderEntry.model_validate(
+                {**(existing or ProviderEntry()).model_dump(), **fields}
+            )
+        except ValidationError as exc:
+            reason = "; ".join(error["msg"] for error in exc.errors(include_input=False))
+            raise ValueError(reason) from exc
+        try:
+            infer_provider_class(entry.provider_id(name))
+        except (ImportError, ValueError, UserError) as exc:
+            raise ValueError(
+                f"Provider type {entry.provider_id(name)!r} is unavailable in this environment."
+            ) from exc
+        if not self.settings.provider or (
+            self.settings.provider == name and not self.settings.model
+        ):
+            model = next(
+                iter(entry.custom_models or _known_models().get(entry.provider_id(name), ())), None
+            )
+            if model is None:
+                raise ValueError("Supply a model ID for this provider.")
+            document["provider"] = name
+            document["model"] = model
+
+        stored = entries.get(name, {})
+        if not isinstance(stored, dict):
+            raise ValueError("The provider entry must be a TOML table.")
+        stored.update({key: getattr(entry, key) for key in fields})
+        entries[name] = stored
+        document["providers"] = entries
+        write_config_document(target, document)
+        if not self.settings.provider or (
+            self.settings.provider == name and not self.settings.model
+        ):
+            self.settings.provider = name
+            self.settings.model = str(document["model"])
+        self.settings.providers[name] = entry
+        api_type = entry.provider_id(name)
+        self._providers[name] = ProviderDescriptor(
+            provider_id=name,
+            supported=(api_type,),
+            required=name == self.settings.provider,
+            current=ProviderRoute(api_type=api_type, base_url=entry.base_url),
+        )
+        self._configs.pop(name, None)
 
     def list_models(self) -> Sequence[ModelChoice]:
         """Every ``entry:model`` target, with the active one first as the default."""
@@ -325,29 +449,23 @@ def run(
         return
     if login:
         raise SystemExit("Account login is not supported by the minimal backend.")
-    if setup:
-        run_acp_stdio(lambda _session: Agent[None, str](name="hrns", deps_type=type(None)))
-        return
-
     resolver = RuntimeModelResolver(settings)
     models = resolver.list_models()
-    if not models:
+    if not models and env_only and not setup:
         raise SystemExit("No models are configured. Add a provider and model first.")
-    resolved = resolver.resolve(models[0].model_id)
-    # Advertise every configured model and resolve the client's choice through this
-    # entry's provider configuration. The active model stays the default.
+    # Resolve the selected catalog entry at prompt time, including after local setup.
     run_acp_stdio(
         lambda _session: build_agent(
-            resolved.model,
             cwd=cwd,
             skills=settings.skills,
-            model_settings=merge_model_settings(
-                ModelSettings(**settings.model_settings), resolved.settings
-            ),
+            model_settings=ModelSettings(**settings.model_settings),
+            _allow_unconfigured=True,
         ),
         model_resolver=resolver,
+        session_store=LocalSessionStore(settings.store),
         attachment_config=_attachment_config,
         mcp_capabilities=schema.McpCapabilities(acp=True, http=True, sse=True),
+        _provider_editor=None if env_only else resolver.edit_provider_document,
     )
 
 

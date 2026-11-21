@@ -26,6 +26,7 @@ def build_agent(
     skills: SkillsSettings | None = None,
     model_settings: ModelSettings | None = None,
     approval: bool = True,
+    _allow_unconfigured: bool = False,
 ) -> Agent[None, str]:
     """Build the default coding agent.
 
@@ -45,7 +46,7 @@ def build_agent(
     disable that policy.
     """
     selected = model or os.environ.get("HRNS_MODEL")
-    if selected is None:
+    if selected is None and not _allow_unconfigured:
         raise ValueError("Pass model= or set HRNS_MODEL to a Pydantic AI model id.")
 
     resolved_skills = Skills.from_settings(skills or SkillsSettings(), cwd=cwd)

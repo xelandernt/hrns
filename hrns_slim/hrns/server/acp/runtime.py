@@ -461,7 +461,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             invoked_skills=set(stored.skills),
         )
         self._title = title_from_updates(self.state.transcript)
-        if self._reconcile_setting_selections(self.state):
+        model_changed = self._reconcile_model(self.state)
+        settings_changed = self._reconcile_setting_selections(self.state)
+        if model_changed or settings_changed:
             await self._persist(self.state)
 
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
@@ -610,13 +612,27 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
         return settings
 
+    def _reconcile_model(self, state: SessionState[AgentDepsT]) -> bool:
+        if self._model_resolver is None:
+            return False
+        choices = self._model_choices()
+        if any(choice.model_id == state.model for choice in choices):
+            return False
+        next_model = choices[0].model_id if choices else None
+        if state.model == next_model:
+            return False
+        state.model = next_model
+        return True
+
     async def _push_option_changes(self, before: ConfigOptions | None) -> None:
         state = self.state
-        if self._reconcile_setting_selections(state):
+        model_changed = self._reconcile_model(state)
+        settings_changed = self._reconcile_setting_selections(state)
+        if model_changed or settings_changed:
             await self._persist(state)
         after = self._config_options(state)
-        if after is not None and after != before:
-            await self._deliver_update(schema.ConfigOptionUpdate(config_options=after))
+        if after != before:
+            await self._deliver_update(schema.ConfigOptionUpdate(config_options=after or []))
 
     async def _build_config(self, session_id: str, cwd: str) -> AcpSessionConfig[AgentDepsT]:
         if self._session_config is None:

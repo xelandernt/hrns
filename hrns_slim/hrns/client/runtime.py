@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hrns.shared.config import HrnsConfig, Profile, config_files
+from hrns.shared.config import HrnsConfig, Profile
 from hrns.shared.config.credentials import store_api_key, stored_api_key_ref
 
 from ..shared.errors import HrnsClientError
@@ -165,8 +165,6 @@ def _agent_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
     args = [*command[1:]]
     if settings.config_file is not None:
         args.extend(["--config", str(settings.config_file.expanduser().absolute())])
-    elif not config_files():
-        args.append("--env-only")
     return Profile(
         name=f"{settings.provider}:{settings.model}",
         command=command[0],

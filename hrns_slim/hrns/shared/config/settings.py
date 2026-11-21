@@ -96,6 +96,21 @@ def config_files() -> tuple[Path, ...]:
     return tuple(path for path in (project_config_path(), default_config_path()) if path.is_file())
 
 
+def write_config_document(target: Path, payload: Mapping[str, object]) -> None:
+    """Replace a TOML document atomically."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = tomli_w.dumps(payload)
+    tomllib.loads(text)
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(text.encode())
+            stream.close()
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def check_provider_name(name: str) -> str:
     """Return a usable entry name, or raise with the reason it is not one."""
     import re
@@ -460,22 +475,12 @@ class HrnsConfig(BaseSettings):
         written by hand and a future default change reaches existing files.
         """
         target = path.expanduser().absolute() if path is not None else self.path
-        target.parent.mkdir(parents=True, exist_ok=True)
         payload = self.model_dump(
             mode="json",
             exclude={"config_file", "api_key"},
             exclude_defaults=True,
         )
-        text = tomli_w.dumps(payload)
-        tomllib.loads(text)
-        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
-            temporary = Path(stream.name)
-            try:
-                stream.write(text.encode())
-                stream.close()
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
+        write_config_document(target, payload)
         return target
 
     # ---------------------------------------------------------- providers
