@@ -167,7 +167,9 @@ clear the transcript rather than replay it.
 
 Transcript entries keep their plain text for search and copy. Agent and thought
 entries render a small Markdown subset at draw time: fenced code, inline code,
-emphasis, links and headings. User and note entries stay literal. ACP tool
+emphasis, links, headings and GitHub Flavored Markdown tables. Table cells wrap
+within aligned columns and use labeled rows when the viewport is too narrow.
+User and note entries stay literal. ACP tool
 calls are keyed by `tool_call_id`, merged from start and progress updates, and
 shown as compact rows with status markers and disclosure arrows. Click a tool
 header to expand or collapse its output. `Ctrl-O` toggles details in bulk for

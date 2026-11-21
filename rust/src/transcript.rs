@@ -1,3 +1,6 @@
+mod table;
+
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use agent_client_protocol::v1::schema::ToolCallStatus;
@@ -54,6 +57,7 @@ struct Entry {
     text: String,
     rows: Vec<Range<usize>>,
     code_rows: Vec<bool>,
+    table_rows: BTreeMap<usize, Line<'static>>,
     detail: Option<String>,
     detail_rows: Vec<Range<usize>>,
     shell: bool,
@@ -80,6 +84,14 @@ impl Entry {
                 return heading;
             }
             row -= 1;
+        }
+        if let Some(line) = self.table_rows.get(&row) {
+            return Line::from(
+                line.spans
+                    .iter()
+                    .map(|span| Span::styled(span.content.as_ref(), span.style))
+                    .collect::<Vec<_>>(),
+            );
         }
         if let Some(range) = self.rows.get(row) {
             let text = &self.text[range.clone()];
@@ -256,7 +268,7 @@ fn link(text: &str) -> Option<(&str, &str, &str)> {
 enum AnchorRow {
     Start,
     Spacer,
-    Text(usize),
+    Text { byte: usize, line_offset: usize },
     Detail(usize),
 }
 
@@ -290,6 +302,7 @@ impl Transcript {
             text,
             rows: Vec::new(),
             code_rows: Vec::new(),
+            table_rows: BTreeMap::new(),
             detail: None,
             detail_rows: Vec::new(),
             shell: false,
@@ -345,6 +358,7 @@ impl Transcript {
             text,
             rows: Vec::new(),
             code_rows: Vec::new(),
+            table_rows: BTreeMap::new(),
             detail: Some(detail),
             detail_rows: Vec::new(),
             shell,
@@ -462,7 +476,14 @@ impl Transcript {
         let entry = self.entries.get(index)?;
         let row = self.top.saturating_sub(self.entry_start(index));
         let anchor = match row.checked_sub(entry.heading_rows()) {
-            Some(row) if row < entry.rows.len() => AnchorRow::Text(entry.rows[row].start),
+            Some(row) if row < entry.rows.len() => {
+                let byte = entry.rows[row].start;
+                let first = entry.rows.partition_point(|range| range.start < byte);
+                AnchorRow::Text {
+                    byte,
+                    line_offset: row - first,
+                }
+            }
             Some(row) => entry
                 .detail_rows
                 .get(row - entry.rows.len())
@@ -484,7 +505,16 @@ impl Transcript {
         };
         match anchor {
             AnchorRow::Spacer => entry.end.saturating_sub(1),
-            AnchorRow::Text(byte) => start + entry.heading_rows() + row_at(&entry.rows, byte),
+            AnchorRow::Text { byte, line_offset } => {
+                let last = row_at(&entry.rows, byte);
+                let row = entry.rows.get(last).map_or(last, |range| {
+                    let first = entry
+                        .rows
+                        .partition_point(|candidate| candidate.start < range.start);
+                    first + line_offset.min(last - first)
+                });
+                start + entry.heading_rows() + row
+            }
             AnchorRow::Detail(byte) if !entry.detail_rows.is_empty() => {
                 start + entry.heading_rows() + entry.rows.len() + row_at(&entry.detail_rows, byte)
             }
@@ -633,11 +663,15 @@ impl Transcript {
                 continue;
             }
             let width = usize::from(self.width);
+            entry.table_rows.clear();
             if entry.role == Role::Thought && !entry.expanded {
                 entry.rows.clear();
                 entry.code_rows.clear();
             } else if matches!(entry.role, Role::Agent | Role::Thought) {
-                (entry.rows, entry.code_rows) = wrap_markdown(&entry.text, width);
+                let layout = MarkdownLayout::new(&entry.text, width);
+                entry.rows = layout.rows;
+                entry.code_rows = layout.code_rows;
+                entry.table_rows = layout.table_rows;
             } else {
                 let indent = match entry.role {
                     Role::Tool => 4,
@@ -664,25 +698,46 @@ impl Transcript {
     }
 }
 
-fn wrap_markdown(text: &str, width: usize) -> (Vec<Range<usize>>, Vec<bool>) {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    let mut code_rows = Vec::new();
-    let mut fence = false;
-    let mut start = 0;
-    for line in text.split_inclusive('\n') {
-        let marker = line.trim_start().starts_with("```");
-        let code = fence || marker;
-        for range in wrap(line, width) {
-            rows.push(start + range.start..start + range.end);
-            code_rows.push(code);
+#[derive(Default)]
+struct MarkdownLayout {
+    rows: Vec<Range<usize>>,
+    code_rows: Vec<bool>,
+    table_rows: BTreeMap<usize, Line<'static>>,
+}
+
+impl MarkdownLayout {
+    fn new(text: &str, width: usize) -> Self {
+        let width = width.max(1);
+        let mut layout = Self::default();
+        let mut start = 0;
+        for table in table::parse(text) {
+            layout.push_text(&text[start..table.source.start], start, width);
+            for (source, line) in table.lines(width) {
+                layout.table_rows.insert(layout.rows.len(), line);
+                layout.rows.push(source);
+                layout.code_rows.push(false);
+            }
+            start = table.source.end;
         }
-        if marker {
-            fence = !fence;
-        }
-        start += line.len();
+        layout.push_text(&text[start..], start, width);
+        layout
     }
-    (rows, code_rows)
+
+    fn push_text(&mut self, text: &str, mut start: usize, width: usize) {
+        let mut fence = false;
+        for line in text.split_inclusive('\n') {
+            let marker = line.trim_start().starts_with("```");
+            let code = fence || marker;
+            for range in wrap(line, width) {
+                self.rows.push(start + range.start..start + range.end);
+                self.code_rows.push(code);
+            }
+            if marker {
+                fence = !fence;
+            }
+            start += line.len();
+        }
+    }
 }
 
 fn wrap(text: &str, width: usize) -> Vec<Range<usize>> {
