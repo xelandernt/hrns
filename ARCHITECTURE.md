@@ -233,12 +233,11 @@ block. It answers `session/request_permission`, `elicitation/create`, `fs/*` and
 session-scoped requests. Provider methods and extension requests use the SDK's
 untyped message type because the stable schema does not expose them.
 
-The server advertises no `available_commands_update` and no `session/resume` or
-rename method. `/agent` therefore stays empty unless an agent advertises
-commands, and `/rename` reports that standard ACP has no rename operation.
+The built-in server supplies session titles through `session_info_update`.
+`/agent` runs slash commands advertised by the connected agent.
+The built-in server omits `available_commands_update` and `session/resume`.
 `session/delete` returning `-32002` is treated as success. Listing defaults to
-the current workspace. Titles arrive through `session_info_update` and the
-server's derived title.
+the current workspace.
 
 ### Terminal command workflows
 

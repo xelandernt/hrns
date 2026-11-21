@@ -133,7 +133,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/sidebar", "Toggle the activity sidebar"),
     ("/thoughts", "Show or hide reasoning"),
     ("/agent", "Run an advertised agent command"),
-    ("/rename", "Explain session rename support"),
 ];
 
 pub struct App {

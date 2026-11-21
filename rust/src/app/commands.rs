@@ -259,13 +259,6 @@ impl App {
                 self.draft.submit();
                 self.apply_setting(text["/settings ".len()..].trim());
             }
-            command if command.starts_with("/rename ") || command == "/rename" => {
-                self.draft.submit();
-                self.transcript.push(
-                    Role::Note,
-                    "Standard ACP has no session rename; the agent updates its own title".into(),
-                );
-            }
             command if command.starts_with("/agent ") => {
                 let command = command["/agent ".len()..].trim();
                 let name = command.split_whitespace().next();
