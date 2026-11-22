@@ -249,6 +249,10 @@ impl App {
             } else {
                 "Unknown command · /help commands"
             }
+        } else if self.provider_draft.is_some() {
+            "Enter save provider · Esc return to draft"
+        } else if self.prompt_setup_message().is_some() {
+            "Set up a provider and model with /providers"
         } else {
             "Enter send · Wheel scroll · Click a header for details · /help commands"
         };

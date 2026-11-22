@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 from .acp.store import (
     _PAGE_SIZE,
     SessionAccess,
+    SessionStoreError,
     SessionSummary,
     StoredSession,
     _cursor_offset,
@@ -30,20 +31,26 @@ class LocalSessionStore:
         self.path = path.expanduser().absolute()
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.touch(mode=0o600, exist_ok=True)
-        with closing(sqlite3.connect(self.path)) as db, db:
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS acp_sessions (
-                    id TEXT PRIMARY KEY,
-                    cwd TEXT NOT NULL,
-                    title TEXT,
-                    updated TEXT NOT NULL,
-                    state BLOB NOT NULL
-                )
-            """)
-            yield db
+    def _connect(self) -> Generator[sqlite3.Connection]:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.touch(mode=0o600, exist_ok=True)
+            with closing(sqlite3.connect(self.path)) as db, db:
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS acp_sessions (
+                        id TEXT PRIMARY KEY,
+                        cwd TEXT NOT NULL,
+                        title TEXT,
+                        updated TEXT NOT NULL,
+                        state BLOB NOT NULL
+                    )
+                """)
+                yield db
+        except (OSError, sqlite3.Error) as exc:
+            detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+            raise SessionStoreError(
+                f"Could not access the local session database ({detail})."
+            ) from exc
 
     async def create(self, session_id: str, *, cwd: str, principal: object) -> None:
         await asyncio.to_thread(self._write, session_id, StoredSession(cwd=cwd), True)

@@ -8,6 +8,14 @@ use crate::theme;
 use crate::transcript::Role;
 
 impl App {
+    pub(super) fn submit_provider_edit(&mut self) {
+        if slash_command(self.draft.text()) == Some("/provider") {
+            self.submit();
+        } else {
+            self.provider_usage();
+        }
+    }
+
     pub(super) fn submit(&mut self) {
         let input = self.draft.text().to_owned();
         let Some(command) = slash_command(&input) else {

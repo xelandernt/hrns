@@ -82,7 +82,7 @@ from .elicitation import (
     build_ask_user_schema,
 )
 from .interactions import Interactions
-from .models import ModelChoice, ModelResolver, ResolvedModel, SettingOption
+from .models import ModelChoice, ModelResolver, ModelSetupError, ResolvedModel, SettingOption
 from .permission import PermissionPolicy, ToolCallPermission, default_permission_scope
 from .presentation import (
     ToolCallContent,
@@ -494,11 +494,13 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         choices = self._model_choices()
         if current_model_id is None or not choices:
             return None
+        setup_message = self._model_setup_message(current_model_id, choices)
         return schema.SessionConfigOptionSelect(
             id=_MODEL_CONFIG_ID,
             name="Model",
             type="select",
             current_value=current_model_id,
+            field_meta={"hrns/prompt/setup": setup_message} if setup_message else None,
             options=[
                 schema.SessionConfigSelectOption(
                     value=choice.model_id,
@@ -508,6 +510,20 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 for choice in choices
             ],
         )
+
+    @staticmethod
+    def _model_setup_message(model_id: str | None, choices: Sequence[ModelChoice]) -> str | None:
+        return next(
+            (choice.setup_message for choice in choices if choice.model_id == model_id), None
+        )
+
+    def check_prompt_setup(self) -> None:
+        model_id = self.state.model
+        if model_id is None:
+            if self._agent.model is None:
+                raise acp.RequestError(-32600, "Set up a provider and model to send messages.")
+        elif message := self._model_setup_message(model_id, self._model_choices()):
+            raise acp.RequestError(-32000, message)
 
     def _config_options(self, state: SessionState[AgentDepsT]) -> ConfigOptions | None:
         """The complete config-option state ACP returns after every change.
@@ -1324,6 +1340,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError.invalid_params(
                 {"model_id": model_id, "reason": str(exc)}
             ) from exc
+        except ModelSetupError as exc:
+            raise acp.RequestError(-32602, str(exc)) from exc
 
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object

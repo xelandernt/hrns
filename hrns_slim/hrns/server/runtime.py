@@ -46,6 +46,7 @@ from .acp import (
     acp_mcp_toolsets,
     run_acp_stdio,
 )
+from .acp.models import ModelSetupError
 from .agent import build_agent
 from .local_sessions import LocalSessionStore
 
@@ -251,7 +252,15 @@ class RuntimeModelResolver(ProviderModelResolver):
             name, separator, model_name = target.partition(":")
             if not separator or not model_name or name not in self.settings.providers:
                 continue
-            choices.append(ModelChoice(model_id=target, provider_id=name))
+            try:
+                self.settings.resolved_api_key(name)
+            except ValueError as exc:
+                setup_message = str(exc)
+            else:
+                setup_message = None
+            choices.append(
+                ModelChoice(model_id=target, provider_id=name, setup_message=setup_message)
+            )
         return choices
 
     def build_model(self, model_id: str, config: ProviderConfig | None) -> ResolvedModel:
@@ -291,11 +300,15 @@ class RuntimeModelResolver(ProviderModelResolver):
                 )
             )
         except ImportError as exc:
-            raise ValueError(
+            raise ModelSetupError(
                 f"Install the Pydantic AI provider extra for {provider!r} in this environment."
             ) from exc
-        except (ValueError, TypeError, UserError) as exc:
-            raise ValueError(
+        except UserError as exc:
+            raise ModelSetupError(
+                f"Check the credentials and settings for provider {name!r} in /providers."
+            ) from exc
+        except (ValueError, TypeError) as exc:
+            raise ModelSetupError(
                 f"Cannot configure {name!r} ({provider}) with model {model_name!r}."
             ) from exc
         return ResolvedModel(

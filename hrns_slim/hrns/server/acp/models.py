@@ -44,6 +44,12 @@ class ModelChoice:
     model_id: str
     provider_id: str
     name: str | None = None
+    #: Client-visible reason the configured model is not ready to receive prompts.
+    setup_message: str | None = None
+
+
+class ModelSetupError(ValueError):
+    """The selected model could not be set up, with a client-safe explanation."""
 
 
 @dataclass(frozen=True, kw_only=True)

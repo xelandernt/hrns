@@ -50,6 +50,10 @@ class StoredSession:
     skills: tuple[str, ...] = ()
 
 
+class SessionStoreError(RuntimeError):
+    """A persistence failure with a message safe to show to the client."""
+
+
 class SessionPersistence(Protocol):
     """Trusted runtime persistence, independent of any caller identity."""
 

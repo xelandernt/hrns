@@ -266,10 +266,15 @@ and pauses queued prompts from the previous connection.
 Tab switches between the current workspace and all accessible workspaces.
 The picker shows the latest activity timestamp and opens the selected session
 through `session/load`. The built-in stdio agent uses the configured SQLite
-store so a new process can restore a session. Server registrations can supply
-their own store.
+store so a new process can restore a session. The ACP adapter reports local
+database failures with a client-visible message. Server registrations can
+supply their own store.
 
 `/models` searches the advertised model choices and marks the current model.
+In the built-in terminal session, submitting a draft before model setup opens
+the provider picker. The composer restores the draft after provider editing,
+and Enter submits it once a model is ready. The ACP prompt endpoint rejects
+missing setup and reports credential errors to clients.
 The reasoning picker opens after model selection when the agent advertises
 effort choices. The composer completes `/model` and `/effort` arguments from
 the current ACP config options, and offers built-in options for `/theme`,

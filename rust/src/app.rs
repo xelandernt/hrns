@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{
-    ElicitationContentValue, PlanEntry, SessionConfigOption, ToolKind,
+    ElicitationContentValue, PlanEntry, SessionConfigOption, SessionConfigOptionCategory, ToolKind,
 };
 use futures::channel::{mpsc, oneshot};
 use ratatui::layout::{Position, Rect};
@@ -19,6 +19,7 @@ use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
 use crate::elicitation::FormState;
 use crate::mcp_types::{ConsentDecision, Health};
+use crate::options;
 use crate::preferences::{ApprovalMode, Preferences};
 use crate::skills::{self, Skill};
 use crate::theme::{self, Palette};
@@ -163,6 +164,7 @@ pub struct App {
     replay_from: Option<usize>,
     queue_paused: bool,
     draft: Composer,
+    provider_draft: Option<Composer>,
     transcript: Transcript,
     transcript_area: Rect,
     approvals: VecDeque<PendingApproval>,
@@ -235,6 +237,7 @@ impl App {
             replay_from: None,
             queue_paused: false,
             draft: Composer::default(),
+            provider_draft: None,
             transcript,
             transcript_area: Rect::default(),
             approvals: VecDeque::new(),
@@ -587,10 +590,8 @@ impl App {
             return;
         };
         if matches!(key, Key::Text('a')) && self.provider_editor {
-            self.providers = None;
             self.provider_usage();
-            self.draft.set_text("/provider add ");
-            self.refresh_completion();
+            self.edit_provider_in_composer("/provider add ");
             return;
         }
         let Some(provider) = providers.get(popup.selected) else {
@@ -647,10 +648,17 @@ impl App {
             _ => None,
         };
         if let Some(command) = action {
-            self.providers = None;
-            self.draft.set_text(&command);
-            self.refresh_completion();
+            self.edit_provider_in_composer(&command);
         }
+    }
+
+    fn edit_provider_in_composer(&mut self, command: &str) {
+        self.providers = None;
+        if !self.draft.text().is_empty() {
+            self.provider_draft = Some(std::mem::take(&mut self.draft));
+        }
+        self.draft.set_text(command);
+        self.refresh_completion();
     }
 
     fn request_permission(&mut self, request: PermissionRequest) {
@@ -901,6 +909,21 @@ impl App {
         if self.picker.is_some() {
             self.picker_key(key);
             return;
+        }
+
+        if self.provider_draft.is_some() {
+            match key {
+                Key::Escape => {
+                    self.restore_provider_draft();
+                    return;
+                }
+                Key::Enter => {
+                    self.submit_provider_edit();
+                    self.restore_provider_draft();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if self.completion.is_some() {
@@ -1310,7 +1333,12 @@ impl App {
     }
 
     fn flush_queue(&mut self) {
-        if !self.ready || self.turns > 0 || self.remote_busy() || self.queue_paused {
+        if !self.ready
+            || self.turns > 0
+            || self.remote_busy()
+            || self.queue_paused
+            || self.prompt_setup_message().is_some()
+        {
             return;
         }
         if let Some(prompt) = self.queue.pop_front()
@@ -1320,7 +1348,33 @@ impl App {
         }
     }
 
+    fn restore_provider_draft(&mut self) {
+        if let Some(draft) = self.provider_draft.take() {
+            self.draft = draft;
+            self.refresh_completion();
+        }
+    }
+
+    fn prompt_setup_message(&self) -> Option<&str> {
+        if !self.ready || !self.provider_editor {
+            return None;
+        }
+        let model = self
+            .options
+            .iter()
+            .find(|option| options::matches_category(option, &SessionConfigOptionCategory::Model));
+        match model {
+            None => Some("Set up a provider and model to send messages."),
+            Some(option) => option.meta.as_ref()?.get("hrns/prompt/setup")?.as_str(),
+        }
+    }
+
     fn prepare_prompt(&mut self, text: String) -> Option<Prompt> {
+        if let Some(message) = self.prompt_setup_message() {
+            self.transcript.push(Role::Note, message.to_owned());
+            self.show_providers();
+            return None;
+        }
         if self.attachment_reads > 0 {
             self.transcript.push(
                 Role::Note,
