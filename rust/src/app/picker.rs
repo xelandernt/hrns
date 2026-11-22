@@ -18,6 +18,7 @@ pub(super) enum Source {
         error: Option<String>,
     },
     Setting(SessionConfigOptionCategory),
+    Skills,
 }
 
 pub(super) struct Picker {
@@ -39,6 +40,7 @@ impl Picker {
             Source::Sessions { .. } => "Resume a session",
             Source::Setting(SessionConfigOptionCategory::Model) => "Select a model",
             Source::Setting(_) => "Select reasoning effort",
+            Source::Skills => "Skills",
         }
     }
 
@@ -49,6 +51,7 @@ impl Picker {
             } => error,
             Source::Sessions { loading: true, .. } => "Loading sessions…",
             Source::Sessions { .. } if empty && self.query.is_empty() => "No saved sessions",
+            Source::Skills if empty && self.query.is_empty() => "No skills available",
             _ if empty => "No matches",
             _ => "",
         }
@@ -67,6 +70,7 @@ impl Picker {
                 "  ↑/↓ select   Enter resume   Tab all workspaces   Esc close"
             }
             Source::Setting(_) => "  ↑/↓ select   Enter confirm   Esc close",
+            Source::Skills => "  ↑/↓ move   Enter insert   Esc close",
         }
     }
 
@@ -79,6 +83,14 @@ impl Picker {
 }
 
 impl App {
+    pub(super) fn show_skills(&mut self) {
+        self.picker = Some(Picker {
+            source: Source::Skills,
+            query: String::new(),
+            selected: 0,
+        });
+    }
+
     pub(super) fn show_sessions(&mut self) {
         self.picker = Some(Picker {
             source: Source::Sessions {
@@ -198,6 +210,17 @@ impl App {
 
     pub(super) fn picker_rows(&self, picker: &Picker) -> Vec<Row> {
         let rows: Vec<Row> = match &picker.source {
+            Source::Skills => self
+                .skills
+                .iter()
+                .filter(|skill| skill.user_invocable)
+                .map(|skill| Row {
+                    value: skill.id.clone(),
+                    label: skill.label().to_owned(),
+                    detail: skill.description.clone(),
+                    active: false,
+                })
+                .collect(),
             Source::Sessions { items, .. } => items
                 .iter()
                 .map(|item| {
@@ -263,6 +286,9 @@ impl App {
                 })
                 .unwrap_or_default(),
         };
+        if picker.query.is_empty() {
+            return rows;
+        }
         rows.into_iter().filter(|row| picker.matches(row)).collect()
     }
 
@@ -312,6 +338,7 @@ impl App {
                     let choose_effort = category == SessionConfigOptionCategory::Model;
                     self.set_config(category, &row.value, choose_effort);
                 }
+                Source::Skills => self.draft.insert(&format!("${} ", row.value)),
                 _ => {}
             }
             return;

@@ -90,9 +90,11 @@ one `session/request_permission` per call under the default approval policy.
 
 ## User invocation
 
-Type `$` in the composer to pick a skill — a bare `$` lists every skill alphabetically,
-typing narrows the list — or run `/skills` to list them. On submit, the client sends the
-skill's id with the prompt. The server resolves the id, prepends
+Run `/skills` to browse the available skills. Use Up and Down to highlight a skill
+and view its description and source. Enter inserts `$skill-name` into the composer,
+and Escape closes the picker. For quick completion, type `$` in the composer and
+start typing the skill name. On submit, the client sends the skill's id with the
+prompt. The server resolves the id, prepends
 the rendered instructions to that turn as a `<skill_content name="…">` block, and marks
 the skill active for the session. The transcript shows a `Loaded skill: <name>` marker.
 

@@ -7,6 +7,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Wrap};
 
+use super::picker::{Picker, Row, Source};
 use super::{App, PendingApproval, ScrollBar, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
@@ -534,13 +535,7 @@ impl App {
         metrics
     }
 
-    fn draw_picker(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        picker: &super::picker::Picker,
-        palette: &Palette,
-    ) {
+    fn draw_picker(&self, frame: &mut Frame, area: Rect, picker: &Picker, palette: &Palette) {
         let width = area.width.saturating_sub(2).min(88);
         let height = area.height.saturating_sub(2).min(26);
         let popup = Rect::new(
@@ -557,10 +552,23 @@ impl App {
         let inner = panel.inner(popup);
         frame.render_widget(Clear, popup);
         frame.render_widget(panel, popup);
+        let rows = self.picker_rows(picker);
+        let skills = matches!(picker.source, Source::Skills);
+        let detail_height = if skills && !rows.is_empty() {
+            (inner.height / 2)
+                .clamp(4, 10)
+                .min(inner.height.saturating_sub(3))
+        } else {
+            1
+        };
         let [search, list, status, keys] = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(if skills {
+                u16::from(inner.height >= 4)
+            } else {
+                2
+            }),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(detail_height),
             Constraint::Length(1),
         ])
         .areas(inner);
@@ -570,8 +578,18 @@ impl App {
             Line::from(format!("  Search  {}", picker.query)).fg(palette.accent)
         };
         frame.render_widget(Paragraph::new(search_text), search);
+        frame.render_widget(Paragraph::new(picker.hint()).fg(palette.muted), keys);
 
-        let rows = self.picker_rows(picker);
+        if skills && let Some(row) = rows.get(picker.selected) {
+            let entries = List::new(rows.iter().map(|row| row.label.as_str()))
+                .highlight_symbol("  › ")
+                .highlight_style(Style::default().fg(palette.accent).bg(palette.panel).bold());
+            let mut state = ListState::default().with_selected(Some(picker.selected));
+            frame.render_stateful_widget(entries, list, &mut state);
+            self.draw_skill_details(frame, status, row, palette);
+            return;
+        }
+
         let page = usize::from(list.height / 2).max(1);
         let start = picker.selected.saturating_sub(page.saturating_sub(1));
         let lines: Vec<_> = rows
@@ -600,7 +618,46 @@ impl App {
             Paragraph::new(picker.status(rows.is_empty())).fg(palette.muted),
             status,
         );
-        frame.render_widget(Paragraph::new(picker.hint()).fg(palette.muted), keys);
+    }
+
+    fn draw_skill_details(&self, frame: &mut Frame, area: Rect, row: &Row, palette: &Palette) {
+        let divider = Block::new()
+            .borders(if area.height >= 3 {
+                Borders::TOP
+            } else {
+                Borders::NONE
+            })
+            .border_style(Style::default().fg(palette.border));
+        let detail = divider.inner(area).inner(Margin::new(2, 0));
+        frame.render_widget(divider, area);
+        if detail.is_empty() {
+            return;
+        }
+
+        let source = if self.skills_remote {
+            "Remote"
+        } else {
+            self.skills
+                .iter()
+                .find(|skill| skill.id == row.value)
+                .and_then(crate::skills::Skill::directory)
+                .unwrap_or("Unavailable")
+        };
+        let source = format!("Source  {source}");
+        let limit = usize::from(detail.height).saturating_sub(1).max(1);
+        let lines = wrap_up_to(&source, usize::from(detail.width), limit);
+        let source_height = u16::try_from(lines.len()).unwrap_or(detail.height);
+        let [origin, description] =
+            Layout::vertical([Constraint::Length(source_height), Constraint::Min(0)]).areas(detail);
+        let lines: Vec<_> = lines
+            .into_iter()
+            .map(|range| Line::from(&source[range]).fg(palette.muted))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), origin);
+        frame.render_widget(
+            Paragraph::new(row.detail.trim()).wrap(Wrap { trim: true }),
+            description,
+        );
     }
 
     fn draw_status(&self, frame: &mut Frame, area: Rect, metrics: Line<'_>, palette: &Palette) {

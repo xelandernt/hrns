@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -13,6 +15,7 @@ pub struct Skill {
     pub description: String,
     #[serde(default = "user_invocable")]
     pub user_invocable: bool,
+    pub path: Option<String>,
 }
 
 const fn user_invocable() -> bool {
@@ -26,6 +29,13 @@ impl Skill {
         } else {
             &self.name
         }
+    }
+
+    pub fn directory(&self) -> Option<&str> {
+        Path::new(self.path.as_deref()?)
+            .parent()?
+            .to_str()
+            .filter(|directory| !directory.is_empty())
     }
 }
 

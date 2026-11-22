@@ -210,6 +210,10 @@ in the composer on Enter, including when used as the first token after
 local command completions, while a `$token` offers user-invocable skills from the agent's
 `hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
 selection while it is open, and Escape dismisses it before cancelling a turn.
+`/skills` uses the shared picker to browse the user-invocable catalog with Up and
+Down. The detail area shows the selected skill's description and the directory
+from its ACP `path` on stdio connections. WebSocket connections show a remote
+source label. Enter inserts the `$id` mention into the composer for the next prompt.
 Submitting a draft that names a catalog skill attaches the skill id and mention
 span to the first text block's `_meta`, leaving the typed text unchanged for
 the agent to expand. Paste, draft history and attachment staging stay shared;

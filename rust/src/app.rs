@@ -146,7 +146,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/clear-queue", "Clear the local queue"),
     ("/attach", "Stage a file"),
     ("/detach", "Remove a staged file"),
-    ("/skills", "List available skills"),
+    ("/skills", "Browse and insert skills"),
     ("/sidebar", "Toggle the activity sidebar"),
     ("/thoughts", "Show or hide reasoning"),
     ("/agent", "Run an advertised agent command"),
@@ -192,6 +192,7 @@ pub struct App {
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
     skills: Vec<Skill>,
+    skills_remote: bool,
     completion: Option<Completion>,
     plan: Vec<PlanEntry>,
     replay_plan: Option<Vec<PlanEntry>>,
@@ -270,6 +271,7 @@ impl App {
             options: Vec::new(),
             commands: Vec::new(),
             skills: Vec::new(),
+            skills_remote: false,
             completion: None,
             plan: Vec::new(),
             replay_plan: None,
@@ -380,8 +382,14 @@ impl App {
             }
             Event::Sessions { request_id, result } => self.sessions_received(request_id, result),
             Event::AgentCommands(commands) => self.commands = commands,
-            Event::Skills(skills) => {
-                self.skills = skills;
+            Event::Skills { catalog, remote } => {
+                self.skills = catalog;
+                self.skills_remote = remote;
+                if let Some(picker) = &mut self.picker
+                    && matches!(picker.source, picker::Source::Skills)
+                {
+                    picker.selected = 0;
+                }
                 self.refresh_completion();
             }
             Event::SessionTitle(title) => self.session_title = title,

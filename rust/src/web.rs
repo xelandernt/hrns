@@ -166,6 +166,7 @@ async fn connect_attempt(
             events,
             Services {
                 client_io: ClientIoMode::Off,
+                remote: true,
                 ..Services::default()
             },
         ),

@@ -121,6 +121,7 @@ impl ClientIoMode {
 pub struct Services {
     pub client_io: ClientIoMode,
     pub mcp_config: Option<PathBuf>,
+    pub remote: bool,
     #[cfg(not(target_family = "wasm"))]
     pub effort_profile: Option<crate::effort::EffortProfile>,
 }
@@ -204,7 +205,10 @@ pub enum Event {
     Options(Vec<SessionConfigOption>),
     ModelSelected(Vec<SessionConfigOption>),
     AgentCommands(Vec<(String, String)>),
-    Skills(Vec<Skill>),
+    Skills {
+        catalog: Vec<Skill>,
+        remote: bool,
+    },
     SessionTitle(Option<String>),
     Mode(String),
     Providers(Result<Vec<ProviderInfo>, String>),
@@ -425,7 +429,10 @@ pub async fn connect(
                 .as_ref()
                 .map(crate::skills::catalog)
                 .unwrap_or_default();
-            let _ = events.unbounded_send(Event::Skills(skills));
+            let _ = events.unbounded_send(Event::Skills {
+                catalog: skills,
+                remote: services.remote,
+            });
             let execution = meta
                 .and_then(|mut meta| meta.remove("hrns/session/state"))
                 .and_then(|state| serde_json::from_value(state).ok());

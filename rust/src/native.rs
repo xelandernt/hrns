@@ -191,6 +191,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         client_io: options.client_io,
         mcp_config: options.mcp_config.clone(),
         effort_profile: options.effort_profile.clone(),
+        remote: false,
     };
     let (shutdown, stop_rx) = mpsc::unbounded();
     let mut terminal = ratatui::try_init()?;
@@ -494,6 +495,7 @@ async fn connect(
                 .map_err(|error| error.message)
         }
         Target::Remote(url) => {
+            services.remote = true;
             let mut request = url
                 .as_str()
                 .into_client_request()

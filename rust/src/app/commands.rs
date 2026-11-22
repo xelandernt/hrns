@@ -75,19 +75,7 @@ impl App {
             }
             "/skills" => {
                 self.draft.submit();
-                let text = if self.skills.is_empty() {
-                    "The agent advertises no skills".into()
-                } else {
-                    self.skills
-                        .iter()
-                        .filter(|skill| skill.user_invocable)
-                        .map(|skill| {
-                            format!("${} · {} · {}", skill.id, skill.label(), skill.description)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                self.transcript.push(Role::Command("/skills".into()), text);
+                self.show_skills();
             }
             text if text.starts_with("/load ") => {
                 self.draft.submit();
