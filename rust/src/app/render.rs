@@ -112,6 +112,10 @@ impl App {
                 transcript.height,
             );
         }
+        if sidebar.width > 0 {
+            // Pull the panel's right edge in to match the composer's framed edge.
+            sidebar.width = sidebar.width.saturating_sub(gutter.horizontal);
+        }
         let transcript = transcript.inner(gutter);
         self.transcript_area = transcript;
         if sidebar.width > 0 {
