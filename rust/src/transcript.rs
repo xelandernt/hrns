@@ -24,9 +24,17 @@ pub enum Role {
 }
 
 impl Role {
+    fn indent(&self, width: usize) -> &'static str {
+        if width >= 10 && matches!(self, Self::Thought | Self::Tool) {
+            "  "
+        } else {
+            ""
+        }
+    }
+
     fn label(&self, palette: &Palette, expanded: bool) -> Option<Line<'_>> {
         let (name, color) = match self {
-            Self::User => ("You", palette.accent),
+            Self::User => ("User", palette.accent),
             Self::Agent => ("Agent", palette.muted),
             Self::Thought => (
                 if expanded {
@@ -838,12 +846,23 @@ impl Transcript {
         while let Some(entry) = self.entries.get(index) {
             let start = self.entry_start(index);
             while row < entry.end {
-                let line = entry.line(row - start, palette);
-                lines.push(if self.selected_prompt == Some(index) {
-                    line.bg(palette.panel)
-                } else {
-                    line
-                });
+                let entry_row = row - start;
+                let mut line = entry.line(entry_row, palette);
+                let indent = entry.role.indent(usize::from(width));
+                if !indent.is_empty() && !line.spans.is_empty() {
+                    line.spans.insert(0, Span::raw(indent));
+                }
+                if entry.role == Role::User && entry_row < entry.heading_rows() + entry.rows.len() {
+                    if line.width() == 0 {
+                        line.spans.push(Span::raw(" "));
+                    }
+                    line = if self.selected_prompt == Some(index) {
+                        line.bg(palette.panel).bold()
+                    } else {
+                        line.bg(palette.surface)
+                    };
+                }
+                lines.push(line);
                 if lines.len() == usize::from(height) {
                     return lines;
                 }
@@ -865,7 +884,8 @@ impl Transcript {
                 entry.end = end;
                 continue;
             }
-            let width = usize::from(self.width);
+            let viewport_width = usize::from(self.width);
+            let width = viewport_width.saturating_sub(entry.role.indent(viewport_width).len());
             entry.table_rows.clear();
             if entry.role == Role::Thought && !entry.expanded {
                 entry.rows.clear();

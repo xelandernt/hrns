@@ -192,9 +192,12 @@ reserved row above the composer, as in Codex. It reverses under the pointer,
 names new activity, disappears once the transcript follows the tail again, and
 `Esc` returns there when no turn is running.
 
-The conversation layout follows the former Textual screen. The transcript and
-optional sidebar sit above a rounded, full-width composer and a bottom status
-bar. `Alt+Up` and `Alt+Down` select earlier and later user prompts without
+The transcript and optional sidebar sit above a rounded, full-width composer
+and a bottom status bar. Prompt and reply text share the composer's typing
+column, including wrapped lines. The `User` and `Agent` labels share that
+column. User prompts use the theme's surface background, and tool calls and
+reasoning are indented within the transcript.
+`Alt+Up` and `Alt+Down` select earlier and later user prompts without
 moving the composer cursor. Incoming output stays below the selected prompt
 or scrolled viewport and shows a footer notice until the reader returns to the
 bottom or presses `Ctrl+End`.

@@ -13,6 +13,8 @@ use crate::options;
 use crate::theme::Palette;
 use crate::transcript::wrap;
 
+const PROMPT_MARKER_WIDTH: u16 = 2;
+
 impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
         let palette = self.palette();
@@ -101,6 +103,10 @@ impl App {
         ])
         .areas(area);
 
+        let composer = composer.inner(gutter);
+        let framed_composer =
+            composer.width >= 6 && (composer.height >= 3 || (approval_active && area.height >= 6));
+
         let sidebar_width = if (self.preferences.sidebar || self.todo_open) && area.width >= 96 {
             self.preferences.sidebar_width(area.width)
         } else {
@@ -123,6 +129,11 @@ impl App {
             sidebar.width = sidebar.width.saturating_sub(gutter.horizontal);
         }
         let mut transcript = transcript.inner(gutter);
+        if composer.width > PROMPT_MARKER_WIDTH {
+            let inset = (PROMPT_MARKER_WIDTH + u16::from(framed_composer)).min(transcript.width);
+            transcript.x += inset;
+            transcript.width -= inset;
+        }
         if transcript.width >= 4 {
             // Reserve the column the composer's right border sits in for the scrollbar.
             transcript.width -= 1;
@@ -138,7 +149,7 @@ impl App {
             .transcript
             .visible(transcript.width, transcript.height, &palette);
         frame.render_widget(
-            Paragraph::new(visible).style(
+            Text::from(visible).style(
                 Style::default()
                     .fg(palette.foreground)
                     .bg(palette.background),
@@ -254,7 +265,6 @@ impl App {
             self.draw_follow_control(frame, follow.inner(gutter), &palette);
         }
 
-        let composer = composer.inner(gutter);
         let prompt_active = self.mcp_consent.is_empty()
             && self.approvals.is_empty()
             && self.elicitations.is_empty()
@@ -266,7 +276,7 @@ impl App {
             palette.border
         };
         let mut block = Block::default().style(Style::default().bg(palette.surface));
-        if composer.width >= 6 && composer.height >= 3 {
+        if framed_composer {
             block = block
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -274,9 +284,10 @@ impl App {
         }
         let input = block.inner(composer);
         frame.render_widget(block, composer);
-        if input.width > 2 && input.height > 0 {
+        if input.width > PROMPT_MARKER_WIDTH && input.height > 0 {
             let [prompt, input] =
-                Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(input);
+                Layout::horizontal([Constraint::Length(PROMPT_MARKER_WIDTH), Constraint::Min(1)])
+                    .areas(input);
             frame.render_widget(Paragraph::new("›").fg(border).bold(), prompt);
             let (rows, (row, column)) = self.draft.display(input.width);
             let scroll = row.saturating_sub(input.height - 1);
