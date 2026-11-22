@@ -468,6 +468,10 @@ impl App {
     }
 
     fn print_settings(&mut self) {
+        let workspace = self
+            .workspace
+            .as_deref()
+            .map(std::path::Path::to_string_lossy);
         let model = self
             .options
             .iter()
@@ -481,7 +485,7 @@ impl App {
             self.client_io.label(),
             on_off(self.preferences.sidebar),
             on_off(self.preferences.show_thoughts),
-            self.workspace.as_deref().unwrap_or("none"),
+            workspace.as_deref().unwrap_or("none"),
             self.session
                 .as_ref()
                 .map_or("none", |session| session.as_str()),

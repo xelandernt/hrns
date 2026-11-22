@@ -233,6 +233,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.event(update);
                 dirty = true;
             }
+            dirty |= app.poll_file_completion();
             if let Some(effect) = app.take_local_effect() {
                 local_effect(
                     effect,

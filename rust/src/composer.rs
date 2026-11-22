@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 
@@ -13,6 +15,11 @@ pub struct Composer {
 impl Composer {
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     pub fn insert(&mut self, text: &str) {
@@ -39,8 +46,13 @@ impl Composer {
     }
 
     pub fn replace_from(&mut self, start: usize, text: &str) {
-        self.text.replace_range(start.., text);
-        self.cursor = self.text.len();
+        self.replace_range(start..self.text.len(), text);
+    }
+
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str) {
+        self.cursor = range.start + text.len();
+        self.text.replace_range(range, text);
+        self.snap_cursor_to_boundary();
         self.recalled = None;
     }
 
@@ -111,7 +123,7 @@ impl Composer {
         self.cursor = self.text.len();
     }
 
-    pub fn display(&self, width: u16) -> (Vec<&str>, (u16, u16)) {
+    pub fn display(&self, width: u16) -> (Vec<Range<usize>>, (u16, u16)) {
         let width = usize::from(width);
         let mut rows = Vec::new();
         let mut row_start = 0;
@@ -122,14 +134,14 @@ impl Composer {
                 if index == self.cursor {
                     cursor = cell(rows.len(), row_width, width);
                 }
-                rows.push(&self.text[row_start..index]);
+                rows.push(row_start..index);
                 row_start = index + 1;
                 row_width = 0;
                 continue;
             }
             let columns = grapheme.width();
             if row_width != 0 && row_width + columns > width {
-                rows.push(&self.text[row_start..index]);
+                rows.push(row_start..index);
                 row_start = index;
                 row_width = 0;
             }
@@ -138,10 +150,10 @@ impl Composer {
             }
             row_width += columns;
         }
-        rows.push(&self.text[row_start..]);
+        rows.push(row_start..self.text.len());
         if self.cursor == self.text.len() {
             if row_width >= width {
-                rows.push("");
+                rows.push(self.cursor..self.cursor);
                 cursor = cell(rows.len() - 1, 0, width);
             } else {
                 cursor = cell(rows.len() - 1, row_width, width);
@@ -181,4 +193,30 @@ fn cell(row: usize, column: usize, width: usize) -> (u16, u16) {
         u16::try_from(row).unwrap_or(u16::MAX),
         u16::try_from(column.min(width.saturating_sub(1))).unwrap_or(u16::MAX),
     )
+}
+
+pub(crate) fn prompt_tokens(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut tail = text;
+    std::iter::from_fn(move || {
+        tail = tail.trim_start_matches(char::is_whitespace);
+        if tail.is_empty() {
+            return None;
+        }
+        let start = text.len() - tail.len();
+        let length = quoted_path_token_len(tail)
+            .unwrap_or_else(|| tail.find(char::is_whitespace).unwrap_or(tail.len()));
+        tail = &tail[length..];
+        Some(start..start + length)
+    })
+}
+
+fn quoted_path_token_len(token: &str) -> Option<usize> {
+    let path = token
+        .strip_prefix('@')
+        .filter(|path| path.starts_with('"'))?;
+    let mut values = serde_json::Deserializer::from_str(path).into_iter::<serde::de::IgnoredAny>();
+    values.next()?.ok()?;
+    let end = values.byte_offset();
+    let rest = &path[end..];
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(end + 1)
 }

@@ -210,6 +210,15 @@ in the composer on Enter, including when used as the first token after
 local command completions, while a `$token` offers user-invocable skills from the agent's
 `hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
 selection while it is open, and Escape dismisses it before cancelling a turn.
+On native stdio connections, `@` at the start of the token under the cursor
+starts a file search in the active session workspace. A background walk indexes
+regular files, respects ignore rules, and skips hidden entries and symlinks.
+Up and Down browse the ranked paths. Tab or Enter replaces the active token
+with an `@` reference to a workspace-relative path, quoting the path when
+needed. The composer uses separate theme colors for recognized commands,
+exact file matches, and user-invocable skill mentions.
+The reference travels as ordinary prompt text so the agent can read the file on
+demand. WebSocket sessions accept manually entered paths.
 `/skills` uses the shared picker to browse the user-invocable catalog with Up and
 Down. The detail area shows the selected skill's description and the directory
 from its ACP `path` on stdio connections. WebSocket connections show a remote

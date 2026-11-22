@@ -193,6 +193,7 @@ pub enum Event {
     Ready {
         session: String,
         workspace: PathBuf,
+        remote: bool,
         attachments_supported: bool,
         loaded: bool,
         load_supported: bool,
@@ -205,10 +206,7 @@ pub enum Event {
     Options(Vec<SessionConfigOption>),
     ModelSelected(Vec<SessionConfigOption>),
     AgentCommands(Vec<(String, String)>),
-    Skills {
-        catalog: Vec<Skill>,
-        remote: bool,
-    },
+    Skills(Vec<Skill>),
     SessionTitle(Option<String>),
     Mode(String),
     Providers(Result<Vec<ProviderInfo>, String>),
@@ -429,16 +427,14 @@ pub async fn connect(
                 .as_ref()
                 .map(crate::skills::catalog)
                 .unwrap_or_default();
-            let _ = events.unbounded_send(Event::Skills {
-                catalog: skills,
-                remote: services.remote,
-            });
+            let _ = events.unbounded_send(Event::Skills(skills));
             let execution = meta
                 .and_then(|mut meta| meta.remove("hrns/session/state"))
                 .and_then(|state| serde_json::from_value(state).ok());
             let _ = events.unbounded_send(Event::Ready {
                 session: session.session_id().to_string(),
                 workspace: cwd,
+                remote: services.remote,
                 attachments_supported: caps.prompt_capabilities.embedded_context,
                 loaded,
                 load_supported,

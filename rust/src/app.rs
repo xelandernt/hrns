@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(not(target_family = "wasm"))]
+mod file_completion;
 mod picker;
 mod render;
 
@@ -91,6 +93,13 @@ struct Suggestion {
 struct Completion {
     items: Vec<Suggestion>,
     selected: usize,
+    file: Option<FileCompletion>,
+}
+
+struct FileCompletion {
+    #[cfg(not(target_family = "wasm"))]
+    range: std::ops::Range<usize>,
+    status: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -154,7 +163,8 @@ const COMMANDS: &[(&str, &str)] = &[
 
 pub struct App {
     destination: String,
-    workspace: Option<String>,
+    workspace: Option<PathBuf>,
+    remote: bool,
     session: Option<String>,
     session_title: Option<String>,
     mode: Option<String>,
@@ -192,8 +202,9 @@ pub struct App {
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
     skills: Vec<Skill>,
-    skills_remote: bool,
     completion: Option<Completion>,
+    #[cfg(not(target_family = "wasm"))]
+    file_search: file_completion::Search,
     plan: Vec<PlanEntry>,
     replay_plan: Option<Vec<PlanEntry>>,
     todo_open: bool,
@@ -234,6 +245,7 @@ impl App {
         Self {
             destination,
             workspace: None,
+            remote: false,
             session: None,
             session_title: None,
             mode: None,
@@ -271,8 +283,9 @@ impl App {
             options: Vec::new(),
             commands: Vec::new(),
             skills: Vec::new(),
-            skills_remote: false,
             completion: None,
+            #[cfg(not(target_family = "wasm"))]
+            file_search: file_completion::Search::default(),
             plan: Vec::new(),
             replay_plan: None,
             todo_open: false,
@@ -302,6 +315,7 @@ impl App {
             Event::Ready {
                 session,
                 workspace,
+                remote,
                 attachments_supported,
                 loaded,
                 load_supported,
@@ -322,7 +336,8 @@ impl App {
                 if !loaded {
                     self.session_title = None;
                 }
-                self.workspace = Some(workspace.display().to_string());
+                self.workspace = Some(workspace);
+                self.remote = remote;
                 if self.session.as_deref() != Some(&session) {
                     if self.session.is_some() {
                         self.clear_queue_for_switch();
@@ -382,9 +397,8 @@ impl App {
             }
             Event::Sessions { request_id, result } => self.sessions_received(request_id, result),
             Event::AgentCommands(commands) => self.commands = commands,
-            Event::Skills { catalog, remote } => {
-                self.skills = catalog;
-                self.skills_remote = remote;
+            Event::Skills(skills) => {
+                self.skills = skills;
                 if let Some(picker) = &mut self.picker
                     && matches!(picker.source, picker::Source::Skills)
                 {
@@ -516,6 +530,7 @@ impl App {
                 self.elicitations.clear();
                 self.mcp_consent.clear();
                 self.status = "Disconnected";
+                self.refresh_completion();
                 self.activity.push_back("disconnected".into());
                 self.trim_activity();
             }
@@ -555,6 +570,7 @@ impl App {
                 self.elicitations.clear();
                 self.mcp_consent.clear();
                 self.status = "Reconnecting";
+                self.refresh_completion();
             }
             Event::McpConsent {
                 name,
@@ -802,7 +818,7 @@ impl App {
         self.usage_cost = None;
         self.plan.clear();
         self.local_effect = Some(LocalEffect::Switch(SessionTarget {
-            cwd: Some(PathBuf::from(workspace)),
+            cwd: Some(workspace),
             session: None,
         }));
     }
@@ -1039,13 +1055,21 @@ impl App {
             }
         }
 
-        if self.completion.is_some() {
+        if let Some(completion) = &self.completion {
             match key {
                 Key::Escape => {
+                    #[cfg(not(target_family = "wasm"))]
+                    if let Some(file) = &completion.file {
+                        self.file_search
+                            .dismiss(file.range.clone(), self.draft.text());
+                    }
                     self.completion = None;
                     return;
                 }
-                Key::Tab => {
+                Key::Tab | Key::Enter
+                    if matches!(key, Key::Tab)
+                        || (completion.file.is_some() && !completion.items.is_empty()) =>
+                {
                     self.accept_completion();
                     self.refresh_completion();
                     return;
@@ -1241,11 +1265,21 @@ impl App {
     }
 
     fn refresh_completion(&mut self) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(completion) = self.file_completion() {
+            self.completion = Some(completion);
+            return;
+        }
+
         let input = self.draft.text();
         self.completion = self
             .argument_suggestions(input)
             .or_else(|| suggestions(input, &self.skills))
-            .map(|items| Completion { items, selected: 0 });
+            .map(|items| Completion {
+                items,
+                selected: 0,
+                file: None,
+            });
     }
 
     fn is_command(&self, command: &str) -> bool {
@@ -1407,8 +1441,14 @@ impl App {
             return;
         };
         let Some(suggestion) = completion.items.get(completion.selected) else {
+            self.completion = Some(completion);
             return;
         };
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(file) = completion.file {
+            self.insert_file_reference(file.range, &suggestion.insert);
+            return;
+        }
         let text = self.draft.text();
         if let Some(start) = last_token_start(text).filter(|start| text[*start..].starts_with('$'))
         {
@@ -1423,6 +1463,9 @@ impl App {
             return;
         };
         let len = completion.items.len();
+        if len == 0 {
+            return;
+        }
         completion.selected = if forward {
             (completion.selected + 1) % len
         } else {

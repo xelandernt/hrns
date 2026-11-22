@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use agent_client_protocol::v1::schema::{
     PlanEntryPriority, PlanEntryStatus, SessionConfigKind, SessionConfigOptionCategory, ToolKind,
 };
@@ -79,7 +81,11 @@ impl App {
             .as_ref()
             .filter(|_| !approval_active)
             .map_or(0, |completion| {
-                u16::try_from(completion.items.len().min(6)).unwrap_or(6)
+                let available = area.height.saturating_sub(
+                    mcp_height + elicitation_height + follow_height + prompt_height + 3,
+                );
+                let minimum = usize::from(completion.file.is_some());
+                (completion.items.len().clamp(minimum, 6) as u16).min(available)
             });
         let reserved_height = [
             mcp_height,
@@ -261,25 +267,47 @@ impl App {
         }
 
         if let Some(completion) = &self.completion {
-            let rows: Vec<_> = completion
-                .items
-                .iter()
-                .enumerate()
-                .skip(completion.selected.saturating_sub(5))
-                .take(6)
-                .map(|(index, suggestion)| {
-                    let text = format!(
-                        " {}  {}",
-                        suggestion.insert.trim_end(),
-                        suggestion.description
-                    );
-                    if index == completion.selected {
-                        Line::from(text).fg(palette.accent).bold()
-                    } else {
-                        Line::from(text).fg(palette.muted)
-                    }
-                })
-                .collect();
+            let rows = if let Some(status) = completion.file.as_ref().and_then(|file| file.status) {
+                vec![Line::from(format!("  {status}")).fg(palette.muted)]
+            } else {
+                let visible = usize::from(suggestions.height);
+                completion
+                    .items
+                    .iter()
+                    .enumerate()
+                    .skip(
+                        completion
+                            .selected
+                            .saturating_sub(visible.saturating_sub(1)),
+                    )
+                    .take(visible)
+                    .map(|(index, suggestion)| {
+                        let selected = index == completion.selected;
+                        let row = if completion.file.is_some() {
+                            let marker = if selected { "›" } else { " " };
+                            format!(" {marker} {}", suggestion.insert)
+                        } else {
+                            format!(
+                                " {}  {}",
+                                suggestion.insert.trim_end(),
+                                suggestion.description
+                            )
+                        };
+                        if selected {
+                            let color = if completion.file.is_some() {
+                                palette.file_reference
+                            } else if suggestion.insert.starts_with('$') {
+                                palette.skill_reference
+                            } else {
+                                palette.accent
+                            };
+                            Line::from(row).fg(color).bold()
+                        } else {
+                            Line::from(row).fg(palette.muted)
+                        }
+                    })
+                    .collect()
+            };
             frame.render_widget(Paragraph::new(rows), suggestions.inner(gutter));
         }
 
@@ -317,21 +345,7 @@ impl App {
             let text = if self.draft.text().is_empty() {
                 Text::from("Send a message…").fg(palette.muted)
             } else {
-                let mut remaining = slash_command(self.draft.text())
-                    .filter(|command| self.is_command(command))
-                    .map_or(0, str::len);
-                Text::from(
-                    rows.into_iter()
-                        .map(|row| {
-                            if remaining == 0 {
-                                return Line::raw(row);
-                            }
-                            let (command, rest) = row.split_at(remaining.min(row.len()));
-                            remaining -= command.len();
-                            Line::from(vec![Span::raw(command).fg(palette.accent), Span::raw(rest)])
-                        })
-                        .collect::<Vec<_>>(),
-                )
+                self.composer_text(rows, &palette)
             };
             frame.render_widget(Paragraph::new(text).scroll((scroll, 0)), input);
             if prompt_active {
@@ -344,6 +358,14 @@ impl App {
             question_hint(&pending.state)
         } else if self.approvals.front().is_some() {
             "PgUp/PgDn approval details"
+        } else if prompt_active
+            && let Some(completion) = self.completion.as_ref().filter(|item| item.file.is_some())
+        {
+            if completion.items.is_empty() {
+                "Esc close file search"
+            } else {
+                "↑/↓ select · Tab/Enter insert path · Esc close"
+            }
         } else if self.transcript.output_pending() {
             "New output ↓ · Ctrl+End"
         } else if self.status == "Disconnected" {
@@ -391,6 +413,53 @@ impl App {
                 self.draw_picker(frame, area, picker, &palette);
             }
         }
+    }
+
+    fn composer_text(&self, rows: Vec<Range<usize>>, palette: &Palette) -> Text<'_> {
+        let draft = self.draft.text();
+        let mut highlights = Vec::new();
+        if let Some(command) = slash_command(draft).filter(|command| self.is_command(command)) {
+            highlights.push((0..command.len(), palette.accent));
+        }
+        #[cfg(not(target_family = "wasm"))]
+        highlights.extend(
+            self.file_search
+                .highlights
+                .iter()
+                .cloned()
+                .map(|range| (range, palette.file_reference)),
+        );
+        highlights.extend(
+            crate::skills::mention_ranges(draft, &self.skills)
+                .map(|range| (range, palette.skill_reference)),
+        );
+        highlights.sort_unstable_by_key(|(range, _)| range.start);
+
+        let lines: Vec<_> = rows
+            .into_iter()
+            .map(|row| {
+                let mut line = Line::default();
+                let mut offset = row.start;
+                let first = highlights.partition_point(|(range, _)| range.end <= offset);
+                for (range, color) in highlights[first..]
+                    .iter()
+                    .take_while(|(range, _)| range.start < row.end)
+                {
+                    let start = range.start.max(row.start);
+                    let end = range.end.min(row.end);
+                    if start > offset {
+                        line.push_span(Span::raw(&draft[offset..start]));
+                    }
+                    line.push_span(Span::raw(&draft[start..end]).fg(*color));
+                    offset = end;
+                }
+                if offset < row.end {
+                    line.push_span(Span::raw(&draft[offset..row.end]));
+                }
+                line
+            })
+            .collect();
+        Text::from(lines)
     }
 
     fn queued_prompt_lines(&self, width: u16, height: u16, palette: &Palette) -> Vec<Line<'_>> {
@@ -583,7 +652,12 @@ impl App {
         if skills && let Some(row) = rows.get(picker.selected) {
             let entries = List::new(rows.iter().map(|row| row.label.as_str()))
                 .highlight_symbol("  › ")
-                .highlight_style(Style::default().fg(palette.accent).bg(palette.panel).bold());
+                .highlight_style(
+                    Style::default()
+                        .fg(palette.skill_reference)
+                        .bg(palette.panel)
+                        .bold(),
+                );
             let mut state = ListState::default().with_selected(Some(picker.selected));
             frame.render_stateful_widget(entries, list, &mut state);
             self.draw_skill_details(frame, status, row, palette);
@@ -634,7 +708,7 @@ impl App {
             return;
         }
 
-        let source = if self.skills_remote {
+        let source = if self.remote {
             "Remote"
         } else {
             self.skills
@@ -676,9 +750,10 @@ impl App {
         if !self.queue.is_empty() {
             left.push(format!(" · {} queued", self.queue.len()).into());
         }
-        let context = self.session_title.as_deref().or(self.workspace.as_deref());
-        if let Some(context) = context {
-            left.push(format!(" · {context}").into());
+        if let Some(title) = &self.session_title {
+            left.push(format!(" · {title}").into());
+        } else if let Some(workspace) = &self.workspace {
+            left.push(format!(" · {}", workspace.display()).into());
         }
         left.push(format!(" · {}", self.destination).into());
 
@@ -794,7 +869,7 @@ impl App {
                 .fg(palette.muted),
         ];
         if let Some(workspace) = &self.workspace {
-            lines.push(Line::from(workspace.clone()).fg(palette.muted));
+            lines.push(Line::from(workspace.to_string_lossy()).fg(palette.muted));
         }
         if let Some(session) = &self.session {
             lines.push(Line::from(session.clone()).fg(palette.muted));

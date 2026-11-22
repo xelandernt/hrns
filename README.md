@@ -33,6 +33,10 @@ state. Native supports the built-in agent, external stdio commands and remote
 WebSocket targets; the browser connects only to an authenticated remote ACP mount and
 advertises no client filesystem, terminal or MCP capability.
 
+In a local native session, type `@` to search workspace files. Use **Up** and
+**Down** to browse, **Tab** or **Enter** to insert a highlighted `@path` reference,
+and **Esc** to close the search. The agent can open the path when it needs the file.
+
 Bare `hrns` and `hrns connect` launch the installed native client. In a source
 checkout, `just install` and `uv sync --frozen --all-extras` build it from the
 local Rust source. Run either command after editing the TUI to refresh the
