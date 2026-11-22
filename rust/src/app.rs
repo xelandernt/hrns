@@ -901,33 +901,18 @@ impl App {
         true
     }
 
-    /// Highlights the scrollbar thumb and the follow control under the pointer, and lets the
-    /// viewport follow the pointer along the scrollbar.
+    /// Tracks what the pointer is over so the scrollbar thumb and follow control highlight.
     pub fn pointer_move(&mut self, position: Position) -> bool {
         let over_bar = self
             .scroll_bar
             .is_some_and(|bar| bar.area.contains(position));
         let over_follow = self.follow_area.is_some_and(|area| area.contains(position));
-        let mut changed = false;
-        if (over_bar, over_follow) != (self.bar_hover, self.follow_hover) {
-            self.bar_hover = over_bar;
-            self.follow_hover = over_follow;
-            changed = true;
+        if (over_bar, over_follow) == (self.bar_hover, self.follow_hover) {
+            return false;
         }
-        if over_bar
-            && self.scroll_drag.is_none()
-            && self.picker.is_none()
-            && self.providers.is_none()
-            && let Some(bar) = self.scroll_bar
-        {
-            let row = position.y.saturating_sub(bar.area.y);
-            let top = self.scroll_top_at(bar, row, bar.thumb / 2);
-            if top != self.transcript.top() {
-                self.transcript.scroll_to(top);
-                changed = true;
-            }
-        }
-        changed
+        self.bar_hover = over_bar;
+        self.follow_hover = over_follow;
+        true
     }
 
     pub fn pointer_down(&mut self, position: Position) -> bool {

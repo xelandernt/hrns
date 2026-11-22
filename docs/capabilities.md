@@ -296,9 +296,9 @@ tool approval to the surrounding deployment.
 
 ## Default agent composition
 
-`build_agent` composes, in order: `LocalWorkspace(cwd)`, `Coder()`, `Todo()`,
+`build_agent` composes `LocalWorkspace(cwd)`, `Coder(sub_agents=False)`, `Todo()`,
 `AskUser()`, `Skills.from_settings(...)` (when a library exists), and
-`require_approval()` (unless `approval=False`). `LocalWorkspace` roots the tools at
-`cwd`; `Coder` contributes the harness capabilities plus `apply_changes`; `Skills`
-contributes the deferred skill catalog and its bundled-file tools. Adding another
-capability is a list entry in `hrns/server/agent.py`.
+`require_approval()` (unless `approval=False`) in that order. `LocalWorkspace`
+roots the tools at `cwd`. `Coder` supplies the coding tools, including
+`apply_changes`, with delegation disabled. `Skills` contributes the deferred
+skill catalog and its bundled-file tools.

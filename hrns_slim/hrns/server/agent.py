@@ -57,7 +57,7 @@ def build_agent(
         model_settings=model_settings,
         capabilities=[
             LocalWorkspace(cwd),
-            coder or Coder(),
+            coder or Coder(sub_agents=False),
             Todo(),
             AskUser(),
             *([resolved_skills] if resolved_skills is not None else []),

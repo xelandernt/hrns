@@ -6,10 +6,11 @@ use std::time::Duration;
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, MouseButton, MouseEventKind,
 };
 use crossterm::event::{Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::style::Print;
 use futures::channel::mpsc;
 use ratatui::layout::Position;
 use tokio_tungstenite::tungstenite::Message;
@@ -28,6 +29,11 @@ const HELP: &str =
        [--mcp-config PATH]
        Native WebSocket authentication reads HRNS_TUI_TOKEN.
        With no transport option, starts the built-in hrns agent.";
+
+/// Motion reporting needs SGR coordinates; RXVT encoding is deprecated and some terminals report
+/// motion in it badly, so it is cleared after the capture modes are set. Windows consoles use the
+/// platform mouse API instead of these sequences.
+const MOUSE_ENCODING: &str = if cfg!(windows) { "" } else { "\x1b[?1015l" };
 
 #[derive(Clone, PartialEq, Eq)]
 enum Target {
@@ -210,7 +216,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut app = App::new(destination, action_tx, crate::preferences::load(), startup);
     let result = (|| -> io::Result<()> {
-        crossterm::execute!(stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+        crossterm::execute!(
+            stdout(),
+            EnableBracketedPaste,
+            EnableFocusChange,
+            EnableMouseCapture,
+            Print(MOUSE_ENCODING)
+        )?;
         let mut dirty = true;
         loop {
             for _ in 0..256 {
@@ -268,11 +280,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         MouseEventKind::ScrollUp => app.pointer_scroll(position, -3),
                         MouseEventKind::ScrollDown => app.pointer_scroll(position, 3),
                         MouseEventKind::Down(MouseButton::Left) => app.pointer_down(position),
-                        MouseEventKind::Drag(MouseButton::Left) => app.pointer_drag(position),
-                        MouseEventKind::Up(MouseButton::Left) => app.pointer_up(position),
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            app.pointer_drag(position) | app.pointer_move(position)
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            app.pointer_up(position) | app.pointer_move(position)
+                        }
                         MouseEventKind::Moved => app.pointer_move(position),
                         _ => false,
                     };
+                }
+                TerminalEvent::FocusGained => {
+                    // Windows Terminal and ConPTY drop mouse modes on focus changes, as do some
+                    // other terminals; re-assert them the way OpenCode's terminal does.
+                    crossterm::execute!(stdout(), EnableMouseCapture, Print(MOUSE_ENCODING))?;
                 }
                 TerminalEvent::Resize(_, _) => dirty = true,
                 _ => {}
@@ -280,7 +301,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(())
     })();
-    let paste = crossterm::execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let paste = crossterm::execute!(
+        stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        DisableFocusChange
+    );
     let restore = ratatui::try_restore();
     let _ = shutdown.unbounded_send(());
     let _ = worker.join();

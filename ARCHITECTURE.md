@@ -185,12 +185,12 @@ the visible entry and byte offset through streaming, resize and expansion.
 The wheel scrolls by rows, Page Up and Page Down move by the viewport height,
 and scrolling down to the latest output resumes follow mode. A one-column
 scrollbar sits in the composer's right-border column when rows overflow; its
-thumb shows the visible share, and the viewport follows the pointer along the
-track, so a hover or drag scrolls, as OpenCode's scrollbar does. While the
-reader is away from the tail, a centred, clickable `↓ Back to bottom` label
-takes a reserved row above the composer, as in Codex. It reverses under the
-pointer, names new activity, disappears once the transcript follows the tail
-again, and `Esc` returns there when no turn is running.
+thumb shows the visible share, lights up under the pointer, and a press or drag
+on it moves the viewport, as OpenCode's scrollbar does. While the reader is
+away from the tail, a centred, clickable `↓ Back to bottom` label takes a
+reserved row above the composer, as in Codex. It reverses under the pointer,
+names new activity, disappears once the transcript follows the tail again, and
+`Esc` returns there when no turn is running.
 
 The conversation layout follows the former Textual screen. The transcript and
 optional sidebar sit above a rounded, full-width composer and a bottom status
@@ -322,6 +322,13 @@ ACP's own `fs/*` and `terminal/*` are the same kind of opt-in: the client's
 `acp_terminal` through `attachment_config` to expose `read_file`, `write_file`, and
 `run_command`. `examples/fastapi_app.py` wires both; the default `hrns agent` does
 not, so its `Coder` works on the server workspace instead of the client's.
+
+## Built-in coding agent
+
+`build_agent()` uses `Coder(sub_agents=False)` by default. The ACP prompt
+runtime handles deferred tool approvals for the parent run, and the delegated
+run has no way to request those approvals. Callers can supply a custom
+`Coder` when they manage delegation and approvals themselves.
 
 ## Server-owned sessions
 
