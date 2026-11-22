@@ -44,10 +44,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     let pointer_app = Rc::clone(&app);
     terminal.on_mouse_event(move |event| {
-        if event.kind == MouseEventKind::SingleClick(MouseButton::Left) {
-            pointer_app
-                .borrow_mut()
-                .pointer_click(Position::new(event.col, event.row));
+        let mut app = pointer_app.borrow_mut();
+        let position = Position::new(event.col, event.row);
+        match event.kind {
+            MouseEventKind::Moved => {
+                app.pointer_drag(position);
+                app.pointer_move(position);
+            }
+            MouseEventKind::ButtonDown(MouseButton::Left) => {
+                app.pointer_down(position);
+            }
+            MouseEventKind::ButtonUp(MouseButton::Left) => {
+                app.pointer_up(position);
+            }
+            _ => {}
         }
     })?;
     bind_input(Rc::clone(&app), requests_tx.clone(), cell_size)?;

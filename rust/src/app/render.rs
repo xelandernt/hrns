@@ -7,7 +7,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Wrap};
 
-use super::{App, PendingApproval, slash_command};
+use super::{App, PendingApproval, ScrollBar, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
 use crate::theme::Palette;
@@ -53,7 +53,11 @@ impl App {
                     (3 + details.min(8) + request.options.len().min(9))
                         .min(usize::from(area.height.saturating_sub(3))) as u16
                 });
-        let question_limit = area.height.saturating_sub(prompt_height + 3).min(18);
+        let follow_height = u16::from(!self.transcript.following());
+        let question_limit = area
+            .height
+            .saturating_sub(prompt_height + 3 + follow_height)
+            .min(18);
         let question = self.elicitations.front().map(|pending| {
             elicitation_lines(
                 pending,
@@ -80,6 +84,7 @@ impl App {
             approval,
             elicitation,
             suggestions,
+            follow,
             composer,
             status,
             help,
@@ -89,6 +94,7 @@ impl App {
             Constraint::Length(approval_height),
             Constraint::Length(elicitation_height),
             Constraint::Length(completion_height),
+            Constraint::Length(follow_height),
             Constraint::Length(prompt_height),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -116,7 +122,11 @@ impl App {
             // Pull the panel's right edge in to match the composer's framed edge.
             sidebar.width = sidebar.width.saturating_sub(gutter.horizontal);
         }
-        let transcript = transcript.inner(gutter);
+        let mut transcript = transcript.inner(gutter);
+        if transcript.width >= 4 {
+            // Reserve the column the composer's right border sits in for the scrollbar.
+            transcript.width -= 1;
+        }
         self.transcript_area = transcript;
         if sidebar.width > 0 {
             self.transcript_area.width = self
@@ -135,6 +145,58 @@ impl App {
             ),
             transcript,
         );
+        self.scroll_bar = None;
+        let total = self.transcript.total();
+        let viewport = self.transcript.viewport_height();
+        if total > viewport
+            && transcript.width > 0
+            && transcript.height > 0
+            && (sidebar.width == 0 || transcript.right() < sidebar.x)
+        {
+            let track = transcript.height;
+            let thumb = (viewport * usize::from(track))
+                .div_ceil(total)
+                .clamp(1, usize::from(track)) as u16;
+            let max_top = total - viewport;
+            let travel = track.saturating_sub(thumb);
+            let top = self.transcript.top();
+            let start = if travel == 0 {
+                0
+            } else {
+                u16::try_from((top * usize::from(travel) + max_top / 2) / max_top)
+                    .unwrap_or(travel)
+                    .min(travel)
+            };
+            let thumb_color = if self.bar_hover || self.scroll_drag.is_some() {
+                palette.foreground
+            } else {
+                palette.muted
+            };
+            let lines = (0..track)
+                .map(|row| {
+                    let on_thumb = row >= start && row < start + thumb;
+                    let (symbol, color) = if on_thumb {
+                        ("█", thumb_color)
+                    } else {
+                        ("│", palette.border)
+                    };
+                    Line::from(symbol).fg(color)
+                })
+                .collect::<Vec<_>>();
+            let bar = Rect::new(transcript.right(), transcript.y, 1, track);
+            frame.render_widget(Paragraph::new(lines), bar);
+            // The gutter beside the bar joins its hit area, so the thumb is easier to catch.
+            let mut hit_width = gutter.horizontal + 1;
+            if sidebar.width > 0 {
+                hit_width = hit_width.min(sidebar.x.saturating_sub(bar.x));
+            }
+            let hit = Rect::new(bar.x, bar.y, hit_width.max(1), track);
+            self.scroll_bar = Some(ScrollBar {
+                area: hit,
+                thumb,
+                max_top,
+            });
+        }
 
         if let Some(pending) = self.mcp_consent.front() {
             let lines = vec![
@@ -185,6 +247,11 @@ impl App {
                 })
                 .collect();
             frame.render_widget(Paragraph::new(rows), suggestions.inner(gutter));
+        }
+
+        self.follow_area = None;
+        if !self.transcript.following() && follow.height > 0 {
+            self.draw_follow_control(frame, follow.inner(gutter), &palette);
         }
 
         let composer = composer.inner(gutter);
@@ -288,6 +355,54 @@ impl App {
                 self.draw_picker(frame, area, picker, &palette);
             }
         }
+    }
+
+    /// A centred, clickable label that returns the transcript to the tail, hidden while it follows.
+    fn draw_follow_control(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
+        let busy = self.turns > 0 || self.remote_busy();
+        let pending = self.transcript.output_pending();
+        let labels: &[&str] = match (pending, busy) {
+            (true, false) => &[
+                "New activity · ↓ Back to bottom · esc",
+                "New activity · ↓ Back to bottom",
+                "↓ Back to bottom · esc",
+                "↓ Back to bottom",
+                "↓ Bottom",
+                "↓",
+            ],
+            (true, true) => &[
+                "New activity · ↓ Back to bottom",
+                "New activity · ↓ Bottom",
+                "↓ Back to bottom",
+                "↓ Bottom",
+                "↓",
+            ],
+            (false, false) => &[
+                "↓ Back to bottom · esc",
+                "↓ Back to bottom",
+                "↓ Bottom",
+                "↓",
+            ],
+            (false, true) => &["↓ Back to bottom", "↓ Bottom", "↓"],
+        };
+        let Some(label) = labels
+            .iter()
+            .copied()
+            .find(|label| label.chars().count() <= usize::from(area.width))
+        else {
+            return;
+        };
+        let width = u16::try_from(label.chars().count()).unwrap_or(area.width);
+        let target = Rect::new(area.x + (area.width - width) / 2, area.y, width, 1);
+        let style = if self.follow_hover || self.follow_pressed {
+            Style::default().fg(palette.accent).bold().reversed()
+        } else {
+            Style::default().fg(palette.muted)
+        };
+        frame.render_widget(Paragraph::new(label).style(style), target);
+        let left = target.x.saturating_sub(1).max(area.x);
+        let right = target.right().saturating_add(1).min(area.right());
+        self.follow_area = Some(Rect::new(left, target.y, right.saturating_sub(left), 1));
     }
 
     fn draw_footer(

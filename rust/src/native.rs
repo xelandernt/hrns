@@ -267,7 +267,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     dirty |= match mouse.kind {
                         MouseEventKind::ScrollUp => app.pointer_scroll(position, -3),
                         MouseEventKind::ScrollDown => app.pointer_scroll(position, 3),
-                        MouseEventKind::Down(MouseButton::Left) => app.pointer_click(position),
+                        MouseEventKind::Down(MouseButton::Left) => app.pointer_down(position),
+                        MouseEventKind::Drag(MouseButton::Left) => app.pointer_drag(position),
+                        MouseEventKind::Up(MouseButton::Left) => app.pointer_up(position),
+                        MouseEventKind::Moved => app.pointer_move(position),
                         _ => false,
                     };
                 }

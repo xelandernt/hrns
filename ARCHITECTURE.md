@@ -183,7 +183,14 @@ more is available. Expanding shows all details received from the agent.
 The transcript tracks
 the visible entry and byte offset through streaming, resize and expansion.
 The wheel scrolls by rows, Page Up and Page Down move by the viewport height,
-and scrolling down to the latest output resumes follow mode.
+and scrolling down to the latest output resumes follow mode. A one-column
+scrollbar sits in the composer's right-border column when rows overflow; its
+thumb shows the visible share, and the viewport follows the pointer along the
+track, so a hover or drag scrolls, as OpenCode's scrollbar does. While the
+reader is away from the tail, a centred, clickable `↓ Back to bottom` label
+takes a reserved row above the composer, as in Codex. It reverses under the
+pointer, names new activity, disappears once the transcript follows the tail
+again, and `Esc` returns there when no turn is running.
 
 The conversation layout follows the former Textual screen. The transcript and
 optional sidebar sit above a rounded, full-width composer and a bottom status

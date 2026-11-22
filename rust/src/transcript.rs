@@ -568,6 +568,34 @@ impl Transcript {
         }
     }
 
+    /// Moves to `top`, following the tail when the move reaches it.
+    pub fn scroll_to(&mut self, top: usize) {
+        self.selected_prompt = None;
+        let end = self.total.saturating_sub(self.viewport_height);
+        self.top = top.min(end);
+        if self.top >= end {
+            self.follow();
+        } else {
+            self.following = false;
+        }
+    }
+
+    pub fn top(&self) -> usize {
+        self.top
+    }
+
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    pub fn viewport_height(&self) -> usize {
+        self.viewport_height
+    }
+
+    pub fn following(&self) -> bool {
+        self.following
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

@@ -92,6 +92,15 @@ struct Completion {
     selected: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ScrollBar {
+    area: Rect,
+    /// The thumb's length in cells.
+    thumb: u16,
+    /// The furthest the transcript can scroll, in rows.
+    max_top: usize,
+}
+
 pub struct PendingElicitation {
     pub state: FormState,
     pub respond: oneshot::Sender<Option<BTreeMap<String, ElicitationContentValue>>>,
@@ -167,6 +176,12 @@ pub struct App {
     provider_draft: Option<Composer>,
     transcript: Transcript,
     transcript_area: Rect,
+    scroll_bar: Option<ScrollBar>,
+    scroll_drag: Option<u16>,
+    bar_hover: bool,
+    follow_area: Option<Rect>,
+    follow_hover: bool,
+    follow_pressed: bool,
     approvals: VecDeque<PendingApproval>,
     elicitations: VecDeque<PendingElicitation>,
     mcp_consent: VecDeque<PendingMcpConsent>,
@@ -240,6 +255,12 @@ impl App {
             provider_draft: None,
             transcript,
             transcript_area: Rect::default(),
+            scroll_bar: None,
+            scroll_drag: None,
+            bar_hover: false,
+            follow_area: None,
+            follow_hover: false,
+            follow_pressed: false,
             approvals: VecDeque::new(),
             elicitations: VecDeque::new(),
             mcp_consent: VecDeque::new(),
@@ -869,7 +890,10 @@ impl App {
     pub fn pointer_scroll(&mut self, position: Position, rows: i32) -> bool {
         if self.picker.is_some()
             || self.providers.is_some()
-            || !self.transcript_area.contains(position)
+            || !(self.transcript_area.contains(position)
+                || self
+                    .scroll_bar
+                    .is_some_and(|bar| bar.area.contains(position)))
         {
             return false;
         }
@@ -877,15 +901,106 @@ impl App {
         true
     }
 
-    pub fn pointer_click(&mut self, position: Position) -> bool {
-        if self.picker.is_some()
-            || self.providers.is_some()
-            || !self.transcript_area.contains(position)
+    /// Highlights the scrollbar thumb and the follow control under the pointer, and lets the
+    /// viewport follow the pointer along the scrollbar.
+    pub fn pointer_move(&mut self, position: Position) -> bool {
+        let over_bar = self
+            .scroll_bar
+            .is_some_and(|bar| bar.area.contains(position));
+        let over_follow = self.follow_area.is_some_and(|area| area.contains(position));
+        let mut changed = false;
+        if (over_bar, over_follow) != (self.bar_hover, self.follow_hover) {
+            self.bar_hover = over_bar;
+            self.follow_hover = over_follow;
+            changed = true;
+        }
+        if over_bar
+            && self.scroll_drag.is_none()
+            && self.picker.is_none()
+            && self.providers.is_none()
+            && let Some(bar) = self.scroll_bar
         {
+            let row = position.y.saturating_sub(bar.area.y);
+            let top = self.scroll_top_at(bar, row, bar.thumb / 2);
+            if top != self.transcript.top() {
+                self.transcript.scroll_to(top);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn pointer_down(&mut self, position: Position) -> bool {
+        if self.picker.is_some() || self.providers.is_some() {
             return false;
         }
+        if self.follow_area.is_some_and(|area| area.contains(position)) {
+            self.follow_pressed = true;
+            return true;
+        }
+        let Some(bar) = self.scroll_bar.filter(|bar| bar.area.contains(position)) else {
+            return self.transcript_area.contains(position)
+                && self
+                    .transcript
+                    .toggle_disclosure_at(position.y - self.transcript_area.y);
+        };
+        let row = position.y.saturating_sub(bar.area.y);
+        let start = self.thumb_start(bar);
+        if row >= start && row < start.saturating_add(bar.thumb) {
+            self.scroll_drag = Some(row - start);
+        } else {
+            // A press on the track centres the thumb on the pointer, then drags from there.
+            let grab = bar.thumb / 2;
+            self.transcript
+                .scroll_to(self.scroll_top_at(bar, row, grab));
+            let start = self.thumb_start(bar);
+            self.scroll_drag = Some(row.saturating_sub(start).min(bar.thumb.saturating_sub(1)));
+        }
+        true
+    }
+
+    pub fn pointer_drag(&mut self, position: Position) -> bool {
+        let (Some(bar), Some(grab)) = (self.scroll_bar, self.scroll_drag) else {
+            return false;
+        };
+        let row = position.y.saturating_sub(bar.area.y);
         self.transcript
-            .toggle_disclosure_at(position.y - self.transcript_area.y)
+            .scroll_to(self.scroll_top_at(bar, row, grab));
+        true
+    }
+
+    pub fn pointer_up(&mut self, position: Position) -> bool {
+        let mut changed = self.scroll_drag.take().is_some();
+        if std::mem::take(&mut self.follow_pressed)
+            && self.follow_area.is_some_and(|area| area.contains(position))
+        {
+            self.transcript.follow();
+            changed = true;
+        }
+        changed
+    }
+
+    fn thumb_start(&self, bar: ScrollBar) -> u16 {
+        let travel = bar.area.height.saturating_sub(bar.thumb);
+        if travel == 0 || bar.max_top == 0 {
+            return 0;
+        }
+        let offset = self
+            .transcript
+            .top()
+            .saturating_mul(usize::from(travel))
+            .saturating_add(bar.max_top / 2)
+            / bar.max_top;
+        u16::try_from(offset).unwrap_or(travel).min(travel)
+    }
+
+    fn scroll_top_at(&self, bar: ScrollBar, row: u16, grab: u16) -> usize {
+        let travel = bar.area.height.saturating_sub(bar.thumb);
+        if travel == 0 {
+            return 0;
+        }
+        let start = row.saturating_sub(grab).min(travel);
+        (usize::from(start) * bar.max_top + usize::from(travel) / 2) / usize::from(travel)
     }
 
     pub fn key(&mut self, key: Key) {
@@ -969,6 +1084,11 @@ impl App {
             Key::Escape if self.todo_scroll.is_some() => {
                 self.todo_open = false;
                 self.todo_scroll = None;
+            }
+            Key::Escape
+                if !self.transcript.following() && self.turns == 0 && !self.remote_busy() =>
+            {
+                self.transcript.follow()
             }
             Key::ScrollUp => self.transcript.scroll_page(false),
             Key::ScrollDown => self.transcript.scroll_page(true),
