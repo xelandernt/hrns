@@ -148,7 +148,6 @@ await session.cancel()
 # Cancel by ID through the agent registration:
 await coder.cancel_session(session.session_id)
 queued = await session.pending_prompts()
-await session.resume_queue()
 await session.clear_queue()
 
 # Close by ID through the agent registration:
@@ -161,7 +160,7 @@ revisioned running/waiting/idle state and the last outcome.
 
 `cancel_session(session_id)` uses the same lookup as `get_session`: it reuses the live
 session or restores saved state, and raises `KeyError` for an unknown ID. It cancels
-the active turn and pauses queued prompts, keeping the session available for reuse.
+the active turn and starts the next queued prompt when one is available.
 
 `close_session(session_id)` uses the same lookup and unknown-ID errors. It cancels
 the active turn, clears queued prompts, detaches the client, and releases the live
@@ -192,16 +191,19 @@ the existing request and response types. Each request waits for the turn that co
 its message. Follow-ups enter history only when started; steering enters history when
 injected through Pydantic AI's native `RunContext.enqueue()`.
 
-Cancellation and errors pause remaining work. New submissions stay queued while paused.
-`pending_prompts`, `resume_queue`, and `clear_queue` manage separate queued turns through
-Python. Clear resolves pending handles as cancelled. Consumed steering shares the active
-turn's cancellation or error; unconsumed messages stay queued for resume.
+After cancellation or an error, the next queued turn starts automatically.
+`pending_prompts` and `clear_queue` manage separate queued turns through Python.
+Clear resolves pending handles as cancelled. Consumed steering shares the active
+turn's cancellation or error, and unconsumed messages become follow-up turns.
 
 The terminal sends messages immediately, with existing prompt-capability checks.
 `/queue <message>` holds a follow-up and any staged attachments locally until execution
-is idle. Edit, Remove, and Resume operate on that client-side queue; `/queue` is never sent to the
-agent. Cancellation, errors, and disconnect pause the local queue. Accepted server
-work survives disconnect and is inspected through session reload.
+is idle, including after Escape cancels a turn. Use `Shift+Left` in an empty
+composer or run `/edit-queue` to bring the last queued message back with its
+attachments. Edit the draft and press Enter to queue it again. `/clear-queue` discards local
+follow-ups. Local follow-ups wait for the connection to the same session and are
+cleared when switching sessions. Accepted server work survives disconnect and is
+inspected through session reload.
 
 ## ACP attachment and lifecycle
 

@@ -556,6 +556,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace => Some(Key::Backspace),
         KeyCode::Delete => Some(Key::Delete),
+        KeyCode::Left if key.modifiers == KeyModifiers::SHIFT => Some(Key::EditQueuedPrompt),
         KeyCode::Left => Some(Key::Left),
         KeyCode::Right => Some(Key::Right),
         KeyCode::Home => Some(Key::Home),

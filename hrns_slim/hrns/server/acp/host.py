@@ -84,7 +84,6 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._worker: asyncio.Task[None] | None = None
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
-        self._paused = False
         self._closed = False
         self._revision = 0
         self._last_outcome: str | None = None
@@ -119,7 +118,7 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         """Join the active turn at its next model request, or queue a follow-up.
 
         A consumed message shares the active turn's result. Messages left unconsumed
-        when it ends become separate turns. Cancellation and errors pause that work.
+        when it ends become separate turns.
         """
         return await self._accept(prompt, steer=True)
 
@@ -142,7 +141,7 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         # Consume unobserved failures without changing what result() raises.
         handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
         queued = _QueuedTurn(handle, origin)
-        if steer and self._active is not None and not self._paused:
+        if steer and self._active is not None:
             self._steering.append(queued)
         else:
             self._queue.append(queued)
@@ -156,12 +155,12 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         return tuple(SteeringPrompt(queued.handle.prompt, queued.origin) for queued in pending)
 
     def _start_worker(self) -> None:
-        if not self._paused and self._queue and self._worker is None:
+        if self._queue and self._worker is None:
             self._worker = asyncio.create_task(self._drain())
 
     async def _drain(self) -> None:
         try:
-            while self._queue and not self._paused and not self._closed:
+            while self._queue and not self._closed:
                 queued = self._queue.popleft()
                 handle = queued.handle
                 self._active = handle
@@ -178,8 +177,6 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                         if response.usage
                         else None
                     )
-                    if response.stop_reason == "cancelled":
-                        self._paused = True
                     result = TurnResult[OutputDataT](
                         response.stop_reason, self._runtime.last_output, response.usage
                     )
@@ -188,13 +185,11 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                 except asyncio.CancelledError:
                     self._last_outcome = "cancelled"
                     self._last_usage = None
-                    self._paused = True
                     for accepted in (handle, *self._joined):
                         accepted._future.set_result(TurnResult("cancelled"))
                 except Exception as exc:
                     self._last_outcome = "error"
                     self._last_usage = None
-                    self._paused = True
                     for accepted in (handle, *self._joined):
                         accepted._future.set_exception(exc)
                 finally:
@@ -206,26 +201,22 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                     self._active = None
                     self._execution = None
                     self._runtime.prompt_origin = None
-                    self._publish()
+                    # An idle update would let clients send local follow-ups ahead of queued work.
+                    if self._closed or not self._queue:
+                        self._publish()
         finally:
             self._worker = None
 
     async def cancel(self) -> None:
-        self._paused = True
-        if self._execution is not None:
-            self._execution.cancel()
-            if self._worker is not None:
-                await asyncio.shield(self._worker)
+        """Cancel and await the active turn while the worker handles pending turns."""
+        execution, active = self._execution, self._active
+        if execution is not None and active is not None:
+            if not execution.cancelling():
+                execution.cancel()
+            await asyncio.gather(active.result(), return_exceptions=True)
 
     async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
         return tuple(queued.handle for queued in self._queue)
-
-    async def resume_queue(self) -> None:
-        self._registration._server._require_running()
-        if self._closed:
-            raise RuntimeError("session is closed")
-        self._paused = False
-        self._start_worker()
 
     async def clear_queue(self) -> None:
         while self._queue:
@@ -361,7 +352,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
             return self._remember(runtime)
 
     async def cancel_session(self, session_id: str) -> None:
-        """Cancel the active turn and pause queued prompts; raise KeyError if unknown."""
+        """Cancel the active turn; raise KeyError if the session is unknown."""
         session = await self.get_session(session_id)
         await session.cancel()
 

@@ -11,7 +11,7 @@ use super::{App, PendingApproval, ScrollBar, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
 use crate::theme::Palette;
-use crate::transcript::wrap;
+use crate::transcript::{wrap, wrap_up_to};
 
 const PROMPT_MARKER_WIDTH: u16 = 2;
 
@@ -80,11 +80,29 @@ impl App {
             .map_or(0, |completion| {
                 u16::try_from(completion.items.len().min(6)).unwrap_or(6)
             });
+        let reserved_height = [
+            mcp_height,
+            approval_height,
+            elicitation_height,
+            completion_height,
+            follow_height,
+            prompt_height,
+            3, // Transcript, status, and help each need a row.
+        ]
+        .into_iter()
+        .fold(0, u16::saturating_add);
+        let queue_height = area
+            .height
+            .saturating_sub(reserved_height)
+            .min((area.height / 4).clamp(2, 7));
+        let queue_lines =
+            self.queued_prompt_lines(area.inner(gutter).width, queue_height, &palette);
         let [
             transcript,
             mcp,
             approval,
             elicitation,
+            queue,
             suggestions,
             follow,
             composer,
@@ -95,6 +113,7 @@ impl App {
             Constraint::Length(mcp_height),
             Constraint::Length(approval_height),
             Constraint::Length(elicitation_height),
+            Constraint::Length(queue_lines.len() as u16),
             Constraint::Length(completion_height),
             Constraint::Length(follow_height),
             Constraint::Length(prompt_height),
@@ -102,6 +121,9 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(area);
+        if !queue_lines.is_empty() {
+            frame.render_widget(Text::from(queue_lines), queue.inner(gutter));
+        }
 
         let composer = composer.inner(gutter);
         let framed_composer =
@@ -335,6 +357,8 @@ impl App {
             "Enter save provider · Esc return to draft"
         } else if self.prompt_setup_message().is_some() {
             "Set up a provider and model with /providers"
+        } else if slash_command(self.draft.text()) == Some("/queue") {
+            "Enter queue message"
         } else {
             "Enter send · Wheel scroll · Click a header for details · /help commands"
         };
@@ -366,6 +390,43 @@ impl App {
                 self.draw_picker(frame, area, picker, &palette);
             }
         }
+    }
+
+    fn queued_prompt_lines(&self, width: u16, height: u16, palette: &Palette) -> Vec<Line<'_>> {
+        if self.queue.is_empty() || width < 8 || height < 2 {
+            return Vec::new();
+        }
+        let height = usize::from(height);
+        let mut heading = Line::from("Queued".fg(palette.accent).bold());
+        if self.draft.text().is_empty() {
+            heading.spans.push(" · Shift+← edit".fg(palette.muted));
+        }
+        let mut lines = vec![heading];
+        for (index, prompt) in self.queue.iter().enumerate() {
+            let remaining = height - lines.len();
+            let more = self.queue.len() - index - 1;
+            if remaining == 1 && more > 0 {
+                lines.push(Line::from(format!("+{} more", more + 1)).fg(palette.muted));
+                break;
+            }
+            let limit = (remaining - usize::from(more > 0)).min(3);
+            // Leave room for the bullet and for an ellipsis on a truncated last row.
+            let rows = wrap_up_to(&prompt.text, usize::from(width) - 3, limit + 1);
+            let truncated = rows.len() > limit;
+            for (row, range) in rows.into_iter().take(limit).enumerate() {
+                let marker = if row == 0 { "• " } else { "  " };
+                let mut line = Line::from(vec![
+                    marker.fg(palette.accent),
+                    Span::raw(&prompt.text[range]),
+                ])
+                .fg(palette.muted);
+                if truncated && row + 1 == limit {
+                    line.spans.push(Span::raw("…"));
+                }
+                lines.push(line);
+            }
+        }
+        lines
     }
 
     /// A centred, clickable label that returns the transcript to the tail, hidden while it follows.
@@ -556,12 +617,7 @@ impl App {
             left.push(format!(" · {} attached", self.attachments.len()).into());
         }
         if !self.queue.is_empty() {
-            let state = if self.queue_paused {
-                "queued · paused"
-            } else {
-                "queued"
-            };
-            left.push(format!(" · {} {state}", self.queue.len()).into());
+            left.push(format!(" · {} queued", self.queue.len()).into());
         }
         let context = self.session_title.as_deref().or(self.workspace.as_deref());
         if let Some(context) = context {

@@ -59,6 +59,7 @@ pub enum Key {
     Backspace,
     Delete,
     Left,
+    EditQueuedPrompt,
     Right,
     Home,
     End,
@@ -141,7 +142,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/connect", "Connect to an ACP endpoint"),
     ("/reconnect", "Reconnect the transport"),
     ("/queue", "Queue a follow-up"),
-    ("/resume-queue", "Resume the local queue"),
+    ("/edit-queue", "Edit the last queued message"),
     ("/clear-queue", "Clear the local queue"),
     ("/attach", "Stage a file"),
     ("/detach", "Remove a staged file"),
@@ -171,7 +172,6 @@ pub struct App {
     provider_editor: bool,
     loaded: bool,
     replay_from: Option<usize>,
-    queue_paused: bool,
     draft: Composer,
     provider_draft: Option<Composer>,
     transcript: Transcript,
@@ -250,7 +250,6 @@ impl App {
             provider_editor: false,
             loaded: false,
             replay_from: None,
-            queue_paused: false,
             draft: Composer::default(),
             provider_draft: None,
             transcript,
@@ -307,6 +306,7 @@ impl App {
                 close_supported,
                 delete_supported,
                 provider_editor,
+                execution,
             } => {
                 if let Some(from) = self.replay_from.take() {
                     self.transcript.replace(from);
@@ -322,6 +322,9 @@ impl App {
                 }
                 self.workspace = Some(workspace.display().to_string());
                 if self.session.as_deref() != Some(&session) {
+                    if self.session.is_some() {
+                        self.clear_queue_for_switch();
+                    }
                     self.plan.clear();
                     self.todo_auto_opened = false;
                     self.todo_scroll = self.todo_scroll.map(|_| 0);
@@ -330,6 +333,9 @@ impl App {
                     self.update_plan(plan);
                 }
                 self.session = Some(session);
+                if let Some(state) = execution {
+                    self.event(Event::Execution(state));
+                }
                 self.ready = true;
                 self.status = "Connected";
                 self.load_waiting_sessions();
@@ -337,6 +343,7 @@ impl App {
                 self.activity.push_back("connected".into());
                 self.trim_activity();
                 self.update_execution();
+                self.flush_queue();
             }
             Event::Execution(state) => {
                 let matches = self
@@ -466,7 +473,6 @@ impl App {
             }
             Event::End { interrupted } => {
                 self.turns = self.turns.saturating_sub(1);
-                self.queue_paused |= interrupted;
                 self.activity.push_back(if interrupted {
                     "turn cancelled".into()
                 } else {
@@ -498,7 +504,6 @@ impl App {
                 self.ready = false;
                 self.turns = 0;
                 self.execution = None;
-                self.queue_paused = true;
                 self.clear_approvals();
                 self.elicitations.clear();
                 self.mcp_consent.clear();
@@ -531,7 +536,7 @@ impl App {
                 self.delete_supported = false;
                 self.provider_editor = false;
                 self.attachments_supported = false;
-                self.queue_paused = !self.queue.is_empty();
+                self.clear_queue_for_switch();
                 self.refresh_completion();
             }
             Event::Connecting => {
@@ -1055,6 +1060,14 @@ impl App {
             Key::Backspace => self.draft.backspace(),
             Key::Delete => self.draft.delete(),
             Key::Left => self.draft.left(),
+            Key::EditQueuedPrompt
+                if self.draft.text().is_empty()
+                    && self.provider_draft.is_none()
+                    && !self.queue.is_empty() =>
+            {
+                self.edit_queued_prompt();
+            }
+            Key::EditQueuedPrompt => self.draft.left(),
             Key::Right => self.draft.right(),
             Key::Home => self.draft.home(),
             Key::End => self.draft.end(),
@@ -1083,9 +1096,10 @@ impl App {
             Key::ToggleTools => self.transcript.toggle_tools(),
             Key::ToggleSidebar => self.toggle_sidebar(),
             Key::Reconnect => self.reconnect(),
-            Key::Escape if self.turns > 0 || self.remote_busy() => {
+            Key::Escape
+                if self.status != "Cancelling" && (self.turns > 0 || self.remote_busy()) =>
+            {
                 if self.actions.unbounded_send(Action::Cancel).is_ok() {
-                    self.queue_paused = true;
                     self.status = "Cancelling";
                 }
             }
@@ -1441,7 +1455,6 @@ impl App {
         if !self.ready
             || self.turns > 0
             || self.remote_busy()
-            || self.queue_paused
             || self.prompt_setup_message().is_some()
         {
             return;
@@ -1450,6 +1463,16 @@ impl App {
             && let Err(prompt) = self.send_prompt(prompt)
         {
             self.queue.push_front(prompt);
+        }
+    }
+
+    fn clear_queue_for_switch(&mut self) {
+        if !self.queue.is_empty() {
+            self.queue.clear();
+            self.transcript.push(
+                Role::Note,
+                "Cleared queued prompts for the previous session".into(),
+            );
         }
     }
 

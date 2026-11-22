@@ -152,10 +152,11 @@ transport after a disconnect. `Ctrl-R`, or the `/reconnect` command, starts
 another attempt with the same transport options and connection identity.
 `Ctrl-R` edits nothing, so the draft survives; `/reconnect` is an ordinary
 command and therefore consumes the current draft line. The transcript and
-queued prompts survive the attempt; connection-scoped session state, approvals
-and in-flight turns are discarded, and the next `Ready` refreshes the session,
-workspace and agent capabilities. Reconnecting never replays a submitted
-prompt.
+queued prompts survive a reconnect to the same session. The next `Ready`
+refreshes the session, workspace and agent capabilities after the client
+discards connection-scoped state, approvals and in-flight turns. The client
+sends queued prompts once the session is idle. Submitted prompts are tracked
+by the server.
 
 The same supervisor replaces a live connection when the composer asks for a new
 or saved session. `/new` reconnects with the current workspace and `/load <id>`
@@ -270,7 +271,7 @@ the current workspace.
 or `local` and an optional workspace. The browser accepts a WebSocket URL.
 WebSocket connections use TLS outside loopback. Native startup bearer
 credentials stay scoped to the startup endpoint. Switching creates a session
-and pauses queued prompts from the previous connection.
+and clears local prompts queued for the previous session.
 
 `/sessions` searches paged ACP session summaries by title, ID and workspace.
 Tab switches between the current workspace and all accessible workspaces.
@@ -375,17 +376,21 @@ Messages left unconsumed at turn completion become separate follow-ups ahead of
 explicitly queued work. Idle steering starts a normal turn. ACP wire types and
 methods are unchanged.
 
-Cancelling an awaiter never cancels execution. Cancel and runtime errors pause
-remaining work; Python inspection/resume/clear manage separate queued turns.
+Cancelling an awaiter never cancels execution. Cancellation waits for the active
+turn to settle, and the worker starts pending turns after cancellation or an
+error. Python provides inspection and clearing for separate queued turns.
 Accepted prompts survive disconnect, their JSON-RPC associations do not, and no
 reconnect resubmits them. The TUI sends concurrent prompts without cancelling
 earlier request workers. `/queue <message>` holds a follow-up and staged attachments
-in the TUI until idle; the command and queue controls are entirely client-side.
+in the TUI until idle. A bounded preview above the composer shows queued
+message text in order until each prompt is submitted. `/edit-queue` or
+`Shift+Left` from an empty composer moves the last pending message and its
+attachments into a `/queue` draft for editing.
 
 `RegisteredAgent.cancel_session(session_id)` resolves a session through `get_session`
 and delegates to `Session.cancel()`. It shares lookup/restoration and unknown-ID
-errors with `get_session`, cancels the active turn, and pauses queued work without
-closing the session or clearing pending prompts.
+errors with `get_session` and cancels the active turn. Any pending prompt can
+start in the same session as soon as the active turn settles.
 
 `RegisteredAgent.close_session(session_id)` resolves through `get_session` and
 delegates to `Session.close()`, sharing its lookup/restoration and unknown-ID errors.

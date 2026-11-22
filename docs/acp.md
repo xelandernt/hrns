@@ -54,7 +54,7 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `session/set_mode` | request | **No** | Returns `method_not_found` |
 | `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
 | `session/prompt` | request | **Yes** | Steers the active turn at its next model request, or starts a turn while idle; late messages become follow-ups. Streams `session/update` and returns the consuming turn's outcome |
-| `session/cancel` | notification | **Yes** | Cancels the in-flight turn and pauses pending work; the prompt returns `cancelled` |
+| `session/cancel` | notification | **Yes** | Cancels the in-flight turn. The prompt returns `cancelled` and the next queued turn starts |
 | `mcp/message` | request | **Conditional** | The stateless binding routes registered provider requests; client-provided servers are consumed through `McpOverAcpCaller` |
 | `session/list` | request | **Conditional** | Requires a `ListableSessionStore`; supports `cwd` filter and cursor paging |
 | `session/delete` | request | **Conditional** | Requires a `DeletableSessionStore`; closes live state first |

@@ -39,8 +39,7 @@ impl App {
                     "Connection  /connect · /reconnect · /providers · /mcp".to_owned(),
                     "Model  /models · /effort · /provider".to_owned(),
                     "Transcript  /thoughts · /find <text> · /copy · /todo".to_owned(),
-                    "Composer  /attach · /detach · /queue · /resume-queue · /clear-queue"
-                        .to_owned(),
+                    "Composer  /attach · /detach · /queue · /edit-queue · /clear-queue".to_owned(),
                     "Settings  /settings · /permissions · /theme · /sidebar".to_owned(),
                     "Agent  /skills · /agent <command>".to_owned(),
                     String::new(),
@@ -402,15 +401,13 @@ impl App {
                 self.attachments
                     .retain(|attachment| attachment.name != name);
             }
-            "/resume-queue" => {
+            "/edit-queue" => {
                 self.draft.submit();
-                self.queue_paused = false;
-                self.flush_queue();
+                self.edit_queued_prompt();
             }
             "/clear-queue" => {
                 self.draft.submit();
                 self.queue.clear();
-                self.queue_paused = false;
             }
             text if text.starts_with("/queue ") => {
                 let text = text["/queue ".len()..].trim();
@@ -427,6 +424,21 @@ impl App {
                 Role::Note,
                 format!("Check the arguments for {command} · /help commands"),
             ),
+        }
+    }
+
+    pub(super) fn edit_queued_prompt(&mut self) {
+        if self.queue.is_empty() {
+            self.transcript
+                .push(Role::Note, "No queued messages to edit".into());
+        } else if self.attachment_reads > 0 || !self.attachments.is_empty() {
+            self.transcript.push(
+                Role::Note,
+                "Send or detach staged files before editing a queued message".into(),
+            );
+        } else if let Some(prompt) = self.queue.pop_back() {
+            self.draft.set_text(&format!("/queue {}", prompt.text));
+            self.attachments = prompt.attachments;
         }
     }
 

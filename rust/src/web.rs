@@ -481,6 +481,7 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
         "Enter" => Some(Key::Enter),
         "Backspace" => Some(Key::Backspace),
         "Delete" => Some(Key::Delete),
+        "ArrowLeft" if event.shift_key() => Some(Key::EditQueuedPrompt),
         "ArrowLeft" => Some(Key::Left),
         "ArrowRight" => Some(Key::Right),
         "Home" => Some(Key::Home),

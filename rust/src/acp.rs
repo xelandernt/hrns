@@ -198,6 +198,7 @@ pub enum Event {
         close_supported: bool,
         delete_supported: bool,
         provider_editor: bool,
+        execution: Option<ExecutionState>,
     },
     Execution(ExecutionState),
     Options(Vec<SessionConfigOption>),
@@ -425,6 +426,9 @@ pub async fn connect(
                 .map(crate::skills::catalog)
                 .unwrap_or_default();
             let _ = events.unbounded_send(Event::Skills(skills));
+            let execution = meta
+                .and_then(|mut meta| meta.remove("hrns/session/state"))
+                .and_then(|state| serde_json::from_value(state).ok());
             let _ = events.unbounded_send(Event::Ready {
                 session: session.session_id().to_string(),
                 workspace: cwd,
@@ -434,12 +438,8 @@ pub async fn connect(
                 close_supported,
                 delete_supported,
                 provider_editor,
+                execution,
             });
-            if let Some(state) = meta.and_then(|mut meta| meta.remove("hrns/session/state"))
-                .and_then(|state| serde_json::from_value(state).ok())
-            {
-                let _ = events.unbounded_send(Event::Execution(state));
-            }
 
             let mut permissions = FuturesUnordered::new();
             let mut elicitations = FuturesUnordered::new();

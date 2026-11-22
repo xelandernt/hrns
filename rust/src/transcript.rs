@@ -981,7 +981,7 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<Range<usize>> {
     wrap_up_to(text, width, usize::MAX)
 }
 
-fn wrap_up_to(text: &str, width: usize, limit: usize) -> Vec<Range<usize>> {
+pub(crate) fn wrap_up_to(text: &str, width: usize, limit: usize) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
     let mut line_start = 0;
     let mut columns = 0;

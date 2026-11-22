@@ -142,7 +142,7 @@ the same data again.
 | --- | --- |
 | `session/load` | Before returning a resident session or restoring a stored one. |
 | `session/prompt` | Before accepting the prompt into the session queue. |
-| `session/cancel` | Before cancelling the active turn and pausing queued work. |
+| `session/cancel` | Before cancelling the active turn. |
 | `session/close` | Before closing the live session and removing its resident view. |
 | `session/delete` | Before closing any resident session and invoking `delete`. |
 | `session/set_config_option` | Before changing the model or session settings. |

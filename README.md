@@ -109,8 +109,9 @@ turn = await session.submit("Investigate the deployment failure")
 result = await turn.result()
 ```
 
-Follow-ups share a FIFO with ACP prompts. Cancellation and failures pause it;
-`pending_prompts()`, `resume_queue()`, and `clear_queue()` are Python-only controls.
+Pending follow-ups run automatically when the active turn ends, including after
+cancellation or an error. Use `pending_prompts()` and `clear_queue()` to inspect or
+clear queued turns from Python.
 Permissions/questions wait for an ACP attachment. See [agent servers](docs/mount-acp.md)
 for configuration, authentication, stores, and model/provider routing, and
 [AG-UI observation](docs/ag_ui.md) for read-only snapshots and SSE replay.
