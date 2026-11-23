@@ -194,7 +194,7 @@ names new activity, disappears once the transcript follows the tail again, and
 `Esc` returns there when no turn is running.
 
 The transcript and optional sidebar sit above a rounded, full-width composer
-and a bottom status bar. Prompt and reply text share the composer's typing
+and a single-row status bar. Prompt and reply text share the composer's typing
 column, including wrapped lines. The `User` and `Agent` labels share that
 column. User prompts use the theme's surface background, and tool calls and
 reasoning are indented within the transcript.
@@ -236,9 +236,9 @@ width, reasoning visibility, theme and permission mode without
 touching connection configuration: native writes JSON under
 `$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
 local storage. The activity sidebar is suppressed below 96 columns. The status
-bar shows the connection, session and model. The footer shows context usage,
-cost, effort and approvals. At narrow widths, context usage and cost move to
-the status bar. `/theme`, `/permissions`, `/settings` and the `theme` and
+bar shows the connection and contextual keyboard hints. When space allows it
+also shows the session, model, context usage, cost, effort and approvals.
+`/theme`, `/permissions`, `/settings` and the `theme` and
 `permission` page parameters expose the same values. The built-in themes are
 `hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
 
@@ -302,7 +302,7 @@ missing setup and reports credential errors to clients.
 The reasoning picker opens after model selection when the agent advertises
 effort choices. The composer completes `/model` and `/effort` arguments from
 the current ACP config options, and offers built-in options for `/theme`,
-`/permissions` and `/provider`. The bottom footer displays the reasoning effort
+`/permissions` and `/provider`. The status bar displays the reasoning effort
 advertised for the session and the client's current approval mode.
 
 Tool entries use ACP kind, location and arguments to summarize each operation.

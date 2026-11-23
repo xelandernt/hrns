@@ -17,6 +17,7 @@ use crate::theme::Palette;
 use crate::transcript::{wrap, wrap_up_to};
 
 const PROMPT_MARKER_WIDTH: u16 = 2;
+const TRANSCRIPT_AND_STATUS_ROWS: u16 = 2;
 
 impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -55,13 +56,14 @@ impl App {
                     let request = &pending.request;
                     let details =
                         wrap(&request.title, width).len() + wrap(&request.detail, width).len();
-                    (3 + details.min(8) + request.options.len().min(9))
-                        .min(usize::from(area.height.saturating_sub(3))) as u16
+                    (3 + details.min(8) + request.options.len().min(9)).min(usize::from(
+                        area.height.saturating_sub(TRANSCRIPT_AND_STATUS_ROWS),
+                    )) as u16
                 });
         let follow_height = u16::from(!self.transcript.following());
         let question_limit = area
             .height
-            .saturating_sub(prompt_height + 3 + follow_height)
+            .saturating_sub(prompt_height + TRANSCRIPT_AND_STATUS_ROWS + follow_height)
             .min(18);
         let question = self.elicitations.front().map(|pending| {
             elicitation_lines(
@@ -82,7 +84,11 @@ impl App {
             .filter(|_| !approval_active)
             .map_or(0, |completion| {
                 let available = area.height.saturating_sub(
-                    mcp_height + elicitation_height + follow_height + prompt_height + 3,
+                    mcp_height
+                        + elicitation_height
+                        + follow_height
+                        + prompt_height
+                        + TRANSCRIPT_AND_STATUS_ROWS,
                 );
                 let minimum = usize::from(completion.file.is_some());
                 (completion.items.len().clamp(minimum, 6) as u16).min(available)
@@ -94,7 +100,7 @@ impl App {
             completion_height,
             follow_height,
             prompt_height,
-            3, // Transcript, status, and help each need a row.
+            TRANSCRIPT_AND_STATUS_ROWS,
         ]
         .into_iter()
         .fold(0, u16::saturating_add);
@@ -114,7 +120,6 @@ impl App {
             follow,
             composer,
             status,
-            help,
         ] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(mcp_height),
@@ -124,7 +129,6 @@ impl App {
             Constraint::Length(completion_height),
             Constraint::Length(follow_height),
             Constraint::Length(prompt_height),
-            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -352,7 +356,7 @@ impl App {
                 frame.set_cursor_position(Position::new(input.x + column, input.y + row - scroll));
             }
         }
-        let help_text = if self.mcp_consent.front().is_some() {
+        let status_hint = if self.mcp_consent.front().is_some() {
             "1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
         } else if let Some(pending) = self.elicitations.front() {
             question_hint(&pending.state)
@@ -383,20 +387,19 @@ impl App {
         } else if slash_command(self.draft.text()) == Some("/queue") {
             "Enter queue message"
         } else {
-            "Enter send · Wheel scroll · Click a header for details · /help commands"
+            ""
         };
-        let help_color = if prompt_active && self.transcript.output_pending() {
+        let hint_color = if prompt_active && self.transcript.output_pending() {
             palette.accent
         } else {
             palette.muted
         };
-        let remaining_metrics = self.draw_footer(
+        self.draw_status(
             frame,
-            help.inner(gutter),
-            Line::from(help_text).fg(help_color),
+            status.inner(gutter),
+            status_hint.fg(hint_color),
             &palette,
         );
-        self.draw_status(frame, status.inner(gutter), remaining_metrics, &palette);
         if sidebar.width > 0 {
             if self.todo_open {
                 self.draw_todos(frame, sidebar, &palette);
@@ -547,63 +550,6 @@ impl App {
         self.follow_area = Some(Rect::new(left, target.y, right.saturating_sub(left), 1));
     }
 
-    fn draw_footer(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        hint: Line<'_>,
-        palette: &Palette,
-    ) -> Line<'_> {
-        let effort = self
-            .options
-            .iter()
-            .find(|option| {
-                options::matches_category(option, &SessionConfigOptionCategory::ThoughtLevel)
-            })
-            .and_then(|option| match &option.kind {
-                SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
-                SessionConfigKind::Boolean(toggle) => {
-                    Some(if toggle.current_value { "on" } else { "off" })
-                }
-                _ => None,
-            })
-            .unwrap_or("—");
-        let approvals = self.approval_mode.label();
-        let mut settings = Line::from(vec![
-            "Effort ".into(),
-            effort.fg(palette.accent),
-            " · Approvals ".into(),
-            approvals.fg(palette.accent),
-        ]);
-        if settings.width() > usize::from(area.width) {
-            settings = Line::from(vec![
-                "Effort ".into(),
-                effort.fg(palette.accent),
-                " · ".into(),
-                approvals.fg(palette.accent),
-            ]);
-        }
-        let mut metrics = self.usage_metrics();
-        if !metrics.spans.is_empty()
-            && metrics.width() + 3 + settings.width() <= usize::from(area.width)
-        {
-            metrics.push_span(" · ");
-            metrics.spans.append(&mut settings.spans);
-            settings = std::mem::take(&mut metrics);
-        }
-        let width = settings.width().min(usize::from(area.width)) as u16;
-        let hints = Rect::new(
-            area.x,
-            area.y,
-            area.width.saturating_sub(width).saturating_sub(1),
-            area.height,
-        );
-        let values = Rect::new(area.right() - width, area.y, width, area.height);
-        frame.render_widget(Paragraph::new(hint), hints);
-        frame.render_widget(Paragraph::new(settings).fg(palette.muted), values);
-        metrics
-    }
-
     fn draw_picker(&self, frame: &mut Frame, area: Rect, picker: &Picker, palette: &Palette) {
         let width = area.width.saturating_sub(2).min(88);
         let height = area.height.saturating_sub(2).min(26);
@@ -734,56 +680,96 @@ impl App {
         );
     }
 
-    fn draw_status(&self, frame: &mut Frame, area: Rect, metrics: Line<'_>, palette: &Palette) {
+    fn draw_status(&self, frame: &mut Frame, area: Rect, hint: Span<'_>, palette: &Palette) {
+        let width = usize::from(area.width);
         let status_color = match self.status {
             "Connected" => palette.success,
             "Disconnected" => palette.error,
             "Waiting" | "Cancelling" => palette.warning,
             _ => palette.accent,
         };
-        let mut left = vec!["● ".fg(status_color), self.status.fg(status_color)];
+        let mut left = Line::from(vec!["● ".fg(status_color), self.status.fg(status_color)]);
+        if hint.width() > 0 {
+            if left.width() + 3 + hint.width() <= width {
+                left.push_span(" · ");
+                left.push_span(hint);
+            } else {
+                left = Line::from(hint);
+            }
+        }
         if self.attachment_reads > 0 {
-            left.push(" · Loading attachment".into());
+            left.push_span(" · Loading attachment");
         } else if !self.attachments.is_empty() {
-            left.push(format!(" · {} attached", self.attachments.len()).into());
+            left.push_span(format!(" · {} attached", self.attachments.len()));
         }
         if !self.queue.is_empty() {
-            left.push(format!(" · {} queued", self.queue.len()).into());
+            left.push_span(format!(" · {} queued", self.queue.len()));
         }
-        if let Some(title) = &self.session_title {
-            left.push(format!(" · {title}").into());
-        } else if let Some(workspace) = &self.workspace {
-            left.push(format!(" · {}", workspace.display()).into());
-        }
-        left.push(format!(" · {}", self.destination).into());
 
-        let mut right = Line::default();
-        if let Some(model) = self.options.iter().find_map(|option| match &option.kind {
+        let effort = self
+            .options
+            .iter()
+            .find(|option| {
+                options::matches_category(option, &SessionConfigOptionCategory::ThoughtLevel)
+            })
+            .and_then(|option| match &option.kind {
+                SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
+                SessionConfigKind::Boolean(toggle) => {
+                    Some(if toggle.current_value { "on" } else { "off" })
+                }
+                _ => None,
+            })
+            .unwrap_or("—");
+        let model = self.options.iter().find_map(|option| match &option.kind {
             SessionConfigKind::Select(select)
                 if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
             {
-                Some(select.current_value.to_string())
+                Some(select.current_value.0.as_ref())
             }
             _ => None,
-        }) {
-            right.push_span(model.fg(palette.accent).bold());
+        });
+        let mut right = Line::default();
+        let budget = width.saturating_sub(left.width() + 2);
+        for field in [
+            Line::from(vec!["Effort ".into(), effort.fg(palette.accent)]),
+            Line::from(vec![
+                "Approvals ".into(),
+                self.approval_mode.label().fg(palette.accent),
+            ]),
+            model.map_or_else(Line::default, |model| {
+                Line::from(model.fg(palette.accent).bold())
+            }),
+            self.usage_metrics(),
+        ] {
+            append_status_field(&mut right, field, budget);
         }
-        let available = usize::from(area.width.saturating_sub(16));
-        let right_limit = available.max(metrics.width());
-        if !metrics.spans.is_empty() {
-            if right.spans.is_empty() || right.width() + 3 + metrics.width() > available {
-                right = metrics;
-            } else {
-                right.push_span(" · ");
-                right.spans.extend(metrics.spans);
+
+        let right_width = right.width();
+        let left_width = width.saturating_sub(right_width + if right_width == 0 { 0 } else { 2 });
+        if let Some(title) = self.session_title.as_deref() {
+            append_status_field(&mut left, Line::from(title), left_width);
+        } else if let Some(workspace) = &self.workspace {
+            let fits = append_status_field(
+                &mut left,
+                Line::from(workspace.to_string_lossy()),
+                left_width,
+            );
+            if !fits && let Some(name) = workspace.file_name() {
+                append_status_field(&mut left, Line::from(name.to_string_lossy()), left_width);
             }
         }
-        let right_width = right.width().min(right_limit).min(usize::from(area.width)) as u16;
-        let [context, metrics] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
+        append_status_field(&mut left, Line::from(self.destination.as_str()), left_width);
+
+        let context = Rect::new(area.x, area.y, left_width as u16, area.height);
+        let values = Rect::new(
+            area.right() - right_width as u16,
+            area.y,
+            right_width as u16,
+            area.height,
+        );
         let style = Style::default().fg(palette.muted);
-        frame.render_widget(Paragraph::new(Line::from(left)).style(style), context);
-        frame.render_widget(Paragraph::new(right).style(style), metrics);
+        frame.render_widget(Paragraph::new(left).style(style), context);
+        frame.render_widget(Paragraph::new(right).style(style), values);
     }
 
     fn usage_metrics(&self) -> Line<'_> {
@@ -948,6 +934,19 @@ impl App {
             area,
         );
     }
+}
+
+fn append_status_field<'a>(line: &mut Line<'a>, field: Line<'a>, limit: usize) -> bool {
+    let width = field.width();
+    let separator_width = if line.spans.is_empty() { 0 } else { 3 };
+    if width == 0 || line.width() + separator_width + width > limit {
+        return false;
+    }
+    if separator_width > 0 {
+        line.push_span(" · ");
+    }
+    line.spans.extend(field.spans);
+    true
 }
 
 fn draw_providers(
