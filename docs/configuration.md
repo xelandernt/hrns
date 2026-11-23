@@ -167,7 +167,7 @@ that builds the model) reads these.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `type` | string | entry name | Provider type (`openai`, `anthropic`, `deepseek`, `gateway/openai`, …). Empty reuses the entry name |
+| `type` | string | entry name | Provider type (`openai-compatible`, `openai`, `anthropic`, `deepseek`, …). Empty reuses the entry name |
 | `base_url` | string | `""` | `http(s)` endpoint for an OpenAI-compatible server. Credentials, query strings and fragments are rejected |
 | `api_key_env` | string | `""` | Environment variable holding this entry's key |
 | `copilot_client_id` | string | `""` | GitHub OAuth app for the Copilot device login; empty uses GitHub's public client |
@@ -282,17 +282,37 @@ Libraries are read in this order, highest precedence first: `paths` as written,
 library's skill and bundled files. `enabled = false` removes the capability and the ACP
 catalog entirely.
 
+## Local provider setup
+
+1. Open `/providers` and press **a** to add an entry. `/provider add` opens the same form.
+2. Enter a name and provider type. Supply a base URL and custom model IDs for a
+   custom endpoint. For Bedrock, set an AWS profile and region if you need to
+   override boto3's defaults.
+3. Save, highlight the entry, and press **Enter** to select it. Run `/login` and
+   choose a sign-in method. With no selection, `/login` opens `/providers`.
+4. Use `/models` to choose a model for the session.
+
+| Provider type | Sign-in method |
+| --- | --- |
+| `bedrock` | Discover credentials through boto3 or start an AWS SSO session with AWS CLI v2. AWS manages the SSO cache. |
+| `github-copilot` | Open the GitHub device verification URL and enter the code. |
+| `openai-codex` | Open the browser authorization URL. The browser returns to Harness through localhost port 1455. |
+| `deepseek` | Enter a DeepSeek API key. |
+| `openai-compatible` | Enter an API key for the endpoint's Chat Completions API. |
+
+In the provider list, press **e** to edit or **d** to delete the highlighted entry.
+A Bedrock model ID can include a colon, such as `amazon.nova-pro-v1:0`.
+The built-in local agent supports editing and sign-in. Remote agents can expose
+routes through ACP's optional provider-routing capability.
+
 ## Secrets
 
-Store credentials in the environment or OS keyring and use a reference:
+`/login` stores API keys and account tokens in the OS keyring. The keyring
+account is scoped to the provider entry, type, and configured base URL.
+For environment-based setup, `api_key_env` names the variable the entry reads.
 
-- `env:NAME` — read the process environment.
-- `keyring:service/user` — read the OS keyring; `hrns login` stores account tokens under
-  `hrns/<entry>`.
-- Anything else is a literal, which is only appropriate for non-secrets such as `PATH`.
-
-`api_key_env` names the variable a provider entry reads; the keyring wins over pasted keys
-for the same entry. Account tokens use the `hrns/<entry>` service.
+Connection profiles can resolve credentials from `env:NAME` or
+`keyring:service/user`. Use literal values for non-secret settings such as `PATH`.
 
 ## Environment variables
 

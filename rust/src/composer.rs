@@ -17,7 +17,6 @@ impl Composer {
         &self.text
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub fn cursor(&self) -> usize {
         self.cursor
     }

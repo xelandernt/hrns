@@ -28,10 +28,9 @@ from .shared.config import (
     McpServerSettings,
     Profile,
     default_config_path,
-    keyring_account,
     project_config_path,
-    stored_api_key_ref,
 )
+from .shared.config.credentials import provider_credential_account, secret_ref, stored_secret
 from .shared.config.mcp import (
     MCP_NAME_PATTERN,
     build_client,
@@ -243,13 +242,12 @@ def _agent_command(
         Parameter(help="Ignore the configuration file and use environment variables only."),
     ] = False,
     catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
-    login: Annotated[bool, Parameter(help="Account login (not supported).")] = False,
     cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
 ) -> int:
     _require_server_extra()
     from .server.runtime import run as run_agent
 
-    run_agent(config=config, env_only=env_only, catalog=catalog, login=login, cwd=cwd)
+    run_agent(config=config, env_only=env_only, catalog=catalog, cwd=cwd)
     return EXIT_OK
 
 
@@ -387,7 +385,7 @@ def _register_commands(app: App) -> None:
     app.command(_agent_command, name="agent", help="Run the configured agent over ACP stdio")
     app.command(_acp_command, name="acp", help="Run an agent over ACP stdio")
     app.command(_serve_command, name="serve", help="Serve the agent over WebSocket and FastAPI")
-    app.command(_login_command, name="login", help="Sign in to a provider with an account login")
+    app.command(_login_command, name="login", help="Sign in to a configured provider")
     app.command(
         _clean_command,
         name="clean",
@@ -672,8 +670,8 @@ def _config_keys(args: SimpleNamespace) -> int:
     settings = _config(args)
     providers: list[dict[str, object]] = []
     for name, entry in sorted(settings.providers.items()):
-        account = keyring_account(name, entry.api_key_env)
-        ref = stored_api_key_ref(name, entry.api_key_env)
+        account = provider_credential_account(name, entry.provider_id(name), entry.base_url)
+        ref = secret_ref(account)
         active = name == settings.provider
         agent_secret = settings.api_key.get_secret_value() if active and settings.api_key else None
         agent_kind = ""
@@ -687,8 +685,8 @@ def _config_keys(args: SimpleNamespace) -> int:
                 "envSet": bool(entry.api_key_env and os.environ.get(entry.api_key_env)),
                 "keyringService": KEYRING_SERVICE,
                 "keyringAccount": account,
-                "keyringRef": ref or f"keyring:{KEYRING_SERVICE}/{account}",
-                "keyringStored": ref is not None,
+                "keyringRef": ref,
+                "keyringStored": stored_secret(account) is not None,
                 "hrnsApiKey": agent_secret is not None,
                 "hrnsApiKeyKind": agent_kind,
             }
@@ -977,30 +975,40 @@ def _command_profiles(args: SimpleNamespace) -> int:
 async def _command_login(args: SimpleNamespace) -> int:
     _require_client_extra()
     _require_server_extra()
-    from .client.login import DeviceAuthorization, login, login_target
+    from getpass import getpass
 
-    target = login_target(args.provider, args.config)
-    print(f"Signing in to {target.provider} (account {target.account})", flush=True)
+    from .server.provider_login import ProviderLogin, login_methods
 
-    def announce(authorization: DeviceAuthorization) -> None:
-        minutes = max(1, authorization.expires_in // 60)
-        print(
-            f"Open {authorization.verification_uri} and enter code: {authorization.user_code}",
-            flush=True,
+    settings = _config(args)
+    name = args.provider or settings.provider
+    if not name:
+        raise HrnsClientError(
+            "Name a configured provider, for example `hrns login github-copilot`."
         )
-        print(f"The code expires in about {minutes} min. Waiting for approval…", flush=True)
-
-    result = await login(target, on_authorization=announce)
-    print(f"Signed in. Token stored in the OS keyring as {result.reference}.", flush=True)
-    if result.models:
-        print("Models this account can use:\n  " + "\n  ".join(result.models), flush=True)
-    if not target.configured:
-        print(
-            f"Saved for {result.provider}, which is not the active provider yet. Set "
-            f'provider = "{result.provider}" in {default_config_path()}, or add and select '
-            "it with /providers in the terminal.",
-            flush=True,
-        )
+    entry = settings.require_entry(name)
+    methods = login_methods(entry.provider_id(name))
+    method = methods[0]
+    if len(methods) > 1:
+        choices = " · ".join(f"{index + 1} {option}" for index, option in enumerate(methods))
+        response = input(f"{choices} [1] ").strip() or "1"
+        if response not in {str(index + 1) for index in range(len(methods))}:
+            raise HrnsClientError("Choose one of the available sign-in methods.")
+        method = methods[int(response) - 1]
+    key = getpass("API key: ") if method == "api-key" else None
+    login = ProviderLogin()
+    previous_url = None
+    try:
+        progress = await login.start(name, entry, method, key)
+        while not progress.get("done"):
+            if (url := progress.get("url")) and url != previous_url:
+                print(f"Open {url}", flush=True)
+                if code := progress.get("code"):
+                    print(f"Enter device code {code}", flush=True)
+                previous_url = url
+            progress = await login.status()
+    finally:
+        await login.cancel()
+    print(f"Signed in to {name}.")
     return EXIT_OK
 
 

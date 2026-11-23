@@ -157,21 +157,14 @@ key by key. `HRNS_*` environment variables override both.
 `hrns agent` launches the ACP entrypoint with the configured provider and model. The
 terminal client reuses that entrypoint, so it passes the same document to it.
 
-Configure providers with `hrns login`, `hrns config`, or `/providers` and `/provider`
-when the connected agent advertises provider routing. `/model provider:model` sets the
-model directly. The Python commands own API-key entry and the OS keyring; the native
-client never prompts for a secret.
+In Local mode, open `/providers` to add, edit, delete, or select a provider.
+Save its connection settings, select the entry, then run `/login` and choose a
+sign-in method. Use `/models` to pick a model for the session.
 
-`/providers` acts on whatever you are connected to. Over stdio to `hrns agent` it opens
-the entry editor above; connected to a remote agent that advertises provider
-configuration it lists that agent's providers and sends `providers/set` /
-`providers/disable` for you.
-
-`hrns agent` seeds its ACP provider registry from those TOML entries, so a client that
-speaks `providers/*` sees one provider per entry and can reroute it to its own gateway.
-The entry this deployment starts with is marked `required`, because disabling it would
-leave the default session without a model; the headers a client sends reach the request
-as `extra_headers` model settings.
+The local sign-in menu supports Bedrock with AWS credentials, GitHub Copilot
+and Codex account login, and API keys for DeepSeek and OpenAI-compatible
+endpoints. `hrns login <provider>` also signs in to a configured local entry.
+[Provider setup](docs/configuration.md#local-provider-setup) lists the required settings.
 
 ## Runtime behavior
 

@@ -314,8 +314,6 @@ class ProviderEntry(BaseModel):
             model = item.strip()
             if not model:
                 continue
-            if ":" in model:
-                raise ValueError("A custom model id must not contain ':'")
             cleaned.append(model)
         return list(dict.fromkeys(cleaned))
 
@@ -413,8 +411,6 @@ class HrnsConfig(BaseSettings):
         """
         if self.provider and self.provider not in self.providers:
             self.providers = {**self.providers, self.provider: ProviderEntry()}
-        if self.model and ":" in self.model:
-            raise ValueError("model is a bare model id; the provider lives in provider.")
         return self
 
     # ------------------------------------------------------------- loading

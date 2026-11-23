@@ -63,7 +63,6 @@ impl App {
         let workspace = self.workspace.as_ref().filter(|_| {
             self.ready
                 && !self.remote
-                && self.provider_draft.is_none()
                 && slash_command(text).is_none_or(|command| command == "/queue")
         });
         let references: Vec<_> = file_references(text).collect();

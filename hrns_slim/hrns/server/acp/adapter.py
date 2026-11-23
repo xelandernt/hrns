@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+import asyncio
+from collections.abc import Awaitable, Callable, Generator, Sequence
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Generic, Literal
 
@@ -20,7 +21,7 @@ from .._types import PrincipalT
 from .content import PromptContentBlock
 from .host import RegisteredAgent, Session
 from .models import ModelChoice
-from .runtime import ConfigOptions
+from .runtime import _MODEL_CONFIG_ID, ConfigOptions
 from .session import McpServers
 from .store import (
     DeletableSessionStore,
@@ -48,7 +49,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         *,
         principal: PrincipalT | None = None,
     ) -> None:
-        self._provider_editor: Callable[[str, dict[str, object]], None] | None = None
+        self._provider_management_lock = asyncio.Lock()
+        self._remember_model: Callable[[str], Awaitable[None]] | None = None
+        self._provider_editor: (
+            Callable[[str, dict[str, object]], Awaitable[dict[str, object]]] | None
+        ) = None
         self._principal = principal
         self._registration = registration
         self._session_store = registration.store
@@ -305,9 +310,15 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object
     ) -> schema.SetSessionConfigOptionResponse | None:
         session = await self._session(session_id, "session/set_config_option")
-        return await session._runtime.set_config_option(
-            config_id=config_id, session_id=session_id, value=value, **kwargs
-        )
+        remember_model = self._remember_model if config_id == _MODEL_CONFIG_ID else None
+        async with self._provider_management_lock if remember_model else nullcontext():
+            with _store_errors():
+                return await session._runtime.set_config_option(
+                    config_id=config_id,
+                    session_id=session_id,
+                    value=value,
+                    remember_model=remember_model,
+                )
 
     async def fork_session(
         self,
@@ -530,19 +541,29 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
     async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
         """Dispatch provider document edits when the stdio launcher supplies an editor."""
         editor = self._provider_editor
-        if editor is None or method not in {"hrns/providers/save", "hrns/providers/remove"}:
+        if editor is None or method not in {
+            "hrns/providers/list",
+            "hrns/providers/save",
+            "hrns/providers/remove",
+            "hrns/providers/login",
+            "hrns/providers/login-status",
+            "hrns/providers/login-cancel",
+        }:
             raise acp.RequestError.method_not_found(method)
-        before = self._options_snapshot()
-        try:
-            editor(method, params)
-        except ValueError as exc:
-            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
-        except OSError as exc:
-            raise acp.RequestError.internal_error(
-                {"reason": "Could not write provider configuration"}
-            ) from exc
-        await self._push_option_changes(before)
-        return {}
+        async with self._provider_management_lock:
+            editing = method in {"hrns/providers/save", "hrns/providers/remove"}
+            before = self._options_snapshot() if editing else {}
+            try:
+                result = await editor(method, params)
+            except ValueError as exc:
+                raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+            except OSError as exc:
+                raise acp.RequestError.internal_error(
+                    {"reason": "The local provider operation failed"}
+                ) from exc
+            if editing or result.get("done") is True:
+                await self._push_option_changes(before)
+            return result
 
     async def ext_notification(self, method: str, params: dict[str, object]) -> None:
         """This adapter exposes no extension notifications."""

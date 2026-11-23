@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use agent_client_protocol::v1::schema::{
-    SessionConfigKind, SessionConfigOptionCategory, SessionInfo,
+    SessionConfigKind, SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo,
 };
 
 use super::{App, Key};
@@ -25,6 +27,14 @@ pub(super) struct Picker {
     pub source: Source,
     pub query: String,
     pub selected: usize,
+    pub provider_tab: usize,
+    tiers: HashMap<String, usize>,
+}
+
+pub(super) struct ContextTier {
+    pub value: String,
+    pub label: String,
+    current: bool,
 }
 
 pub(super) struct Row {
@@ -32,6 +42,8 @@ pub(super) struct Row {
     pub label: String,
     pub detail: String,
     pub active: bool,
+    pub context_tiers: Vec<ContextTier>,
+    pub selected_tier: usize,
 }
 
 impl Picker {
@@ -52,12 +64,17 @@ impl Picker {
             Source::Sessions { loading: true, .. } => "Loading sessions…",
             Source::Sessions { .. } if empty && self.query.is_empty() => "No saved sessions",
             Source::Skills if empty && self.query.is_empty() => "No skills available",
+            Source::Setting(SessionConfigOptionCategory::Model)
+                if empty && self.query.is_empty() =>
+            {
+                "No models available for this provider"
+            }
             _ if empty => "No matches",
             _ => "",
         }
     }
 
-    pub fn hint(&self) -> &'static str {
+    pub fn hint(&self, provider_tabs: bool, context_tiers: bool) -> &'static str {
         match self.source {
             Source::Sessions { error: Some(_), .. } => {
                 "  Ctrl+R retry   Tab switch workspace scope   Esc close"
@@ -69,6 +86,15 @@ impl Picker {
             Source::Sessions { .. } => {
                 "  ↑/↓ select   Enter resume   Tab all workspaces   Esc close"
             }
+            Source::Setting(_) if context_tiers && provider_tabs => {
+                "  ↑/↓ model   ←/→ context   Tab provider   Enter confirm"
+            }
+            Source::Setting(_) if context_tiers => {
+                "  ↑/↓ model   ←/→ context   Enter confirm   Esc close"
+            }
+            Source::Setting(_) if provider_tabs => {
+                "  ↑/↓ select   Tab / Shift+Tab provider   Enter confirm"
+            }
             Source::Setting(_) => "  ↑/↓ select   Enter confirm   Esc close",
             Source::Skills => "  ↑/↓ move   Enter insert   Esc close",
         }
@@ -79,7 +105,55 @@ impl Picker {
         [&row.label, &row.value, &row.detail]
             .iter()
             .any(|text| text.to_lowercase().contains(&query))
+            || row
+                .context_tiers
+                .iter()
+                .any(|tier| tier.label.to_lowercase().contains(&query))
     }
+}
+
+fn model_provider(choice: &SessionConfigSelectOption) -> Option<&str> {
+    choice.meta.as_ref()?.get("providerId")?.as_str()
+}
+
+pub(super) fn context_tier(choice: &SessionConfigSelectOption) -> Option<(&str, &str)> {
+    let meta = choice.meta.as_ref()?;
+    Some((
+        meta.get("hrns/model/context_group")?.as_str()?,
+        meta.get("hrns/model/context_size")?.as_str()?,
+    ))
+}
+
+fn group_context_tiers(rows: Vec<Row>, selections: &HashMap<String, usize>) -> Vec<Row> {
+    let mut grouped: Vec<Row> = Vec::new();
+    let mut positions = HashMap::new();
+    for mut row in rows {
+        if !row.context_tiers.is_empty() {
+            let position = positions.entry(row.label.clone()).or_insert(grouped.len());
+            if let Some(existing) = grouped.get_mut(*position) {
+                existing.context_tiers.append(&mut row.context_tiers);
+                continue;
+            }
+        }
+        grouped.push(row);
+    }
+    for row in &mut grouped {
+        if row.context_tiers.is_empty() {
+            continue;
+        }
+        row.context_tiers
+            .sort_by_key(|tier| tier.value != row.label);
+        row.selected_tier = selections
+            .get(&row.label)
+            .copied()
+            .filter(|&index| index < row.context_tiers.len())
+            .or_else(|| row.context_tiers.iter().position(|tier| tier.current))
+            .unwrap_or(0);
+        let tier = &row.context_tiers[row.selected_tier];
+        row.value.clone_from(&tier.value);
+        row.active = tier.current;
+    }
+    grouped
 }
 
 impl App {
@@ -88,6 +162,8 @@ impl App {
             source: Source::Skills,
             query: String::new(),
             selected: 0,
+            provider_tab: 0,
+            tiers: HashMap::new(),
         });
     }
 
@@ -102,6 +178,8 @@ impl App {
             },
             query: String::new(),
             selected: 0,
+            provider_tab: 0,
+            tiers: HashMap::new(),
         });
         self.request_sessions(false);
     }
@@ -208,8 +286,43 @@ impl App {
         }
     }
 
+    pub(super) fn model_provider_tabs(&self, picker: &Picker) -> Vec<Option<&str>> {
+        if !matches!(
+            picker.source,
+            Source::Setting(SessionConfigOptionCategory::Model)
+        ) {
+            return Vec::new();
+        }
+        let Some(option) = self
+            .options
+            .iter()
+            .find(|option| options::matches_category(option, &SessionConfigOptionCategory::Model))
+        else {
+            return Vec::new();
+        };
+        let mut providers: Vec<_> = option
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("hrns/model/providers"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(Some)
+            .collect();
+        for choice in options::choices(option) {
+            let provider = model_provider(choice);
+            if !providers.contains(&provider) {
+                providers.push(provider);
+            }
+        }
+        providers
+    }
+
     pub(super) fn picker_rows(&self, picker: &Picker) -> Vec<Row> {
-        let rows: Vec<Row> = match &picker.source {
+        let tabs = self.model_provider_tabs(picker);
+        let provider = tabs.get(picker.provider_tab.min(tabs.len().saturating_sub(1)));
+        let mut rows: Vec<Row> = match &picker.source {
             Source::Skills => self
                 .skills
                 .iter()
@@ -219,6 +332,8 @@ impl App {
                     label: skill.label().to_owned(),
                     detail: skill.description.clone(),
                     active: false,
+                    context_tiers: Vec::new(),
+                    selected_tier: 0,
                 })
                 .collect(),
             Source::Sessions { items, .. } => items
@@ -238,6 +353,8 @@ impl App {
                             item.updated_at.as_deref().unwrap_or("").replace('T', " "),
                             item.cwd.display()
                         ),
+                        context_tiers: Vec::new(),
+                        selected_tier: 0,
                     }
                 })
                 .collect(),
@@ -249,13 +366,14 @@ impl App {
                     SessionConfigKind::Select(select) => Some(
                         options::choices(option)
                             .into_iter()
+                            .filter(|choice| {
+                                provider.is_none_or(|tab| *tab == model_provider(choice))
+                            })
                             .map(|choice| {
                                 let value = choice.value.to_string();
-                                let provider = choice
-                                    .meta
-                                    .as_ref()
-                                    .and_then(|meta| meta.get("providerId"))
-                                    .and_then(serde_json::Value::as_str);
+                                let tier = context_tier(choice);
+                                let active = choice.value == select.current_value;
+                                let provider = model_provider(choice);
                                 let detail = choice
                                     .description
                                     .clone()
@@ -267,17 +385,28 @@ impl App {
                                             .map(|provider| format!("{provider} · {value}"))
                                     })
                                     .unwrap_or_else(|| {
-                                        if choice.name == value {
+                                        if tier.is_some() || choice.name == value {
                                             String::new()
                                         } else {
                                             value.clone()
                                         }
                                     });
                                 Row {
+                                    context_tiers: tier.map_or_else(Vec::new, |(_, label)| {
+                                        vec![ContextTier {
+                                            value: value.clone(),
+                                            label: label.into(),
+                                            current: active,
+                                        }]
+                                    }),
                                     value,
-                                    label: choice.name.clone(),
+                                    label: tier.map_or_else(
+                                        || choice.name.clone(),
+                                        |(family, _)| family.into(),
+                                    ),
                                     detail,
-                                    active: choice.value == select.current_value,
+                                    active,
+                                    selected_tier: 0,
                                 }
                             })
                             .collect(),
@@ -286,6 +415,9 @@ impl App {
                 })
                 .unwrap_or_default(),
         };
+        if rows.iter().any(|row| !row.context_tiers.is_empty()) {
+            rows = group_context_tiers(rows, &picker.tiers);
+        }
         if picker.query.is_empty() {
             return rows;
         }
@@ -310,9 +442,30 @@ impl App {
             source: Source::Setting(category),
             query: String::new(),
             selected: 0,
+            provider_tab: 0,
+            tiers: HashMap::new(),
         };
+        let tabs = self.model_provider_tabs(&picker);
+        let preferred = self.selected_provider.as_ref().and_then(|selected| {
+            tabs.iter()
+                .position(|name| *name == Some(selected.id.as_str()))
+        });
+        let active = self
+            .options
+            .iter()
+            .find(|option| options::matches_category(option, &SessionConfigOptionCategory::Model))
+            .and_then(|option| {
+                let SessionConfigKind::Select(select) = &option.kind else {
+                    return None;
+                };
+                let choice = options::choices(option)
+                    .into_iter()
+                    .find(|choice| choice.value == select.current_value)?;
+                tabs.iter().position(|name| *name == model_provider(choice))
+            });
+        picker.provider_tab = preferred.or(active).unwrap_or_default();
         let rows = self.picker_rows(&picker);
-        if rows.is_empty() {
+        if rows.is_empty() && tabs.is_empty() {
             return false;
         }
         picker.selected = rows.iter().position(|row| row.active).unwrap_or(0);
@@ -322,8 +475,39 @@ impl App {
 
     pub(super) fn picker_key(&mut self, key: Key) {
         let Some(picker) = &self.picker else { return };
+        if matches!(key, Key::Tab | Key::BackTab) {
+            let count = self.model_provider_tabs(picker).len();
+            if count > 1 {
+                let current = picker.provider_tab.min(count - 1);
+                let offset = if matches!(key, Key::Tab) {
+                    1
+                } else {
+                    count - 1
+                };
+                if let Some(picker) = &mut self.picker {
+                    picker.provider_tab = (current + offset) % count;
+                    picker.selected = 0;
+                }
+                return;
+            }
+        }
         let rows = self.picker_rows(picker);
         let last = rows.len().saturating_sub(1);
+        if matches!(key, Key::Left | Key::Right) {
+            if let Some(row) = rows.get(picker.selected)
+                && row.context_tiers.len() > 1
+            {
+                let index = if matches!(key, Key::Left) {
+                    row.selected_tier.saturating_sub(1)
+                } else {
+                    (row.selected_tier + 1).min(row.context_tiers.len() - 1)
+                };
+                if let Some(picker) = &mut self.picker {
+                    picker.tiers.insert(row.label.clone(), index);
+                }
+            }
+            return;
+        }
         if matches!(key, Key::Enter) {
             let Some(row) = rows.get(picker.selected) else {
                 return;

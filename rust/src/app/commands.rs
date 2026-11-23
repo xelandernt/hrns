@@ -1,21 +1,15 @@
-use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
+use agent_client_protocol::v1::schema::{
+    DisableProviderRequest, LlmProtocol, SessionConfigOptionCategory, SetProviderRequest,
+};
 
 use super::{App, LocalEffect, is_local_command, slash_command};
-use crate::acp::{Action, ConnectTarget};
+use crate::acp::{Action, ConnectTarget, ProviderEdit};
 use crate::options;
 use crate::preferences::ApprovalMode;
 use crate::theme;
 use crate::transcript::Role;
 
 impl App {
-    pub(super) fn submit_provider_edit(&mut self) {
-        if slash_command(self.draft.text()) == Some("/provider") {
-            self.submit();
-        } else {
-            self.provider_usage();
-        }
-    }
-
     pub(super) fn submit(&mut self) {
         let input = self.draft.text().to_owned();
         let Some(command) = slash_command(&input) else {
@@ -36,7 +30,7 @@ impl App {
                 self.draft.submit();
                 let mut commands = vec![
                     "Sessions  /sessions · /new · /load <id> · /close · /delete <id>".to_owned(),
-                    "Connection  /connect · /reconnect · /providers · /mcp".to_owned(),
+                    "Connection  /connect · /reconnect · /providers · /login · /mcp".to_owned(),
                     "Model  /models · /effort · /provider".to_owned(),
                     "Transcript  /thoughts · /find <text> · /copy · /todo".to_owned(),
                     "Composer  /attach · /detach · /queue · /edit-queue · /clear-queue".to_owned(),
@@ -140,80 +134,76 @@ impl App {
                 self.draft.submit();
                 self.show_providers();
             }
-            "/provider add" | "/provider edit" | "/provider remove" | "/provider set"
-            | "/provider disable" => {
+            "/login" => {
                 self.draft.submit();
-                self.provider_usage();
+                self.show_provider_login();
+            }
+            "/provider add" => {
+                self.draft.submit();
+                self.show_provider_form();
+            }
+            "/provider edit" | "/provider remove" => {
+                self.draft.submit();
+                self.show_providers();
             }
             text if text.starts_with("/provider add ") || text.starts_with("/provider edit ") => {
                 self.draft.set_text("");
                 let mut words = text.split_whitespace().skip(1);
-                let (Some(operation), Some(id), Some(api_type), Some(base_url)) =
-                    (words.next(), words.next(), words.next(), words.next())
+                let (Some(operation), Some(id), Some(api_type)) =
+                    (words.next(), words.next(), words.next())
                 else {
                     self.provider_usage();
                     return;
                 };
-                let models = words.next().map(|value| {
-                    if value == "-" {
-                        Vec::new()
-                    } else {
-                        value.split(',').map(str::to_owned).collect()
-                    }
-                });
-                let api_key_env = words
+                let base_url = words
                     .next()
-                    .map(|value| if value == "-" { "" } else { value }.to_owned());
+                    .filter(|value| *value != "-")
+                    .unwrap_or_default();
+                let models = words.next().map(super::providers::model_ids);
                 if words.next().is_some() {
                     self.provider_usage();
                     return;
                 }
-                self.edit_local_provider(Action::EditProvider {
+                self.edit_local_provider(Action::SaveProvider(ProviderEdit {
                     id: id.to_owned(),
                     create: operation == "add",
                     api_type: api_type.to_owned(),
-                    base_url: if base_url == "-" {
-                        String::new()
-                    } else {
-                        base_url.to_owned()
-                    },
+                    base_url: base_url.to_owned(),
                     models,
-                    api_key_env,
-                });
+                    aws_profile: None,
+                    aws_region: None,
+                }));
             }
             text if text.starts_with("/provider remove ") => {
-                self.draft.submit();
+                self.draft.set_text("");
                 let id = text["/provider remove ".len()..].trim();
-                self.edit_local_provider(Action::RemoveProvider(id.to_owned()));
+                self.confirm_provider_removal(id.to_owned());
             }
-            text if text.starts_with("/provider set ") => {
-                self.draft.submit();
-                let mut words = text["/provider set ".len()..].split_whitespace();
-                let (Some(id), Some(api_type)) = (words.next(), words.next()) else {
-                    self.transcript.push(
-                        Role::Note,
-                        "Use /provider set <id> <api-type> [base-url]".into(),
-                    );
-                    return;
-                };
-                let base_url = words.next().map(str::to_owned);
-                let _ = self.actions.unbounded_send(Action::SetProvider {
-                    id: id.to_owned(),
-                    api_type: api_type.to_owned(),
-                    base_url,
-                });
-            }
-            text if text.starts_with("/provider disable ") => {
-                self.draft.submit();
-                let id = text["/provider disable ".len()..].trim();
-                if id.is_empty() {
-                    self.transcript
-                        .push(Role::Note, "Use /provider disable <id>".into());
-                } else {
+            text if self.provider_routing && text.starts_with("/provider set ") => {
+                self.draft.set_text("");
+                let mut args = text["/provider set ".len()..].split_whitespace();
+                if let (Some(id), Some(kind), Some(url), None) =
+                    (args.next(), args.next(), args.next(), args.next())
+                    && let Ok(protocol) = serde_json::from_value::<LlmProtocol>(kind.into())
+                {
+                    let request = SetProviderRequest::new(id.to_owned(), protocol, url);
                     let _ = self
                         .actions
-                        .unbounded_send(Action::DisableProvider(id.to_owned()));
+                        .unbounded_send(Action::SetProviderRoute(request));
+                } else {
+                    self.transcript.push(
+                        Role::Note,
+                        "Use /provider set <id> <type> <base-url>.".into(),
+                    );
                 }
+            }
+            text if self.provider_routing && text.starts_with("/provider disable ") => {
+                self.draft.set_text("");
+                let id = text["/provider disable ".len()..].trim();
+                let request = DisableProviderRequest::new(id.to_owned());
+                let _ = self
+                    .actions
+                    .unbounded_send(Action::DisableProviderRoute(request));
             }
             "/permissions" => {
                 self.draft.submit();
@@ -441,30 +431,11 @@ impl App {
         }
     }
 
-    pub(super) fn provider_usage(&mut self) {
-        let text = if self.provider_editor {
-            "/provider add <id> <type> <url|-> [model,model] [key-env]\n/provider edit <id> <type> <url|-> [model,model] [key-env]\n/provider remove <id>\nUse - for a provider default URL or to clear an optional field."
-        } else {
-            "/provider set <id> <type> [url]\n/provider disable <id>"
-        };
-        self.transcript
-            .push(Role::Command("/providers".into()), text.into());
-    }
-
-    fn edit_local_provider(&mut self, action: Action) {
-        if !self.ready || !self.provider_editor {
-            self.transcript.push(
-                Role::Error,
-                "Provider configuration requires the built-in stdio agent".into(),
-            );
-        } else if !self.can_switch() {
-            self.transcript.push(
-                Role::Error,
-                "Stop the running turn before changing providers".into(),
-            );
-        } else {
-            let _ = self.actions.unbounded_send(action);
-        }
+    fn provider_usage(&mut self) {
+        self.transcript.push(
+            Role::Command("/provider".into()),
+            "/provider add <name> <type> [url|-] [model,model]".into(),
+        );
     }
 
     fn print_settings(&mut self) {

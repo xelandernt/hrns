@@ -42,8 +42,8 @@ class ConfigArtifact:
 
     label: str
     path: Path
-    #: ``(entry name, api_key_env)`` for every ``[providers.<name>]`` in the file.
-    entries: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    #: Entry name and credential accounts for every provider in the file.
+    entries: tuple[tuple[str, tuple[str, ...]], ...] = field(default_factory=tuple)
 
 
 def _client_store_path() -> Path:
@@ -99,7 +99,7 @@ def _config_candidates() -> list[tuple[str, Path]]:
     ]
 
 
-def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
+def _declared_entries(path: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Provider entries in a config file, read without validating the hrns schema.
 
     A file written for an older hrns must still be deletable, so this reads the TOML
@@ -113,12 +113,25 @@ def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
     providers = payload.get("providers")
     if not isinstance(providers, dict):
         return ()
-    entries: list[tuple[str, str]] = []
+    from hrns.shared.config.credentials import keyring_account, provider_credential_account
+
+    entries: list[tuple[str, tuple[str, ...]]] = []
     for name, entry in providers.items():
         if not isinstance(name, str):
             continue
-        api_key_env = entry.get("api_key_env") if isinstance(entry, dict) else None
-        entries.append((name, api_key_env if isinstance(api_key_env, str) else ""))
+        values = entry if isinstance(entry, dict) else {}
+        api_key_env = values.get("api_key_env")
+        provider_type = values.get("type")
+        base_url = values.get("base_url")
+        accounts = (
+            keyring_account(name, api_key_env if isinstance(api_key_env, str) else ""),
+            provider_credential_account(
+                name,
+                provider_type.strip() or name if isinstance(provider_type, str) else name,
+                base_url if isinstance(base_url, str) else "",
+            ),
+        )
+        entries.append((name, accounts))
     return tuple(entries)
 
 
@@ -137,16 +150,10 @@ def config_artifacts() -> list[ConfigArtifact]:
 
 def _stored_accounts(artifact: ConfigArtifact) -> list[str]:
     """Keyring accounts of this file's entries that currently hold a secret."""
-    from hrns.shared.config.credentials import keyring_account, stored_secret
+    from hrns.shared.config.credentials import stored_secret
 
-    accounts: list[str] = []
-    for name, api_key_env in artifact.entries:
-        account = keyring_account(name, api_key_env)
-        if account in accounts:
-            continue
-        if stored_secret(account) is not None:
-            accounts.append(account)
-    return accounts
+    candidates = dict.fromkeys(account for _, accounts in artifact.entries for account in accounts)
+    return [account for account in candidates if stored_secret(account) is not None]
 
 
 def _sidecars(path: Path) -> list[Path]:

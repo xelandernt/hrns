@@ -232,18 +232,8 @@ def _last_response(messages: Sequence[ModelMessage]) -> ModelResponse | None:
 
 
 def _context_tokens(response: ModelResponse) -> int:
-    """Tokens the last request left in the context window.
-
-    Cache reads and writes are part of the prompt, and the response itself becomes
-    context for the next request, so all four counts belong in the gauge.
-    """
-    usage = response.usage
-    return (
-        usage.input_tokens
-        + usage.cache_read_tokens
-        + usage.cache_write_tokens
-        + usage.output_tokens
-    )
+    """The latest request's input and output, including cached input once."""
+    return response.usage.total_tokens
 
 
 ObservedOutputT = TypeVar("ObservedOutputT")
@@ -361,7 +351,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         #: The session title the attached client has been told, derived from the transcript.
         self._title: str | None = None
         #: The last usage gauge sent, so a turn that changes nothing does not repeat it.
-        self._usage_update: schema.UsageUpdate | None = None
+        self._usage_update: schema.UsageUpdate | schema.SessionInfoUpdate | None = None
+        self._reasoning_tokens: int | None = None
 
     def _model_choices(self) -> Sequence[ModelChoice]:
         """The models advertised in the ``model`` config option, in priority order."""
@@ -495,17 +486,34 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         if current_model_id is None or not choices:
             return None
         setup_message = self._model_setup_message(current_model_id, choices)
+        meta: dict[str, object] = {}
+        if setup_message:
+            meta["hrns/prompt/setup"] = setup_message
+        if self._model_resolver is not None:
+            meta["hrns/model/providers"] = [
+                entry.provider_id for entry in self._model_resolver.list_providers()
+            ]
         return schema.SessionConfigOptionSelect(
             id=_MODEL_CONFIG_ID,
             name="Model",
             type="select",
             current_value=current_model_id,
-            field_meta={"hrns/prompt/setup": setup_message} if setup_message else None,
+            field_meta=meta or None,
             options=[
                 schema.SessionConfigSelectOption(
                     value=choice.model_id,
                     name=choice.name or choice.model_id,
-                    field_meta={"providerId": choice.provider_id},
+                    field_meta={
+                        "providerId": choice.provider_id,
+                        **(
+                            {
+                                "hrns/model/context_group": choice.context_group,
+                                "hrns/model/context_size": choice.context_size,
+                            }
+                            if choice.context_group and choice.context_size
+                            else {}
+                        ),
+                    },
                 )
                 for choice in choices
             ],
@@ -688,6 +696,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         reconnect = self._conn is None
         if reconnect:
             self._attachment_generation += 1
+            self._reasoning_tokens = None
+            self._usage_update = None
         self._conn = conn
         self._mcp_caller = caller
         self._mcp_channel = channel
@@ -1026,29 +1036,44 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         response: ModelResponse | None,
         spent: Decimal | None = None,
     ) -> None:
-        """Publish the usage gauge clients render as context percentage and session cost.
+        """Publish context usage and estimated session cost when available.
 
-        ``PromptResponse.usage`` carries only per-turn token totals and has no room for
-        either figure, so an agent that stays silent here leaves the client's readout
-        blank. The gauge is deliberately not recorded in the transcript: replaying a
-        stale percentage into a freshly loaded session would be wrong. ``spent`` is the
-        session total to report, defaulting to the committed one; a caller following a
-        running turn passes the committed total plus the run so far. Repeating a gauge
-        the client already has tells it nothing, so an unchanged one is dropped.
+        ACP usage updates require a context size. A session info update carries
+        the estimate when the model has no known context window. During a turn,
+        ``spent`` includes the committed session cost and completed requests in the run.
         """
         if response is None:
             return
+        reported_reasoning = response.usage.details.get("reasoning_tokens")
+        reasoning_tokens = (
+            reported_reasoning if reported_reasoning and reported_reasoning > 0 else None
+        )
+        if reasoning_tokens != self._reasoning_tokens:
+            self._reasoning_tokens = reasoning_tokens
+            await self._deliver_update(
+                schema.SessionInfoUpdate(
+                    field_meta={"hrns/usage/reasoning_tokens": reasoning_tokens}
+                )
+            )
         resolved = self._resolve_run_model(state.model)
         size = _context_window(resolved.model if resolved is not None else self._agent.model)
         used = _context_tokens(response)
-        if size is None or used <= 0:
-            return
         total = state.cost if spent is None else spent
-        update = schema.UsageUpdate(
-            used=used,
-            size=size,
-            cost=(schema.Cost(amount=float(total), currency="USD") if total is not None else None),
-        )
+        amount = float(total) if total is not None else None
+        update: schema.UsageUpdate | schema.SessionInfoUpdate
+        if size is not None and used > 0:
+            update = schema.UsageUpdate(
+                used=used,
+                size=size,
+                cost=schema.Cost(amount=amount, currency="USD") if amount is not None else None,
+                field_meta={"hrns/usage/estimated_cost": True} if amount is not None else None,
+            )
+        else:
+            if amount is None and self._usage_update is None:
+                return
+            update = schema.SessionInfoUpdate(
+                field_meta={"hrns/usage/cost_without_context": amount}
+            )
         if update == self._usage_update:
             return
         self._usage_update = update
@@ -1344,7 +1369,13 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             raise acp.RequestError(-32602, str(exc)) from exc
 
     async def set_config_option(
-        self, config_id: str, session_id: str, value: str | bool, **kwargs: object
+        self,
+        config_id: str,
+        session_id: str,
+        value: str | bool,
+        *,
+        remember_model: Callable[[str], Awaitable[None]] | None = None,
+        **kwargs: object,
     ) -> schema.SetSessionConfigOptionResponse | None:
         """Change the session's model or one of the resolver's settings.
 
@@ -1364,6 +1395,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 raise acp.RequestError.invalid_params(
                     {"model_id": value, "reason": "not an advertised model"}
                 )
+            if remember_model is not None:
+                await remember_model(value)
             state.model = value
             self._reconcile_setting_selections(state)
         else:

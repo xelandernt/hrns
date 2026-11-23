@@ -52,6 +52,38 @@ class LocalSessionStore:
                 f"Could not access the local session database ({detail})."
             ) from exc
 
+    @contextmanager
+    def _model_preferences(self) -> Generator[sqlite3.Connection]:
+        with self._connect() as db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS startup_models (
+                    config_path TEXT PRIMARY KEY,
+                    model TEXT NOT NULL
+                )
+            """)
+            yield db
+
+    def startup_model(self, config_path: Path) -> str | None:
+        """Read the last explicitly selected model for this configuration."""
+        with self._model_preferences() as db:
+            row = db.execute(
+                "SELECT model FROM startup_models WHERE config_path = ?", (str(config_path),)
+            ).fetchone()
+        return row[0] if row is not None else None
+
+    async def remember_startup_model(self, config_path: Path, model: str) -> None:
+        await asyncio.to_thread(self._write_startup_model, config_path, model)
+
+    def _write_startup_model(self, config_path: Path, model: str) -> None:
+        with self._model_preferences() as db:
+            db.execute(
+                """
+                INSERT INTO startup_models (config_path, model) VALUES (?, ?)
+                ON CONFLICT (config_path) DO UPDATE SET model = excluded.model
+                """,
+                (str(config_path), model),
+            )
+
     async def create(self, session_id: str, *, cwd: str, principal: object) -> None:
         await asyncio.to_thread(self._write, session_id, StoredSession(cwd=cwd), True)
 

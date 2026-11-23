@@ -1,14 +1,12 @@
 """Provider secrets in the OS keyring, shared by the client and the runtime.
 
-One account per provider entry: the entry's ``api_key_env`` name when it has one, so a
-pasted key and an account login for that entry resolve to the same secret. Entries that
-name no variable are keyed by their own name, which is why two entries of the same
-provider type (``openai-work``, ``openai-home``) can hold different keys.
+Provider logins bind each account to the entry, provider type, and configured endpoint.
 """
 
 from __future__ import annotations
 
 import threading
+from hashlib import sha256
 
 #: Keyring service that holds provider credentials.
 KEYRING_SERVICE = "hrns"
@@ -30,12 +28,20 @@ def keyring_account(provider: str, api_key_env: str = "") -> str:
     return api_key_env or provider or "default"
 
 
+def provider_credential_account(name: str, provider_type: str, base_url: str = "") -> str:
+    """Scope a saved credential to the entry, provider type and configured endpoint."""
+    account = f"provider/{provider_type}/{name}"
+    if base_url:
+        account += "/" + sha256(base_url.encode()).hexdigest()
+    return account
+
+
 def secret_ref(account: str) -> str:
     """Reference the client resolves before launching the runtime."""
     return f"keyring:{KEYRING_SERVICE}/{account}"
 
 
-def keyring_secret(service: str, account: str) -> str | None:
+def keyring_secret(service: str, account: str, *, fresh: bool = False) -> str | None:
     """Read one secret, reusing a successful lookup for the life of the process.
 
     Missing entries are not cached: a login or pasted key that lands after the first
@@ -45,13 +51,15 @@ def keyring_secret(service: str, account: str) -> str | None:
     key = (service, account)
     with _LOOKUPS_LOCK:
         cached = _LOOKUPS.get(key)
-        if cached is not None:
+        if cached is not None and not fresh:
             return cached
         import keyring
 
         value = keyring.get_password(service, account)
         if value is not None:
             _LOOKUPS[key] = value
+        elif fresh:
+            _LOOKUPS.pop(key, None)
         return value
 
 

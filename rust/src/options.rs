@@ -54,6 +54,18 @@ pub fn matches_category(
     }
 }
 
+pub fn selected_model(options: &[SessionConfigOption]) -> Option<&SessionConfigSelectOption> {
+    let option = options
+        .iter()
+        .find(|option| matches_category(option, &SessionConfigOptionCategory::Model))?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    choices(option)
+        .into_iter()
+        .find(|choice| choice.value == select.current_value)
+}
+
 pub fn choices(option: &SessionConfigOption) -> Vec<&SessionConfigSelectOption> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();

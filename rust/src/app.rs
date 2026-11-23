@@ -2,6 +2,7 @@ mod commands;
 #[cfg(not(target_family = "wasm"))]
 mod file_completion;
 mod picker;
+mod providers;
 mod render;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -15,7 +16,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::acp::{
     Action, ClientIoMode, ConnectTarget, Event, ExecutionState, ExecutionStatus, PermissionRequest,
-    ProviderInfo, SessionTarget,
+    SessionTarget,
 };
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
@@ -80,11 +81,6 @@ pub enum Key {
     Escape,
 }
 
-struct ProviderPopup {
-    result: Option<Result<Vec<ProviderInfo>, String>>,
-    selected: usize,
-}
-
 struct Suggestion {
     insert: String,
     description: String,
@@ -139,7 +135,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/models", "Search and select a model"),
     ("/model", "Select a model"),
     ("/effort", "Select reasoning effort"),
-    ("/providers", "Browse and manage providers"),
+    ("/providers", "Browse providers"),
+    ("/login", "Sign in to the selected local provider"),
     ("/provider", "Add, edit or remove a provider"),
     ("/permissions", "Show or set the approval mode"),
     ("/settings", "Show or set terminal settings"),
@@ -180,10 +177,10 @@ pub struct App {
     close_supported: bool,
     delete_supported: bool,
     provider_editor: bool,
+    provider_routing: bool,
     loaded: bool,
     replay_from: Option<usize>,
     draft: Composer,
-    provider_draft: Option<Composer>,
     transcript: Transcript,
     transcript_area: Rect,
     scroll_bar: Option<ScrollBar>,
@@ -213,7 +210,9 @@ pub struct App {
     usage: Option<(u64, u64)>,
     usage_cost: Option<String>,
     last_usage_tokens: Option<u64>,
-    providers: Option<ProviderPopup>,
+    reasoning_tokens: Option<u64>,
+    providers: Option<providers::Dialog>,
+    selected_provider: Option<providers::Selected>,
     picker: Option<picker::Picker>,
     session_request: u64,
     preferences: Preferences,
@@ -261,10 +260,10 @@ impl App {
             close_supported: false,
             delete_supported: false,
             provider_editor: false,
+            provider_routing: false,
             loaded: false,
             replay_from: None,
             draft: Composer::default(),
-            provider_draft: None,
             transcript,
             transcript_area: Rect::default(),
             scroll_bar: None,
@@ -294,7 +293,9 @@ impl App {
             usage: None,
             usage_cost: None,
             last_usage_tokens: None,
+            reasoning_tokens: None,
             providers: None,
+            selected_provider: None,
             picker: None,
             session_request: 0,
             preferences,
@@ -322,6 +323,7 @@ impl App {
                 close_supported,
                 delete_supported,
                 provider_editor,
+                provider_routing,
                 execution,
             } => {
                 if let Some(from) = self.replay_from.take() {
@@ -332,6 +334,8 @@ impl App {
                 self.close_supported = close_supported;
                 self.delete_supported = delete_supported;
                 self.provider_editor = provider_editor;
+                self.provider_routing = provider_routing;
+                self.reasoning_tokens = None;
                 self.loaded = loaded;
                 if !loaded {
                     self.session_title = None;
@@ -386,6 +390,12 @@ impl App {
                 }
             }
             Event::Options(options) => {
+                if options::selected_model(&options).map(|choice| &choice.value)
+                    != options::selected_model(&self.options).map(|choice| &choice.value)
+                {
+                    self.usage = None;
+                    self.last_usage_tokens = None;
+                }
                 self.options = options;
                 self.refresh_completion();
                 if let Some(picker) = self.picker.as_ref() {
@@ -407,13 +417,13 @@ impl App {
                 self.refresh_completion();
             }
             Event::SessionTitle(title) => self.session_title = title,
+            Event::ReasoningTokens(tokens) => self.reasoning_tokens = tokens,
             Event::Mode(mode) => self.mode = Some(mode),
-            Event::Providers(result) => {
-                if let Some(popup) = &mut self.providers {
-                    popup.result = Some(result);
-                    popup.selected = 0;
-                }
-            }
+            Event::Providers(result) => self.provider_list(result),
+            Event::ProviderRoutes(result) => self.provider_routes(result),
+            Event::ProviderChanged(result) => self.provider_changed(result),
+            Event::ProviderLogin(result) => self.provider_login(result),
+            Event::ProviderLoginCancelled => self.provider_login_cancelled(),
             Event::LoadingAttachment => self.attachment_reads += 1,
             Event::Attachment(attachment) => {
                 self.attachment_reads = self.attachment_reads.saturating_sub(1);
@@ -452,8 +462,8 @@ impl App {
                     self.replay_plan = Some(plan);
                 }
             }
-            Event::Usage { used, size, cost } => {
-                self.usage = Some((used, size));
+            Event::Usage { context, cost } => {
+                self.usage = context;
                 self.usage_cost = cost;
             }
             Event::SessionClosed(id) => {
@@ -483,7 +493,7 @@ impl App {
             }
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
-            Event::Thought(text) => self.transcript.append(Role::Thought, text),
+            Event::Thought(text) => self.transcript.append_thought(text, self.turns > 0),
             Event::Note(text) => self.transcript.push(Role::Note, text),
             Event::Error(text) => {
                 if !self.ready
@@ -515,9 +525,7 @@ impl App {
                     Err("Disconnected from the agent".into()),
                 );
                 self.replay_plan = None;
-                if let Some(popup) = &mut self.providers {
-                    popup.result = Some(Err("Disconnected from the agent".into()));
-                }
+                self.providers = None;
                 if let Some(from) = self.replay_from.take() {
                     self.transcript.trim(from);
                     self.transcript
@@ -550,6 +558,7 @@ impl App {
                 self.usage = None;
                 self.usage_cost = None;
                 self.last_usage_tokens = None;
+                self.reasoning_tokens = None;
                 self.options.clear();
                 self.commands.clear();
                 self.skills.clear();
@@ -558,6 +567,9 @@ impl App {
                 self.close_supported = false;
                 self.delete_supported = false;
                 self.provider_editor = false;
+                self.provider_routing = false;
+                self.providers = None;
+                self.selected_provider = None;
                 self.attachments_supported = false;
                 self.clear_queue_for_switch();
                 self.refresh_completion();
@@ -620,97 +632,6 @@ impl App {
         }
     }
 
-    fn show_providers(&mut self) {
-        let loading = self.ready && self.actions.unbounded_send(Action::ListProviders).is_ok();
-        self.providers = Some(ProviderPopup {
-            result: (!loading).then(|| Err("Connect to an agent to list providers".into())),
-            selected: 0,
-        });
-    }
-
-    fn provider_key(&mut self, key: Key) {
-        if matches!(key, Key::Escape) {
-            self.providers = None;
-            return;
-        }
-        let Some(popup) = &mut self.providers else {
-            return;
-        };
-        let Some(Ok(providers)) = &popup.result else {
-            return;
-        };
-        if matches!(key, Key::Text('a')) && self.provider_editor {
-            self.provider_usage();
-            self.edit_provider_in_composer("/provider add ");
-            return;
-        }
-        let Some(provider) = providers.get(popup.selected) else {
-            return;
-        };
-        let action = match key {
-            Key::Enter => {
-                let api_type = provider
-                    .current
-                    .as_ref()
-                    .map(|current| current.api_type.as_str())
-                    .or_else(|| {
-                        (provider.supported.len() == 1).then(|| provider.supported[0].as_str())
-                    });
-                let operation = if self.provider_editor { "edit" } else { "set" };
-                let mut command = match api_type {
-                    Some(api_type) => format!("/provider {operation} {} {api_type} ", provider.id),
-                    None => format!("/provider {operation} {} ", provider.id),
-                };
-                if let Some(url) = provider
-                    .current
-                    .as_ref()
-                    .and_then(|current| current.base_url.as_deref())
-                {
-                    command.push_str(url);
-                }
-                if self.provider_editor && command.ends_with(' ') {
-                    command.push('-');
-                }
-                Some(command)
-            }
-            Key::Text('d') if self.provider_editor && !provider.required => {
-                Some(format!("/provider remove {}", provider.id))
-            }
-            Key::Text('d') if !provider.required => {
-                Some(format!("/provider disable {}", provider.id))
-            }
-            Key::HistoryUp => {
-                popup.selected = popup.selected.saturating_sub(1);
-                None
-            }
-            Key::HistoryDown => {
-                popup.selected = (popup.selected + 1).min(providers.len() - 1);
-                None
-            }
-            Key::Home => {
-                popup.selected = 0;
-                None
-            }
-            Key::End => {
-                popup.selected = providers.len() - 1;
-                None
-            }
-            _ => None,
-        };
-        if let Some(command) = action {
-            self.edit_provider_in_composer(&command);
-        }
-    }
-
-    fn edit_provider_in_composer(&mut self, command: &str) {
-        self.providers = None;
-        if !self.draft.text().is_empty() {
-            self.provider_draft = Some(std::mem::take(&mut self.draft));
-        }
-        self.draft.set_text(command);
-        self.refresh_completion();
-    }
-
     fn request_permission(&mut self, request: PermissionRequest) {
         if let Some(answer) = self.auto_permission(&request) {
             let _ = request.respond.send(answer);
@@ -762,7 +683,11 @@ impl App {
             }
             return;
         }
-        if self.providers.is_some() || !self.approvals.is_empty() || !self.mcp_consent.is_empty() {
+        if !self.approvals.is_empty() || !self.mcp_consent.is_empty() {
+            return;
+        }
+        if let Some(dialog) = &mut self.providers {
+            dialog.paste(text);
             return;
         }
         if let Some(picker) = &mut self.picker {
@@ -1040,21 +965,6 @@ impl App {
             return;
         }
 
-        if self.provider_draft.is_some() {
-            match key {
-                Key::Escape => {
-                    self.restore_provider_draft();
-                    return;
-                }
-                Key::Enter => {
-                    self.submit_provider_edit();
-                    self.restore_provider_draft();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         if let Some(completion) = &self.completion {
             match key {
                 Key::Escape => {
@@ -1092,11 +1002,7 @@ impl App {
             Key::Backspace => self.draft.backspace(),
             Key::Delete => self.draft.delete(),
             Key::Left => self.draft.left(),
-            Key::EditQueuedPrompt
-                if self.draft.text().is_empty()
-                    && self.provider_draft.is_none()
-                    && !self.queue.is_empty() =>
-            {
+            Key::EditQueuedPrompt if self.draft.text().is_empty() && !self.queue.is_empty() => {
                 self.edit_queued_prompt();
             }
             Key::EditQueuedPrompt => self.draft.left(),
@@ -1326,7 +1232,7 @@ impl App {
             .into_iter()
             .map(|(value, description)| (value.into(), description.into()))
             .collect(),
-            "/provider" => [
+            "/provider" if self.provider_routing => [
                 ("set", "Set a provider route"),
                 ("disable", "Disable a provider route"),
             ]
@@ -1524,13 +1430,6 @@ impl App {
                 Role::Note,
                 "Cleared queued prompts for the previous session".into(),
             );
-        }
-    }
-
-    fn restore_provider_draft(&mut self) {
-        if let Some(draft) = self.provider_draft.take() {
-            self.draft = draft;
-            self.refresh_completion();
         }
     }
 

@@ -1,6 +1,6 @@
 use std::env;
 use std::io::{self, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Channel};
@@ -192,6 +192,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         mcp_config: options.mcp_config.clone(),
         effort_profile: options.effort_profile.clone(),
         remote: false,
+        local_provider_management: false,
     };
     let (shutdown, stop_rx) = mpsc::unbounded();
     let mut terminal = ratatui::try_init()?;
@@ -490,6 +491,17 @@ async fn connect(
     }
     match transport {
         Target::Stdio { command, args } => {
+            services.local_provider_management = matches!(
+                args.as_slice(),
+                [module_flag, module, ..] if module_flag == "-m" && module == "hrns.server.runtime"
+            ) || (matches!(
+                Path::new(command)
+                    .file_name()
+                    .and_then(|name| name.to_str()),
+                Some("hrns" | "hrns.exe")
+            ) && args
+                .first()
+                .is_some_and(|arg| arg == "agent"));
             let agent = AcpAgent::new(AcpAgentConfig::new(command.clone()).args(args.clone()));
             acp::connect(agent, target, actions, events, services)
                 .await

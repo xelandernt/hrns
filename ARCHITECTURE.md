@@ -250,12 +250,13 @@ Form elicitation uses a question dock with a tab per field and a confirmation
 view for multiple questions. Harness choice fields and their `_text` companions
 share a tab and submit an ordinary ACP form response.
 
-Provider routing uses the `providers/list`, `providers/set` and
-`providers/disable` methods. `/providers` opens a dialog with the live routes.
-Selecting a route or disable action prepares a command in the composer.
-Submitting `/provider set` or `/provider disable` applies the change.
-Models and effort remain session config options. Device login uses `hrns login`.
-Local provider document editing uses the built-in stdio agent's ACP extension.
+The native client opens its local provider editor with `/providers` or
+`/provider`. The popup owns add, edit, delete, and selection. The explicit
+selection is client state for `/login`. Models and effort are ACP session
+config options. The browser client and remote connections use ACP session
+options to present the agent's available models. Agents that advertise the ACP
+provider-routing capability expose their routes through `providers/list`,
+`providers/set`, and `providers/disable`.
 
 ### ACP SDK pin and extension surface
 
@@ -579,13 +580,27 @@ ACP model options carry `_meta.providerId` when the resolver supplies a provider
 association. The model picker uses that metadata as context for the advertised
 display name and value.
 
-The built-in stdio agent advertises `hrns/providers/manage` for document-backed
-configuration. Its private `_hrns/providers/save` and
-`_hrns/providers/remove` requests validate provider entries, atomically update
-the TOML document and refresh the model options. Configuration stores API-key
-environment variable names. The configured default provider remains required.
-The first provider added in setup mode also establishes a default model.
-Remote agents use the advertised ACP provider routing methods.
+The built-in stdio agent advertises `hrns/providers/manage`. The native
+client enables it for the built-in stdio launch. The private
+`_hrns/providers/*` requests list and edit local TOML entries and manage one
+sign-in attempt. Saving provider settings and authenticating are separate operations.
+Edits and successful sign-ins refresh ACP model options for open sessions.
+The built-in agent fetches the Copilot account's catalog on startup and after
+sign-in. It keeps each model's Chat Completions or Responses endpoint in memory
+for its provider entry. The model picker uses ACP model option metadata to group
+models by provider and switches tabs with Tab and Shift+Tab.
+The ACP runtime reports the latest provider-supplied reasoning token count at
+model-response boundaries, including when the model's context window is unknown.
+The built-in stdio agent remembers explicit model selections in its local session
+database, scoped to the active configuration file. Fresh sessions prefer that
+selection when it is available. Saved sessions restore their own model, and
+environment model overrides govern startup.
+
+API keys and Copilot tokens are stored in the OS keyring. The Codex provider
+loads and saves its rotating credentials through the same keyring. Accounts
+are scoped to the provider entry, type, and base URL. A login attempt runs in
+the runtime and exposes progress and public browser or device instructions to
+the client. Bedrock uses boto3's credential chain and the AWS CLI's SSO cache.
 
 ## Session settings
 
@@ -627,26 +642,39 @@ response. An in-app switch to a different transport has no saved profile.
 Two channels carry usage, and they answer different questions. `PromptResponse.usage`
 is per-turn token totals — the protocol has no field there for a context percentage or a
 price, because `acp.schema.Usage` is tokens only. The context gauge is
-`session/update` `usage_update`, whose `used`/`size`/`cost` the client renders as
-"ctx 12k/200k (6%)" and the session's spend. An agent that sends only `PromptResponse`
-leaves the client's status band blank, which is why the adapter emits the gauge at the
-end of every prompt.
+`session/update` `usage_update`, whose `used` and `size` the native client renders
+as `ctx 12000/200000` alongside the estimated session cost, when available.
 
 It also emits it as the turn progresses. A request that ends in a tool call has already
 produced its tokens, so the adapter sends the gauge when the tool call starts: the readout
 follows the work instead of appearing only when the prompt returns, which for a long
 tool-using turn is minutes after the person started watching it. `used` is that request's
-tokens, and `cost` is the committed session total plus the run so far, so the spend moves
-while the turn runs and is corrected to the exact total when it commits. A gauge identical
+tokens, and `cost` is the committed session estimate plus the run so far. A gauge identical
 to the one already sent is dropped rather than repeated for every parallel tool call.
 
-`used` is the last request's input, cache-read, cache-write, and output tokens: cache
-tokens are part of the prompt, and the response becomes context for the next request.
-`size` comes from the resolved model's profile `context_window`; when the profile has
-none (arbitrary OpenAI-compatible endpoints usually do not), no gauge is sent rather than
-a bogus percentage, and the client falls back to the turn's token totals. `cost` is
-session-cumulative and priced by `genai-prices` through `RunUsage.cost`, so it is USD and
-absent for models pricing data does not know.
+`used` is the last request's normalized input plus output tokens. Input already
+includes cached prompt tokens. `size` comes from the resolved model's profile
+`context_window`, which for locally configured Copilot models can come from the
+authenticated catalog. With no known size, the client shows the turn's token total,
+and the adapter can send the cost separately in `session_info_update` metadata
+under `hrns/usage/cost_without_context`.
+
+The local Copilot resolver reads prompt limits from the versioned catalog's
+default and long-context tiers. When both limits are available and differ, it
+advertises two model config values with a shared `hrns/model/context_group`
+and per-value `hrns/model/context_size`. The native picker groups the values
+into one row with left and right tier selection. The session and startup model
+selection persist the selected value. Both values use the same Copilot model
+ID for inference. Hosted Copilot requests select the API version for their tier, and
+the resolved profile uses the tier's prompt limit plus its output allowance,
+capped by the catalog's full window. The picker follows Copilot's size labels
+for Carbon by showing the default prompt limit and the extended full window.
+
+The estimated cost sums priced requests in USD through `RunUsage.cost`. The
+official Copilot endpoint uses GitHub's published Gemini 4 Carbon rates, including
+the UTC December 1, 2026 transition from promotional to standard rates. Other
+available token rates come from Pydantic AI's pricing integration. The adapter
+labels the estimate via `hrns/usage/estimated_cost` on standard usage updates.
 
 The gauge is sent straight to the connection rather than recorded in the session
 transcript: replaying a stale percentage into a loaded session would describe context

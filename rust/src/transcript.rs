@@ -360,7 +360,11 @@ impl Transcript {
         }
     }
 
-    pub fn push(&mut self, role: Role, mut text: String) {
+    pub fn push(&mut self, role: Role, text: String) {
+        self.push_entry(role, text, false);
+    }
+
+    fn push_entry(&mut self, role: Role, mut text: String, expanded: bool) {
         self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
         text.retain(|ch| ch == '\n' || !ch.is_control());
         self.entries.push(Entry {
@@ -374,7 +378,7 @@ impl Transcript {
             preview_start: None,
             shell: false,
             id: None,
-            expanded: false,
+            expanded,
             tool_status: None,
             approval: None,
             end: 0,
@@ -549,14 +553,22 @@ impl Transcript {
         }
     }
 
-    pub fn append(&mut self, role: Role, mut text: String) {
+    pub fn append(&mut self, role: Role, text: String) {
+        self.append_chunk(role, text, false);
+    }
+
+    pub fn append_thought(&mut self, text: String, live: bool) {
+        self.append_chunk(Role::Thought, text, live && self.show_thoughts);
+    }
+
+    fn append_chunk(&mut self, role: Role, mut text: String, expand_new: bool) {
         self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
         if let Some(entry) = self.entries.last_mut().filter(|entry| entry.role == role) {
             text.retain(|ch| ch == '\n' || !ch.is_control());
             entry.text.push_str(&text);
             self.measured = self.measured.min(self.entries.len() - 1);
         } else {
-            self.push(role, text);
+            self.push_entry(role, text, expand_new);
         }
     }
 

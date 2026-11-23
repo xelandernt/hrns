@@ -4,13 +4,14 @@ use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
-    CreateElicitationResponse, DeleteSessionRequest, ElicitationCapabilities,
-    ElicitationContentValue, ElicitationFormCapabilities, FileSystemCapabilities, Implementation,
-    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionId, SessionInfo,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCallContent,
+    CreateElicitationResponse, DeleteSessionRequest, DisableProviderRequest,
+    ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities,
+    FileSystemCapabilities, Implementation, InitializeRequest, ListProvidersRequest,
+    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionKind,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionId, SessionInfo, SessionNotification, SessionUpdate,
+    SetProviderRequest, SetSessionConfigOptionRequest, StopReason, ToolCallContent,
     ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
@@ -122,6 +123,7 @@ pub struct Services {
     pub client_io: ClientIoMode,
     pub mcp_config: Option<PathBuf>,
     pub remote: bool,
+    pub local_provider_management: bool,
     #[cfg(not(target_family = "wasm"))]
     pub effort_profile: Option<crate::effort::EffortProfile>,
 }
@@ -143,21 +145,18 @@ pub enum Action {
     CloseSession(String),
     DeleteSession(String),
     ListProviders,
-    SetProvider {
-        id: String,
-        api_type: String,
-        base_url: Option<String>,
-    },
-    DisableProvider(String),
-    EditProvider {
-        id: String,
-        create: bool,
-        api_type: String,
-        base_url: String,
-        models: Option<Vec<String>>,
-        api_key_env: Option<String>,
-    },
+    ListProviderRoutes,
+    SetProviderRoute(SetProviderRequest),
+    DisableProviderRoute(DisableProviderRequest),
+    SaveProvider(ProviderEdit),
     RemoveProvider(String),
+    ProviderLogin {
+        id: String,
+        method: LoginMethod,
+        key: Option<String>,
+    },
+    ProviderLoginStatus,
+    CancelProviderLogin,
 }
 
 pub struct PermissionChoice {
@@ -175,18 +174,62 @@ pub struct PermissionRequest {
     pub respond: oneshot::Sender<Option<usize>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ProviderConfig {
-    pub api_type: String,
-    pub base_url: Option<String>,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Deserialize)]
 pub struct ProviderInfo {
     pub id: String,
-    pub supported: Vec<String>,
-    pub required: bool,
-    pub current: Option<ProviderConfig>,
+    pub api_type: String,
+    pub base_url: String,
+    pub models: Vec<String>,
+    pub aws_profile: Option<String>,
+    pub aws_region: Option<String>,
+    pub login_methods: Vec<LoginMethod>,
+}
+
+#[derive(Deserialize)]
+struct ProviderList {
+    providers: Vec<ProviderInfo>,
+}
+
+#[derive(Serialize)]
+pub struct ProviderEdit {
+    pub id: String,
+    pub create: bool,
+    pub api_type: String,
+    pub base_url: String,
+    pub models: Option<Vec<String>>,
+    pub aws_profile: Option<String>,
+    pub aws_region: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoginMethod {
+    ApiKey,
+    Copilot,
+    Codex,
+    Aws,
+    AwsSso,
+}
+
+impl LoginMethod {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ApiKey => "API key",
+            Self::Copilot => "GitHub device login",
+            Self::Codex => "Sign in with ChatGPT",
+            Self::Aws => "Use the AWS credential chain",
+            Self::AwsSso => "Sign in with AWS SSO",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProviderLoginState {
+    #[serde(default)]
+    pub done: bool,
+    pub url: Option<String>,
+    pub code: Option<String>,
+    pub warning: Option<String>,
 }
 
 pub enum Event {
@@ -200,6 +243,7 @@ pub enum Event {
         close_supported: bool,
         delete_supported: bool,
         provider_editor: bool,
+        provider_routing: bool,
         execution: Option<ExecutionState>,
     },
     Execution(ExecutionState),
@@ -208,14 +252,18 @@ pub enum Event {
     AgentCommands(Vec<(String, String)>),
     Skills(Vec<Skill>),
     SessionTitle(Option<String>),
+    ReasoningTokens(Option<u64>),
     Mode(String),
     Providers(Result<Vec<ProviderInfo>, String>),
+    ProviderRoutes(Result<Vec<agent_client_protocol::v1::schema::ProviderInfo>, String>),
+    ProviderChanged(Result<(), String>),
+    ProviderLogin(Result<ProviderLoginState, String>),
+    ProviderLoginCancelled,
     LoadingAttachment,
     Attachment(Result<Box<Attachment>, String>),
     Plan(Vec<agent_client_protocol::v1::schema::PlanEntry>),
     Usage {
-        used: u64,
-        size: u64,
+        context: Option<(u64, u64)>,
         cost: Option<String>,
     },
     Sessions {
@@ -363,11 +411,12 @@ pub async fn connect(
                 .block_task()
                 .await?;
 
-            let provider_editor = initialized.meta.as_ref()
+            let provider_editor = services.local_provider_management && initialized.meta.as_ref()
                 .and_then(|meta| meta.get("hrns/providers/manage"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let caps = initialized.agent_capabilities;
+            let provider_routing = !provider_editor && caps.providers.is_some();
             let loaded = target.session.is_some();
             let load_supported = caps.load_session;
             let close_supported = caps.session_capabilities.close.is_some();
@@ -441,6 +490,7 @@ pub async fn connect(
                 close_supported,
                 delete_supported,
                 provider_editor,
+                provider_routing,
                 execution,
             });
 
@@ -571,47 +621,67 @@ pub async fn connect(
                             };
                             let _ = events.unbounded_send(event);
                         }
-                        Some(Action::ListProviders) => {
-                            let event = Event::Providers(list_providers(session.connection()).await);
-                            let _ = events.unbounded_send(event);
+                        Some(Action::ListProviderRoutes) if provider_routing => {
+                            let result = session.connection()
+                                .send_request(ListProvidersRequest::new())
+                                .block_task()
+                                .await
+                                .map(|reply| reply.providers)
+                                .map_err(|error| error.message);
+                            let _ = events.unbounded_send(Event::ProviderRoutes(result));
                         }
-                        Some(Action::SetProvider { id, api_type, base_url }) => {
-                            let mut params = serde_json::Map::new();
-                            params.insert("providerId".into(), id.into());
-                            params.insert("apiType".into(), api_type.into());
-                            params.insert("baseUrl".into(), base_url.unwrap_or_default().into());
-                            let event = match provider_call(session.connection(), "providers/set", params.into()).await {
-                                Ok(_) => Event::Note("Provider updated".into()),
-                                Err(error) => Event::Error(error),
+                        Some(Action::SetProviderRoute(request)) if provider_routing => {
+                            let event = match session.connection().send_request(request).block_task().await {
+                                Ok(_) => Event::Note("Provider route updated".into()),
+                                Err(error) => Event::Error(error.message),
                             };
                             let _ = events.unbounded_send(event);
                         }
-                        Some(Action::DisableProvider(id)) => {
-                            let mut params = serde_json::Map::new();
-                            params.insert("providerId".into(), id.into());
-                            let event = match provider_call(session.connection(), "providers/disable", params.into()).await {
-                                Ok(_) => Event::Note("Provider disabled".into()),
-                                Err(error) => Event::Error(error),
+                        Some(Action::DisableProviderRoute(request)) if provider_routing => {
+                            let event = match session.connection().send_request(request).block_task().await {
+                                Ok(_) => Event::Note("Provider route disabled".into()),
+                                Err(error) => Event::Error(error.message),
                             };
                             let _ = events.unbounded_send(event);
                         }
-                        Some(Action::EditProvider { id, create, api_type, base_url, models, api_key_env }) => {
-                            let params = serde_json::json!({ "id": id, "create": create, "api_type": api_type,
-                                "base_url": base_url, "models": models, "api_key_env": api_key_env });
-                            let event = match provider_call(session.connection(), "_hrns/providers/save", params).await {
-                                Ok(_) => Event::Note(if create { "Provider added".into() } else { "Provider saved".into() }),
-                                Err(error) => Event::Error(error),
-                            };
-                            let _ = events.unbounded_send(event);
+                        Some(Action::ListProviders) if provider_editor => {
+                            let result = provider_call::<ProviderList>(
+                                session.connection(), "list", serde_json::json!({}),
+                            ).await.map(|list| list.providers);
+                            let _ = events.unbounded_send(Event::Providers(result));
                         }
-                        Some(Action::RemoveProvider(id)) => {
-                            let params = serde_json::json!({ "id": id });
-                            let event = match provider_call(session.connection(), "_hrns/providers/remove", params).await {
-                                Ok(_) => Event::Note("Provider removed".into()),
-                                Err(error) => Event::Error(error),
-                            };
-                            let _ = events.unbounded_send(event);
+                        Some(Action::SaveProvider(edit)) if provider_editor => {
+                            let result = provider_call::<serde_json::Value>(
+                                session.connection(), "save", edit,
+                            ).await.map(|_| ());
+                            let _ = events.unbounded_send(Event::ProviderChanged(result));
                         }
+                        Some(Action::RemoveProvider(id)) if provider_editor => {
+                            let result = provider_call::<serde_json::Value>(
+                                session.connection(), "remove", serde_json::json!({ "id": id }),
+                            ).await.map(|_| ());
+                            let _ = events.unbounded_send(Event::ProviderChanged(result));
+                        }
+                        Some(Action::ProviderLogin { id, method, key }) if provider_editor => {
+                            let result = provider_call(
+                                session.connection(), "login",
+                                serde_json::json!({ "id": id, "method": method, "key": key }),
+                            ).await;
+                            let _ = events.unbounded_send(Event::ProviderLogin(result));
+                        }
+                        Some(Action::ProviderLoginStatus) if provider_editor => {
+                            let result = provider_call(
+                                session.connection(), "login-status", serde_json::json!({}),
+                            ).await;
+                            let _ = events.unbounded_send(Event::ProviderLogin(result));
+                        }
+                        Some(Action::CancelProviderLogin) if provider_editor => {
+                            let _ = provider_call::<serde_json::Value>(
+                                session.connection(), "login-cancel", serde_json::json!({}),
+                            ).await;
+                            let _ = events.unbounded_send(Event::ProviderLoginCancelled);
+                        }
+                        Some(_) => {}
                         None => break,
                     },
                     update = session.read_update().fuse() => match update? {
@@ -895,71 +965,17 @@ fn exit_status(exit: client_io::Exit) -> agent_client_protocol::v1::schema::Term
     }
 }
 
-async fn list_providers(connection: &ConnectionTo<Agent>) -> Result<Vec<ProviderInfo>, String> {
-    let request = UntypedMessage::new("providers/list", serde_json::json!({}))
-        .map_err(|error| error.message)?;
-    let reply = connection
-        .send_request(request)
-        .block_task()
-        .await
-        .map_err(|error| format!("Could not list providers: {}", error.message))?;
-    let providers = reply
-        .get("providers")
-        .and_then(|value| value.as_array())
-        .ok_or("The agent returned an invalid provider list")?;
-    Ok(providers
-        .iter()
-        .filter_map(|provider| {
-            let id = provider.get("providerId")?.as_str()?.to_owned();
-            let supported = provider
-                .get("supported")
-                .and_then(|value| value.as_array())
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let required = provider
-                .get("required")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let current = provider
-                .get("current")
-                .filter(|value| !value.is_null())
-                .map(|current| ProviderConfig {
-                    api_type: current
-                        .get("apiType")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("custom")
-                        .to_owned(),
-                    base_url: current
-                        .get("baseUrl")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_owned),
-                });
-            Some(ProviderInfo {
-                id,
-                supported,
-                required,
-                current,
-            })
-        })
-        .collect())
-}
-
-async fn provider_call(
+async fn provider_call<T: serde::de::DeserializeOwned>(
     connection: &ConnectionTo<Agent>,
     method: &str,
-    params: serde_json::Value,
-) -> Result<(), String> {
-    let request = UntypedMessage::new(method, &params).map_err(|error| error.message)?;
-    connection
+    params: impl Serialize,
+) -> Result<T, String> {
+    let request = UntypedMessage::new(&format!("_hrns/providers/{method}"), &params)
+        .map_err(|error| error.message)?;
+    let result = connection
         .send_request(request)
         .block_task()
         .await
-        .map(|_| ())
         .map_err(|error| {
             error
                 .data
@@ -968,7 +984,8 @@ async fn provider_call(
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or(error.message)
-        })
+        })?;
+    serde_json::from_value(result).map_err(|_| "Invalid local provider response".into())
 }
 
 async fn find_workspace(
@@ -1028,6 +1045,10 @@ fn respond(
     responder.respond(RequestPermissionResponse::new(outcome))
 }
 
+fn estimated_cost(amount: f64) -> String {
+    format!("est. {amount:.6} USD")
+}
+
 fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) -> Option<Event> {
     match update {
         SessionUpdate::UserMessageChunk(chunk) => {
@@ -1047,18 +1068,49 @@ fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) ->
                 .map(|command| (command.name, command.description))
                 .collect(),
         )),
-        SessionUpdate::SessionInfoUpdate(update) => Some(Event::SessionTitle(update.title.take())),
+        SessionUpdate::SessionInfoUpdate(update) => {
+            if let Some(cost) = update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("hrns/usage/cost_without_context"))
+            {
+                return Some(Event::Usage {
+                    context: None,
+                    cost: cost.as_f64().map(estimated_cost),
+                });
+            }
+            if let Some(tokens) = update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("hrns/usage/reasoning_tokens"))
+            {
+                Some(Event::ReasoningTokens(tokens.as_u64()))
+            } else {
+                Some(Event::SessionTitle(update.title.take()))
+            }
+        }
         SessionUpdate::CurrentModeUpdate(update) => {
             Some(Event::Mode(update.current_mode_id.to_string()))
         }
         SessionUpdate::Plan(plan) => Some(Event::Plan(plan.entries)),
-        SessionUpdate::UsageUpdate(usage) => Some(Event::Usage {
-            used: usage.used,
-            size: usage.size,
-            cost: usage
-                .cost
-                .map(|cost| format!("{:.4} {}", cost.amount, cost.currency)),
-        }),
+        SessionUpdate::UsageUpdate(usage) => {
+            let estimated = usage
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("hrns/usage/estimated_cost"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            Some(Event::Usage {
+                context: (usage.size > 0).then_some((usage.used, usage.size)),
+                cost: usage.cost.map(|cost| {
+                    if estimated && cost.currency == "USD" {
+                        estimated_cost(cost.amount)
+                    } else {
+                        format!("{:.4} {}", cost.amount, cost.currency)
+                    }
+                }),
+            })
+        }
         SessionUpdate::ToolCall(call) => {
             let id = call.tool_call_id.to_string();
             let state = ToolState {

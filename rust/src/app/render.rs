@@ -7,9 +7,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Tabs, Wrap};
 
-use super::picker::{Picker, Row, Source};
+use super::picker::{Picker, Row, Source, context_tier};
 use super::{App, PendingApproval, ScrollBar, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
@@ -380,8 +380,6 @@ impl App {
             } else {
                 "Unknown command · /help commands"
             }
-        } else if self.provider_draft.is_some() {
-            "Enter save provider · Esc return to draft"
         } else if self.prompt_setup_message().is_some() {
             "Set up a provider and model with /providers"
         } else if slash_command(self.draft.text()) == Some("/queue") {
@@ -410,7 +408,7 @@ impl App {
         if self.approvals.is_empty() && self.elicitations.is_empty() && self.mcp_consent.is_empty()
         {
             if let Some(popup) = &self.providers {
-                draw_providers(frame, area, popup, self.provider_editor, &palette);
+                popup.draw(frame, area, self.selected_provider.as_ref(), &palette);
             }
             if let Some(picker) = &self.picker {
                 self.draw_picker(frame, area, picker, &palette);
@@ -568,6 +566,8 @@ impl App {
         frame.render_widget(Clear, popup);
         frame.render_widget(panel, popup);
         let rows = self.picker_rows(picker);
+        let tabs = self.model_provider_tabs(picker);
+        let show_tabs = tabs.len() > 1;
         let skills = matches!(picker.source, Source::Skills);
         let detail_height = if skills && !rows.is_empty() {
             (inner.height / 2)
@@ -576,7 +576,8 @@ impl App {
         } else {
             1
         };
-        let [search, list, status, keys] = Layout::vertical([
+        let [provider_tabs, search, list, status, keys] = Layout::vertical([
+            Constraint::Length(u16::from(show_tabs)),
             Constraint::Length(if skills {
                 u16::from(inner.height >= 4)
             } else {
@@ -587,13 +588,52 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(inner);
+        if show_tabs {
+            let active = picker.provider_tab.min(tabs.len() - 1);
+            let labels: Vec<_> = tabs
+                .iter()
+                .map(|name| Line::from(name.unwrap_or("Other")))
+                .collect();
+            let mut remaining = usize::from(provider_tabs.width);
+            let first = labels[..=active]
+                .iter()
+                .rev()
+                .take_while(|label| {
+                    let width = label.width() + 3;
+                    if width > remaining {
+                        return false;
+                    }
+                    remaining -= width;
+                    true
+                })
+                .count()
+                .max(1);
+            let start = active + 1 - first;
+            frame.render_widget(
+                Tabs::new(labels.into_iter().skip(start))
+                    .select(active - start)
+                    .style(Style::default().fg(palette.muted))
+                    .highlight_style(Style::default().fg(palette.accent).bg(palette.panel).bold()),
+                provider_tabs,
+            );
+        }
         let search_text = if picker.query.is_empty() {
             Line::from("  Search…").fg(palette.muted)
         } else {
             Line::from(format!("  Search  {}", picker.query)).fg(palette.accent)
         };
         frame.render_widget(Paragraph::new(search_text), search);
-        frame.render_widget(Paragraph::new(picker.hint()).fg(palette.muted), keys);
+        frame.render_widget(
+            Paragraph::new(
+                picker.hint(
+                    show_tabs,
+                    rows.get(picker.selected)
+                        .is_some_and(|row| row.context_tiers.len() > 1),
+                ),
+            )
+            .fg(palette.muted),
+            keys,
+        );
 
         if skills && let Some(row) = rows.get(picker.selected) {
             let entries = List::new(rows.iter().map(|row| row.label.as_str()))
@@ -621,7 +661,17 @@ impl App {
                 let selected = index == picker.selected;
                 let marker = if selected { "›" } else { " " };
                 let active = if row.active { "  ✓ current" } else { "" };
-                let title = Line::from(format!(" {marker}  {}{active}", row.label));
+                let mut title = Line::from(format!(" {marker}  {}", row.label));
+                for (index, tier) in row.context_tiers.iter().enumerate() {
+                    title.push_span(if index == 0 { "  " } else { " | " });
+                    let label = Span::raw(tier.label.as_str());
+                    title.push_span(if index == row.selected_tier {
+                        label.fg(palette.background).bg(palette.accent).bold()
+                    } else {
+                        label.fg(palette.muted)
+                    });
+                }
+                title.push_span(active);
                 let detail = Line::from(format!("    {}", row.detail.trim())).fg(palette.muted);
                 if selected {
                     [
@@ -689,11 +739,22 @@ impl App {
             _ => palette.accent,
         };
         let mut left = Line::from(vec!["● ".fg(status_color), self.status.fg(status_color)]);
+        if let Some(provider) = &self.selected_provider {
+            let name = provider.id.as_str().fg(palette.accent);
+            let field = Line::from(vec!["Login provider ".into(), name.clone()]);
+            if field.width() + left.width() + 3 <= width {
+                append_status_field(&mut left, field, width);
+            } else if field.width() <= width {
+                left = field;
+            } else {
+                left = Line::from(name);
+            }
+        }
         if hint.width() > 0 {
             if left.width() + 3 + hint.width() <= width {
                 left.push_span(" · ");
                 left.push_span(hint);
-            } else {
+            } else if self.selected_provider.is_none() {
                 left = Line::from(hint);
             }
         }
@@ -724,22 +785,29 @@ impl App {
             SessionConfigKind::Select(select)
                 if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
             {
-                Some(select.current_value.0.as_ref())
+                let current = select.current_value.0.as_ref();
+                Some(
+                    options::selected_model(&self.options)
+                        .filter(|choice| context_tier(choice).is_some())
+                        .map_or(current, |choice| choice.name.as_str()),
+                )
             }
             _ => None,
         });
         let mut right = Line::default();
         let budget = width.saturating_sub(left.width() + 2);
+        let model = model.map_or_else(Line::default, |model| {
+            Line::from(model.fg(palette.accent).bold())
+        });
         for field in [
+            model,
+            self.token_usage(),
+            Line::from(self.usage_cost.as_deref().unwrap_or_default()),
             Line::from(vec!["Effort ".into(), effort.fg(palette.accent)]),
             Line::from(vec![
                 "Approvals ".into(),
                 self.approval_mode.label().fg(palette.accent),
             ]),
-            model.map_or_else(Line::default, |model| {
-                Line::from(model.fg(palette.accent).bold())
-            }),
-            self.usage_metrics(),
         ] {
             append_status_field(&mut right, field, budget);
         }
@@ -772,20 +840,14 @@ impl App {
         frame.render_widget(Paragraph::new(right).style(style), values);
     }
 
-    fn usage_metrics(&self) -> Line<'_> {
-        let usage = self
-            .usage
+    fn token_usage(&self) -> Line<'_> {
+        self.usage
             .map(|(used, size)| format!("ctx {used}/{size}"))
             .or_else(|| {
                 self.last_usage_tokens
                     .map(|tokens| format!("{tokens} tokens"))
-            });
-        match (usage, self.usage_cost.as_deref()) {
-            (Some(usage), Some(cost)) => Line::from(format!("{usage} · {cost}")),
-            (Some(usage), None) => Line::from(usage),
-            (None, Some(cost)) => Line::from(cost),
-            (None, None) => Line::default(),
-        }
+            })
+            .map_or_else(Line::default, Line::from)
     }
 
     fn draw_todos(&mut self, frame: &mut Frame, area: Rect, palette: &Palette) {
@@ -854,6 +916,15 @@ impl App {
             Line::from(format!("{} · io {}", self.status, self.client_io.label()))
                 .fg(palette.muted),
         ];
+        if let Some(provider) = &self.selected_provider {
+            lines.push(
+                Line::from(vec![
+                    "Login provider ".into(),
+                    provider.id.as_str().fg(palette.accent),
+                ])
+                .fg(palette.muted),
+            );
+        }
         if let Some(workspace) = &self.workspace {
             lines.push(Line::from(workspace.to_string_lossy()).fg(palette.muted));
         }
@@ -881,6 +952,9 @@ impl App {
         );
         if let Some((used, size)) = self.usage {
             lines.push(Line::from(format!("usage {used}/{size}")).fg(palette.muted));
+        }
+        if let Some(tokens) = self.reasoning_tokens {
+            lines.push(Line::from(format!("{tokens} thinking tokens")).fg(palette.muted));
         }
         if let Some(cost) = &self.usage_cost {
             lines.push(Line::from(format!("cost {cost}")).fg(palette.muted));
@@ -947,126 +1021,6 @@ fn append_status_field<'a>(line: &mut Line<'a>, field: Line<'a>, limit: usize) -
     }
     line.spans.extend(field.spans);
     true
-}
-
-fn draw_providers(
-    frame: &mut Frame,
-    area: Rect,
-    popup: &super::ProviderPopup,
-    editable: bool,
-    palette: &Palette,
-) {
-    let providers = popup
-        .result
-        .as_ref()
-        .and_then(|result| result.as_ref().ok());
-    let rows = providers.map_or(1, |providers| providers.len().clamp(1, 8));
-    let width = area.width.saturating_sub(2).min(76);
-    let height = (rows as u16 + 9).min(area.height);
-    let popup_area = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(palette.accent))
-        .style(Style::default().fg(palette.foreground).bg(palette.surface))
-        .title(" Providers ")
-        .title_style(Style::default().fg(palette.accent).bold());
-    let inner = block.inner(popup_area);
-    frame.render_widget(Clear, popup_area);
-    frame.render_widget(block, popup_area);
-    let [listing, details, help] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(5),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    let lines = match &popup.result {
-        None => vec![Line::from(" Loading providers…").fg(palette.muted)],
-        Some(Err(error)) => vec![Line::from(error.as_str()).fg(palette.error)],
-        Some(Ok(providers)) if providers.is_empty() => {
-            vec![Line::from(" No providers available").fg(palette.muted)]
-        }
-        Some(Ok(providers)) => {
-            let rows = usize::from(listing.height);
-            providers
-                .iter()
-                .enumerate()
-                .skip(popup.selected.saturating_sub(rows.saturating_sub(1)))
-                .take(rows)
-                .map(|(index, provider)| {
-                    let current = provider
-                        .current
-                        .as_ref()
-                        .map_or("disabled", |config| config.api_type.as_str());
-                    let selected = index == popup.selected;
-                    let marker = if selected { "›" } else { " " };
-                    let line = Line::from(format!(" {marker} {}  ·  {current}", provider.id));
-                    if selected {
-                        line.fg(palette.accent).bold()
-                    } else {
-                        line
-                    }
-                })
-                .collect()
-        }
-    };
-    if providers.is_some() {
-        frame.render_widget(Paragraph::new(lines), listing);
-    } else {
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: true }),
-            listing.union(details),
-        );
-    }
-    if let Some(provider) = providers.and_then(|providers| providers.get(popup.selected)) {
-        let mut lines = vec![
-            Line::from(format!(
-                " {} · {}",
-                if provider.required {
-                    "Required"
-                } else {
-                    "Optional"
-                },
-                provider.supported.join(", ")
-            ))
-            .fg(palette.muted),
-        ];
-        if let Some(url) = provider
-            .current
-            .as_ref()
-            .and_then(|config| config.base_url.as_deref())
-        {
-            lines.push(Line::from(format!(" {url}")));
-        }
-        let command = if editable {
-            format!(
-                " /provider edit {} <type> <url|-> [models] [key-env]",
-                provider.id
-            )
-        } else {
-            format!(" /provider set {} <type> [url]", provider.id)
-        };
-        lines.push(Line::from(command).fg(palette.muted));
-        frame.render_widget(Paragraph::new(lines), details);
-    }
-    let selected = providers.and_then(|providers| providers.get(popup.selected));
-    let hint = match (editable, selected) {
-        (true, Some(provider)) if !provider.required => {
-            " ↑/↓ select · Enter edit · a add · d remove · Esc close"
-        }
-        (true, Some(_)) => " ↑/↓ select · Enter edit · a add · Esc close",
-        (true, None) if providers.is_some() => " a add · Esc close",
-        (false, Some(provider)) if !provider.required => {
-            " ↑/↓ select · Enter route · d disable · Esc close"
-        }
-        (false, Some(_)) => " ↑/↓ select · Enter route · Esc close",
-        _ => " Esc close",
-    };
-    frame.render_widget(Paragraph::new(hint).fg(palette.muted), help);
 }
 
 fn draw_approval(frame: &mut Frame, area: Rect, pending: &mut PendingApproval, palette: &Palette) {

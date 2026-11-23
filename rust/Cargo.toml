@@ -7,7 +7,7 @@ publish = false
 license = "MIT"
 
 [dependencies]
-agent-client-protocol = "=5.4.0"
+agent-client-protocol = { version = "=5.4.0", features = ["unstable_llm_providers"] }
 base64 = "0.22"
 futures = "0.3"
 mime_guess = "2"

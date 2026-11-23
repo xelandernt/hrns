@@ -27,7 +27,9 @@ def run_acp_stdio(
     session_config: SessionConfigFunc[None] | None = None,
     attachment_config: AttachmentConfigFunc[None] | None = None,
     mcp_capabilities: schema.McpCapabilities | None = None,
-    _provider_editor: Callable[[str, dict[str, object]], None] | None = None,
+    _provider_editor: Callable[[str, dict[str, object]], Awaitable[dict[str, object]]]
+    | None = None,
+    _remember_model: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     server = AcpServer[PrincipalT]()
     registration = server.add_agent(
@@ -44,6 +46,7 @@ def run_acp_stdio(
         async with server:
             adapter = registration.connection(principal=principal)
             adapter._provider_editor = _provider_editor
+            adapter._remember_model = _remember_model
             try:
                 await acp.run_agent(adapter, use_unstable_protocol=True)
             finally:
