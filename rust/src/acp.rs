@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(not(target_family = "wasm"))]
+use std::path::Path;
 use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{
@@ -161,6 +163,10 @@ pub enum Action {
     CheckQuit,
     #[cfg(not(target_family = "wasm"))]
     StopForQuit,
+    #[cfg(not(target_family = "wasm"))]
+    PruneForQuit {
+        discard: Option<String>,
+    },
     CloseSession(String),
     DeleteSession(String),
     ListProviders,
@@ -310,6 +316,8 @@ pub enum Event {
     QuitChecked(Result<bool, String>),
     #[cfg(not(target_family = "wasm"))]
     QuitStopped(Result<(), String>),
+    #[cfg(not(target_family = "wasm"))]
+    QuitDeleted,
     SessionClosed(String),
     SessionDeleteResult {
         id: String,
@@ -543,7 +551,7 @@ pub async fn connect(
             let _ = events.unbounded_send(Event::Ready {
                 session: session.session_id().to_string(),
                 approval_scope: services.approval_scope,
-                workspace: cwd,
+                workspace: cwd.clone(),
                 remote: services.remote,
                 attachments_supported: caps.prompt_capabilities.embedded_context,
                 loaded,
@@ -705,6 +713,20 @@ pub async fn connect(
                                 .map_err(|error| request_error(&error));
                             let _ = events.unbounded_send(Event::QuitStopped(result));
                         }
+                        #[cfg(not(target_family = "wasm"))]
+                        Some(Action::PruneForQuit { discard }) => {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                prune_for_quit(
+                                    session.connection(),
+                                    session.session_id(),
+                                    &cwd,
+                                    discard,
+                                    delete_supported,
+                                ),
+                            ).await;
+                            let _ = events.unbounded_send(Event::QuitDeleted);
+                        }
                         Some(Action::CloseSession(id)) => {
                             let event = if !close_supported {
                                 Event::Error(
@@ -724,19 +746,10 @@ pub async fn connect(
                             let _ = events.unbounded_send(event);
                         }
                         Some(Action::DeleteSession(id)) => {
-                            let result = if !delete_supported {
-                                Err("The agent does not advertise session/delete".into())
+                            let result = if delete_supported {
+                                delete_session(session.connection(), id.clone()).await
                             } else {
-                                let reply = session
-                                    .connection()
-                                    .send_request(DeleteSessionRequest::new(id.clone()))
-                                    .block_task()
-                                    .await;
-                                match reply {
-                                    Ok(_) => Ok(()),
-                                    Err(error) if error.code == ErrorCode::RESOURCE_NOT_FOUND => Ok(()),
-                                    Err(error) => Err(error.message),
-                                }
+                                Err("The agent does not advertise session/delete".into())
                             };
                             let _ = events.unbounded_send(Event::SessionDeleteResult { id, result });
                         }
@@ -1175,6 +1188,79 @@ async fn only_active_session(
             ));
         }
         cursor = Some(next);
+    }
+}
+
+/// Discard the session the client opened and every untitled session left in its workspace.
+#[cfg(not(target_family = "wasm"))]
+async fn prune_for_quit(
+    connection: &ConnectionTo<Agent>,
+    current: &SessionId,
+    cwd: &Path,
+    discard: Option<String>,
+    supported: bool,
+) {
+    if !supported {
+        return;
+    }
+    let sweep = untitled_sessions(connection, current, cwd)
+        .await
+        .unwrap_or_default();
+    for id in discard.into_iter().chain(sweep) {
+        let _ = delete_session(connection, id).await;
+    }
+}
+
+/// The sessions in `cwd` that never received a title and that no client is using.
+#[cfg(not(target_family = "wasm"))]
+async fn untitled_sessions(
+    connection: &ConnectionTo<Agent>,
+    current: &SessionId,
+    cwd: &Path,
+) -> Result<Vec<String>, Error> {
+    let mut cursor = None;
+    let mut visited = HashSet::new();
+    let mut ids = Vec::new();
+    loop {
+        let page = connection
+            .send_request(
+                ListSessionsRequest::new()
+                    .cursor(cursor)
+                    .cwd(Some(cwd.to_path_buf())),
+            )
+            .block_task()
+            .await?;
+        for info in &page.sessions {
+            let in_use = session_activity(info).is_some_and(|activity| {
+                activity.attached_elsewhere || !matches!(activity.status, ExecutionStatus::Idle)
+            });
+            let untitled = info.title.as_deref().is_none_or(str::is_empty);
+            if untitled && !in_use && &info.session_id != current {
+                ids.push(info.session_id.to_string());
+            }
+        }
+        let Some(next) = page.next_cursor else {
+            return Ok(ids);
+        };
+        if !visited.insert(next.clone()) {
+            return Err(Error::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Repeated session-list cursor",
+            ));
+        }
+        cursor = Some(next);
+    }
+}
+
+async fn delete_session(connection: &ConnectionTo<Agent>, id: String) -> Result<(), String> {
+    match connection
+        .send_request(DeleteSessionRequest::new(id))
+        .block_task()
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == ErrorCode::RESOURCE_NOT_FOUND => Ok(()),
+        Err(error) => Err(error.message),
     }
 }
 

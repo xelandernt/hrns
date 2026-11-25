@@ -26,6 +26,7 @@ const CHOICES: [(&str, Choice); 3] = [
 pub(super) enum Quit {
     #[default]
     Closed,
+    Deleting,
     Checking,
     Choose {
         error: Option<String>,
@@ -37,11 +38,19 @@ pub(super) enum Quit {
 
 impl Quit {
     pub fn open(&mut self, app: &App) {
-        *self = if app.check_quit() {
+        *self = if app.prune_on_quit() {
+            Self::Deleting
+        } else {
+            Self::check(app)
+        };
+    }
+
+    fn check(app: &App) -> Self {
+        if app.check_quit() {
             Self::Checking
         } else {
             Self::Exit
-        };
+        }
     }
 
     pub fn active(&self) -> bool {
@@ -52,8 +61,10 @@ impl Quit {
         matches!(self, Self::Exit)
     }
 
-    pub fn event(&mut self, event: &Event) {
+    pub fn event(&mut self, event: &Event, app: &App) {
         match (&self, event) {
+            (Self::Deleting, Event::QuitDeleted) => *self = Self::check(app),
+            (Self::Deleting, Event::Disconnected) => *self = Self::Exit,
             (Self::Checking, Event::QuitChecked(Ok(false)))
             | (Self::Stopping, Event::QuitStopped(Ok(()))) => *self = Self::Exit,
             (Self::Checking, Event::QuitChecked(Ok(true))) => *self = Self::choose(None),
@@ -143,6 +154,9 @@ impl Quit {
                     Paragraph::new("↑/↓ move · Enter choose · Esc stay").fg(palette.muted),
                     hint,
                 );
+            }
+            Self::Deleting => {
+                frame.render_widget(Paragraph::new("Discarding empty sessions…"), inner)
             }
             Self::Checking => frame.render_widget(
                 Paragraph::new(vec![

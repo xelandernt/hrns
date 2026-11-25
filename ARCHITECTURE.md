@@ -337,7 +337,9 @@ Path completion matches local directories on local connections and known
 workspace paths on remote connections. Delete confirms the selected session's
 name and workspace before requesting deletion. Deleting the current session
 opens a fresh session in its workspace. When quitting with only the current session active,
-the native TUI offers to detach, close that session and quit, or stay.
+the native TUI offers to detach, close that session and quit, or stay. Quitting deletes the
+current session when it never received a prompt, then sweeps its workspace for untitled sessions
+that no client holds or runs.
 Before switching or checking whether to quit, the terminal uses
 `_hrns/session/flush` to let earlier prompt requests finish admission to the
 server queue. The call returns before the prompts finish running.

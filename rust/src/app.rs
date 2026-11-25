@@ -230,6 +230,8 @@ pub struct App {
     provider_editor: bool,
     provider_routing: bool,
     loaded: bool,
+    /// The current session produced a user turn, so quitting keeps it.
+    prompted: bool,
     preparing_switch: bool,
     draft: Composer,
     transcript: Transcript,
@@ -313,6 +315,7 @@ impl App {
             provider_editor: false,
             provider_routing: false,
             loaded: false,
+            prompted: false,
             preparing_switch: false,
             draft: Composer::default(),
             transcript,
@@ -365,6 +368,16 @@ impl App {
     }
 
     pub fn event(&mut self, event: Event) {
+        if matches!(
+            &event,
+            Event::UserChunk(_)
+                | Event::Chunk(_)
+                | Event::Thought(_)
+                | Event::Tool { .. }
+                | Event::Plan(_)
+        ) {
+            self.prompted = true;
+        }
         match event {
             Event::Ready {
                 session,
@@ -468,7 +481,7 @@ impl App {
                 }
             }
             #[cfg(not(target_family = "wasm"))]
-            Event::QuitChecked(_) | Event::QuitStopped(_) => {}
+            Event::QuitChecked(_) | Event::QuitStopped(_) | Event::QuitDeleted => {}
             Event::AgentCommands(commands) => self.commands = commands,
             Event::Skills(skills) => {
                 self.skills = skills;
@@ -612,6 +625,7 @@ impl App {
                 self.session_title = None;
                 self.mode = None;
                 self.loaded = false;
+                self.prompted = false;
                 self.ready = false;
                 self.transcript.begin_replay();
                 self.replay_plan = None;
@@ -645,6 +659,7 @@ impl App {
                 self.approval_preference = None;
                 self.model_change_pending = false;
                 self.ready = false;
+                self.prompted = false;
                 self.turns = 0;
                 self.execution = None;
                 self.clear_approvals();
@@ -952,6 +967,22 @@ impl App {
     #[cfg(not(target_family = "wasm"))]
     pub fn stop_for_quit(&self) -> bool {
         self.ready && self.actions.unbounded_send(Action::StopForQuit).is_ok()
+    }
+
+    /// Ask the worker to discard untitled sessions and the current one when it has no prompt.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn prune_on_quit(&self) -> bool {
+        if !self.ready || !self.delete_supported {
+            return false;
+        }
+        let discard = if self.prompted {
+            None
+        } else {
+            self.session.clone()
+        };
+        self.actions
+            .unbounded_send(Action::PruneForQuit { discard })
+            .is_ok()
     }
 
     pub fn close_session(&mut self, id: Option<String>) {
@@ -1818,6 +1849,7 @@ impl App {
             return Err(prompt);
         }
         self.transcript.push(Role::User, displayed);
+        self.prompted = true;
         self.turns += 1;
         self.transcript.follow();
         self.status = "Streaming";

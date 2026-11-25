@@ -235,7 +235,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let Ok(update) = event_rx.try_recv() else {
                     break;
                 };
-                quit.event(&update);
+                quit.event(&update, &app);
                 app.event(update);
                 dirty = true;
             }
