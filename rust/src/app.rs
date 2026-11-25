@@ -203,7 +203,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/detach", "Remove a staged file"),
     ("/skills", "Browse and insert skills"),
     ("/sidebar", "Toggle the activity sidebar"),
-    ("/thoughts", "Show or hide reasoning"),
+    ("/thoughts", "Show or collapse reasoning"),
     ("/agent", "Run an advertised agent command"),
 ];
 
@@ -1533,13 +1533,13 @@ impl App {
         self.preferences.show_thoughts = !self.preferences.show_thoughts;
         self.transcript
             .show_thoughts(self.preferences.show_thoughts);
-        let shown = if self.preferences.show_thoughts {
+        let state = if self.preferences.show_thoughts {
             "shown"
         } else {
-            "hidden"
+            "collapsed"
         };
         self.transcript
-            .push(Role::Note, format!("Reasoning is now {shown}"));
+            .push(Role::Note, format!("Reasoning is now {state}"));
         self.save_preferences();
     }
 

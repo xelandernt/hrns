@@ -418,7 +418,7 @@ impl Transcript {
     }
 
     fn push_entry(&mut self, role: Role, mut text: String, expanded: bool) {
-        self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
+        self.output_pending |= !self.following;
         text.retain(|ch| ch == '\n' || !ch.is_control());
         self.entries.push(Entry {
             role,
@@ -583,7 +583,7 @@ impl Transcript {
                                 entry.detail_rows.len() + usize::from(entry.has_more_output())
                             }
             }
-            Role::Thought => self.show_thoughts && row == start,
+            Role::Thought => row == start,
             _ => false,
         };
         if !header_hit {
@@ -596,6 +596,7 @@ impl Transcript {
         true
     }
 
+    /// Show or collapse the text of reasoning blocks; their headers stay visible.
     pub fn show_thoughts(&mut self, show: bool) {
         if self.show_thoughts != show {
             self.show_thoughts = show;
@@ -617,7 +618,7 @@ impl Transcript {
     }
 
     fn append_chunk(&mut self, role: Role, mut text: String, expand_new: bool) {
-        self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
+        self.output_pending |= !self.following;
         let start = self.replay_from.unwrap_or(0);
         if let Some(entry) = self.entries[start..]
             .last_mut()
@@ -847,9 +848,7 @@ impl Transcript {
                 .enumerate()
                 .rev()
                 .find_map(|(index, entry)| {
-                    if entry.role == Role::Thought
-                        && (!self.show_thoughts || entry.text.trim().is_empty())
-                    {
+                    if entry.role == Role::Thought && entry.text.trim().is_empty() {
                         return None;
                     }
                     if entry.text.to_lowercase().contains(&query) {
@@ -867,7 +866,8 @@ impl Transcript {
         else {
             return false;
         };
-        if !in_text && !self.entries[index].expanded {
+        let reveal = !in_text || self.entries[index].role == Role::Thought;
+        if reveal && !self.entries[index].expanded {
             self.entries[index].expanded = true;
             self.measured = self.measured.min(index);
             self.measure();
@@ -986,8 +986,7 @@ impl Transcript {
             .checked_sub(1)
             .map_or(0, |prev| self.entries[prev].end);
         for entry in &mut self.entries[self.measured..] {
-            if entry.role == Role::Thought && (!self.show_thoughts || entry.text.trim().is_empty())
-            {
+            if entry.role == Role::Thought && entry.text.trim().is_empty() {
                 entry.end = end;
                 continue;
             }

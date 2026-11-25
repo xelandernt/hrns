@@ -103,7 +103,7 @@ older clients; the native client stores those toggles in its state file instead.
 | --- | --- | --- | --- |
 | `theme` | string | `"hrns"` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark`, or `ansi-light` |
 | `auto_expand_tools` | bool | `false` | Render every tool result expanded |
-| `show_thoughts` | bool | `false` | Render the agent's reasoning |
+| `show_thoughts` | bool | `false` | Stream the agent's reasoning expanded; collapsed reasoning headers remain visible when false |
 | `client_io` | `off` \| `read` \| `all` | `"all"` | What this terminal offers the agent: nothing, filesystem reads, or reads plus writes and terminal commands |
 | `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
 | `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |

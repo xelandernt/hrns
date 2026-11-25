@@ -8,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Tabs, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use super::picker::{Picker, Row, Source, context_tier};
 use super::{
@@ -299,6 +300,13 @@ impl App {
                 vec![Line::from(format!("  {status}")).fg(palette.muted)]
             } else {
                 let visible = usize::from(suggestions.height);
+                // Pad labels to the widest one so descriptions share a column.
+                let label_width = completion
+                    .items
+                    .iter()
+                    .map(|suggestion| suggestion.insert.trim_end().width())
+                    .max()
+                    .unwrap_or_default();
                 completion
                     .items
                     .iter()
@@ -315,9 +323,11 @@ impl App {
                             let marker = if selected { "›" } else { " " };
                             format!(" {marker} {}", suggestion.insert)
                         } else {
+                            let label = suggestion.insert.trim_end();
+                            let padding = label_width.saturating_sub(label.width());
                             format!(
-                                " {}  {}",
-                                suggestion.insert.trim_end(),
+                                " {label}{}  {}",
+                                " ".repeat(padding),
                                 suggestion.description
                             )
                         };

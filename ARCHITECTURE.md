@@ -229,7 +229,8 @@ command. Recognized names use the theme accent. Partial and unknown names stay
 in the composer on Enter, including when used as the first token after
 `/queue`. Slashes elsewhere in a message are literal. The first token offers
 local command completions, while a `$token` offers user-invocable skills from the agent's
-`hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
+`hrns/skills` metadata. Suggestion labels pad to the widest row so descriptions
+start on one column. `Tab` accepts the selected row, Up and Down move the
 selection while it is open, and Escape dismisses it before cancelling a turn.
 On local native connections, `@` at the start of the token under the cursor
 starts a file search in the active session workspace. A background walk indexes
@@ -369,10 +370,10 @@ render arguments as labeled fields, file previews, or lists on expansion.
 Approval prompts use the same input formatting. Ctrl+O reveals formatted
 arguments, results, diffs, and terminal references. Shell entries show the command and expose
 multiline output on expansion. The shell's exit record supplies the failure
-status when available. Reasoning headers are visible by default. Click a header
-to expand its text. `/thoughts` hides the reasoning headers or shows them in
-their collapsed state during streaming and replay. The transcript uses titled
-panels for command output such as `/help` and `/settings`.
+status when available. Reasoning headers are always visible. Click a header to
+expand or collapse its text. `/thoughts` controls whether new reasoning streams
+expanded; switching it off collapses existing reasoning blocks. The transcript
+uses titled panels for command output such as `/help` and `/settings`.
 
 ## ACP dependency
 
