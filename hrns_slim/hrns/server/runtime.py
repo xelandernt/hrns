@@ -28,7 +28,6 @@ from pydantic_ai.settings import ModelSettings
 from hrns.shared.config import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
-    THINKING_LEVELS,
     HrnsConfig,
     ProviderEntry,
 )
@@ -60,6 +59,7 @@ from .agent import build_agent
 from .copilot_pricing import CopilotCarbonModel
 from .local_sessions import LocalSessionStore
 from .provider_login import LoginMethod, ProviderLogin, codex_source, login_account, login_methods
+from .reasoning import native_efforts, openai_efforts
 
 __all__ = ["RuntimeModelResolver", "main"]
 
@@ -85,8 +85,13 @@ class _CopilotLimits(BaseModel):
     max_output_tokens: int | None = None
 
 
+class _CopilotSupports(BaseModel):
+    reasoning_effort: list[str] | None = None
+
+
 class _CopilotCapabilities(BaseModel):
     limits: _CopilotLimits | None = None
+    supports: _CopilotSupports | None = None
 
 
 class _CopilotPriceTier(BaseModel):
@@ -111,6 +116,10 @@ class _CopilotModel(BaseModel):
     supported_endpoints: list[str] = []
     capabilities: _CopilotCapabilities | None = None
     billing: _CopilotBilling | None = None
+
+    def reasoning_efforts(self) -> Sequence[str]:
+        supports = self.capabilities.supports if self.capabilities else None
+        return (supports.reasoning_effort or ()) if supports else ()
 
     def tier_prompt_limits(self) -> tuple[int, int] | None:
         prices = self.billing.token_prices if self.billing else None
@@ -146,12 +155,6 @@ class _CopilotCatalog(BaseModel):
 #: The ACP config option id for the reasoning-effort ladder.
 _EFFORT_OPTION_ID = "effort"
 
-#: One ``ModelSettings`` per selectable effort; the default value is absent by design.
-_THINKING_BY_EFFORT: dict[str, ModelSettings] = {
-    EFFORT_OFF: ModelSettings(thinking=False),
-    **{level: ModelSettings(thinking=level) for level in THINKING_LEVELS},
-}
-
 #: Display names and one-line explanations, shared by the ACP option and the client.
 _EFFORT_COPY: dict[str, tuple[str, str]] = {
     EFFORT_DEFAULT: ("Default", "Let the provider choose its default reasoning effort."),
@@ -160,7 +163,8 @@ _EFFORT_COPY: dict[str, tuple[str, str]] = {
     "low": ("Low", "Light reasoning for straightforward work."),
     "medium": ("Medium", "Balanced reasoning for everyday work."),
     "high": ("High", "Deeper reasoning for harder work."),
-    "xhigh": ("XHigh", "Maximum reasoning; highest cost and latency."),
+    "xhigh": ("XHigh", "Extra high reasoning for complex work."),
+    "max": ("Max", "Maximum reasoning depth."),
 }
 
 
@@ -680,44 +684,51 @@ class RuntimeModelResolver(ProviderModelResolver):
             raise ValueError(f"Model id {model_id!r} must read entry:model.")
         return name, entry, model_name
 
-    def _run_provider_id(self, name: str, entry: ProviderEntry) -> str:
-        """The Pydantic AI provider the next run would use for this entry.
-
-        A client-configured route replaces the entry's protocol, so the profile that
-        decides whether reasoning exists must be read from the route, not the entry.
-        """
-        try:
-            config = self.current_config(name)
-        except ProviderDisabled:
-            return entry.provider_id(name)
-        return config.route.api_type if config is not None else entry.provider_id(name)
-
-    def list_options(self, model_id: str) -> Sequence[SettingOption]:
-        """The reasoning-effort ladder ``[thinking]`` allows for one model.
-
-        The configured levels are policy; the model's profile decides whether reasoning
-        exists at all and whether it can be turned off. A model outside the runtime's
-        catalog is offered the policy as-is, so a custom id is opt-in rather than blocked.
-        """
-        levels = self.settings.thinking.levels
-        if not levels:
-            return ()
+    def _allowed_efforts(self, model_id: str) -> dict[str, ModelSettings]:
+        policy = self.settings.thinking
+        if not policy.levels:
+            return {}
         try:
             name, entry, model_name = self._split(model_id)
+            config = self.current_config(name)
         except ValueError:
-            return ()
-        provider = self._run_provider_id(name, entry)
+            return {}
+
+        provider = config.route.api_type if config else entry.provider_id(name)
         if provider == "github-copilot":
-            model_name, _ = self._context_selection(model_name)
-        profile = _profile_for(f"{provider}:{model_name}")
-        if profile is not None and not profile.get("supports_thinking"):
+            base_model, _ = self._context_selection(model_name)
+            catalog_model = self._local_copilot_model(name, base_model)
+            supported = openai_efforts(catalog_model.reasoning_efforts()) if catalog_model else {}
+        else:
+            base_url = config.route.base_url if config else entry.base_url
+            supported = native_efforts(
+                provider, model_name, base_url, entry.options, self.settings.model_settings
+            )
+
+        allowed: dict[str, ModelSettings] = {
+            level: supported[level] for level in policy.levels if level in supported
+        }
+        if policy.allow_off and EFFORT_OFF in supported:
+            return {EFFORT_OFF: supported[EFFORT_OFF], **allowed}
+        return allowed
+
+    def _configured_effort(self) -> object:
+        effort = self.settings.model_settings.get("thinking", EFFORT_DEFAULT)
+        return EFFORT_OFF if effort is False else effort
+
+    def list_options(self, model_id: str) -> Sequence[SettingOption]:
+        """Advertise the effective route's verified efforts allowed by the deployment."""
+        allowed = self._allowed_efforts(model_id)
+        if not allowed:
             return ()
-        choices = [self._effort_choice(EFFORT_DEFAULT, is_default=True)]
-        if self.settings.thinking.allow_off and not (
-            profile is not None and profile.get("thinking_always_enabled")
-        ):
-            choices.append(self._effort_choice(EFFORT_OFF))
-        choices.extend(self._effort_choice(level) for level in levels)
+        configured = self._configured_effort()
+        default = (
+            configured if isinstance(configured, str) and configured in allowed else EFFORT_DEFAULT
+        )
+        choices = [
+            self._effort_choice(value, is_default=value == default)
+            for value in (EFFORT_DEFAULT, *allowed)
+        ]
         return [
             SettingOption(
                 id=_EFFORT_OPTION_ID,
@@ -731,23 +742,19 @@ class RuntimeModelResolver(ProviderModelResolver):
     def resolve_settings(
         self, model_id: str, setting_selections: Mapping[str, str]
     ) -> ModelSettings:
-        """Turn the session's effort choice into a ``thinking`` delta.
-
-        ``default`` emits nothing so the agent's settings and the provider's default stand;
-        ``off`` disables reasoning where the model allows it.
-        """
-        value = setting_selections.get(_EFFORT_OPTION_ID)
-        if value is None or value == EFFORT_DEFAULT:
+        """Validate an explicit setting and translate it to the provider's request format."""
+        configured = _EFFORT_OPTION_ID not in setting_selections
+        value = self._configured_effort() if configured else setting_selections[_EFFORT_OPTION_ID]
+        if value == EFFORT_DEFAULT:
             return ModelSettings()
-        if value == EFFORT_OFF:
-            if not self.settings.thinking.allow_off:
-                raise ValueError("reasoning cannot be disabled: [thinking].allow_off is false")
-        elif value not in self.settings.thinking.levels:
-            raise ValueError(f"Reasoning effort {value!r} is not offered by [thinking]")
-        settings = _THINKING_BY_EFFORT.get(value)
-        if settings is None:
-            raise ValueError(f"Unknown reasoning effort: {value!r}")
-        return settings
+        allowed = self._allowed_efforts(model_id)
+        if isinstance(value, str) and value in allowed:
+            return allowed[value]
+        choices = ", ".join((EFFORT_DEFAULT, *allowed))
+        source = " in [model_settings].thinking" if configured else ""
+        raise ValueError(
+            f"Reasoning effort {value!r}{source} is unsupported for {model_id!r}. Choose {choices}."
+        )
 
     @staticmethod
     def _effort_choice(value: str, *, is_default: bool = False) -> SettingChoice:
@@ -846,7 +853,13 @@ def run(
         lambda session: build_agent(
             cwd=session.cwd if cwd == "." else cwd,
             skills=settings.skills,
-            model_settings=ModelSettings(**settings.model_settings),
+            model_settings=ModelSettings(
+                **{
+                    key: value
+                    for key, value in settings.model_settings.items()
+                    if key != "thinking"
+                }
+            ),
             _allow_unconfigured=True,
         ),
         model_resolver=resolver,

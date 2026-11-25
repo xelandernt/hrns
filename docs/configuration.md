@@ -197,29 +197,33 @@ connection. Use the model ID advertised over ACP. The built-in agent uses
 "openai:gpt-5.2" = "low"
 ```
 
-The terminal restores an available saved choice in new sessions and after a model
-switch. A loaded session retains its own ACP choices.
+The terminal restores a saved choice in new sessions and after a model switch when
+the server still offers it. A loaded session uses its stored ACP choice if available.
 
 ### `[thinking]`
 
-The reasoning-effort policy `hrns agent` advertises to ACP clients. The built-in
-agent intersects this allowlist with the model profile. Advertised levels are supported
-by both the policy and the model. Values outside the policy receive a validation error.
+The reasoning-effort policy controls which verified levels `hrns agent` advertises to
+ACP clients. The model and its provider route determine the supported levels. A route
+without verified effort levels uses the provider default. Explicit unsupported choices
+receive a validation error with the valid values.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `levels` | list | all five levels | Values the `effort` option offers, in display order |
+| `levels` | list | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | Allowed effort levels, in display order |
 | `allow_off` | bool | `true` | Offer `off` on models whose reasoning can be disabled |
 
-`default` is always offered and lets the provider choose the effort. An empty `levels`
-removes the effort option entirely. Listing a value that is not one of `minimal`, `low`,
-`medium`, `high`, `xhigh` is a configuration error.
+Whenever the effort option is available, `default` lets the provider choose the
+effort. An empty `levels` disables the effort option.
 
 ```toml
 [thinking]
 levels = ["low", "medium", "high"]
 allow_off = false
 ```
+
+`[model_settings].thinking` can set a server default effort. It accepts the same
+values as the ACP option, including `default` and `off`. The server validates the
+effective choice for the session's model before inference.
 
 ### `[mcp]`
 

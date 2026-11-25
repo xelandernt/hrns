@@ -532,6 +532,10 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 raise acp.RequestError(-32600, "Set up a provider and model to send messages.")
         elif message := self._model_setup_message(model_id, self._model_choices()):
             raise acp.RequestError(-32000, message)
+        try:
+            self._resolver_settings(self.state)
+        except ValueError as exc:
+            raise acp.RequestError(-32602, str(exc)) from exc
 
     def _config_options(self, state: SessionState[AgentDepsT]) -> ConfigOptions | None:
         """The complete config-option state ACP returns after every change.
@@ -630,9 +634,22 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         model's routing settings stay the base, so the client cannot drop them.
         """
         base = resolved.settings if resolved is not None else None
+        resolver = self._model_resolver
+        model_id = state.model
+        if resolver is None or model_id is None:
+            return lambda _run_context: base or ModelSettings()
+        initial_options = tuple(resolver.list_options(model_id))
+        selected = self._resolver_settings(state)
 
         def settings(_run_context: RunContext[AgentDepsT]) -> ModelSettings:
-            return merge_model_settings(base, self._resolver_settings(state)) or ModelSettings()
+            nonlocal selected
+            # The run still holds its original model if the session changes routes.
+            if (
+                state.model == model_id
+                and tuple(resolver.list_options(model_id)) == initial_options
+            ):
+                selected = self._resolver_settings(state)
+            return merge_model_settings(base, selected) or ModelSettings()
 
         return settings
 
@@ -1403,24 +1420,24 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             option = self._setting_option(state, config_id)
             model = state.model
             if option is None or model is None:
-                raise acp.RequestError.invalid_params(
-                    {"config_id": config_id, "reason": "unknown config option"}
+                raise acp.RequestError(
+                    -32602,
+                    f"Config option {config_id!r} cannot be set to {value!r} for {model!r}.",
                 )
             if value not in {choice.value for choice in option.choices}:
-                raise acp.RequestError.invalid_params(
-                    {"config_id": config_id, "reason": "not an advertised value"}
+                choices = ", ".join(choice.value for choice in option.choices)
+                raise acp.RequestError(
+                    -32602,
+                    f"{option.name} {value!r} is unsupported for {model!r}. Choose {choices}.",
                 )
             candidate = {**state.setting_selections, config_id: value}
             resolver = self._model_resolver
             assert resolver is not None  # _setting_option only returns options from it
             try:
-                # Validate the whole selection map, not just this value: a resolver may
-                # reject a combination even when each value is individually advertised.
+                # Validate combinations of otherwise advertised values.
                 resolver.resolve_settings(model, candidate)
             except ValueError as exc:
-                raise acp.RequestError.invalid_params(
-                    {"config_id": config_id, "reason": str(exc)}
-                ) from exc
+                raise acp.RequestError(-32602, str(exc), {"config_id": config_id}) from exc
             state.setting_selections = candidate
         await self._persist(state)
         options = self._config_options(state)

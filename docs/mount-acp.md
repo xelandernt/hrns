@@ -327,6 +327,12 @@ Reasoning effort is the motivating case: the adapter needs the values a client m
 and a way to turn a pick into `ModelSettings`. Those are `list_options` and
 `resolve_settings` on the same resolver.
 
+WebSocket clients get their effort choices from the resolver registered with
+`add_agent(model_resolver=...)`. The built-in `hrns agent` command supplies
+`RuntimeModelResolver` automatically. A mounted deployment can register that resolver
+or provide its own. When using the built-in resolver with Copilot, load its authenticated
+catalog with `await resolver.load_copilot_catalogs()` during application startup.
+
 ```python
 from collections.abc import Mapping, Sequence
 

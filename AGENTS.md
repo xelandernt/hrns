@@ -35,3 +35,8 @@ These documentations should be consulted if relevant:
 ## Architecture
 
 Store architecture and decision in `ARCHITECTURE.md`.
+
+## Release maintenance
+
+Follow the checklist in [MAINTENANCE.md](MAINTENANCE.md)
+before each release and when upgrading Pydantic AI or its provider SDKs.

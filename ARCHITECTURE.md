@@ -611,7 +611,8 @@ for a model — the shipped effort ladder is a `thought_level` select built by
 selections into a `ModelSettings` **delta**. The adapter merges that delta over
 `ResolvedModel.settings` and the agent's own settings on every model request: passing a
 callable `model_settings` is what lets `session/set_config_option` land on the next request
-of a running turn, not only on the next turn. The delta shape also keeps the client out of
+of a running turn. A model change or a route change that alters the available options takes
+effect with the next model resolution. The delta shape also keeps the client out of
 credential-bearing keys such as `extra_headers`, which routing uses.
 
 Selections live in `SessionState.setting_selections`, are persisted in `StoredSession`, and
@@ -621,10 +622,16 @@ snapshot the options before mutating resolver state and send `config_option_upda
 resident session whose list changed, because nothing else tells such a client its choices
 shrank.
 
-`hrns agent` reads the policy from `[thinking]` (`levels`, `allow_off`) and intersects it
-with the model's profile via `infer_model_profile`, so a model that cannot reason gets no
-option and an always-on model does not offer `off`. The built-in runtime uses the
-provider's default effort until the session selects a level.
+`hrns agent` intersects its `[thinking]` policy with verified effort settings for the
+effective provider route and model. Copilot supplies its effort levels through
+`capabilities.supports.reasoning_effort` on the authenticated model catalog. Both
+context tiers use the catalog entry for their shared model ID. Native routes use
+provider-specific levels and Pydantic AI settings so the selected effort reaches the
+provider with its intended value. Pydantic AI's unified thinking setting can map
+different input levels to the same provider value. Routes without verified levels use the provider
+default. The same allowed values drive advertisement and validation. An explicit
+session choice takes precedence over `[model_settings].thinking`, and the adapter
+validates the effective setting before inference.
 
 The terminal saves the selected effort in `[local_model_effort]` for Local mode and
 `[profile.<name>.model_effort]` for named connections. Each key is the model id advertised

@@ -27,7 +27,7 @@ import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from urllib.parse import urlsplit
 
 import tomli_w
@@ -37,11 +37,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettin
 
 from .mcp import McpSettings
 
-#: Unified pydantic-ai thinking levels, weakest first.
-EffortLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
+#: Selectable reasoning efforts, weakest first.
+EffortLevel = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 
-#: The unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
-THINKING_LEVELS: tuple[EffortLevel, ...] = ("minimal", "low", "medium", "high", "xhigh")
+THINKING_LEVELS: tuple[EffortLevel, ...] = get_args(EffortLevel)
 
 #: TUI/ACP spelling for "do not set thinking; use the provider default".
 EFFORT_DEFAULT = "default"
@@ -184,7 +183,7 @@ class ThinkingSettings(BaseModel):
     """The reasoning efforts this deployment offers, and whether ``off`` is one.
 
     This is a policy, not a capability probe: the built-in agent intersects it with the
-    model's profile, so a level the model cannot use is not advertised even when listed
+    model's provider capabilities, so a level the model cannot use is not advertised even when listed
     here. An empty ``levels`` removes the reasoning-effort option entirely.
     """
 
@@ -376,12 +375,6 @@ class HrnsConfig(BaseSettings):
         description="Agent Skills: discovery libraries and selection.",
     )
     store: Path = Field(default_factory=lambda: user_data_path("hrns") / "local-sessions.db")
-
-    @field_validator("model_settings")
-    @classmethod
-    def remove_global_thinking(cls, value: dict[str, Any]) -> dict[str, Any]:
-        """Reasoning effort is selected for a model through ACP."""
-        return {key: setting for key, setting in value.items() if key != "thinking"}
 
     @field_validator("providers")
     @classmethod
