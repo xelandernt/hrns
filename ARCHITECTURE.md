@@ -174,8 +174,12 @@ Transcript entries keep their plain text for search and copy. Agent and thought
 entries render a small Markdown subset at draw time: fenced code, inline code,
 emphasis, links, headings and GitHub Flavored Markdown tables. Table cells wrap
 within aligned columns and use labeled rows when the viewport is too narrow.
-User and note entries stay literal. ACP tool
-calls are keyed by `tool_call_id`, merged from start and progress updates, and
+User entries and system notices stay literal. The `System` heading and body
+align with the `User` and `Agent` entries. The heading, gutter border, and
+highlighted slash commands share the theme's system, warning, or error color
+according to severity. The rest of the body uses the normal text color.
+
+ACP tool calls are keyed by `tool_call_id`, merged from start and progress updates, and
 shown as compact rows with status markers and disclosure arrows. Click a tool
 header to expand or collapse its output. `Ctrl-O` toggles details in bulk for
 the current transcript. New tool calls start collapsed. Shell, read, list,
@@ -251,8 +255,10 @@ view for multiple questions. Harness choice fields and their `_text` companions
 share a tab and submit an ordinary ACP form response.
 
 The native client opens its local provider editor with `/providers` or
-`/provider`. The popup owns add, edit, delete, and selection. The explicit
-selection is client state for `/login`. Models and effort are ACP session
+`/provider`. The popup owns add, edit, delete, and selection. `/login` uses the
+explicit provider selection when present, then the active model's provider ID
+from its ACP metadata. The picker is the fallback when neither resolves to a
+local provider. Models and effort are ACP session
 config options. The browser client and remote connections use ACP session
 options to present the agent's available models. Agents that advertise the ACP
 provider-routing capability expose their routes through `providers/list`,
@@ -303,8 +309,10 @@ missing setup and reports credential errors to clients.
 The reasoning picker opens after model selection when the agent advertises
 effort choices. The composer completes `/model` and `/effort` arguments from
 the current ACP config options, and offers built-in options for `/theme`,
-`/permissions` and `/provider`. The status bar displays the reasoning effort
-advertised for the session and the client's current approval mode.
+`/permissions` and `/provider`. The status bar's model field shows the active
+model or the selected provider ID while its model is unavailable or switching.
+The status bar also shows the session's reasoning effort and the client's
+current approval mode.
 
 Tool entries use ACP kind, location and arguments to summarize each operation.
 The built-in tools show the primary input in their collapsed headers and

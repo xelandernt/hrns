@@ -64,7 +64,7 @@ impl EffortProfile {
         match connection.send_request(request).block_task().await {
             Ok(reply) => reply.config_options,
             Err(error) => {
-                let _ = events.unbounded_send(Event::Note(format!(
+                let _ = events.unbounded_send(Event::Warning(format!(
                     "Could not restore saved reasoning effort: {}",
                     error.message
                 )));
@@ -96,7 +96,7 @@ impl EffortProfile {
                 }
             }
             _ => {
-                let _ = events.unbounded_send(Event::Note("Reasoning effort was applied, but it could not be saved to the profile configuration".into()));
+                let _ = events.unbounded_send(Event::Warning("Reasoning effort was applied, but it could not be saved to the profile configuration".into()));
             }
         }
     }

@@ -76,7 +76,7 @@ impl App {
                 let id = text["/load ".len()..].trim();
                 if id.is_empty() {
                     self.transcript
-                        .push(Role::Note, "Use /load <session id>".into());
+                        .push(Role::Warning, "Use /load <session id>".into());
                 } else {
                     self.load_session(id.to_owned());
                 }
@@ -92,7 +92,7 @@ impl App {
             "/delete" => {
                 self.draft.submit();
                 self.transcript
-                    .push(Role::Note, "Use /delete <session id>".into());
+                    .push(Role::Warning, "Use /delete <session id>".into());
             }
             text if text.starts_with("/delete ") => {
                 self.draft.submit();
@@ -192,7 +192,7 @@ impl App {
                         .unbounded_send(Action::SetProviderRoute(request));
                 } else {
                     self.transcript.push(
-                        Role::Note,
+                        Role::Warning,
                         "Use /provider set <id> <type> <base-url>.".into(),
                     );
                 }
@@ -226,7 +226,7 @@ impl App {
                     }
                     None => self
                         .transcript
-                        .push(Role::Note, "Use /permissions ask · reads · all".into()),
+                        .push(Role::Warning, "Use /permissions ask · reads · all".into()),
                 }
             }
             "/theme" => {
@@ -244,7 +244,7 @@ impl App {
                     self.transcript.push(Role::Note, format!("Theme · {name}"));
                 } else {
                     self.transcript.push(
-                        Role::Note,
+                        Role::Warning,
                         format!("Unknown theme · {}", theme::NAMES.join(" · ")),
                     );
                 }
@@ -345,7 +345,7 @@ impl App {
                 self.draft.submit();
                 if self.turns > 0 || self.remote_busy() {
                     self.transcript.push(
-                        Role::Note,
+                        Role::Warning,
                         "Wait for the turn to finish before copying".into(),
                     );
                 } else if let Some(text) = self.transcript.latest_agent() {
@@ -401,7 +401,7 @@ impl App {
             }
             _ if !is_local_command(command) => self.send_message(input),
             _ => self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 format!("Check the arguments for {command} · /help commands"),
             ),
         }
@@ -413,7 +413,7 @@ impl App {
                 .push(Role::Note, "No queued messages to edit".into());
         } else if self.attachment_reads > 0 || !self.attachments.is_empty() {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Send or detach staged files before editing a queued message".into(),
             );
         } else if let Some(prompt) = self.queue.pop_back() {
@@ -425,7 +425,7 @@ impl App {
     fn send_message(&mut self, input: String) {
         if !self.ready {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Not connected · use /reconnect, /new or /load <id>".into(),
             );
         } else if self.status != "Cancelling" {
@@ -491,7 +491,7 @@ impl App {
                 }
                 None => self
                     .transcript
-                    .push(Role::Note, "Use ask, reads or all".into()),
+                    .push(Role::Warning, "Use ask, reads or all".into()),
             },
             ("sidebar", Some(value)) => {
                 if let Some(value) = parse_on_off(value) {
@@ -525,15 +525,18 @@ impl App {
     ) {
         if model_change.is_some() && self.model_change_pending {
             self.transcript
-                .push(Role::Note, "Wait for the model switch to finish.".into());
+                .push(Role::Warning, "Wait for the model switch to finish.".into());
             return;
         }
         let selected = self
             .options
             .iter()
             .find(|option| options::matches_category(option, &category));
-        let notice = match selected {
-            Some(option) if input.is_empty() => options::summary(option),
+        let warning = match selected {
+            Some(option) if input.is_empty() => {
+                self.transcript.push(Role::Note, options::summary(option));
+                return;
+            }
             Some(option) => match options::value(option, input) {
                 Some(value) => {
                     let action = Action::SetOption {
@@ -552,7 +555,7 @@ impl App {
             },
             None => "The agent did not advertise this session setting".into(),
         };
-        self.transcript.push(Role::Note, notice);
+        self.transcript.push(Role::Warning, warning);
     }
 }
 

@@ -290,6 +290,7 @@ pub enum Event {
     Chunk(String),
     Thought(String),
     Note(String),
+    Warning(String),
     End {
         interrupted: bool,
     },

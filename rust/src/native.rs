@@ -356,7 +356,7 @@ fn local_effect(
             }
         }
         LocalEffect::Attach(path) if path.is_empty() => {
-            app.event(Event::Note("Use /attach <path> to select a file".into()));
+            app.event(Event::Warning("Use /attach <path> to select a file".into()));
         }
         LocalEffect::Attach(path) => {
             app.event(Event::LoadingAttachment);

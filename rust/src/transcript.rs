@@ -20,10 +20,20 @@ pub enum Role {
     Tool,
     Command(String),
     Note,
+    Warning,
     Error,
 }
 
 impl Role {
+    fn notice_color(&self, palette: &Palette) -> Option<Color> {
+        match self {
+            Self::Note => Some(palette.system),
+            Self::Warning => Some(palette.warning),
+            Self::Error => Some(palette.error),
+            _ => None,
+        }
+    }
+
     fn indent(&self, width: usize) -> &'static str {
         if width >= 10 && matches!(self, Self::Thought | Self::Tool) {
             "  "
@@ -36,6 +46,7 @@ impl Role {
         let (name, color) = match self {
             Self::User => ("User", palette.accent),
             Self::Agent => ("Agent", palette.muted),
+            Self::Note | Self::Warning | Self::Error => ("System", self.notice_color(palette)?),
             Self::Thought => (
                 if expanded {
                     "▾ Reasoning"
@@ -53,8 +64,7 @@ impl Role {
                     .bg(palette.panel),
                 );
             }
-            Self::Tool | Self::Note => return None,
-            Self::Error => ("Error", palette.error),
+            Self::Tool => return None,
         };
         Some(Line::styled(name, Style::default().fg(color).bold()))
     }
@@ -103,14 +113,14 @@ impl Entry {
     }
 
     fn heading_rows(&self) -> usize {
-        usize::from(!matches!(self.role, Role::Note | Role::Tool))
+        usize::from(self.role != Role::Tool)
     }
 
     fn approval_rows(&self) -> usize {
         usize::from(self.expanded && self.approval.is_some())
     }
 
-    fn line(&self, mut row: usize, palette: &Palette) -> Line<'_> {
+    fn line(&self, mut row: usize, palette: &Palette, is_command: fn(&str) -> bool) -> Line<'_> {
         if let Some(heading) = self.role.label(palette, self.expanded) {
             if row == 0 {
                 return heading;
@@ -127,6 +137,9 @@ impl Entry {
         }
         if let Some(range) = self.rows.get(row) {
             let text = &self.text[range.clone()];
+            if let Some(color) = self.role.notice_color(palette) {
+                return notice_line(&self.text, range.clone(), color, is_command);
+            }
             if let Some(status) = self.tool_status {
                 let (marker, color) = match status {
                     _ if self.approval == Some(ManualApproval::Rejected) => ("–", palette.muted),
@@ -264,6 +277,45 @@ impl Entry {
         }
         Line::default()
     }
+}
+
+fn notice_line(
+    text: &str,
+    row: Range<usize>,
+    color: Color,
+    is_command: fn(&str) -> bool,
+) -> Line<'_> {
+    let mut spans = Vec::new();
+    // Recognize the full command even when the viewport splits it across rows.
+    let start = text[..row.start].rfind(char::is_whitespace).unwrap_or(0);
+    let end = text[row.end..]
+        .find(char::is_whitespace)
+        .map_or(text.len(), |offset| row.end + offset);
+    let mut offset = start;
+    let mut plain_start = row.start;
+    for word in text[start..end].split_inclusive(char::is_whitespace) {
+        let token = word.trim_start_matches(['`', '\'', '"', '(', '[']);
+        let command = token.trim_end_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '`' | '\'' | '"' | ')' | ']' | '.' | ',' | ':' | ';' | '!' | '?'
+                )
+        });
+        if command.starts_with('/') && is_command(command) {
+            let command_start = offset + word.len() - token.len();
+            let start = command_start.max(row.start);
+            let end = (command_start + command.len()).min(row.end);
+            if start < end {
+                spans.push(Span::raw(&text[plain_start..start]));
+                spans.push(text[start..end].fg(color).bold());
+                plain_start = end;
+            }
+        }
+        offset += word.len();
+    }
+    spans.push(Span::raw(&text[plain_start..row.end]));
+    Line::from(spans)
 }
 
 fn inline(text: &str) -> Vec<Span<'_>> {
@@ -824,9 +876,16 @@ impl Transcript {
         true
     }
 
-    pub fn visible(&mut self, width: u16, height: u16, palette: &Palette) -> Vec<Line<'_>> {
+    pub fn visible(
+        &mut self,
+        width: u16,
+        height: u16,
+        palette: &Palette,
+        is_command: fn(&str) -> bool,
+    ) -> VisibleTranscript<'_> {
+        let mut visible = VisibleTranscript::default();
         if width == 0 || height == 0 {
-            return Vec::new();
+            return visible;
         }
         let reflow = self.width != width || self.measured < self.entries.len();
         let anchor = if reflow && !self.following {
@@ -854,17 +913,19 @@ impl Transcript {
 
         let mut row = self.top;
         let mut index = self.entries.partition_point(|entry| entry.end <= row);
-        let mut lines = Vec::with_capacity(usize::from(height));
+        visible.lines.reserve(usize::from(height));
         while let Some(entry) = self.entries.get(index) {
             let start = self.entry_start(index);
+            let border = entry.role.notice_color(palette);
+            let content_rows = entry.heading_rows() + entry.rows.len();
             while row < entry.end {
                 let entry_row = row - start;
-                let mut line = entry.line(entry_row, palette);
+                let mut line = entry.line(entry_row, palette, is_command);
                 let indent = entry.role.indent(usize::from(width));
                 if !indent.is_empty() && !line.spans.is_empty() {
                     line.spans.insert(0, Span::raw(indent));
                 }
-                if entry.role == Role::User && entry_row < entry.heading_rows() + entry.rows.len() {
+                if entry.role == Role::User && entry_row < content_rows {
                     if line.width() == 0 {
                         line.spans.push(Span::raw(" "));
                     }
@@ -874,15 +935,22 @@ impl Transcript {
                         line.bg(palette.surface)
                     };
                 }
-                lines.push(line);
-                if lines.len() == usize::from(height) {
-                    return lines;
+                if let Some(color) = border
+                    && entry_row < content_rows
+                {
+                    visible
+                        .notice_borders
+                        .push(((row - self.top) as u16, color));
+                }
+                visible.lines.push(line);
+                if visible.lines.len() == usize::from(height) {
+                    return visible;
                 }
                 row += 1;
             }
             index += 1;
         }
-        lines
+        visible
     }
 
     fn measure(&mut self) {
@@ -945,6 +1013,12 @@ impl Transcript {
         self.laid_out = self.measured;
         self.total = end;
     }
+}
+
+#[derive(Default)]
+pub struct VisibleTranscript<'a> {
+    pub lines: Vec<Line<'a>>,
+    pub notice_borders: Vec<(u16, Color)>,
 }
 
 #[derive(Default)]

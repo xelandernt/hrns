@@ -30,6 +30,17 @@ pub(super) struct Selected {
     refresh_model_after_login: bool,
 }
 
+impl From<&ProviderInfo> for Selected {
+    fn from(provider: &ProviderInfo) -> Self {
+        Self {
+            id: provider.id.clone(),
+            methods: provider.login_methods.clone(),
+            setup_message: provider.setup_message.clone(),
+            refresh_model_after_login: false,
+        }
+    }
+}
+
 pub(super) struct Dialog {
     screen: Screen,
     error: Option<String>,
@@ -38,6 +49,7 @@ pub(super) struct Dialog {
 
 enum Screen {
     Loading,
+    LoadingLogin(String),
     List {
         items: Vec<ProviderInfo>,
         index: usize,
@@ -264,7 +276,7 @@ impl App {
             return true;
         }
         self.transcript.push(
-            Role::Note,
+            Role::Warning,
             "Provider management is available in Local mode.".into(),
         );
         false
@@ -319,11 +331,20 @@ impl App {
         let Some(dialog) = &mut self.providers else {
             return;
         };
-        if !matches!(dialog.screen, Screen::Loading) {
-            return;
-        }
+        let login_provider = match &dialog.screen {
+            Screen::Loading => None,
+            Screen::LoadingLogin(id) => Some(id),
+            _ => return,
+        };
         match result {
             Ok(items) => {
+                if let Some(id) = login_provider
+                    && let Some(item) = items.iter().find(|item| &item.id == id)
+                {
+                    self.selected_provider = Some(Selected::from(item));
+                    *dialog = Dialog::new(Screen::Methods { index: 0 });
+                    return;
+                }
                 if let Some(selected) = &mut self.selected_provider {
                     let item = items.iter().find(|item| item.id == selected.id);
                     selected.setup_message = item.and_then(|item| item.setup_message.clone());
@@ -379,6 +400,10 @@ impl App {
         }
         if self.selected_provider.is_some() {
             self.providers = Some(Dialog::new(Screen::Methods { index: 0 }));
+        } else if let Some(provider) = self.active_model_provider().map(str::to_owned) {
+            if self.actions.unbounded_send(Action::ListProviders).is_ok() {
+                self.providers = Some(Dialog::new(Screen::LoadingLogin(provider)));
+            }
         } else {
             self.show_providers();
         }
@@ -418,7 +443,7 @@ impl App {
                         .push(Role::Note, format!("Signed in to {}.", selected.id));
                 }
                 if let Some(warning) = result.warning {
-                    self.transcript.push(Role::Note, warning);
+                    self.transcript.push(Role::Warning, warning);
                 }
                 self.providers = None;
             }
@@ -477,7 +502,7 @@ impl App {
             return;
         }
         match &mut dialog.screen {
-            Screen::Loading | Screen::Cancelling => {}
+            Screen::Loading | Screen::LoadingLogin(_) | Screen::Cancelling => {}
             Screen::List { items, index } => match key {
                 Key::Text('a') => self.show_provider_form(),
                 Key::HistoryUp | Key::HistoryDown | Key::Home | Key::End => {
@@ -493,19 +518,14 @@ impl App {
                                 dialog.error = Some("Wait for the model switch to finish.".into());
                                 return;
                             }
-                            self.selected_provider = Some(Selected {
-                                id: item.id.clone(),
-                                methods: item.login_methods.clone(),
-                                setup_message: item.setup_message.clone(),
-                                refresh_model_after_login: false,
-                            });
+                            self.selected_provider = Some(Selected::from(item));
                             self.providers = None;
                             self.activate_provider_model();
                             if let Some(message) = self.provider_setup_message().or_else(|| {
                                 self.prompt_setup_message()
                                     .filter(|_| !self.model_change_pending)
                             }) {
-                                self.transcript.push(Role::Note, message.to_owned());
+                                self.transcript.push(Role::Warning, message.to_owned());
                             }
                         }
                         Key::Text('e') => {
@@ -619,7 +639,8 @@ impl Dialog {
             Screen::Edit(form) if form.create => " Add provider ",
             Screen::Edit(_) => " Edit provider ",
             Screen::Remove(_) => " Delete provider ",
-            Screen::Methods { .. }
+            Screen::LoadingLogin(_)
+            | Screen::Methods { .. }
             | Screen::ApiKey(_)
             | Screen::SigningIn { .. }
             | Screen::Cancelling => " Provider login ",
@@ -676,7 +697,7 @@ impl Dialog {
         palette: &Palette,
     ) -> (Vec<Line<'a>>, &'static str) {
         match &self.screen {
-            Screen::Loading => {
+            Screen::Loading | Screen::LoadingLogin(_) => {
                 let lines = self
                     .error
                     .is_none()

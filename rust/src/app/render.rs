@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Tabs, Wrap};
 
 use super::picker::{Picker, Row, Source, context_tier};
-use super::{App, PendingApproval, ScrollBar, slash_command};
+use super::{App, PendingApproval, ScrollBar, is_local_command, slash_command};
 use crate::elicitation::FieldKind;
 use crate::options;
 use crate::theme::Palette;
@@ -178,17 +178,30 @@ impl App {
                 .width
                 .min(sidebar.x.saturating_sub(transcript.x));
         }
-        let visible = self
-            .transcript
-            .visible(transcript.width, transcript.height, &palette);
+        let visible = self.transcript.visible(
+            transcript.width,
+            transcript.height,
+            &palette,
+            is_local_command,
+        );
         frame.render_widget(
-            Text::from(visible).style(
+            Text::from(visible.lines).style(
                 Style::default()
                     .fg(palette.foreground)
                     .bg(palette.background),
             ),
             transcript,
         );
+        if transcript.x > area.x {
+            for (row, color) in visible.notice_borders {
+                frame.buffer_mut().set_string(
+                    transcript.x - 1,
+                    transcript.y + row,
+                    "│",
+                    Style::default().fg(color),
+                );
+            }
+        }
         self.scroll_bar = None;
         let total = self.transcript.total();
         let viewport = self.transcript.viewport_height();
@@ -732,6 +745,38 @@ impl App {
 
     fn draw_status(&self, frame: &mut Frame, area: Rect, hint: Span<'_>, palette: &Palette) {
         let width = usize::from(area.width);
+        let model_ready = !self.model_change_pending && !self.provider_model_missing();
+        let model = if model_ready {
+            self.options.iter().find_map(|option| match &option.kind {
+                SessionConfigKind::Select(select)
+                    if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
+                {
+                    let current = select.current_value.0.as_ref();
+                    Some(
+                        options::selected_model(&self.options)
+                            .filter(|choice| context_tier(choice).is_some())
+                            .map_or(current, |choice| choice.name.as_str()),
+                    )
+                }
+                _ => None,
+            })
+        } else {
+            self.selected_provider
+                .as_ref()
+                .map(|provider| provider.id.as_str())
+        };
+        let model = model.map_or_else(Line::default, |model| {
+            Line::from(model.fg(palette.accent).bold())
+        });
+        let model_width = match model.width() {
+            size if size <= width => size,
+            _ => 0,
+        };
+        let left_budget = if model_width > 0 {
+            width.saturating_sub(model_width + 2)
+        } else {
+            width
+        };
         let status_color = match self.status {
             "Connected" => palette.success,
             "Disconnected" => palette.error,
@@ -739,32 +784,29 @@ impl App {
             _ => palette.accent,
         };
         let mut left = Line::from(vec!["● ".fg(status_color), self.status.fg(status_color)]);
-        if let Some(provider) = &self.selected_provider {
-            let name = provider.id.as_str().fg(palette.accent);
-            let field = Line::from(vec!["Provider ".into(), name.clone()]);
-            if field.width() + left.width() + 3 <= width {
-                append_status_field(&mut left, field, width);
-            } else if field.width() <= width {
-                left = field;
-            } else {
-                left = Line::from(name);
-            }
-        }
         if hint.width() > 0 {
-            if left.width() + 3 + hint.width() <= width {
+            if left.width() + 3 + hint.width() <= left_budget {
                 left.push_span(" · ");
                 left.push_span(hint);
-            } else if self.selected_provider.is_none() {
+            } else if left_budget == width {
                 left = Line::from(hint);
             }
         }
         if self.attachment_reads > 0 {
-            left.push_span(" · Loading attachment");
+            append_status_field(&mut left, Line::from("Loading attachment"), left_budget);
         } else if !self.attachments.is_empty() {
-            left.push_span(format!(" · {} attached", self.attachments.len()));
+            append_status_field(
+                &mut left,
+                Line::from(format!("{} attached", self.attachments.len())),
+                left_budget,
+            );
         }
         if !self.queue.is_empty() {
-            left.push_span(format!(" · {} queued", self.queue.len()));
+            append_status_field(
+                &mut left,
+                Line::from(format!("{} queued", self.queue.len())),
+                left_budget,
+            );
         }
 
         let effort = self
@@ -781,27 +823,11 @@ impl App {
                 _ => None,
             })
             .unwrap_or("—");
-        let model = self.options.iter().find_map(|option| match &option.kind {
-            SessionConfigKind::Select(select)
-                if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
-            {
-                let current = select.current_value.0.as_ref();
-                Some(
-                    options::selected_model(&self.options)
-                        .filter(|choice| context_tier(choice).is_some())
-                        .map_or(current, |choice| choice.name.as_str()),
-                )
-            }
-            _ => None,
-        });
         let mut right = Line::default();
-        let budget = width.saturating_sub(left.width() + 2);
-        let model = model.map_or_else(Line::default, |model| {
-            Line::from(model.fg(palette.accent).bold())
-        });
-        if !self.model_change_pending && !self.provider_model_missing() {
+        let budget = width.saturating_sub(left.width() + 2).max(model_width);
+        append_status_field(&mut right, model, budget);
+        if model_ready {
             for field in [
-                model,
                 self.token_usage(),
                 Line::from(self.usage_cost.as_deref().unwrap_or_default()),
                 Line::from(vec!["Effort ".into(), effort.fg(palette.accent)]),
@@ -819,7 +845,13 @@ impl App {
         );
 
         let right_width = right.width();
-        let left_width = width.saturating_sub(right_width + if right_width == 0 { 0 } else { 2 });
+        let left_width = width.saturating_sub(right_width);
+        let gap = if right_width == 0 {
+            0
+        } else {
+            left_width.saturating_sub(left.width()).clamp(1, 2)
+        };
+        let left_width = left_width.saturating_sub(gap);
         if let Some(title) = self.session_title.as_deref() {
             append_status_field(&mut left, Line::from(title), left_width);
         } else if let Some(workspace) = &self.workspace {

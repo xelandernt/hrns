@@ -92,7 +92,7 @@ impl Provider {
         let servers = match config::read(path) {
             Ok(servers) => servers,
             Err(error) => {
-                let _ = events.unbounded_send(Event::Note(format!(
+                let _ = events.unbounded_send(Event::Warning(format!(
                     "Could not load MCP configuration: {error}"
                 )));
                 return Vec::new();
@@ -131,7 +131,7 @@ impl Provider {
                             if decision == ConsentDecision::Always
                                 && let Err(error) = config::allow(&path, &status.name)
                             {
-                                let _ = events.unbounded_send(Event::Note(format!(
+                                let _ = events.unbounded_send(Event::Warning(format!(
                                     "Could not save MCP consent for {}: {error}",
                                     status.name
                                 )));

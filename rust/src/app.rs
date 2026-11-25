@@ -488,6 +488,7 @@ impl App {
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
             Event::Thought(text) => self.transcript.append_thought(text, self.turns > 0),
             Event::Note(text) => self.transcript.push(Role::Note, text),
+            Event::Warning(text) => self.transcript.push(Role::Warning, text),
             Event::Error(text) => {
                 if !self.ready
                     && let Some(from) = self.replay_from.take()
@@ -523,7 +524,7 @@ impl App {
                 if let Some(from) = self.replay_from.take() {
                     self.transcript.trim(from);
                     self.transcript
-                        .push(Role::Note, "The session did not finish loading".into());
+                        .push(Role::Warning, "The session did not finish loading".into());
                 }
                 self.ready = false;
                 self.turns = 0;
@@ -591,7 +592,7 @@ impl App {
                     let _ = respond.send(ConsentDecision::Session);
                 } else {
                     self.transcript
-                        .push(Role::Note, format!("MCP consent · {name} ({transport})"));
+                        .push(Role::Warning, format!("MCP consent · {name} ({transport})"));
                     self.mcp_consent.push_back(PendingMcpConsent {
                         name,
                         transport,
@@ -618,7 +619,7 @@ impl App {
             Event::Permission(request) => self.request_permission(request),
             Event::Elicitation { form, respond } => {
                 self.transcript
-                    .push(Role::Note, format!("Agent question · {}", form.message));
+                    .push(Role::Warning, format!("Agent question · {}", form.message));
                 self.elicitations.push_back(PendingElicitation {
                     state: FormState::new(form),
                     respond,
@@ -717,14 +718,14 @@ impl App {
     pub fn new_session(&mut self) {
         if !self.can_switch() {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Stop the running turn before switching sessions".into(),
             );
             return;
         }
         let Some(workspace) = self.workspace.clone() else {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Connect once so the new session has a workspace".into(),
             );
             return;
@@ -746,14 +747,14 @@ impl App {
     pub fn load_session(&mut self, id: String) {
         if !self.can_switch() {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Stop the running turn before switching sessions".into(),
             );
             return;
         }
         if !self.load_supported {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "The agent does not advertise session/load".into(),
             );
             return;
@@ -775,12 +776,12 @@ impl App {
     pub fn close_session(&mut self, id: Option<String>) {
         if !self.ready {
             self.transcript
-                .push(Role::Note, "Connect before closing a session".into());
+                .push(Role::Warning, "Connect before closing a session".into());
             return;
         }
         if !self.close_supported {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "The agent does not advertise session/close".into(),
             );
             return;
@@ -795,7 +796,7 @@ impl App {
         };
         if self.session.as_deref() == Some(&id) && !self.can_switch() {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Stop the running turn before closing its session".into(),
             );
             return;
@@ -806,24 +807,24 @@ impl App {
     pub fn delete_session(&mut self, id: String) {
         if id.is_empty() {
             self.transcript
-                .push(Role::Note, "Use /delete <session id>".into());
+                .push(Role::Warning, "Use /delete <session id>".into());
             return;
         }
         if !self.ready {
             self.transcript
-                .push(Role::Note, "Connect before deleting a session".into());
+                .push(Role::Warning, "Connect before deleting a session".into());
             return;
         }
         if !self.delete_supported {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "The agent does not advertise session/delete".into(),
             );
             return;
         }
         if self.session.as_deref() == Some(id.as_str()) && !self.can_switch() {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Stop the running turn before deleting its session".into(),
             );
             return;
@@ -1511,7 +1512,7 @@ impl App {
 
     fn prepare_prompt(&mut self, text: String) -> Option<Prompt> {
         if let Some(message) = self.prompt_setup_message() {
-            self.transcript.push(Role::Note, message.to_owned());
+            self.transcript.push(Role::Warning, message.to_owned());
             if !self.model_change_pending {
                 if self.provider_setup_message().is_some() {
                     self.show_provider_login();
@@ -1523,7 +1524,7 @@ impl App {
         }
         if self.attachment_reads > 0 {
             self.transcript.push(
-                Role::Note,
+                Role::Warning,
                 "Wait for the attachment to finish loading".into(),
             );
             return None;

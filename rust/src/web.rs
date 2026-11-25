@@ -328,7 +328,7 @@ fn bind_input(
                         crate::preferences::save(&preferences);
                     }
                     Some(LocalEffect::Attach(path)) if path.is_empty() => input.click(),
-                    Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Note(
+                    Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Warning(
                         "Use /attach to open the browser file chooser".into(),
                     )),
                     None => {}
