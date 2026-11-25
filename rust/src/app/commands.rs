@@ -29,15 +29,17 @@ impl App {
             "/help" => {
                 self.draft.submit();
                 let mut commands = vec![
-                    "Sessions  /sessions · /new · /load <id> · /close · /delete <id>".to_owned(),
+                    "Sessions  /agents · /new [path] · /load <id> · /close · /delete <id>"
+                        .to_owned(),
                     "Connection  /connect · /reconnect · /providers · /login · /mcp".to_owned(),
                     "Model  /models · /effort · /provider".to_owned(),
                     "Transcript  /thoughts · /find <text> · /copy · /todo".to_owned(),
                     "Composer  /attach · /detach · /queue · /edit-queue · /clear-queue".to_owned(),
-                    "Settings  /settings · /permissions · /theme · /sidebar".to_owned(),
+                    "Settings  /settings · /permissions · /yolo · /theme · /sidebar".to_owned(),
                     "Agent  /skills · /agent <command>".to_owned(),
                     String::new(),
                     "Tab  Complete a command or argument".to_owned(),
+                    "Ctrl+G  Open the Agents view".to_owned(),
                     "Click a header  Toggle reasoning or tool output".to_owned(),
                     "Ctrl+O  Toggle all tool output".to_owned(),
                     "Wheel / PgUp / PgDn  Scroll the transcript".to_owned(),
@@ -51,13 +53,17 @@ impl App {
                 self.transcript
                     .push(Role::Command("/help".into()), commands.join("\n"));
             }
-            "/sessions" | "/load" => {
+            "/agents" | "/sessions" | "/load" => {
                 self.draft.submit();
                 self.show_sessions();
             }
             "/new" => {
                 self.draft.submit();
                 self.new_session();
+            }
+            text if text.starts_with("/new ") => {
+                self.draft.submit();
+                self.new_session_at(Some(&text["/new ".len()..]));
             }
             "/sidebar" => {
                 self.draft.submit();
@@ -210,20 +216,19 @@ impl App {
                 self.transcript.push(
                     Role::Note,
                     format!(
-                        "Approval mode · {}\n/permissions ask · reads · all",
+                        "Session approval mode · {}\n/permissions ask · reads · all",
                         self.approval_mode.label()
                     ),
                 );
             }
+            "/yolo" => {
+                self.draft.submit();
+                self.set_approval_mode(ApprovalMode::All);
+            }
             text if text.starts_with("/permissions ") => {
                 self.draft.submit();
                 match ApprovalMode::parse(text["/permissions ".len()..].trim()) {
-                    Some(mode) => {
-                        let label = mode.label().to_owned();
-                        self.set_approval_mode(mode);
-                        self.transcript
-                            .push(Role::Note, format!("Approval mode · {label}"));
-                    }
+                    Some(mode) => self.set_approval_mode(mode),
                     None => self
                         .transcript
                         .push(Role::Warning, "Use /permissions ask · reads · all".into()),
@@ -320,7 +325,7 @@ impl App {
             }
             text if text.starts_with("/connect ") => {
                 self.draft.set_text("");
-                if !self.can_switch() {
+                if self.turns > 0 || self.remote_busy() || self.preparing_switch {
                     self.transcript.push(
                         Role::Error,
                         "Stop the running turn before changing the connection".into(),
@@ -483,12 +488,7 @@ impl App {
                 .transcript
                 .push(Role::Note, format!("Theme · {}", theme::NAMES.join(" · "))),
             ("permissions", Some(value)) => match ApprovalMode::parse(value) {
-                Some(mode) => {
-                    let label = mode.label().to_owned();
-                    self.set_approval_mode(mode);
-                    self.transcript
-                        .push(Role::Note, format!("Approval mode · {label}"));
-                }
+                Some(mode) => self.set_approval_mode(mode),
                 None => self
                     .transcript
                     .push(Role::Warning, "Use ask, reads or all".into()),

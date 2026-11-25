@@ -6,10 +6,10 @@ import asyncio
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import isawaitable
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic
+from typing import TYPE_CHECKING, Generic, Literal
 from uuid import uuid4
 
 import acp
@@ -95,13 +95,16 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         return {
             "sessionId": self.session_id,
             "revision": self._revision,
-            "status": ("waiting" if self._runtime.interactions.waiting else "running")
-            if self._active is not None
-            else "idle",
+            "status": self.execution_status(),
             "activeTurnId": self._active.turn_id if self._active else None,
             "lastOutcome": self._last_outcome,
             "lastUsage": self._last_usage,
         }
+
+    def execution_status(self) -> Literal["idle", "running", "waiting"]:
+        if self._active is None:
+            return "running" if self._queue else "idle"
+        return "waiting" if self._runtime.interactions.waiting else "running"
 
     def _publish(self) -> None:
         self._revision += 1
@@ -272,12 +275,16 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         usage_limits: UsageLimits | None,
         tool_presenter: ToolCallPresenter | None,
         mcp_capabilities: schema.McpCapabilities | None,
+        workspace_root: Path | None,
     ) -> None:
         self._server = server
         self.agent_id = agent_id
         self._factory = factory
         self._deps = deps
         self.store = session_store
+        self._workspace_root = workspace_root.resolve(strict=True) if workspace_root else None
+        if self._workspace_root is not None and not self._workspace_root.is_dir():
+            raise ValueError("The workspace root must be a directory")
         self.resolver = model_resolver
         self._session_config = session_config
         self._attachment_config = attachment_config
@@ -325,12 +332,26 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
     ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
         self._server._require_running()
         context = SessionContext(
-            agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
+            agent_id=self.agent_id, session_id=uuid4().hex, cwd=self.workspace_path(cwd)
         )
         await self.store.create(context.session_id, cwd=context.cwd, principal=principal)
         runtime = await self._make_runtime(context)
         await runtime.create(context.session_id, context.cwd)
         return self._remember(runtime)
+
+    def workspace_path(self, cwd: str) -> str:
+        path = Path(cwd)
+        if not path.is_absolute():
+            raise ValueError("Enter an absolute workspace path on the server")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ValueError("The workspace directory is unavailable") from error
+        if not resolved.is_dir():
+            raise ValueError("The workspace path must be a directory")
+        if self._workspace_root is not None and not resolved.is_relative_to(self._workspace_root):
+            raise ValueError(f"Choose a workspace under {self._workspace_root}")
+        return str(resolved)
 
     async def get_session(
         self, session_id: str, *, principal: PrincipalT | None = None
@@ -345,10 +366,11 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                 raise KeyError(session_id)
             if session_id in self._sessions:
                 return self._sessions[session_id]
+            cwd = self.workspace_path(stored.cwd)
             runtime = await self._make_runtime(
-                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd)
+                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=cwd)
             )
-            await runtime.restore(session_id, stored)
+            await runtime.restore(session_id, replace(stored, cwd=cwd))
             return self._remember(runtime)
 
     async def cancel_session(self, session_id: str) -> None:
@@ -400,6 +422,7 @@ class AcpServer(Generic[PrincipalT]):
         usage_limits: UsageLimits | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         mcp_capabilities: schema.McpCapabilities | None = None,
+        workspace_root: Path | None = None,
     ) -> RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT]:
         if self._started:
             raise RuntimeError("register agents before starting the server")
@@ -427,6 +450,7 @@ class AcpServer(Generic[PrincipalT]):
             usage_limits=usage_limits,
             tool_presenter=tool_presenter,
             mcp_capabilities=mcp_capabilities,
+            workspace_root=workspace_root,
         )
         self._registrations[agent_id] = _RegistrationEntry(
             registration.connection, registration.close, registration._views, registration.store

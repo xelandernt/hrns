@@ -1,3 +1,4 @@
+mod agents_view;
 mod commands;
 #[cfg(not(target_family = "wasm"))]
 mod file_completion;
@@ -5,7 +6,7 @@ mod picker;
 mod providers;
 mod render;
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{
@@ -23,7 +24,7 @@ use crate::composer::Composer;
 use crate::elicitation::FormState;
 use crate::mcp_types::{ConsentDecision, Health};
 use crate::options;
-use crate::preferences::{ApprovalMode, Preferences};
+use crate::preferences::{ApprovalKey, ApprovalMode, Preferences};
 use crate::skills::{self, Skill};
 use crate::theme::{self, Palette};
 use crate::transcript::{ManualApproval, Role, Transcript};
@@ -41,7 +42,6 @@ pub enum LocalEffect {
 pub struct Startup {
     pub client_io: ClientIoMode,
     pub theme: Option<String>,
-    pub permission: Option<ApprovalMode>,
 }
 
 impl Default for Startup {
@@ -49,7 +49,6 @@ impl Default for Startup {
         Self {
             client_io: ClientIoMode::Off,
             theme: None,
-            permission: None,
         }
     }
 }
@@ -77,6 +76,7 @@ pub enum Key {
     BackTab,
     ToggleTools,
     ToggleSidebar,
+    Agents,
     Reconnect,
     Escape,
 }
@@ -118,6 +118,13 @@ struct PendingApproval {
     detail_scroll: usize,
 }
 
+#[derive(Default)]
+struct SessionInput {
+    draft: Composer,
+    queue: VecDeque<Prompt>,
+    attachments: Vec<Attachment>,
+}
+
 pub struct PendingMcpConsent {
     pub name: String,
     pub transport: String,
@@ -127,7 +134,8 @@ pub struct PendingMcpConsent {
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "List commands"),
-    ("/sessions", "Search and resume saved sessions"),
+    ("/agents", "Open the Agents view"),
+    ("/sessions", "Open the Agents view"),
     ("/new", "Start a new session"),
     ("/load", "Load a session by id"),
     ("/close", "Close a session"),
@@ -139,6 +147,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/login", "Sign in to the selected local provider"),
     ("/provider", "Add, edit or remove a provider"),
     ("/permissions", "Show or set the approval mode"),
+    ("/yolo", "Auto-approve tools in this session"),
     ("/settings", "Show or set terminal settings"),
     ("/theme", "Show or select a theme"),
     ("/mcp", "Show MCP server health"),
@@ -176,10 +185,12 @@ pub struct App {
     load_supported: bool,
     close_supported: bool,
     delete_supported: bool,
+    managed_sessions: bool,
+    session_inputs: HashMap<String, SessionInput>,
     provider_editor: bool,
     provider_routing: bool,
     loaded: bool,
-    replay_from: Option<usize>,
+    preparing_switch: bool,
     draft: Composer,
     transcript: Transcript,
     transcript_area: Rect,
@@ -219,6 +230,7 @@ pub struct App {
     preferences: Preferences,
     theme: String,
     approval_mode: ApprovalMode,
+    approval_preference: Option<ApprovalKey>,
     client_io: ClientIoMode,
     activity: VecDeque<String>,
     actions: mpsc::UnboundedSender<Action>,
@@ -238,10 +250,6 @@ impl App {
             .clone()
             .or(startup.theme)
             .unwrap_or_else(|| "hrns".into());
-        let approval_mode = preferences
-            .permission_mode
-            .or(startup.permission)
-            .unwrap_or_default();
         Self {
             destination,
             workspace: None,
@@ -260,10 +268,12 @@ impl App {
             load_supported: false,
             close_supported: false,
             delete_supported: false,
+            managed_sessions: false,
+            session_inputs: HashMap::new(),
             provider_editor: false,
             provider_routing: false,
             loaded: false,
-            replay_from: None,
+            preparing_switch: false,
             draft: Composer::default(),
             transcript,
             transcript_area: Rect::default(),
@@ -302,7 +312,8 @@ impl App {
             session_request: 0,
             preferences,
             theme,
-            approval_mode,
+            approval_mode: ApprovalMode::Ask,
+            approval_preference: None,
             client_io: startup.client_io,
             activity: VecDeque::new(),
             actions,
@@ -317,6 +328,7 @@ impl App {
         match event {
             Event::Ready {
                 session,
+                approval_scope,
                 workspace,
                 remote,
                 attachments_supported,
@@ -324,17 +336,24 @@ impl App {
                 load_supported,
                 close_supported,
                 delete_supported,
+                managed_sessions,
                 provider_editor,
                 provider_routing,
                 execution,
             } => {
-                if let Some(from) = self.replay_from.take() {
-                    self.transcript.replace(from);
-                }
+                let key = ApprovalKey::new(&approval_scope, &session);
+                self.approval_mode = if loaded {
+                    key.load()
+                } else {
+                    ApprovalMode::Ask
+                };
+                self.approval_preference = Some(key);
+                self.transcript.commit_replay();
                 self.attachments_supported = attachments_supported;
                 self.load_supported = load_supported;
                 self.close_supported = close_supported;
                 self.delete_supported = delete_supported;
+                self.managed_sessions = managed_sessions;
                 self.provider_editor = provider_editor;
                 self.provider_routing = provider_routing;
                 self.reasoning_tokens = None;
@@ -346,7 +365,9 @@ impl App {
                 self.remote = remote;
                 if self.session.as_deref() != Some(&session) {
                     self.selected_provider = None;
-                    if self.session.is_some() {
+                    if self.managed_sessions {
+                        self.restore_session_input(&session);
+                    } else if self.session.is_some() {
                         self.clear_queue_for_switch();
                     }
                     self.plan.clear();
@@ -399,6 +420,15 @@ impl App {
                 self.flush_queue();
             }
             Event::Sessions { request_id, result } => self.sessions_received(request_id, result),
+            Event::SwitchPrepared(result) => {
+                self.preparing_switch = false;
+                match result {
+                    Ok(target) => self.connect_session(target),
+                    Err(error) => self.transcript.push(Role::Error, error),
+                }
+            }
+            #[cfg(not(target_family = "wasm"))]
+            Event::QuitChecked(_) | Event::QuitStopped(_) => {}
             Event::AgentCommands(commands) => self.commands = commands,
             Event::Skills(skills) => {
                 self.skills = skills;
@@ -469,6 +499,7 @@ impl App {
                 }
             }
             Event::SessionDeleted(id) => {
+                self.session_inputs.remove(&id);
                 self.transcript
                     .push(Role::Note, format!("Deleted session {id}"));
                 if self.session.as_deref() == Some(&id) {
@@ -490,10 +521,8 @@ impl App {
             Event::Note(text) => self.transcript.push(Role::Note, text),
             Event::Warning(text) => self.transcript.push(Role::Warning, text),
             Event::Error(text) => {
-                if !self.ready
-                    && let Some(from) = self.replay_from.take()
-                {
-                    self.transcript.trim(from);
+                if !self.ready {
+                    self.transcript.cancel_replay();
                 }
                 self.transcript.push(Role::Error, text);
             }
@@ -514,6 +543,9 @@ impl App {
                 }
             }
             Event::Disconnected => {
+                self.approval_mode = ApprovalMode::Ask;
+                self.approval_preference = None;
+                self.preparing_switch = false;
                 self.model_change_pending = false;
                 self.sessions_received(
                     self.session_request,
@@ -521,8 +553,7 @@ impl App {
                 );
                 self.replay_plan = None;
                 self.providers = None;
-                if let Some(from) = self.replay_from.take() {
-                    self.transcript.trim(from);
+                if self.transcript.cancel_replay() {
                     self.transcript
                         .push(Role::Warning, "The session did not finish loading".into());
                 }
@@ -538,6 +569,8 @@ impl App {
                 self.trim_activity();
             }
             Event::ConnectionChanged(destination) => {
+                self.approval_mode = ApprovalMode::Ask;
+                self.approval_preference = None;
                 self.mcp_grants.clear();
                 self.destination = destination;
                 self.workspace = None;
@@ -546,7 +579,7 @@ impl App {
                 self.mode = None;
                 self.loaded = false;
                 self.ready = false;
-                self.replay_from = Some(self.transcript.len());
+                self.transcript.begin_replay();
                 self.replay_plan = None;
                 self.plan.clear();
                 self.todo_auto_opened = false;
@@ -561,6 +594,8 @@ impl App {
                 self.load_supported = false;
                 self.close_supported = false;
                 self.delete_supported = false;
+                self.managed_sessions = false;
+                self.session_inputs.clear();
                 self.provider_editor = false;
                 self.provider_routing = false;
                 self.providers = None;
@@ -570,6 +605,8 @@ impl App {
                 self.refresh_completion();
             }
             Event::Connecting => {
+                self.approval_mode = ApprovalMode::Ask;
+                self.approval_preference = None;
                 self.model_change_pending = false;
                 self.ready = false;
                 self.turns = 0;
@@ -577,8 +614,20 @@ impl App {
                 self.clear_approvals();
                 self.elicitations.clear();
                 self.mcp_consent.clear();
+                if self.transcript.replaying() {
+                    self.transcript.begin_replay();
+                    self.session_title = None;
+                    self.usage = None;
+                    self.usage_cost = None;
+                    self.last_usage_tokens = None;
+                }
                 self.status = "Reconnecting";
                 self.refresh_completion();
+            }
+            #[cfg(not(target_family = "wasm"))]
+            Event::SwitchReplayReset => {
+                self.transcript.retry_replay();
+                self.replay_plan = None;
             }
             Event::McpConsent {
                 name,
@@ -629,7 +678,9 @@ impl App {
     }
 
     fn request_permission(&mut self, request: PermissionRequest) {
-        if let Some(answer) = self.auto_permission(&request) {
+        if self.ready
+            && let Some(answer) = self.auto_permission(&request)
+        {
             let _ = request.respond.send(answer);
             return;
         }
@@ -673,6 +724,10 @@ impl App {
     }
 
     pub fn paste(&mut self, text: &str) {
+        if self.picker.as_ref().is_some_and(picker::Picker::is_agents) {
+            self.paste_into_picker(text);
+            return;
+        }
         if self.elicitations.front().is_some() {
             if let Some(pending) = self.elicitations.front_mut() {
                 pending.state.insert(text);
@@ -686,16 +741,22 @@ impl App {
             dialog.paste(text);
             return;
         }
+        if self.picker.is_some() {
+            self.paste_into_picker(text);
+            return;
+        }
+        self.draft.insert(text);
+        self.refresh_completion();
+    }
+
+    fn paste_into_picker(&mut self, text: &str) {
         if let Some(picker) = &mut self.picker {
             picker
                 .query
                 .extend(text.chars().filter(|ch| !ch.is_control()));
             picker.selected = 0;
             self.maybe_page_sessions();
-            return;
         }
-        self.draft.insert(text);
-        self.refresh_completion();
     }
 
     pub fn take_local_effect(&mut self) -> Option<LocalEffect> {
@@ -708,48 +769,57 @@ impl App {
                 .push(Role::Note, "The connection is already open".into());
             return;
         }
-        if self.loaded {
-            self.replay_from = Some(self.transcript.len());
+        if self.loaded || (self.load_supported && self.session.is_some()) {
+            self.transcript.begin_replay();
         }
         self.status = "Reconnecting";
         self.local_effect = Some(LocalEffect::Reconnect);
     }
 
     pub fn new_session(&mut self) {
-        if !self.can_switch() {
-            self.transcript.push(
-                Role::Warning,
-                "Stop the running turn before switching sessions".into(),
-            );
+        self.new_session_at(None);
+    }
+
+    fn new_session_at(&mut self, path: Option<&str>) {
+        if !self.prepare_session_switch() {
             return;
         }
-        let Some(workspace) = self.workspace.clone() else {
+        let Some(mut workspace) = self.workspace.clone() else {
             self.transcript.push(
                 Role::Warning,
                 "Connect once so the new session has a workspace".into(),
             );
             return;
         };
-        self.loaded = false;
-        self.ready = false;
-        self.replay_from = Some(self.transcript.len());
-        self.status = "Connecting";
-        self.session_title = None;
-        self.usage = None;
-        self.usage_cost = None;
-        self.plan.clear();
-        self.local_effect = Some(LocalEffect::Switch(SessionTarget {
+        if let Some(path) = path {
+            if !self.managed_sessions {
+                self.transcript.push(
+                    Role::Warning,
+                    "Selecting a workspace requires a Harness server".into(),
+                );
+                return;
+            }
+            if self.remote {
+                workspace = PathBuf::from(path);
+            } else {
+                workspace.push(path);
+            }
+        }
+        self.switch_session(SessionTarget {
             cwd: Some(workspace),
             session: None,
-        }));
+        });
     }
 
     pub fn load_session(&mut self, id: String) {
-        if !self.can_switch() {
-            self.transcript.push(
-                Role::Warning,
-                "Stop the running turn before switching sessions".into(),
-            );
+        self.load_session_at(id, None);
+    }
+
+    fn load_session_at(&mut self, id: String, cwd: Option<PathBuf>) {
+        if self.session.as_deref() == Some(&id) && self.ready {
+            return;
+        }
+        if !self.prepare_session_switch() {
             return;
         }
         if !self.load_supported {
@@ -759,18 +829,84 @@ impl App {
             );
             return;
         }
-        self.loaded = true;
-        self.ready = false;
-        self.replay_from = Some(self.transcript.len());
-        self.status = "Connecting";
-        self.local_effect = Some(LocalEffect::Switch(SessionTarget {
-            cwd: None,
+        self.switch_session(SessionTarget {
+            cwd,
             session: Some(id),
-        }));
+        });
+    }
+
+    fn switch_session(&mut self, target: SessionTarget) {
+        if self.managed_sessions && self.ready {
+            self.preparing_switch = self
+                .actions
+                .unbounded_send(Action::PrepareSwitch(target))
+                .is_ok();
+        } else {
+            self.connect_session(target);
+        }
+    }
+
+    fn connect_session(&mut self, target: SessionTarget) {
+        self.ready = false;
+        self.status = "Connecting";
+        self.transcript.begin_replay();
+        self.local_effect = Some(LocalEffect::Switch(target));
     }
 
     fn can_switch(&self) -> bool {
-        self.turns == 0 && !self.remote_busy()
+        self.managed_sessions || (self.turns == 0 && !self.remote_busy())
+    }
+
+    fn prepare_session_switch(&mut self) -> bool {
+        let message = if self.preparing_switch || (self.transcript.replaying() && !self.ready) {
+            "Wait for the current session to connect"
+        } else if self.attachment_reads > 0 {
+            "Wait for the attachment to finish loading"
+        } else if !self.can_switch() {
+            "Stop the running turn before switching sessions"
+        } else {
+            return true;
+        };
+        self.transcript.push(Role::Warning, message.into());
+        false
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn local_attachment_path(&self, path: PathBuf) -> PathBuf {
+        if !self.remote
+            && let Some(workspace) = &self.workspace
+        {
+            return workspace.join(path);
+        }
+        path
+    }
+
+    fn restore_session_input(&mut self, session: &str) {
+        let Some(previous) = self.session.as_ref() else {
+            return;
+        };
+        let input = self.session_inputs.remove(session).unwrap_or_default();
+        self.session_inputs.insert(
+            previous.clone(),
+            SessionInput {
+                draft: std::mem::replace(&mut self.draft, input.draft),
+                queue: std::mem::replace(&mut self.queue, input.queue),
+                attachments: std::mem::replace(&mut self.attachments, input.attachments),
+            },
+        );
+        self.completion = None;
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn check_quit(&self) -> bool {
+        self.managed_sessions
+            && self.ready
+            && self.actions.unbounded_send(Action::CheckQuit).is_ok()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn stop_for_quit(&self) -> bool {
+        self.ready && self.actions.unbounded_send(Action::StopForQuit).is_ok()
     }
 
     pub fn close_session(&mut self, id: Option<String>) {
@@ -794,7 +930,7 @@ impl App {
                 .push(Role::Note, "There is no current session to close".into());
             return;
         };
-        if self.session.as_deref() == Some(&id) && !self.can_switch() {
+        if self.session.as_deref() == Some(&id) && (self.turns > 0 || self.remote_busy()) {
             self.transcript.push(
                 Role::Warning,
                 "Stop the running turn before closing its session".into(),
@@ -939,6 +1075,18 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) {
+        if matches!(key, Key::Agents) {
+            if self.picker.as_ref().is_some_and(picker::Picker::is_agents) {
+                self.picker = None;
+            } else {
+                self.show_sessions();
+            }
+            return;
+        }
+        if self.picker.as_ref().is_some_and(picker::Picker::is_agents) {
+            self.picker_key(key);
+            return;
+        }
         if self.mcp_consent.front().is_some() {
             self.mcp_consent_key(key);
             return;
@@ -1029,6 +1177,7 @@ impl App {
             Key::LatestOutput => self.transcript.follow(),
             Key::ToggleTools => self.transcript.toggle_tools(),
             Key::ToggleSidebar => self.toggle_sidebar(),
+            Key::Agents => {}
             Key::Reconnect => self.reconnect(),
             Key::Escape
                 if self.status != "Cancelling" && (self.turns > 0 || self.remote_busy()) =>
@@ -1323,9 +1472,24 @@ impl App {
     }
 
     pub fn set_approval_mode(&mut self, mode: ApprovalMode) {
+        let Some(key) = self.approval_preference.as_ref().filter(|_| self.ready) else {
+            self.transcript.push(
+                Role::Warning,
+                "Open a session before changing its approval mode".into(),
+            );
+            return;
+        };
         self.approval_mode = mode;
-        self.preferences.permission_mode = Some(mode);
-        self.save_preferences();
+        self.transcript.push(
+            Role::Note,
+            format!("Session approval mode · {}", mode.label()),
+        );
+        if let Err(error) = key.save(mode) {
+            self.transcript.push(
+                Role::Warning,
+                format!("Could not save this session's approval mode ({error})"),
+            );
+        }
     }
 
     fn save_preferences(&mut self) {
@@ -1562,6 +1726,9 @@ impl App {
     }
 
     fn send_prompt(&mut self, prompt: Prompt) -> Result<(), Prompt> {
+        if self.preparing_switch {
+            return Err(prompt);
+        }
         let mut displayed = prompt.text.clone();
         for attachment in &prompt.attachments {
             displayed.push_str(&format!("\n[Attachment: {}]", attachment.name));

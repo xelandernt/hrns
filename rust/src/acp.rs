@@ -61,6 +61,18 @@ pub enum ExecutionStatus {
     Waiting,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActivity {
+    pub status: ExecutionStatus,
+    pub attached_elsewhere: bool,
+}
+
+pub fn session_activity(info: &SessionInfo) -> Option<SessionActivity> {
+    let activity = info.meta.as_ref()?.get("hrns/session/activity")?;
+    SessionActivity::deserialize(activity).ok()
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnUsage {
@@ -118,12 +130,14 @@ impl ClientIoMode {
 }
 
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Services {
     pub client_io: ClientIoMode,
+    pub approval_scope: String,
     pub mcp_config: Option<PathBuf>,
     pub remote: bool,
     pub local_provider_management: bool,
+    pub managed_sessions: bool,
     #[cfg(not(target_family = "wasm"))]
     pub effort_profile: Option<crate::effort::EffortProfile>,
 }
@@ -142,6 +156,11 @@ pub enum Action {
         cursor: Option<String>,
         cwd: Option<PathBuf>,
     },
+    PrepareSwitch(SessionTarget),
+    #[cfg(not(target_family = "wasm"))]
+    CheckQuit,
+    #[cfg(not(target_family = "wasm"))]
+    StopForQuit,
     CloseSession(String),
     DeleteSession(String),
     ListProviders,
@@ -242,6 +261,7 @@ pub struct ProviderLoginState {
 pub enum Event {
     Ready {
         session: String,
+        approval_scope: String,
         workspace: PathBuf,
         remote: bool,
         attachments_supported: bool,
@@ -249,6 +269,7 @@ pub enum Event {
         load_supported: bool,
         close_supported: bool,
         delete_supported: bool,
+        managed_sessions: bool,
         provider_editor: bool,
         provider_routing: bool,
         execution: Option<ExecutionState>,
@@ -280,6 +301,11 @@ pub enum Event {
         request_id: u64,
         result: Result<SessionPage, String>,
     },
+    SwitchPrepared(Result<SessionTarget, String>),
+    #[cfg(not(target_family = "wasm"))]
+    QuitChecked(Result<bool, String>),
+    #[cfg(not(target_family = "wasm"))]
+    QuitStopped(Result<(), String>),
     SessionClosed(String),
     SessionDeleted(String),
     Tool {
@@ -296,6 +322,8 @@ pub enum Event {
     },
     Error(String),
     Connecting,
+    #[cfg(not(target_family = "wasm"))]
+    SwitchReplayReset,
     ConnectionChanged(String),
     Disconnected,
     Permission(PermissionRequest),
@@ -426,6 +454,10 @@ pub async fn connect(
                 .and_then(|meta| meta.get("hrns/providers/manage"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let managed_sessions = services.managed_sessions && initialized.meta.as_ref()
+                .and_then(|meta| meta.get("hrns/session/activity"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let caps = initialized.agent_capabilities;
             let provider_routing = !provider_editor && caps.providers.is_some();
             let loaded = target.session.is_some();
@@ -493,6 +525,7 @@ pub async fn connect(
                 .and_then(|state| serde_json::from_value(state).ok());
             let _ = events.unbounded_send(Event::Ready {
                 session: session.session_id().to_string(),
+                approval_scope: services.approval_scope,
                 workspace: cwd,
                 remote: services.remote,
                 attachments_supported: caps.prompt_capabilities.embedded_context,
@@ -500,6 +533,7 @@ pub async fn connect(
                 load_supported,
                 close_supported,
                 delete_supported,
+                managed_sessions,
                 provider_editor,
                 provider_routing,
                 execution,
@@ -600,6 +634,30 @@ pub async fn connect(
                                 }).map_err(|error| error.message)
                             };
                             let _ = events.unbounded_send(Event::Sessions { request_id, result });
+                        }
+                        Some(Action::PrepareSwitch(target)) => {
+                            let result = flush_prompts(session.connection()).await
+                                .map(|()| target).map_err(|error| request_error(&error));
+                            let _ = events.unbounded_send(Event::SwitchPrepared(result));
+                        }
+                        #[cfg(not(target_family = "wasm"))]
+                        Some(Action::CheckQuit) => {
+                            let result = tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                only_active_session(session.connection(), session.session_id()),
+                            ).await
+                                .map_err(|_| "Timed out checking running sessions".to_owned())
+                                .and_then(|result| result.map_err(|error| request_error(&error)));
+                            let _ = events.unbounded_send(Event::QuitChecked(result));
+                        }
+                        #[cfg(not(target_family = "wasm"))]
+                        Some(Action::StopForQuit) => {
+                            let result = session.connection()
+                                .send_request(CloseSessionRequest::new(session.session_id().clone()))
+                                .block_task().await
+                                .map(|_| ())
+                                .map_err(|error| request_error(&error));
+                            let _ = events.unbounded_send(Event::QuitStopped(result));
                         }
                         Some(Action::CloseSession(id)) => {
                             let event = if !close_supported {
@@ -1041,6 +1099,59 @@ async fn find_workspace(
         }
         cursor = Some(next);
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn only_active_session(
+    connection: &ConnectionTo<Agent>,
+    current: &SessionId,
+) -> Result<bool, Error> {
+    flush_prompts(connection).await?;
+    let mut cursor = None;
+    let mut visited = HashSet::new();
+    let mut current_active = false;
+    loop {
+        let page = connection
+            .send_request(ListSessionsRequest::new().cursor(cursor))
+            .block_task()
+            .await?;
+        for info in &page.sessions {
+            if session_activity(info)
+                .is_some_and(|activity| !matches!(activity.status, ExecutionStatus::Idle))
+            {
+                if &info.session_id != current {
+                    return Ok(false);
+                }
+                current_active = true;
+            }
+        }
+        let Some(next) = page.next_cursor else {
+            return Ok(current_active);
+        };
+        if !visited.insert(next.clone()) {
+            return Err(Error::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Repeated session-list cursor",
+            ));
+        }
+        cursor = Some(next);
+    }
+}
+
+async fn flush_prompts(connection: &ConnectionTo<Agent>) -> Result<(), Error> {
+    let request = UntypedMessage::new("_hrns/session/flush", serde_json::json!({}))?;
+    connection.send_request(request).block_task().await?;
+    Ok(())
+}
+
+pub fn request_error(error: &Error) -> String {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.message.clone())
 }
 
 fn needs_workspace() -> Error {

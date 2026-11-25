@@ -28,7 +28,6 @@ from .shared.config import (
     McpServerSettings,
     Profile,
     default_config_path,
-    project_config_path,
 )
 from .shared.config.credentials import provider_credential_account, secret_ref, stored_secret
 from .shared.config.mcp import (
@@ -54,10 +53,7 @@ ConfigOption = Annotated[
     Parameter(
         name=["--config", "--config-file"],
         metavar="PATH",
-        help=(
-            "Read one configuration file instead of merging the user and project "
-            "documents. Also HRNS_CONFIG_FILE."
-        ),
+        help="Select a configuration file. Also HRNS_CONFIG_FILE.",
     ),
 ]
 RepeatedStringOption = Annotated[list[str] | None, Parameter(negative_iterable=())]
@@ -243,8 +239,14 @@ def _agent_command(
     ] = False,
     catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
     cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+    local_endpoint: Annotated[bool, Parameter(show=False)] = False,
 ) -> int:
     _require_server_extra()
+    if local_endpoint:
+        from .local_server import print_endpoint
+
+        print_endpoint(config=config, env_only=env_only, cwd=cwd)
+        return EXIT_OK
     from .server.runtime import run as run_agent
 
     run_agent(config=config, env_only=env_only, catalog=catalog, cwd=cwd)
@@ -271,7 +273,7 @@ def _serve_command(
     model: Annotated[
         str | None, Parameter(help="Pydantic AI model id; defaults to HRNS_MODEL.")
     ] = None,
-    cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
+    cwd: Annotated[str, Parameter(help="Root directory allowed for session workspaces.")] = ".",
     host: str = "127.0.0.1",
     port: int = 8000,
 ) -> int:
@@ -290,7 +292,14 @@ def _serve_command(
     from .server.agent import build_agent
 
     server = AcpServer[None]()
-    server.add_agent("agent", factory=lambda _session: build_agent(model, cwd=cwd))
+    workspace_root = Path(cwd).expanduser().resolve()
+    if not workspace_root.is_dir():
+        raise HrnsClientError("The server workspace root must be an existing directory.")
+    server.add_agent(
+        "agent",
+        factory=lambda session: build_agent(model, cwd=session.cwd),
+        workspace_root=workspace_root,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -479,7 +488,7 @@ def build_parser() -> App:
 
 
 def _config(args: SimpleNamespace) -> HrnsConfig:
-    """Read the configuration; no explicit file means the user and project merge."""
+    """Read the selected or default configuration."""
     path = getattr(args, "config", None)
     return HrnsConfig(config_file=path) if path is not None else HrnsConfig()
 
@@ -543,12 +552,8 @@ def _config_sources(settings: HrnsConfig, *, explicit: bool) -> tuple[_ConfigSou
         path = settings.config_file.expanduser().absolute()
         kind = "selected" if explicit else "environment"
         return (_ConfigSource(path=path, kind=kind, exists=path.is_file()),)
-    project = project_config_path().expanduser().absolute()
     user = default_config_path().expanduser().absolute()
-    return (
-        _ConfigSource(path=project, kind="project", exists=project.is_file()),
-        _ConfigSource(path=user, kind="user", exists=user.is_file()),
-    )
+    return (_ConfigSource(path=user, kind="user", exists=user.is_file()),)
 
 
 def _config_show_command(
@@ -1063,7 +1068,6 @@ def _command_connect(args: SimpleNamespace) -> int:
         explicit_cwd=args.cwd,
         client_io=client_io or "all",
         theme=config.tui.theme,
-        permission_mode=config.tui.permission_mode,
         config=config,
     )
 

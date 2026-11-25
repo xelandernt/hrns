@@ -47,8 +47,9 @@ all.
 
 The preview in `rust/` shares its composer, transcript and ACP v1 client across
 native Ratatui and Ratzilla. The protocol uses the official Rust ACP SDK. Native
-launches stdio agents using the SDK and connects to remote agents with
-Tungstenite. The browser uses its WebSocket API through `ws_stream_wasm`.
+launches external stdio agents using the SDK and connects to local and remote
+Harness servers with Tungstenite. The browser uses its WebSocket API through
+`ws_stream_wasm`.
 Both WebSocket adapters send one SDK JSON-RPC frame per text message through
 the Python ACP mount. Host arguments and browser services stay outside the
 shared application state. ACP work is driven on a native worker thread or
@@ -135,9 +136,8 @@ protocol errors through the MCP health view.
 The native upstream transport negotiates MCP 2026-07-28. HTTP credentials
 can be passed through configured headers. The native client asks before
 starting an enabled server unless its configuration already grants consent.
-`always allow` updates the local TOML file. The built-in agent can launch
-locally through ACP stdio and consumes the same declarations as a remote
-agent. Browser sessions do not provide client-configured MCP servers.
+`always allow` updates the local TOML file. Local and remote Harness servers
+consume the same declarations. Browser sessions omit client MCP capabilities.
 
 Agent forms (`elicitation/create`) render as a dock above the composer. A form
 walks its fields in order: typing edits text and number fields, `1`-`6` choose,
@@ -159,16 +159,16 @@ sends queued prompts once the session is idle. Submitted prompts are tracked
 by the server.
 
 The same supervisor replaces a live connection when the composer asks for a new
-or saved session. `/new` reconnects with the current workspace and `/load <id>`
-reconnects with the saved session ID, which the client resolves through
-paginated `session/list` when no workspace is supplied. `/close` and `/delete`
+or saved session. `/new` uses the current workspace and `/new <path>` selects
+another workspace on a Harness server. `/load <id>` resolves the workspace
+through paginated `session/list` when no workspace is supplied. `/close` and `/delete`
 use the capabilities advertised at initialize; closing or deleting the current
 session starts a new one, while acting on another session leaves the current
 one attached. A switch opens a replay window: the client keeps the old
 transcript until the new connection's `Ready`, then drops the old prefix so
-restored history is not duplicated. A failed load rolls back to the old
-prefix, and its error is reported after the restored transcript. New sessions
-clear the transcript rather than replay it.
+restored history is not duplicated. The native supervisor returns to the prior
+session when a switch on a persistent server fails. Each session's draft, staged
+attachments, and unsent local queue stay in the TUI until it exits.
 
 Transcript entries keep their plain text for search and copy. Agent and thought
 entries render a small Markdown subset at draw time: fenced code, inline code,
@@ -214,7 +214,7 @@ in the composer on Enter, including when used as the first token after
 local command completions, while a `$token` offers user-invocable skills from the agent's
 `hrns/skills` metadata. `Tab` accepts the selected row, Up and Down move the
 selection while it is open, and Escape dismisses it before cancelling a turn.
-On native stdio connections, `@` at the start of the token under the cursor
+On local native connections, `@` at the start of the token under the cursor
 starts a file search in the active session workspace. A background walk indexes
 regular files, respects ignore rules, and skips hidden entries and symlinks.
 Up and Down browse the ranked paths. Tab or Enter replaces the active token
@@ -222,10 +222,10 @@ with an `@` reference to a workspace-relative path, quoting the path when
 needed. The composer uses separate theme colors for recognized commands,
 exact file matches, and user-invocable skill mentions.
 The reference travels as ordinary prompt text so the agent can read the file on
-demand. WebSocket sessions accept manually entered paths.
+demand. Remote sessions accept manually entered paths.
 `/skills` uses the shared picker to browse the user-invocable catalog with Up and
 Down. The detail area shows the selected skill's description and the directory
-from its ACP `path` on stdio connections. WebSocket connections show a remote
+from its ACP `path` on local connections. Remote connections show a remote
 source label. Enter inserts the `$id` mention into the composer for the next prompt.
 Submitting a draft that names a catalog skill attaches the skill id and mention
 span to the first text block's `_meta`, leaving the typed text unchanged for
@@ -242,8 +242,13 @@ touching connection configuration: native writes JSON under
 local storage. The activity sidebar is suppressed below 96 columns. The status
 bar shows the connection and contextual keyboard hints. When space allows it
 also shows the session, model, context usage, cost, effort and approvals.
-`/theme`, `/permissions`, `/settings` and the `theme` and
-`permission` page parameters expose the same values. The built-in themes are
+`/theme`, `/settings`, and the `theme` page parameter expose theme settings.
+Approval mode starts in Ask for each new session. `/permissions` and `/yolo`
+change the current session only. The TUI saves the mode on the device under a
+key derived from the connection identity and session ID. Native writes each
+entry atomically alongside the TUI state, and the browser uses local storage
+in its current origin. Local daemon identity uses the session store instead
+of the daemon's transient port. The built-in themes are
 `hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
 
 ACP plan snapshots populate the Todos panel with completion counts, item
@@ -293,13 +298,28 @@ WebSocket connections use TLS outside loopback. Native startup bearer
 credentials stay scoped to the startup endpoint. Switching creates a session
 and clears local prompts queued for the previous session.
 
-`/sessions` searches paged ACP session summaries by title, ID and workspace.
-Tab switches between the current workspace and all accessible workspaces.
-The picker shows the latest activity timestamp and opens the selected session
-through `session/load`. The built-in stdio agent uses the configured SQLite
-store so a new process can restore a session. The ACP adapter reports local
-database failures with a client-visible message. Server registrations can
-supply their own store.
+`/agents`, `/sessions`, and Ctrl+G open the full-screen Agents view. The view
+shows a session list and details for the selection. Escape or Ctrl+G returns to
+the chat. The list groups sessions by workspace, ordered by each workspace's
+latest session activity. Search filters paged ACP summaries by title, ID, and workspace.
+Tab switches between the current
+workspace and all accessible workspaces. On a Harness server the view refreshes
+while open, showing running, waiting for input, and attached-elsewhere states.
+Selecting a session loads it and releases the previous attachment. Background
+status is visible in this view. When quitting with only the current session active,
+the native TUI offers to detach, close that session and quit, or stay.
+Before switching or checking whether to quit, the terminal uses
+`_hrns/session/flush` to let earlier prompt requests finish admission to the
+server queue. The call returns before the prompts finish running.
+
+The built-in terminal starts or joins one local server per configured SQLite
+store. A detached Python process holds a per-store lock, binds a random loopback
+port, and writes its endpoint and bearer token into a private runtime directory.
+The launcher reads the normal configuration, checks the authenticated endpoint
+before reuse, and starts the runtime in a separate process on a cold launch.
+Endpoint discovery uses only the base Python package. The server owns
+the runs independently of terminal connections. The packaged `hrns serve`
+command accepts session workspaces within its configured `--cwd` root.
 
 `/models` searches the advertised model choices and marks the current model.
 In the built-in terminal session, submitting a draft before model setup opens
@@ -434,6 +454,13 @@ last outcome, and last usage. The existing client uses them for server-started t
 and suppresses duplicate lifecycle events from its own prompt response. They do not
 expose queue management. Successful close/delete clears that session's client revision
 and active-turn caches, so restoring its saved state can begin a new revision sequence.
+
+Listable registrations advertise `_meta["hrns/session/activity"]`. Every result
+in `session/list` carries the same key in its own metadata with `status`
+(`idle`, `running`, or `waiting`) and `attachedElsewhere` relative to the caller.
+The adapter combines live state only with sessions returned by the principal's
+store query. The native TUI consults the same metadata when deciding whether
+quitting requires a choice.
 
 ## Read-only AG-UI
 
@@ -588,8 +615,8 @@ ACP model options carry `_meta.providerId` when the resolver supplies a provider
 association. The model picker uses that metadata as context for the advertised
 display name and value.
 
-The built-in stdio agent advertises `hrns/providers/manage`. The native
-client enables it for the built-in stdio launch. The private
+The built-in agent advertises `hrns/providers/manage`. The native
+client enables it for the local Harness server. The private
 `_hrns/providers/*` requests list and edit local TOML entries and manage one
 sign-in attempt. Saving provider settings and authenticating are separate operations.
 Edits and successful sign-ins refresh ACP model options for open sessions.
@@ -599,7 +626,7 @@ for its provider entry. The model picker uses ACP model option metadata to group
 models by provider and switches tabs with Tab and Shift+Tab.
 The ACP runtime reports the latest provider-supplied reasoning token count at
 model-response boundaries, including when the model's context window is unknown.
-The built-in stdio agent remembers explicit model selections in its local session
+The built-in agent remembers explicit model selections in its local session
 database, scoped to the active configuration file and provider entry. Fresh sessions
 prefer the most recent explicit selection when it is available. Saved sessions
 restore their own model, and environment model overrides govern startup. For each
@@ -747,12 +774,10 @@ client's, `provider`/`model`/`[providers.<name>]`/`[model_settings]`/`[mcp]`/`st
 the runtime's. Neither side reads the other's sections, but both parse them, because a
 model with unknown keys is a typo detector.
 
-Precedence is expressed as pydantic-settings source order — init, environment, project
-document, user document, defaults — which deep-merges each source over the next, so a
-project `hrns.toml` overrides exactly the keys it names and leaves the rest of the user
-document intact. `--config PATH` (or `HRNS_CONFIG_FILE`) collapses that to a single
-file and is a contract: a selected file that does not exist is an error, not a silent fall
-back to defaults. The environment prefix is `HRNS_`; `HRNS_MODEL` and `HRNS_STORE`
+Configuration precedence is constructor settings, environment, one TOML file, and
+defaults. Harness uses the user document by default. `--config PATH` or
+`HRNS_CONFIG_FILE` selects another file, which must exist. The environment prefix is
+`HRNS_`. `HRNS_MODEL` and `HRNS_STORE`
 are read by every entry point, so the same variable means the same thing in the
 terminal, the built-in agent, and the HTTP server.
 
@@ -761,7 +786,7 @@ facade: `HrnsConfig.profile` is the profile map the dispatcher resolves, `HrnsCo
 seeds the terminal's theme, permission mode and client I/O, and `HrnsConfig.save()` writes
 the whole effective document to the user file (defaults omitted). The native client keeps
 changes it makes in its own state file; MCP `always_allow` consent is written through
-`HrnsConfig.save()`. Project documents are read, never written.
+`HrnsConfig.save()`.
 
 ## Launching the terminal
 
@@ -791,7 +816,7 @@ reason in the transcript. A profile deleted from disk is forgotten. `_remembered
 in `cli.py` owns the identity→target mapping and only the interactive command uses it;
 `hrns run` takes its target from its own arguments every time.
 
-When `hrns connect --session ID` opens a remote session without `--cwd`, the native client
+When `hrns connect --session ID` opens a local or remote Harness session without `--cwd`, the native client
 finds the session's stored cwd through unfiltered, paginated `session/list` before
 loading its history. This cwd also becomes the connection's displayed workspace.
 An explicit `--cwd` goes directly to `session/load`, where the server validates it

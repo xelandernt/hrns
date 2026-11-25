@@ -17,6 +17,7 @@ from acp import schema
 from cyclopts import App, Parameter
 from openai import OpenAIError
 from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
+from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models import infer_model, infer_model_profile, known_model_names
 from pydantic_ai.models.github_copilot import GitHubCopilotModel
@@ -34,12 +35,13 @@ from hrns.shared.config import (
 from hrns.shared.config.credentials import delete_secret, stored_secret
 from hrns.shared.config.settings import (
     check_provider_name,
-    config_files,
     write_config_document,
 )
 
+from ..local_server import configuration_id, load_settings
 from .acp import (
     AcpAttachmentConfig,
+    AcpServer,
     AcpSession,
     ModelChoice,
     ProviderConfig,
@@ -48,6 +50,7 @@ from .acp import (
     ProviderModelResolver,
     ProviderRoute,
     ResolvedModel,
+    SessionContext,
     SettingChoice,
     SettingOption,
     acp_mcp_toolsets,
@@ -362,26 +365,22 @@ class RuntimeModelResolver(ProviderModelResolver):
         if edit is None and os.getenv("HRNS_PROVIDER") == name:
             raise ValueError("Unset HRNS_PROVIDER before removing this provider.")
 
-        paths = (self.settings.path,) if self.settings.config_file else config_files()
-        sources: list[tuple[Path, dict[str, object], dict[str, object]]] = []
-        for path in paths:
-            if path.is_file():
-                with path.open("rb") as stream:
-                    document = tomllib.load(stream)
-                entries = document.get("providers", {})
-                if not isinstance(entries, dict):
-                    raise ValueError("The providers section must be a TOML table.")
-                if name in entries or (edit is None and document.get("provider") == name):
-                    sources.append((path, document, entries))
+        target = self.settings.path
+        document = {}
+        if target.is_file():
+            with target.open("rb") as stream:
+                document = tomllib.load(stream)
+        entries = document.get("providers", {})
+        if not isinstance(entries, dict):
+            raise ValueError("The providers section must be a TOML table.")
         if edit is None:
-            if not sources:
-                raise ValueError("This provider is configured outside the local TOML documents.")
-            for target, document, entries in reversed(sources):
-                entries.pop(name, None)
-                if document.get("provider") == name:
-                    document.pop("provider", None)
-                    document.pop("model", None)
-                write_config_document(target, document)
+            if name not in entries and document.get("provider") != name:
+                raise ValueError("This provider is configured outside the local TOML file.")
+            entries.pop(name, None)
+            if document.get("provider") == name:
+                document.pop("provider", None)
+                document.pop("model", None)
+            write_config_document(target, document)
             removed = self.settings.providers.pop(name)
             if self.settings.provider == name:
                 file = self.settings.config_file
@@ -394,19 +393,6 @@ class RuntimeModelResolver(ProviderModelResolver):
             self._configs.pop(name, None)
             self._copilot_models.pop(name, None)
             return login_account(name, removed)
-
-        if sources:
-            target, document, entries = sources[0]
-        else:
-            target = self.settings.path
-            if target.is_file():
-                with target.open("rb") as stream:
-                    document = tomllib.load(stream)
-            else:
-                document = {}
-            entries = document.get("providers", {})
-            if not isinstance(entries, dict):
-                raise ValueError("The providers section must be a TOML table.")
 
         api_type = edit.api_type.strip()
         fields: dict[str, object] = {"type": api_type, "base_url": edit.base_url}
@@ -824,15 +810,10 @@ def run(
     catalog: Annotated[bool, Parameter(help="Print the provider/model catalog.")] = False,
     cwd: Annotated[str, Parameter(help="Workspace root.")] = ".",
     setup: Annotated[bool, Parameter(show=False)] = False,
+    local_daemon: Annotated[bool, Parameter(show=False)] = False,
 ) -> None:
     """Run the configured agent as an ACP stdio server."""
-    settings = (
-        HrnsConfig(config_file=None)
-        if env_only
-        else HrnsConfig(config_file=config)
-        if config is not None
-        else HrnsConfig()
-    )
+    settings = load_settings(config, env_only=env_only)
 
     resolver = RuntimeModelResolver(settings)
     if any(
@@ -848,8 +829,7 @@ def run(
         key.upper() for key in os.environ
     )
     if not env_only:
-        inferred_paths = () if settings.config_file else config_files()
-        scope = (inferred_paths[0] if inferred_paths else settings.path).resolve()
+        scope = settings.path.resolve()
         try:
             resolver.last_provider_models = store.provider_models(scope)
             if not startup_override:
@@ -867,10 +847,11 @@ def run(
     models = resolver.list_models()
     if not models and env_only and not setup:
         raise SystemExit("No models are configured. Add a provider and model first.")
-    # Resolve the selected catalog entry at prompt time, including after local setup.
-    run_acp_stdio(
-        lambda session: build_agent(
-            cwd=session.cwd if cwd == "." else cwd,
+
+    def factory(session: SessionContext) -> AbstractAgent[None, str]:
+        # Resolve the selected catalog entry at prompt time, including after local setup.
+        return build_agent(
+            cwd=session.cwd if local_daemon or cwd == "." else cwd,
             skills=settings.skills,
             model_settings=ModelSettings(
                 **{
@@ -880,13 +861,41 @@ def run(
                 }
             ),
             _allow_unconfigured=True,
-        ),
+        )
+
+    provider_editor = None if env_only else resolver.manage_provider
+    model_memory = remember_model if scope is not None else None
+    mcp_capabilities = schema.McpCapabilities(acp=True, http=True, sse=True)
+    if local_daemon:
+        from .local_daemon import serve
+
+        server = AcpServer[None]()
+        registration = server.add_agent(
+            "agent",
+            factory=factory,
+            model_resolver=resolver,
+            session_store=store,
+            attachment_config=_attachment_config,
+            mcp_capabilities=mcp_capabilities,
+        )
+
+        def adapter():
+            connection = registration.connection()
+            connection._provider_editor = provider_editor
+            connection._remember_model = model_memory
+            return connection
+
+        serve(server, adapter, store.path, configuration_id(settings, env_only=env_only))
+        return
+
+    run_acp_stdio(
+        factory,
         model_resolver=resolver,
         session_store=store,
         attachment_config=_attachment_config,
-        mcp_capabilities=schema.McpCapabilities(acp=True, http=True, sse=True),
-        _provider_editor=None if env_only else resolver.manage_provider,
-        _remember_model=remember_model if scope is not None else None,
+        mcp_capabilities=mcp_capabilities,
+        _provider_editor=provider_editor,
+        _remember_model=model_memory,
     )
 
 

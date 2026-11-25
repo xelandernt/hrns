@@ -7,11 +7,8 @@ A single pydantic-settings model parses the whole document, so a typo in any sec
 fails the same way wherever it is read.
 
 Precedence, highest first: constructor arguments, ``HRNS_*`` environment
-variables, the project file ``./hrns.toml``, the user file ``config.toml`` in the
-platform config directory, then defaults. Files merge key by key: a project file only
-overrides the entries and values it names, so a repository can add one profile or
-provider without copying the user's document. ``--config PATH`` (or
-``HRNS_CONFIG_FILE``) selects a single file and disables that merge.
+variables, the user file ``config.toml`` in the platform config directory, then
+defaults. ``--config PATH`` (or ``HRNS_CONFIG_FILE``) selects a different file.
 
 Providers are named entries: ``[providers.<name>]`` holds how to reach one provider, and
 ``provider``/``model`` at the top level say which entry and model are active. Two entries
@@ -57,10 +54,7 @@ PROVIDER_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 #: The user document, in the platform config directory.
 CONFIG_FILE_NAME = "config.toml"
 
-#: The optional project document, read from the working directory.
-PROJECT_CONFIG_NAME = "hrns.toml"
-
-#: Environment variable that selects one document instead of the merge.
+#: Environment variable that selects the configuration document.
 CONFIG_ENV_VAR = "HRNS_CONFIG_FILE"
 
 #: What this terminal offers the agent: filesystem reads, writes, and commands.
@@ -83,16 +77,6 @@ class ProviderNameError(ValueError):
 def default_config_path() -> Path:
     """The user document: every setting in one file, in the platform config directory."""
     return user_config_path("hrns") / CONFIG_FILE_NAME
-
-
-def project_config_path() -> Path:
-    """The document a working directory may add, overriding the user's key by key."""
-    return Path.cwd() / PROJECT_CONFIG_NAME
-
-
-def config_files() -> tuple[Path, ...]:
-    """The documents a default load reads, highest priority first."""
-    return tuple(path for path in (project_config_path(), default_config_path()) if path.is_file())
 
 
 def write_config_document(target: Path, payload: Mapping[str, object]) -> None:
@@ -173,7 +157,6 @@ class TuiSettings(BaseModel):
     theme: str = "hrns"
     auto_expand_tools: bool = False
     show_thoughts: bool = False
-    permission_mode: PermissionMode = "ask"
     client_io: ClientIoMode = "all"
     sidebar_width: int = Field(default=52, ge=32, le=76)
     last_connection: str = ""
@@ -427,27 +410,22 @@ class HrnsConfig(BaseSettings):
             path = Path(explicit).expanduser()
             if not path.is_file():
                 raise ValueError(f"Configuration file does not exist: {path}")
-            paths = [path]
         else:
-            # Later sources are read first; both files deep-merge, project over user.
-            paths = [project_config_path(), default_config_path()]
-        sources: list[TomlConfigSettingsSource] = []
-        for path in paths:
+            path = default_config_path()
             if not path.is_file():
-                continue
-            source = TomlConfigSettingsSource(settings_cls, path)
-            payload = source()
-            if "config_file" in payload:
-                raise ValueError(
-                    f"{path}: select the document with --config or {CONFIG_ENV_VAR}, "
-                    "not with a config_file key."
-                )
-            if "api_key" in payload:
-                raise ValueError(
-                    f"{path}: use api_key_env in the document, or HRNS_API_KEY in the environment."
-                )
-            sources.append(source)
-        return (init_settings, env_settings, *sources)
+                return init_settings, env_settings
+        source = TomlConfigSettingsSource(settings_cls, path)
+        payload = source()
+        if "config_file" in payload:
+            raise ValueError(
+                f"{path}: select the document with --config or {CONFIG_ENV_VAR}, "
+                "not with a config_file key."
+            )
+        if "api_key" in payload:
+            raise ValueError(
+                f"{path}: use api_key_env in the document, or HRNS_API_KEY in the environment."
+            )
+        return init_settings, env_settings, source
 
     # ------------------------------------------------------------- saving
 

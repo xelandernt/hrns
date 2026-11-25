@@ -7,10 +7,9 @@ import os
 import shutil
 import subprocess
 import sysconfig
-import tomllib
 
 from ..shared.config import HrnsConfig
-from ..shared.config.settings import config_files, is_builtin_hrns
+from ..shared.config.settings import is_builtin_hrns
 from ..shared.errors import HrnsClientError
 from .launch import ConnectionTarget
 from .transport import secret_value
@@ -29,7 +28,6 @@ def run_rust_preview(
     explicit_cwd: str | None,
     client_io: str = "all",
     theme: str | None = None,
-    permission_mode: str | None = None,
     config: HrnsConfig,
 ) -> int:
     executable = native_executable()
@@ -37,6 +35,7 @@ def run_rust_preview(
         raise HrnsClientError("Install the hrns-tui wheel in this Python environment.")
 
     profile = target.profile
+    builtin = is_builtin_hrns(profile)
     env = dict(os.environ)
     env.pop("HRNS_TUI_TOKEN", None)
     argv = [executable, "--client-io", client_io]
@@ -45,13 +44,11 @@ def run_rust_preview(
         argv.extend(("--effort-profile", json.dumps(effort)))
     if theme:
         argv.extend(("--theme", theme))
-    if permission_mode:
-        argv.extend(("--permission-mode", permission_mode))
     if config.config_file:
         argv.extend(("--mcp-config", str(config.path)))
     if session:
         argv.extend(("--session", session))
-    if target.kind != "remote" or session is None or explicit_cwd is not None:
+    if session is None or explicit_cwd is not None or (target.kind != "remote" and not builtin):
         argv.extend(("--cwd", target.cwd))
     cwd = None
     if target.kind == "remote":
@@ -61,7 +58,14 @@ def run_rust_preview(
             env["HRNS_TUI_TOKEN"] = token
     else:
         cwd = target.cwd
-        argv.extend(("--stdio", profile.command, *profile.args))
+        if builtin:
+            if profile.args[:2] == ["-m", "hrns.server.runtime"]:
+                args = ["-m", "hrns.local_server", *profile.args[2:]]
+            else:
+                args = [*profile.args, "--local-endpoint"]
+            argv.extend(("--local", profile.command, *args))
+        else:
+            argv.extend(("--stdio", profile.command, *profile.args))
         env.update({name: secret_value(reference) or "" for name, reference in profile.env.items()})
 
     if os.name == "posix":
@@ -86,24 +90,8 @@ def _effort_profile(config: HrnsConfig, target: ConnectionTarget) -> dict[str, o
     builtin = is_builtin_hrns(target.profile)
     if name is None and not builtin:
         return None
-    paths = (config.path,) if config.config_file else config_files()
-    path = config.path
-    for source in paths:
-        if not source.is_file():
-            continue
-        with source.open("rb") as stream:
-            document = tomllib.load(stream)
-        profiles = document.get("profile", {})
-        owns_profile = (
-            "local_model_effort" in document
-            if name is None
-            else isinstance(profiles, dict) and name in profiles
-        )
-        if owns_profile:
-            path = source
-            break
     return {
-        "path": str(path.resolve()),
+        "path": str(config.path.resolve()),
         "profile": name,
         "builtin": builtin,
         "values": config.local_model_effort if name is None else target.profile.model_effort,

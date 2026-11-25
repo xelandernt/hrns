@@ -33,6 +33,11 @@ state. Native supports the built-in agent, external stdio commands and remote
 WebSocket targets; the browser connects only to an authenticated remote ACP mount and
 advertises no client filesystem, terminal or MCP capability.
 
+Press **Ctrl+G** or enter `/agents` to switch between Harness sessions. Use
+`/new` in the current workspace or `/new /path/to/workspace` for another
+directory. Runs keep going when you switch or quit, and the Agents view shows
+which sessions are running, need input, or are open in another TUI.
+
 In a local native session, type `@` to search workspace files. Use **Up** and
 **Down** to browse, **Tab** or **Enter** to insert a highlighted `@path` reference,
 and **Esc** to close the search. The agent can open the path when it needs the file.
@@ -132,11 +137,12 @@ The [FastAPI example](examples/fastapi_app.py) shows both mounts with authentica
 For the packaged single-agent server:
 
 ```sh
-HRNS_MODEL=provider:model hrns serve --port 8000
+HRNS_MODEL=provider:model hrns serve --cwd /path/to/projects --port 8000
 # ACP endpoint: ws://127.0.0.1:8000/acp/agent
+hrns connect --server ws://127.0.0.1:8000/acp/agent --cwd /path/to/projects
 ```
 
-For stdio:
+Sessions can select workspaces under the server's `--cwd` directory. For stdio:
 
 ```python
 from hrns.server import build_agent, run_acp_stdio
@@ -144,14 +150,15 @@ from hrns.server import build_agent, run_acp_stdio
 run_acp_stdio(lambda: build_agent("anthropic:claude-sonnet-5-5"))
 ```
 
-`hrns acp` starts the default agent over stdio; `hrns agent` uses the configured
-models and provider routing. The terminal uses the same configured entry point.
+`hrns acp` starts the default agent over stdio. `hrns agent` uses the configured
+models and provider routing. The native terminal starts or joins a local Harness
+server with that configuration.
 
 ## Configuration
 
-The client and server read one document: `config.toml` in the platform
-config directory, with an optional `hrns.toml` in the working directory overriding it
-key by key. `HRNS_*` environment variables override both.
+The client and server read `config.toml` from the platform config directory by
+default. `--config PATH` selects another file. `HRNS_*` environment variables
+override values from that file.
 [Configuration](docs/configuration.md) is the field reference and the location map.
 
 `hrns agent` launches the ACP entrypoint with the configured provider and model. The

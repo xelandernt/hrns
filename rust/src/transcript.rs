@@ -392,6 +392,7 @@ enum AnchorRow {
 #[derive(Default)]
 pub struct Transcript {
     entries: Vec<Entry>,
+    replay_from: Option<usize>,
     measured: usize,
     laid_out: usize,
     viewport_height: usize,
@@ -501,9 +502,11 @@ impl Transcript {
     }
 
     fn tool_index(&self, id: &str) -> Option<usize> {
-        self.entries
+        let start = self.replay_from.unwrap_or(0);
+        self.entries[start..]
             .iter()
             .rposition(|entry| entry.id.as_deref() == Some(id))
+            .map(|index| start + index)
     }
 
     pub fn show_pending_approval(&mut self, request: &PermissionRequest) {
@@ -615,7 +618,11 @@ impl Transcript {
 
     fn append_chunk(&mut self, role: Role, mut text: String, expand_new: bool) {
         self.output_pending |= !self.following && (role != Role::Thought || self.show_thoughts);
-        if let Some(entry) = self.entries.last_mut().filter(|entry| entry.role == role) {
+        let start = self.replay_from.unwrap_or(0);
+        if let Some(entry) = self.entries[start..]
+            .last_mut()
+            .filter(|entry| entry.role == role)
+        {
             text.retain(|ch| ch == '\n' || !ch.is_control());
             entry.text.push_str(&text);
             self.measured = self.measured.min(self.entries.len() - 1);
@@ -668,21 +675,41 @@ impl Transcript {
         self.following
     }
 
-    pub fn len(&self) -> usize {
-        self.entries.len()
+    pub fn begin_replay(&mut self) {
+        self.replay_from = Some(self.entries.len());
+    }
+
+    pub fn replaying(&self) -> bool {
+        self.replay_from.is_some()
+    }
+
+    pub fn cancel_replay(&mut self) -> bool {
+        let Some(from) = self.replay_from.take() else {
+            return false;
+        };
+        self.trim(from);
+        true
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn retry_replay(&mut self) {
+        if let Some(from) = self.replay_from {
+            self.trim(from);
+        }
     }
 
     /// Discards everything from `from` onward, keeping the prefix intact.
-    pub fn trim(&mut self, from: usize) {
+    fn trim(&mut self, from: usize) {
         self.entries.truncate(from.min(self.entries.len()));
         self.reset_layout();
     }
 
-    /// Drops the first `from` entries and keeps the entries a replay appended after them.
-    pub fn replace(&mut self, from: usize) {
-        self.entries.drain(..from.min(self.entries.len()));
-        self.reset_layout();
-        self.follow();
+    pub fn commit_replay(&mut self) {
+        if let Some(from) = self.replay_from.take() {
+            self.entries.drain(..from.min(self.entries.len()));
+            self.reset_layout();
+            self.follow();
+        }
     }
 
     fn reset_layout(&mut self) {

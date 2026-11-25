@@ -37,6 +37,7 @@ and output types flow through its session and turn handles.
 | `factory` | Required | Sync or async callable receiving `SessionContext` and returning a fresh `AbstractAgent` per live session |
 | `deps` | `None` | Default agent dependencies |
 | `session_store` | Separate `InMemorySessionStore` | Persistence scoped to this registration |
+| `workspace_root` | `None` | Root directory allowed for session workspaces |
 | `model_resolver` | `None` | Model choices, provider routing, and session settings |
 | `session_config` | `None` | Per-session dependencies, capabilities, toolsets, and workspace |
 | `attachment_config` | `None` | Client toolsets (MCP, filesystem, terminal) configured on each ACP attachment |
@@ -212,6 +213,9 @@ One ACP client may attach to a session. `session/new` creates and attaches;
 before responding. The current owner may reload the same session on its connection.
 Loading must use the session's stored cwd. Another attached client
 receives an attachment conflict.
+
+Supply `workspace_root` when registering an agent to restrict session directories
+to that root. The packaged `hrns serve --cwd` command sets this restriction.
 
 Disconnect removes attachment resources while accepted turns and queued work remain
 alive. Reconnecting clients load the session to inspect accepted work. `session/close`

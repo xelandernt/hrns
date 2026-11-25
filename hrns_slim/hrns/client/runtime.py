@@ -158,9 +158,7 @@ def _agent_profile(settings: HrnsConfig, cwd: str | None) -> Profile:
             "The built-in agent needs the server extra. Install `hrns-slim[server]`, "
             "or connect to a remote agent."
         )
-    # The runtime reads the same document this client just read. An explicitly selected
-    # file is passed through; otherwise the runtime discovers the user and project
-    # documents itself, so a merged view stays merged instead of being flattened.
+    # Pass through a selected configuration so the client and runtime use the same file.
     command = agent_command()
     args = [*command[1:]]
     if settings.config_file is not None:

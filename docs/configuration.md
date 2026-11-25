@@ -9,13 +9,10 @@ report the file and field that need correction.
 | Location | Path |
 | --- | --- |
 | User document | `config.toml` in the platform config directory (macOS: `~/Library/Application Support/hrns/config.toml`, Linux: `~/.config/hrns/config.toml`, Windows: `%LOCALAPPDATA%\hrns\config.toml`) |
-| Project document | `hrns.toml` in the working directory |
 | Explicit document | `--config PATH` or `HRNS_CONFIG_FILE=PATH` |
 
-The user document is the one `hrns` writes. A project document only overrides the keys it
-names, so a repository can add a profile or provider to the user configuration.
-`--config` reads exactly that file and disables the merge; it is what `hrns agent --config`
-receives when a profile must pin one file.
+Harness reads and writes the user document by default. An explicit path selects
+the document for both operations.
 
 `hrns profiles path` prints the file in effect.
 
@@ -25,13 +22,8 @@ Highest first:
 
 1. Command-line options (`--model`, `--server`, `--stdio`, …).
 2. `HRNS_*` environment variables.
-3. The project document (`./hrns.toml`).
-4. The user document (`config.toml`).
-5. Built-in defaults.
-
-Files merge key by key: setting `provider = "local-gw"` in a project document keeps the
-user document's other providers. Sections merge the same way,
-so a project file can add `[profile.repo]` next to the user's `[profile.team]`.
+3. The selected configuration file.
+4. Built-in defaults.
 
 ## A complete example
 
@@ -77,7 +69,6 @@ enabled = true
 theme = "hrns"
 auto_expand_tools = false
 show_thoughts = false
-permission_mode = "all"                # ask | reads | all
 client_io = "all"                      # off | read | all
 sidebar_width = 76
 last_connection = "builtin"
@@ -103,7 +94,7 @@ notes = "scratch agent"
 
 ### `[tui]`
 
-Terminal defaults and the last connection. `theme`, `permission_mode` and `client_io`
+Terminal defaults and the last connection. `theme` and `client_io`
 seed the native client when it has no stored value; the client keeps later changes in its
 own state file. `auto_expand_tools`, `show_thoughts` and `sidebar_width` are accepted for
 older clients; the native client stores those toggles in its state file instead.
@@ -113,10 +104,14 @@ older clients; the native client stores those toggles in its state file instead.
 | `theme` | string | `"hrns"` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark`, or `ansi-light` |
 | `auto_expand_tools` | bool | `false` | Render every tool result expanded |
 | `show_thoughts` | bool | `false` | Render the agent's reasoning |
-| `permission_mode` | `ask` \| `reads` \| `all` | `"ask"` | `ask` surfaces every approval; `reads` auto-answers read-only tools; `all` auto-approves any call the agent offered an allow option for (executes with the workspace permissions) |
 | `client_io` | `off` \| `read` \| `all` | `"all"` | What this terminal offers the agent: nothing, filesystem reads, or reads plus writes and terminal commands |
 | `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
 | `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |
+
+New sessions start in Ask. Use `/permissions ask`, `/permissions reads` (auto-approve
+read-only tools), or `/permissions all` (auto-approve eligible tool calls) in the
+session. `/yolo` is an alias for `/permissions all`. When you reopen the session,
+the TUI restores the mode saved on this device.
 
 `client_io` advertises ACP client capabilities; it does not by itself give the agent
 tools. The agent must install `acp_filesystem` / `acp_terminal` through
@@ -365,8 +360,8 @@ hrns mcp list
 hrns login github-copilot
 ```
 
-`hrns config show` prints the merged document as TOML and marks each source as `project`,
-`user`, `selected`, or `environment`. `--json` prints the same data as JSON, `--all`
+`hrns config show` prints the effective settings and identifies the document.
+`--json` prints the same data as JSON, `--all`
 includes defaults, and `--reveal` prints literal secrets that are otherwise shown as
 `***`. `hrns config keys` lists each provider's keyring service/account and environment
 variable name, plus whether a value is present.

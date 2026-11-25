@@ -31,6 +31,17 @@ impl App {
             ),
             area,
         );
+        if let Some(picker) = &self.picker
+            && picker.is_agents()
+        {
+            self.transcript_area = Rect::default();
+            self.scroll_bar = None;
+            self.scroll_drag = None;
+            self.follow_area = None;
+            self.follow_pressed = false;
+            self.draw_agents(frame, area, picker, &palette);
+            return;
+        }
         let approval_active = !self.approvals.is_empty()
             && self.mcp_consent.is_empty()
             && self.elicitations.is_empty();
@@ -418,14 +429,14 @@ impl App {
                 self.draw_sidebar(frame, sidebar, &palette);
             }
         }
-        if self.approvals.is_empty() && self.elicitations.is_empty() && self.mcp_consent.is_empty()
-        {
-            if let Some(popup) = &self.providers {
-                popup.draw(frame, area, self.selected_provider.as_ref(), &palette);
-            }
-            if let Some(picker) = &self.picker {
-                self.draw_picker(frame, area, picker, &palette);
-            }
+        let awaiting_input = !self.approvals.is_empty()
+            || !self.elicitations.is_empty()
+            || !self.mcp_consent.is_empty();
+        if !awaiting_input && let Some(popup) = &self.providers {
+            popup.draw(frame, area, self.selected_provider.as_ref(), &palette);
+        }
+        if !awaiting_input && let Some(picker) = &self.picker {
+            self.draw_picker(frame, area, picker, &palette);
         }
     }
 

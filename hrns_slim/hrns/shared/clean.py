@@ -90,13 +90,10 @@ def session_artifacts() -> list[SessionArtifact]:
 
 
 def _config_candidates() -> list[tuple[str, Path]]:
-    """The project file and the user file, in the order the runtime reads them."""
-    from hrns.shared.config import default_config_path, project_config_path
+    """The default user configuration file."""
+    from hrns.shared.config import default_config_path
 
-    return [
-        ("project config", project_config_path()),
-        ("user config", default_config_path()),
-    ]
+    return [("user config", default_config_path())]
 
 
 def _declared_entries(path: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:

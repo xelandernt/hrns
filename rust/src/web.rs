@@ -20,7 +20,6 @@ use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 use crate::acp::{self, ClientIoMode, Connection, Event, Services, SessionTarget};
 use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments::{Attachment, MAX_FILE_BYTES};
-use crate::preferences::ApprovalMode;
 use crate::socket;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -166,13 +165,14 @@ async fn connect_attempt(
             events,
             Services {
                 client_io: ClientIoMode::Off,
+                approval_scope: format!("websocket:{}", endpoint.href()),
                 remote: true,
                 ..Services::default()
             },
         ),
     );
     wire?;
-    session.map_err(|error| error.message)
+    session.map_err(|error| acp::request_error(&error))
 }
 
 fn startup_config() -> Startup {
@@ -187,14 +187,9 @@ fn startup_config() -> Startup {
         .as_ref()
         .and_then(|query| query.get("theme"))
         .filter(|name| crate::theme::NAMES.contains(&name.as_str()));
-    let permission = query
-        .as_ref()
-        .and_then(|query| query.get("permission"))
-        .and_then(|value| ApprovalMode::parse(&value));
     Startup {
         client_io: ClientIoMode::Off,
         theme,
-        permission,
     }
 }
 
@@ -473,6 +468,7 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
             "r" => Some(Key::Reconnect),
             "o" => Some(Key::ToggleTools),
             "b" => Some(Key::ToggleSidebar),
+            "g" => Some(Key::Agents),
             "End" => Some(Key::LatestOutput),
             _ => None,
         };

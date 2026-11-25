@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
-from pathlib import Path
 from typing import Generic, Literal
 
 import acp
@@ -28,6 +27,7 @@ from .store import (
     ListableSessionStore,
     SessionAccess,
     SessionStoreError,
+    SessionSummary,
     StoredSession,
 )
 
@@ -50,6 +50,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         principal: PrincipalT | None = None,
     ) -> None:
         self._provider_management_lock = asyncio.Lock()
+        self._prompt_admission = asyncio.Lock()
         self._remember_model: Callable[[str], Awaitable[None]] | None = None
         self._provider_editor: (
             Callable[[str, dict[str, object]], Awaitable[dict[str, object]]] | None
@@ -115,8 +116,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         mcp_servers: McpServers = None,
         **kwargs: object,
     ) -> schema.NewSessionResponse:
-        with _store_errors():
-            session = await self._registration.new_session(cwd=cwd, principal=self._principal)
+        try:
+            with _store_errors():
+                session = await self._registration.new_session(cwd=cwd, principal=self._principal)
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
         runtime = session._runtime
         try:
             config_options = runtime._config_options(runtime.state)
@@ -146,7 +150,13 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
                 )
         except KeyError as exc:
             raise acp.RequestError.invalid_params({"session_id": session_id}) from exc
-        if str(Path(cwd).resolve()) != session.cwd:
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+        try:
+            workspace = self._registration.workspace_path(cwd)
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+        if workspace != session.cwd:
             raise acp.RequestError.invalid_params({"reason": "session cwd does not match"})
         runtime = session._runtime
         config_options = runtime._config_options(runtime.state)
@@ -160,9 +170,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
     async def prompt(
         self, session_id: str, prompt: list[PromptContentBlock], **kwargs: object
     ) -> schema.PromptResponse:
-        session = await self._session(session_id, "session/prompt")
-        session._runtime.check_prompt_setup()
-        handle = await session._accept(prompt, self._conn, steer=True)
+        async with self._prompt_admission:
+            session = await self._session(session_id, "session/prompt")
+            session._runtime.check_prompt_setup()
+            handle = await session._accept(prompt, self._conn, steer=True)
         try:
             result = await handle.result()
         except ModelHTTPError as exc:
@@ -264,6 +275,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
             agent_info=schema.Implementation(name=self._name, version=self._version),
             field_meta={
                 "hrns/session/state": True,
+                "hrns/session/activity": self._listable_store is not None,
                 "hrns/providers/manage": self._provider_editor is not None,
             },
         )
@@ -286,18 +298,25 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         except ValueError as exc:
             raise acp.RequestError.invalid_params({"cursor": cursor, "reason": str(exc)}) from exc
         return schema.ListSessionsResponse(
-            sessions=[
-                schema.SessionInfo(
-                    session_id=summary.session_id,
-                    cwd=summary.cwd,
-                    title=summary.title,
-                    updated_at=(
-                        summary.updated_at.isoformat() if summary.updated_at is not None else None
-                    ),
-                )
-                for summary in summaries
-            ],
+            sessions=[self._session_info(summary) for summary in summaries],
             next_cursor=next_cursor,
+        )
+
+    def _session_info(self, summary: SessionSummary) -> schema.SessionInfo:
+        session = self._registration._sessions.get(summary.session_id)
+        runtime = session._runtime if session is not None else None
+        owner = runtime._conn if runtime is not None else None
+        return schema.SessionInfo(
+            session_id=summary.session_id,
+            cwd=summary.cwd,
+            title=(runtime._title if runtime is not None else None) or summary.title,
+            updated_at=summary.updated_at.isoformat() if summary.updated_at is not None else None,
+            field_meta={
+                "hrns/session/activity": {
+                    "status": session.execution_status() if session is not None else "idle",
+                    "attachedElsewhere": owner is not None and owner is not self._conn,
+                }
+            },
         )
 
     async def set_session_mode(
@@ -541,7 +560,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         return None
 
     async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
-        """Dispatch provider document edits when the stdio launcher supplies an editor."""
+        """Dispatch Harness session and provider extension requests."""
+        if method == "hrns/session/flush":
+            async with self._prompt_admission:
+                return {}
         editor = self._provider_editor
         if editor is None or method not in {
             "hrns/providers/list",

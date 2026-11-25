@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item, TableLike};
+use toml_edit::{DocumentMut, Item};
 
 #[derive(Deserialize, Default)]
 struct Settings {
@@ -71,69 +71,32 @@ impl Server {
 }
 
 pub(super) fn read(explicit: Option<&Path>) -> io::Result<BTreeMap<String, (Server, PathBuf)>> {
-    let paths = if let Some(path) = explicit {
-        vec![path.to_owned()]
-    } else {
-        let mut paths = Vec::new();
-        if let Some(dirs) = directories::BaseDirs::new() {
-            paths.push(dirs.config_local_dir().join("hrns/config.toml"));
-        }
-        paths.push(env::current_dir()?.join("hrns.toml"));
-        paths
+    let Some(path) = explicit.map(Path::to_owned).or_else(|| {
+        directories::BaseDirs::new().map(|dirs| dirs.config_local_dir().join("hrns/config.toml"))
+    }) else {
+        return Ok(BTreeMap::new());
     };
-    let mut merged = DocumentMut::new();
-    let mut locations = BTreeMap::new();
-    for path in paths {
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        let document = text.parse::<DocumentMut>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid TOML in {}", path.display()),
-            )
-        })?;
-        if let Some(servers) = server_table(document.as_table()) {
-            for (name, _) in servers.iter() {
-                locations.insert(name.to_owned(), path.clone());
-            }
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && explicit.is_none() => {
+            return Ok(BTreeMap::new());
         }
-        merge(merged.as_table_mut(), document.as_table());
-    }
-    let settings: Settings = toml_edit::de::from_document(merged)
+        Err(error) => return Err(error),
+    };
+    let document = text.parse::<DocumentMut>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid TOML in {}", path.display()),
+        )
+    })?;
+    let settings: Settings = toml_edit::de::from_document(document)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid [mcp] configuration"))?;
-    settings
+    Ok(settings
         .mcp
         .servers
         .into_iter()
-        .map(|(name, server)| {
-            let path = locations
-                .remove(&name)
-                .ok_or_else(|| io::Error::other("Missing MCP server configuration path"))?;
-            Ok((name, (server, path)))
-        })
-        .collect()
-}
-
-fn merge(target: &mut dyn TableLike, source: &dyn TableLike) {
-    for (key, value) in source.iter() {
-        if let Some(old) = target.get_mut(key).and_then(Item::as_table_like_mut)
-            && let Some(new) = value.as_table_like()
-        {
-            merge(old, new);
-        } else {
-            target.insert(key, value.clone());
-        }
-    }
-}
-
-fn server_table(root: &dyn TableLike) -> Option<&dyn TableLike> {
-    root.get("mcp")?
-        .as_table_like()?
-        .get("servers")?
-        .as_table_like()
+        .map(|(name, server)| (name, (server, path.clone())))
+        .collect())
 }
 
 pub(super) fn allow(path: &Path, name: &str) -> io::Result<()> {
