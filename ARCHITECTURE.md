@@ -68,6 +68,11 @@ Put any deployment authentication upstream of the browser connection. The
 browser advertises no client filesystem, terminal or MCP capability and serves
 no workspace callback; only its own file chooser and clipboard act on user
 input. Deployments that need those capabilities use the native client.
+
+Native clipboard actions, including provider sign-in, use the system pasteboard
+on local macOS sessions. SSH sessions and other native platforms send OSC 52
+to the terminal.
+
 The shared `/attach` command stages an embedded ACP resource when the runtime
 advertises embedded context. The native frontend reads the supplied path away
 from the event loop. The browser opens its file chooser, and the prompt carries
@@ -665,7 +670,10 @@ sign-in attempt. Saving provider settings and authenticating are separate operat
 Edits and successful sign-ins refresh ACP model options for open sessions.
 The built-in agent fetches the Copilot account's catalog on startup and after
 sign-in. It keeps each model's Chat Completions or Responses endpoint in memory
-for its provider entry. The model picker uses ACP model option metadata to group
+for its provider entry. The same refresh points fetch the Codex subscription's
+catalog through the authenticated Pydantic AI provider. The resolver keeps the
+selectable Codex model IDs in catalog priority order alongside configured custom
+IDs. The model picker uses ACP model option metadata to group
 models by provider and switches tabs with Tab and Shift+Tab.
 The ACP runtime reports the latest provider-supplied reasoning token count at
 model-response boundaries, including when the model's context window is unknown.

@@ -77,9 +77,9 @@ class ProviderLogin:
     """One cancellable sign-in attempt per local runtime."""
 
     def __init__(
-        self, *, refresh_copilot_models: Callable[[str], Awaitable[str | None]] | None = None
+        self, *, refresh_models: Callable[[str], Awaitable[str | None]] | None = None
     ) -> None:
-        self._refresh_copilot_models = refresh_copilot_models
+        self._refresh_models = refresh_models
         self._task: asyncio.Task[str | None] | None = None
         self._challenge: dict[str, object] = {}
 
@@ -120,9 +120,7 @@ class ProviderLogin:
                     self._challenge = {"url": device.verification_uri, "code": device.user_code}
                     credentials = await flow.wait_for_authorization()
                     await asyncio.to_thread(_save_secret, account, credentials.access_token)
-                    if self._refresh_copilot_models is not None:
-                        return await self._refresh_copilot_models(name)
-                    return None
+                    return await self._refresh_models(name) if self._refresh_models else None
 
                 self._task = asyncio.create_task(copilot())
                 return {}
@@ -131,11 +129,12 @@ class ProviderLogin:
 
                 codex_flow = OpenAICodexOAuthFlow()
 
-                async def codex() -> None:
+                async def codex() -> str | None:
                     credentials = await asyncio.wait_for(
                         codex_flow.exchange_code_from_callback(), timeout=300
                     )
                     await CodexKeyring(account).save(credentials)
+                    return await self._refresh_models(name) if self._refresh_models else None
 
                 self._task = asyncio.create_task(codex())
                 return {"url": codex_flow.authorization_url()}

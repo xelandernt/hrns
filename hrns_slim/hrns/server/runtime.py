@@ -18,12 +18,13 @@ from cyclopts import App, Parameter
 from openai import OpenAIError
 from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import ModelAPIError, UserError
 from pydantic_ai.models import infer_model, infer_model_profile, known_model_names
 from pydantic_ai.models.github_copilot import GitHubCopilotModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.providers.github_copilot import GitHubCopilotProvider
+from pydantic_ai.providers.openai_codex import OpenAICodexProvider
 from pydantic_ai.settings import ModelSettings
 
 from hrns.shared.config import (
@@ -73,6 +74,9 @@ _COPILOT_DEFAULT_VERSION = "2025-04-01"
 _COPILOT_EXTENDED_VERSION = "2026-08-01"
 _COPILOT_LONG_SUFFIX = "@long-context"
 _CopilotEndpoint = Literal["/chat/completions", "/responses"]
+# Codex catalog compatibility level, based on minimal_client_version in its bundled catalog.
+_CODEX_CATALOG_CLIENT_VERSION = "0.166.0"
+_LIVE_CATALOG_PROVIDERS = {"github-copilot", "openai-codex"}
 
 
 def _context_size_label(size: int) -> str:
@@ -153,6 +157,16 @@ class _CopilotModel(BaseModel):
 
 class _CopilotCatalog(BaseModel):
     data: list[_CopilotModel]
+
+
+class _CodexCatalogModel(BaseModel):
+    slug: str
+    visibility: str
+    priority: int
+
+
+class _CodexCatalog(BaseModel):
+    models: list[_CodexCatalogModel]
 
 
 #: The ACP config option id for the reasoning-effort ladder.
@@ -248,7 +262,16 @@ class RuntimeModelResolver(ProviderModelResolver):
         self.startup_model: str | None = None
         self.last_provider_models: dict[str, str] = {}
         self._copilot_models: dict[str, dict[str, _CopilotModel]] = {}
-        self.login = ProviderLogin(refresh_copilot_models=self.refresh_copilot_models)
+        self._codex_models: dict[str, tuple[str, ...]] = {}
+        self.login = ProviderLogin(refresh_models=self.refresh_provider_models)
+
+    async def refresh_provider_models(self, name: str) -> str | None:
+        match self.settings.provider_id(name):
+            case "github-copilot":
+                return await self.refresh_copilot_models(name)
+            case "openai-codex":
+                return await self.refresh_codex_models(name)
+        return None
 
     async def refresh_copilot_models(self, name: str) -> str | None:
         entry = self.settings.require_entry(name)
@@ -287,12 +310,53 @@ class RuntimeModelResolver(ProviderModelResolver):
             return f"Copilot returned no compatible models for {name!r}."
         return None
 
-    async def load_copilot_catalogs(self) -> None:
+    async def refresh_codex_models(self, name: str) -> str | None:
+        entry = self.settings.require_entry(name)
+
+        def create_provider() -> OpenAICodexProvider:
+            options = dict(entry.options)
+            if entry.base_url:
+                options["base_url"] = entry.base_url
+            if (source := codex_source(name, entry)) is not None:
+                options["credential_source"] = source
+            return OpenAICodexProvider(**options)
+
+        try:
+            provider = await asyncio.to_thread(create_provider)
+        except UserError:
+            return None  # A configured entry may still need sign-in.
+        except (TypeError, ValueError):
+            self._codex_models.pop(name, None)
+            return f"Check the Codex provider settings for {name!r}."
+
+        try:
+            async with provider.client as client:
+                raw = await client.with_options(max_retries=0, timeout=5).get(
+                    "/models",
+                    cast_to=object,
+                    options={"params": {"client_version": _CODEX_CATALOG_CLIENT_VERSION}},
+                )
+            catalog = _CodexCatalog.model_validate(raw)
+        except (ModelAPIError, OpenAIError, ValueError):
+            self._codex_models.pop(name, None)
+            return f"Could not load Codex models for {name!r}. Check your Codex access."
+
+        models = tuple(
+            model.slug.strip()
+            for model in sorted(catalog.models, key=lambda model: model.priority)
+            if model.visibility == "list" and model.slug.strip()
+        )
+        self._codex_models[name] = models
+        if not models:
+            return f"Codex returned no selectable models for {name!r}."
+        return None
+
+    async def load_provider_catalogs(self) -> None:
         warnings = await asyncio.gather(
             *(
-                self.refresh_copilot_models(name)
+                self.refresh_provider_models(name)
                 for name, entry in self.settings.providers.items()
-                if entry.provider_id(name) == "github-copilot"
+                if entry.provider_id(name) in _LIVE_CATALOG_PROVIDERS
             )
         )
         for warning in warnings:
@@ -305,6 +369,7 @@ class RuntimeModelResolver(ProviderModelResolver):
                 (
                     *self.settings.models_for(name, _known_models()),
                     *self._copilot_models.get(name, ()),
+                    *self._codex_models.get(name, ()),
                 )
             )
         )
@@ -392,6 +457,7 @@ class RuntimeModelResolver(ProviderModelResolver):
             self._providers.pop(name, None)
             self._configs.pop(name, None)
             self._copilot_models.pop(name, None)
+            self._codex_models.pop(name, None)
             return login_account(name, removed)
 
         api_type = edit.api_type.strip()
@@ -445,6 +511,7 @@ class RuntimeModelResolver(ProviderModelResolver):
             previous_type != entry.provider_id(name) or existing.base_url != entry.base_url
         ):
             self._copilot_models.pop(name, None)
+            self._codex_models.pop(name, None)
         api_type = entry.provider_id(name)
         self._providers[name] = ProviderDescriptor(
             provider_id=name,
@@ -817,9 +884,10 @@ def run(
 
     resolver = RuntimeModelResolver(settings)
     if any(
-        entry.provider_id(name) == "github-copilot" for name, entry in settings.providers.items()
+        entry.provider_id(name) in _LIVE_CATALOG_PROVIDERS
+        for name, entry in settings.providers.items()
     ):
-        asyncio.run(resolver.load_copilot_catalogs())
+        asyncio.run(resolver.load_provider_catalogs())
     if catalog:
         _print_catalog(resolver)
         return

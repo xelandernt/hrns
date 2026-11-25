@@ -373,10 +373,10 @@ fn local_effect(
         }
         LocalEffect::SavePreferences(preferences) => crate::preferences::save(&preferences),
         LocalEffect::Copy(text) => {
-            if crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(text)).is_err() {
-                app.event(Event::Error(
-                    "Could not copy to the terminal clipboard".into(),
-                ));
+            if let Err(error) = copy_to_clipboard(&text) {
+                app.event(Event::Error(format!(
+                    "Could not copy to the clipboard: {error}"
+                )));
             }
         }
         LocalEffect::Attach(path) if path.is_empty() => {
@@ -400,6 +400,34 @@ fn local_effect(
             });
         }
     }
+}
+
+fn copy_to_clipboard(text: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if env::var_os("SSH_CONNECTION").is_none() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/usr/bin/pbcopy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let written = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("pbcopy input pipe unavailable"))
+            .and_then(|mut stdin| stdin.write_all(text.as_bytes()));
+        let status = child.wait()?;
+        written?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("pbcopy exited with {status}")))
+        };
+    }
+
+    crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(text))
 }
 
 async fn supervise(
