@@ -705,6 +705,7 @@ fn translate(key: KeyEvent) -> Option<Key> {
         KeyCode::Char('o') if key.modifiers == KeyModifiers::CONTROL => Some(Key::ToggleTools),
         KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Reconnect),
         KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => Some(Key::Agents),
+        KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => Some(Key::NewSession),
         KeyCode::Esc => Some(Key::Escape),
         KeyCode::BackTab => Some(Key::BackTab),
         KeyCode::Tab => Some(Key::Tab),

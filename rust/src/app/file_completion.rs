@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use futures::channel::oneshot;
 use ignore::WalkBuilder;
 
-use super::{App, Completion, FileCompletion, Suggestion, slash_command};
+use super::{App, Completion, FileCompletion, Suggestion, path_match_rank, slash_command};
 use crate::composer::prompt_tokens;
 
 const MAX_MATCHES: usize = 50;
@@ -227,7 +227,7 @@ fn matches(files: &[File], query: &str) -> Vec<Suggestion> {
     let mut paths: Vec<_> = files
         .iter()
         .filter_map(|file| {
-            let rank = match_rank(&file.lowercase, &query)?;
+            let rank = path_match_rank(&file.lowercase, &query)?;
             Some((rank, file.path.len(), file.path.as_str()))
         })
         .collect();
@@ -243,22 +243,4 @@ fn matches(files: &[File], query: &str) -> Vec<Suggestion> {
             description: String::new(),
         })
         .collect()
-}
-
-fn match_rank(path: &str, query: &str) -> Option<u8> {
-    let name = path.rsplit('/').next()?;
-    if path == query || name == query {
-        return Some(0);
-    }
-    if name.starts_with(query) {
-        return Some(1);
-    }
-    if path.contains(query) {
-        return Some(2);
-    }
-    let mut path = path.chars();
-    query
-        .chars()
-        .all(|ch| path.any(|candidate| candidate == ch))
-        .then_some(3)
 }

@@ -1,10 +1,14 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row as TableRow, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, List, ListState, Paragraph, Row as TableRow, Table,
+    TableState, Wrap,
+};
 
 use super::App;
+use super::agents_actions::{DeleteDialog, DeleteProgress, SessionDialog, WorkspaceInput};
 use super::picker::{Picker, Row, SessionDetails, Source};
 use crate::acp::ExecutionStatus;
 use crate::theme::Palette;
@@ -17,23 +21,34 @@ impl App {
         picker: &Picker,
         palette: &Palette,
     ) {
-        let Source::Sessions { all_workspaces, .. } = picker.source else {
+        let Source::Sessions {
+            all_workspaces,
+            dialog,
+            notice,
+            ..
+        } = &picker.source
+        else {
             return;
         };
         let rows = self.picker_rows(picker);
         let selected = rows.get(picker.selected);
         let message = picker.status(rows.is_empty());
+        let feedback_text = notice
+            .as_deref()
+            .unwrap_or(if rows.is_empty() { "" } else { message });
         let area = area.inner(Margin::new(if area.width >= 48 { 2 } else { 1 }, 0));
         let show_full_controls = area.width >= 92;
         let [header, filters, content, feedback, footer] = Layout::vertical([
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Min(1),
-            Constraint::Length(u16::from(!rows.is_empty() && !message.is_empty())),
-            Constraint::Length(if show_full_controls || area.height < 12 {
+            Constraint::Length(u16::from(!feedback_text.is_empty())),
+            Constraint::Length(if area.height < 8 {
                 1
-            } else {
+            } else if show_full_controls || area.height < 13 {
                 2
+            } else {
+                3
             }),
         ])
         .areas(area);
@@ -49,7 +64,7 @@ impl App {
                 ),
             header,
         );
-        let (scope, short_scope) = if all_workspaces {
+        let (scope, short_scope) = if *all_workspaces {
             ("All workspaces", "All")
         } else {
             ("Current workspace", "Current")
@@ -118,13 +133,13 @@ impl App {
         } else {
             ("", palette.muted)
         };
-        frame.render_widget(Paragraph::new(message).fg(palette.muted), feedback);
+        frame.render_widget(Paragraph::new(feedback_text).fg(palette.muted), feedback);
         let controls = if show_full_controls {
             "Esc  Back    ↑/↓  Select    Tab  Workspace    Ctrl+R  Refresh"
         } else {
             "Esc  Back    ↑/↓  Select    Tab  Workspace"
         };
-        let footer_text = if footer.height >= 2 {
+        let mut footer_text = if footer.height >= 3 {
             vec![
                 Line::from(controls).fg(palette.muted),
                 Line::from(action).fg(color),
@@ -139,8 +154,116 @@ impl App {
                 Span::styled(action, Style::default().fg(color)),
             ])]
         };
+        let actions = if !self.delete_supported {
+            "Ctrl+N  New session"
+        } else if footer.width >= 44 {
+            "Ctrl+N  New session    Delete  Delete session"
+        } else {
+            "Ctrl+N New    Del Delete"
+        };
+        footer_text.insert(0, Line::from(actions).fg(palette.accent));
         frame.render_widget(Paragraph::new(footer_text), footer);
+        match dialog.as_deref() {
+            Some(SessionDialog::Workspace(input)) => {
+                draw_workspace_input(frame, area, input, palette)
+            }
+            Some(SessionDialog::Delete(dialog)) => draw_delete_dialog(frame, area, dialog, palette),
+            None => {}
+        }
     }
+}
+
+fn draw_workspace_input(frame: &mut Frame, area: Rect, input: &WorkspaceInput, palette: &Palette) {
+    let height = 6 + input.suggestions.len().min(6) as u16;
+    let body = agents_dialog(frame, area, "New session · Workspace path", height, palette);
+    if body.is_empty() {
+        return;
+    }
+    let [field, suggestions, feedback, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(body);
+    if !field.is_empty() {
+        let (rows, (row, col)) = input.editor.display(field.width);
+        let scroll = row.saturating_sub(field.height - 1);
+        let text: Vec<_> = rows
+            .into_iter()
+            .map(|range| Line::from(&input.editor.text()[range]))
+            .collect();
+        frame.render_widget(Paragraph::new(text).scroll((scroll, 0)), field);
+        frame.set_cursor_position(Position::new(field.x + col, field.y + row - scroll));
+    }
+    if !input.suggestions.is_empty() {
+        let mut state = ListState::default().with_selected(Some(input.selected));
+        let list = List::new(input.suggestions.iter().map(String::as_str))
+            .highlight_style(Style::default().fg(palette.background).bg(palette.accent));
+        frame.render_stateful_widget(list, suggestions, &mut state);
+    }
+    if let Some(error) = input.error {
+        frame.render_widget(Paragraph::new(error).fg(palette.error), feedback);
+    }
+    let hint = if input.suggestions.is_empty() {
+        "Enter  Create    Tab  Complete path    Esc  Cancel"
+    } else {
+        "↑/↓  Select    Tab/Enter  Insert    Esc  Close suggestions"
+    };
+    frame.render_widget(Paragraph::new(hint).fg(palette.muted), footer);
+}
+
+fn draw_delete_dialog(frame: &mut Frame, area: Rect, dialog: &DeleteDialog, palette: &Palette) {
+    let body = agents_dialog(frame, area, "Delete session", 9, palette);
+    let [details, footer] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
+    let mut lines = vec![
+        Line::from(dialog.title.as_str()).bold(),
+        Line::from(dialog.workspace.as_str()).fg(palette.muted),
+        Line::default(),
+    ];
+    let hint = match &dialog.progress {
+        DeleteProgress::Confirm => {
+            lines.push(
+                Line::from("This permanently deletes the session and its history.")
+                    .fg(palette.warning),
+            );
+            "Enter  Delete    Esc  Cancel"
+        }
+        DeleteProgress::Pending => "Deleting session…",
+        DeleteProgress::Failed(error) => {
+            lines.push(Line::from(error.as_str()).fg(palette.error));
+            "Enter  Retry    Esc  Back"
+        }
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), details);
+    frame.render_widget(Paragraph::new(hint).fg(palette.muted), footer);
+}
+
+fn agents_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    height: u16,
+    palette: &Palette,
+) -> Rect {
+    let width = area.width.saturating_sub(2).min(76);
+    let height = area.height.min(height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.accent))
+        .style(Style::default().fg(palette.foreground).bg(palette.surface))
+        .title(title);
+    let body = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    body
 }
 
 fn draw_session_list(

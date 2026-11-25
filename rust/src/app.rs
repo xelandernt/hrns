@@ -1,3 +1,4 @@
+mod agents_actions;
 mod agents_view;
 mod commands;
 #[cfg(not(target_family = "wasm"))]
@@ -7,7 +8,7 @@ mod providers;
 mod render;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agent_client_protocol::v1::schema::{
     ElicitationContentValue, PlanEntry, SessionConfigOption, SessionConfigOptionCategory, ToolKind,
@@ -77,6 +78,7 @@ pub enum Key {
     ToggleTools,
     ToggleSidebar,
     Agents,
+    NewSession,
     Reconnect,
     Escape,
 }
@@ -84,6 +86,32 @@ pub enum Key {
 struct Suggestion {
     insert: String,
     description: String,
+}
+
+fn path_match_rank(path: &str, query: &str) -> Option<u8> {
+    let name = path.rsplit('/').next()?;
+    if path == query || name == query {
+        return Some(0);
+    }
+    if name.starts_with(query) {
+        return Some(1);
+    }
+    if path.contains(query) {
+        return Some(2);
+    }
+    let mut path = path.chars();
+    query
+        .chars()
+        .all(|ch| path.any(|candidate| candidate == ch))
+        .then_some(3)
+}
+
+fn session_workspace_path(workspace: &Path, path: &str, remote: bool) -> PathBuf {
+    if remote {
+        PathBuf::from(path)
+    } else {
+        workspace.join(path)
+    }
 }
 
 struct Completion {
@@ -498,14 +526,7 @@ impl App {
                     self.new_session();
                 }
             }
-            Event::SessionDeleted(id) => {
-                self.session_inputs.remove(&id);
-                self.transcript
-                    .push(Role::Note, format!("Deleted session {id}"));
-                if self.session.as_deref() == Some(&id) {
-                    self.new_session();
-                }
-            }
+            Event::SessionDeleteResult { id, result } => self.session_delete_result(id, result),
             Event::Tool { id, display } => {
                 self.activity.push_back(format!(
                     "{} · {}",
@@ -547,6 +568,7 @@ impl App {
                 self.approval_preference = None;
                 self.preparing_switch = false;
                 self.model_change_pending = false;
+                self.agents_delete_interrupted();
                 self.sessions_received(
                     self.session_request,
                     Err("Disconnected from the agent".into()),
@@ -725,7 +747,7 @@ impl App {
 
     pub fn paste(&mut self, text: &str) {
         if self.picker.as_ref().is_some_and(picker::Picker::is_agents) {
-            self.paste_into_picker(text);
+            self.agents_paste(text);
             return;
         }
         if self.elicitations.front().is_some() {
@@ -799,11 +821,7 @@ impl App {
                 );
                 return;
             }
-            if self.remote {
-                workspace = PathBuf::from(path);
-            } else {
-                workspace.push(path);
-            }
+            workspace = session_workspace_path(&workspace, path, self.remote);
         }
         self.switch_session(SessionTarget {
             cwd: Some(workspace),
@@ -858,17 +876,24 @@ impl App {
     }
 
     fn prepare_session_switch(&mut self) -> bool {
-        let message = if self.preparing_switch || (self.transcript.replaying() && !self.ready) {
-            "Wait for the current session to connect"
-        } else if self.attachment_reads > 0 {
-            "Wait for the attachment to finish loading"
-        } else if !self.can_switch() {
-            "Stop the running turn before switching sessions"
+        if let Some(message) = self.session_switch_blocker() {
+            self.transcript.push(Role::Warning, message.into());
+            false
         } else {
-            return true;
-        };
-        self.transcript.push(Role::Warning, message.into());
-        false
+            true
+        }
+    }
+
+    fn session_switch_blocker(&self) -> Option<&'static str> {
+        if self.preparing_switch || (self.transcript.replaying() && !self.ready) {
+            Some("Wait for the current session to connect")
+        } else if self.attachment_reads > 0 {
+            Some("Wait for the attachment to finish loading")
+        } else if !self.can_switch() {
+            Some("Stop the running turn before switching sessions")
+        } else {
+            None
+        }
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -946,26 +971,47 @@ impl App {
                 .push(Role::Warning, "Use /delete <session id>".into());
             return;
         }
+        if let Err(message) = self.request_session_delete(&id) {
+            self.transcript.push(Role::Warning, message.into());
+        }
+    }
+
+    fn session_delete_blocker(&self, id: &str) -> Option<&'static str> {
         if !self.ready {
-            self.transcript
-                .push(Role::Warning, "Connect before deleting a session".into());
+            Some("Connect before deleting a session")
+        } else if !self.delete_supported {
+            Some("The agent does not advertise session/delete")
+        } else if self.session.as_deref() == Some(id) && !self.can_switch() {
+            Some("Stop the running turn before deleting its session")
+        } else {
+            None
+        }
+    }
+
+    fn request_session_delete(&self, id: &str) -> Result<(), &'static str> {
+        if let Some(message) = self.session_delete_blocker(id) {
+            return Err(message);
+        }
+        self.actions
+            .unbounded_send(Action::DeleteSession(id.to_owned()))
+            .map_err(|_| "Disconnected from the agent")
+    }
+
+    fn session_delete_result(&mut self, id: String, result: Result<(), String>) {
+        if let Err(error) = result {
+            if !self.agents_delete_failed(&id, &error) {
+                self.transcript.push(Role::Error, error);
+            }
             return;
         }
-        if !self.delete_supported {
-            self.transcript.push(
-                Role::Warning,
-                "The agent does not advertise session/delete".into(),
-            );
-            return;
+        self.session_inputs.remove(&id);
+        self.transcript
+            .push(Role::Note, format!("Deleted session {id}"));
+        let active = self.session.as_deref() == Some(&id);
+        self.agents_delete_completed(&id, active);
+        if active {
+            self.new_session();
         }
-        if self.session.as_deref() == Some(id.as_str()) && !self.can_switch() {
-            self.transcript.push(
-                Role::Warning,
-                "Stop the running turn before deleting its session".into(),
-            );
-            return;
-        }
-        let _ = self.actions.unbounded_send(Action::DeleteSession(id));
     }
 
     #[cfg(target_family = "wasm")]
@@ -1075,6 +1121,9 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) {
+        if self.agents_action_key(key) {
+            return;
+        }
         if matches!(key, Key::Agents) {
             if self.picker.as_ref().is_some_and(picker::Picker::is_agents) {
                 self.picker = None;
@@ -1177,7 +1226,7 @@ impl App {
             Key::LatestOutput => self.transcript.follow(),
             Key::ToggleTools => self.transcript.toggle_tools(),
             Key::ToggleSidebar => self.toggle_sidebar(),
-            Key::Agents => {}
+            Key::Agents | Key::NewSession => {}
             Key::Reconnect => self.reconnect(),
             Key::Escape
                 if self.status != "Cancelling" && (self.turns > 0 || self.remote_busy()) =>

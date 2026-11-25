@@ -307,7 +307,10 @@ pub enum Event {
     #[cfg(not(target_family = "wasm"))]
     QuitStopped(Result<(), String>),
     SessionClosed(String),
-    SessionDeleted(String),
+    SessionDeleteResult {
+        id: String,
+        result: Result<(), String>,
+    },
     Tool {
         id: String,
         display: ToolDisplay,
@@ -678,10 +681,8 @@ pub async fn connect(
                             let _ = events.unbounded_send(event);
                         }
                         Some(Action::DeleteSession(id)) => {
-                            let event = if !delete_supported {
-                                Event::Error(
-                                    "The agent does not advertise session/delete".into(),
-                                )
+                            let result = if !delete_supported {
+                                Err("The agent does not advertise session/delete".into())
                             } else {
                                 let reply = session
                                     .connection()
@@ -689,16 +690,12 @@ pub async fn connect(
                                     .block_task()
                                     .await;
                                 match reply {
-                                    Ok(_) => Event::SessionDeleted(id),
-                                    Err(error)
-                                        if error.code == ErrorCode::RESOURCE_NOT_FOUND =>
-                                    {
-                                        Event::SessionDeleted(id)
-                                    }
-                                    Err(error) => Event::Error(error.message),
+                                    Ok(_) => Ok(()),
+                                    Err(error) if error.code == ErrorCode::RESOURCE_NOT_FOUND => Ok(()),
+                                    Err(error) => Err(error.message),
                                 }
                             };
-                            let _ = events.unbounded_send(event);
+                            let _ = events.unbounded_send(Event::SessionDeleteResult { id, result });
                         }
                         Some(Action::ListProviderRoutes) if provider_routing => {
                             let result = session.connection()

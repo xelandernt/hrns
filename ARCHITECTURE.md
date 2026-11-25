@@ -306,7 +306,12 @@ Tab switches between the current
 workspace and all accessible workspaces. On a Harness server the view refreshes
 while open, showing running, waiting for input, and attached-elsewhere states.
 Selecting a session loads it and releases the previous attachment. Background
-status is visible in this view. When quitting with only the current session active,
+status is visible in this view. Ctrl+N creates a session in the current
+workspace or opens an editable workspace path in the all-workspaces view.
+Path completion matches local directories on local connections and known
+workspace paths on remote connections. Delete confirms the selected session's
+name and workspace before requesting deletion. Deleting the current session
+opens a fresh session in its workspace. When quitting with only the current session active,
 the native TUI offers to detach, close that session and quit, or stay.
 Before switching or checking whether to quit, the terminal uses
 `_hrns/session/flush` to let earlier prompt requests finish admission to the

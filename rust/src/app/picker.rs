@@ -4,7 +4,7 @@ use agent_client_protocol::v1::schema::{
     SessionConfigKind, SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo,
 };
 
-use super::{App, Key};
+use super::{App, Key, agents_actions::SessionDialog};
 use crate::{
     acp::{Action, ExecutionStatus, ModelChange, SessionActivity, SessionPage, session_activity},
     options::{self, model_provider},
@@ -19,6 +19,8 @@ pub(super) enum Source {
         loading: bool,
         error: Option<String>,
         refresh: Option<Vec<SessionInfo>>,
+        dialog: Option<Box<SessionDialog>>,
+        notice: Option<String>,
     },
     Setting(SessionConfigOptionCategory),
     Skills,
@@ -192,6 +194,8 @@ impl App {
                 loading: false,
                 error: None,
                 refresh: None,
+                dialog: None,
+                notice: None,
             },
             query: String::new(),
             selected: 0,
@@ -341,6 +345,20 @@ impl App {
         if let Some(picker) = &mut self.picker {
             picker.selected = selected;
         }
+    }
+
+    pub(super) fn remove_agent_session(&mut self, id: &str) {
+        let Some(Picker {
+            source: Source::Sessions { items, refresh, .. },
+            ..
+        }) = &mut self.picker
+        else {
+            return;
+        };
+        items.retain(|item| item.session_id.0.as_ref() != id);
+        *refresh = Some(Vec::new());
+        self.restore_agents_selection(None);
+        self.request_sessions(false);
     }
 
     pub(super) fn maybe_page_sessions(&mut self) {
@@ -665,6 +683,7 @@ impl App {
                     cursor,
                     all_workspaces,
                     error,
+                    notice,
                     refresh,
                     ..
                 },
@@ -674,6 +693,7 @@ impl App {
         {
             if matches!(key, Key::Tab) {
                 items.clear();
+                *notice = None;
                 *cursor = None;
                 *refresh = None;
                 *all_workspaces = !*all_workspaces;
@@ -683,6 +703,7 @@ impl App {
             }
             if matches!(key, Key::Reconnect) {
                 *error = None;
+                *notice = None;
                 *refresh = Some(Vec::new());
                 self.request_sessions(false);
                 return;

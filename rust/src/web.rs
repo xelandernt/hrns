@@ -469,6 +469,7 @@ fn translate(event: &KeyboardEvent) -> Option<Key> {
             "o" => Some(Key::ToggleTools),
             "b" => Some(Key::ToggleSidebar),
             "g" => Some(Key::Agents),
+            "n" => Some(Key::NewSession),
             "End" => Some(Key::LatestOutput),
             _ => None,
         };
