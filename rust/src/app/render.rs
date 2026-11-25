@@ -380,8 +380,8 @@ impl App {
             } else {
                 "Unknown command · /help commands"
             }
-        } else if self.prompt_setup_message().is_some() {
-            "Set up a provider and model with /providers"
+        } else if let Some(message) = self.prompt_setup_message() {
+            message
         } else if slash_command(self.draft.text()) == Some("/queue") {
             "Enter queue message"
         } else {
@@ -741,7 +741,7 @@ impl App {
         let mut left = Line::from(vec!["● ".fg(status_color), self.status.fg(status_color)]);
         if let Some(provider) = &self.selected_provider {
             let name = provider.id.as_str().fg(palette.accent);
-            let field = Line::from(vec!["Login provider ".into(), name.clone()]);
+            let field = Line::from(vec!["Provider ".into(), name.clone()]);
             if field.width() + left.width() + 3 <= width {
                 append_status_field(&mut left, field, width);
             } else if field.width() <= width {
@@ -799,18 +799,24 @@ impl App {
         let model = model.map_or_else(Line::default, |model| {
             Line::from(model.fg(palette.accent).bold())
         });
-        for field in [
-            model,
-            self.token_usage(),
-            Line::from(self.usage_cost.as_deref().unwrap_or_default()),
-            Line::from(vec!["Effort ".into(), effort.fg(palette.accent)]),
+        if !self.model_change_pending && !self.provider_model_missing() {
+            for field in [
+                model,
+                self.token_usage(),
+                Line::from(self.usage_cost.as_deref().unwrap_or_default()),
+                Line::from(vec!["Effort ".into(), effort.fg(palette.accent)]),
+            ] {
+                append_status_field(&mut right, field, budget);
+            }
+        }
+        append_status_field(
+            &mut right,
             Line::from(vec![
                 "Approvals ".into(),
                 self.approval_mode.label().fg(palette.accent),
             ]),
-        ] {
-            append_status_field(&mut right, field, budget);
-        }
+            budget,
+        );
 
         let right_width = right.width();
         let left_width = width.saturating_sub(right_width + if right_width == 0 { 0 } else { 2 });
@@ -919,7 +925,7 @@ impl App {
         if let Some(provider) = &self.selected_provider {
             lines.push(
                 Line::from(vec![
-                    "Login provider ".into(),
+                    "Provider ".into(),
                     provider.id.as_str().fg(palette.accent),
                 ])
                 .fg(palette.muted),
@@ -934,14 +940,17 @@ impl App {
         if let Some(title) = &self.session_title {
             lines.push(Line::from(title.clone()).fg(palette.foreground));
         }
-        if let Some(model) = self.options.iter().find_map(|option| match &option.kind {
-            SessionConfigKind::Select(select)
-                if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
-            {
-                Some(select.current_value.clone())
-            }
-            _ => None,
-        }) {
+        if !self.model_change_pending
+            && !self.provider_model_missing()
+            && let Some(model) = self.options.iter().find_map(|option| match &option.kind {
+                SessionConfigKind::Select(select)
+                    if options::matches_category(option, &SessionConfigOptionCategory::Model) =>
+                {
+                    Some(select.current_value.clone())
+                }
+                _ => None,
+            })
+        {
             lines.push(Line::from(format!("model {model}")).fg(palette.muted));
         }
         if let Some(mode) = &self.mode {

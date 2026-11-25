@@ -310,8 +310,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object
     ) -> schema.SetSessionConfigOptionResponse | None:
         session = await self._session(session_id, "session/set_config_option")
-        remember_model = self._remember_model if config_id == _MODEL_CONFIG_ID else None
-        async with self._provider_management_lock if remember_model else nullcontext():
+        is_model = config_id == _MODEL_CONFIG_ID
+        automatic = self._provider_editor is not None and kwargs.get("hrns/model/automatic") is True
+        remember_model = self._remember_model if is_model and not automatic else None
+        async with self._provider_management_lock if is_model else nullcontext():
             with _store_errors():
                 return await session._runtime.set_config_option(
                     config_id=config_id,

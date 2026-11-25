@@ -66,6 +66,10 @@ pub fn selected_model(options: &[SessionConfigOption]) -> Option<&SessionConfigS
         .find(|choice| choice.value == select.current_value)
 }
 
+pub fn model_provider(choice: &SessionConfigSelectOption) -> Option<&str> {
+    choice.meta.as_ref()?.get("providerId")?.as_str()
+}
+
 pub fn choices(option: &SessionConfigOption) -> Vec<&SessionConfigSelectOption> {
     let SessionConfigKind::Select(select) = &option.kind else {
         return Vec::new();

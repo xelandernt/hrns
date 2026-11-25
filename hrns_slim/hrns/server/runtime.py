@@ -243,6 +243,7 @@ class RuntimeModelResolver(ProviderModelResolver):
         )
         self.settings = settings
         self.startup_model: str | None = None
+        self.last_provider_models: dict[str, str] = {}
         self._copilot_models: dict[str, dict[str, _CopilotModel]] = {}
         self.login = ProviderLogin(refresh_copilot_models=self.refresh_copilot_models)
 
@@ -317,6 +318,7 @@ class RuntimeModelResolver(ProviderModelResolver):
                         "aws_profile": entry.options.get("profile_name", ""),
                         "aws_region": entry.options.get("region_name", ""),
                         "login_methods": login_methods(entry.provider_id(name)),
+                        "setup_message": self._setup_message(name, entry),
                     }
                     for name, entry in self.settings.providers.items()
                 ],
@@ -511,6 +513,17 @@ class RuntimeModelResolver(ProviderModelResolver):
             targets.insert(0, configured)
         active = self.startup_model if self.startup_model in targets else configured
         ordered = [active, *(target for target in targets if target != active)]
+        preferred: dict[str, str] = {}
+        for target in (configured, *targets):
+            name, _, model_name = target.partition(":")
+            if model_name:
+                preferred.setdefault(name, target)
+        available = set(targets)
+        preferred.update(
+            (name, target)
+            for name, target in self.last_provider_models.items()
+            if target in available
+        )
         choices: list[ModelChoice] = []
         setup_messages: dict[str, str | None] = {}
         for target in ordered:
@@ -537,6 +550,7 @@ class RuntimeModelResolver(ProviderModelResolver):
                     provider_id=name,
                     name=f"{group} ({label})" if group else None,
                     setup_message=setup_messages[name],
+                    preferred_for_provider=target == preferred.get(name),
                     context_group=group,
                     context_size=label,
                 )
@@ -830,20 +844,25 @@ def run(
         return
     store = LocalSessionStore(settings.store)
     scope: Path | None = None
-    if not env_only and not {"HRNS_PROVIDER", "HRNS_MODEL"}.intersection(
+    startup_override = {"HRNS_PROVIDER", "HRNS_MODEL"}.intersection(
         key.upper() for key in os.environ
-    ):
+    )
+    if not env_only:
         inferred_paths = () if settings.config_file else config_files()
         scope = (inferred_paths[0] if inferred_paths else settings.path).resolve()
         try:
-            resolver.startup_model = store.startup_model(scope)
+            resolver.last_provider_models = store.provider_models(scope)
+            if not startup_override:
+                resolver.startup_model = store.startup_model(scope)
         except SessionStoreError as exc:
             logger.warning("Could not load the last selected model: %s", exc)
 
     async def remember_model(model: str) -> None:
         if scope is not None:
             await store.remember_startup_model(scope, model)
-            resolver.startup_model = model
+            resolver.last_provider_models[model.partition(":")[0]] = model
+            if not startup_override:
+                resolver.startup_model = model
 
     models = resolver.list_models()
     if not models and env_only and not setup:

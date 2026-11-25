@@ -15,8 +15,8 @@ use futures::channel::{mpsc, oneshot};
 use ratatui::layout::{Position, Rect};
 
 use crate::acp::{
-    Action, ClientIoMode, ConnectTarget, Event, ExecutionState, ExecutionStatus, PermissionRequest,
-    SessionTarget,
+    Action, ClientIoMode, ConnectTarget, Event, ExecutionState, ExecutionStatus, ModelChange,
+    PermissionRequest, SessionTarget,
 };
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
@@ -213,6 +213,7 @@ pub struct App {
     reasoning_tokens: Option<u64>,
     providers: Option<providers::Dialog>,
     selected_provider: Option<providers::Selected>,
+    model_change_pending: bool,
     picker: Option<picker::Picker>,
     session_request: u64,
     preferences: Preferences,
@@ -296,6 +297,7 @@ impl App {
             reasoning_tokens: None,
             providers: None,
             selected_provider: None,
+            model_change_pending: false,
             picker: None,
             session_request: 0,
             preferences,
@@ -343,6 +345,7 @@ impl App {
                 self.workspace = Some(workspace);
                 self.remote = remote;
                 if self.session.as_deref() != Some(&session) {
+                    self.selected_provider = None;
                     if self.session.is_some() {
                         self.clear_queue_for_switch();
                     }
@@ -363,6 +366,9 @@ impl App {
                 self.refresh_completion();
                 self.activity.push_back("connected".into());
                 self.trim_activity();
+                if self.provider_model_missing() {
+                    self.activate_provider_model();
+                }
                 self.update_execution();
                 self.flush_queue();
             }
@@ -382,28 +388,15 @@ impl App {
                     self.update_execution();
                 }
             }
-            Event::ModelSelected(options) => {
-                self.event(Event::Options(options));
-                if self.draft.text().is_empty() && self.picker.is_none() && self.providers.is_none()
-                {
-                    self.choose_model_effort();
-                }
-            }
+            Event::ModelSelected { change, result } => self.model_selected(change, result),
             Event::Options(options) => {
-                if options::selected_model(&options).map(|choice| &choice.value)
-                    != options::selected_model(&self.options).map(|choice| &choice.value)
+                self.update_options(options);
+                if self.ready
+                    && (self.take_provider_login_refresh() || self.provider_model_missing())
                 {
-                    self.usage = None;
-                    self.last_usage_tokens = None;
+                    self.activate_provider_model();
                 }
-                self.options = options;
-                self.refresh_completion();
-                if let Some(picker) = self.picker.as_ref() {
-                    let last = self.picker_rows(picker).len().saturating_sub(1);
-                    if let Some(picker) = self.picker.as_mut() {
-                        picker.selected = picker.selected.min(last);
-                    }
-                }
+                self.flush_queue();
             }
             Event::Sessions { request_id, result } => self.sessions_received(request_id, result),
             Event::AgentCommands(commands) => self.commands = commands,
@@ -520,6 +513,7 @@ impl App {
                 }
             }
             Event::Disconnected => {
+                self.model_change_pending = false;
                 self.sessions_received(
                     self.session_request,
                     Err("Disconnected from the agent".into()),
@@ -575,6 +569,7 @@ impl App {
                 self.refresh_completion();
             }
             Event::Connecting => {
+                self.model_change_pending = false;
                 self.ready = false;
                 self.turns = 0;
                 self.execution = None;
@@ -1433,9 +1428,76 @@ impl App {
         }
     }
 
+    fn update_options(&mut self, options: Vec<SessionConfigOption>) {
+        if options::selected_model(&options).map(|choice| &choice.value)
+            != options::selected_model(&self.options).map(|choice| &choice.value)
+        {
+            self.usage = None;
+            self.last_usage_tokens = None;
+        }
+        self.options = options;
+        self.refresh_completion();
+        if let Some(picker) = &self.picker {
+            let last = self.picker_rows(picker).len().saturating_sub(1);
+            if let Some(picker) = &mut self.picker {
+                picker.selected = picker.selected.min(last);
+            }
+        }
+    }
+
+    fn model_selected(
+        &mut self,
+        change: ModelChange,
+        result: Result<Vec<SessionConfigOption>, String>,
+    ) {
+        self.model_change_pending = false;
+        let options = match result {
+            Ok(options) => options,
+            Err(error) => {
+                self.transcript.push(Role::Error, error);
+                return;
+            }
+        };
+        self.update_options(options);
+        if let ModelChange::Explicit { choose_effort } = change {
+            if self.provider_model_missing() {
+                self.selected_provider = None;
+            }
+            if choose_effort
+                && self.draft.text().is_empty()
+                && self.picker.is_none()
+                && self.providers.is_none()
+            {
+                self.choose_model_effort();
+            }
+        }
+        self.flush_queue();
+    }
+
+    fn active_model_provider(&self) -> Option<&str> {
+        options::selected_model(&self.options).and_then(options::model_provider)
+    }
+
+    fn provider_model_missing(&self) -> bool {
+        self.selected_provider
+            .as_ref()
+            .is_some_and(|selected| self.active_model_provider() != Some(selected.id.as_str()))
+    }
+
     fn prompt_setup_message(&self) -> Option<&str> {
-        if !self.ready || !self.provider_editor {
+        if !self.ready {
             return None;
+        }
+        if self.model_change_pending {
+            return Some("Switching models…");
+        }
+        if !self.provider_editor {
+            return None;
+        }
+        if self.provider_model_missing() {
+            return Some(self.provider_setup_message().unwrap_or(
+                "No model is active. Check /login or configure a model in /providers.",
+            ));
         }
         let model = self
             .options
@@ -1450,7 +1512,13 @@ impl App {
     fn prepare_prompt(&mut self, text: String) -> Option<Prompt> {
         if let Some(message) = self.prompt_setup_message() {
             self.transcript.push(Role::Note, message.to_owned());
-            self.show_providers();
+            if !self.model_change_pending {
+                if self.provider_setup_message().is_some() {
+                    self.show_provider_login();
+                } else if self.selected_provider.is_none() {
+                    self.show_providers();
+                }
+            }
             return None;
         }
         if self.attachment_reads > 0 {

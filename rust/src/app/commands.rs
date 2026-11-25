@@ -3,7 +3,7 @@ use agent_client_protocol::v1::schema::{
 };
 
 use super::{App, LocalEffect, is_local_command, slash_command};
-use crate::acp::{Action, ConnectTarget, ProviderEdit};
+use crate::acp::{Action, ConnectTarget, ModelChange, ProviderEdit};
 use crate::options;
 use crate::preferences::ApprovalMode;
 use crate::theme;
@@ -298,7 +298,9 @@ impl App {
                 self.set_config(
                     SessionConfigOptionCategory::Model,
                     text.split_once(' ').map_or("", |(_, value)| value.trim()),
-                    false,
+                    Some(ModelChange::Explicit {
+                        choose_effort: false,
+                    }),
                 );
             }
             text if text.starts_with("/effort ") => {
@@ -306,7 +308,7 @@ impl App {
                 self.set_config(
                     SessionConfigOptionCategory::ThoughtLevel,
                     text["/effort ".len()..].trim(),
-                    false,
+                    None,
                 );
             }
             "/connect" => {
@@ -519,8 +521,13 @@ impl App {
         &mut self,
         category: SessionConfigOptionCategory,
         input: &str,
-        choose_effort: bool,
+        model_change: Option<ModelChange>,
     ) {
+        if model_change.is_some() && self.model_change_pending {
+            self.transcript
+                .push(Role::Note, "Wait for the model switch to finish.".into());
+            return;
+        }
         let selected = self
             .options
             .iter()
@@ -529,13 +536,17 @@ impl App {
             Some(option) if input.is_empty() => options::summary(option),
             Some(option) => match options::value(option, input) {
                 Some(value) => {
-                    let _ = self.actions.unbounded_send(Action::SetOption {
+                    let action = Action::SetOption {
                         id: option.id.clone(),
                         value,
                         category,
-                        choose_effort,
-                    });
-                    return;
+                        model_change,
+                    };
+                    if self.actions.unbounded_send(action).is_ok() {
+                        self.model_change_pending |= model_change.is_some();
+                        return;
+                    }
+                    "The agent disconnected.".into()
                 }
                 None => "Invalid configuration value".into(),
             },

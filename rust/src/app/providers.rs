@@ -1,4 +1,4 @@
-use agent_client_protocol::v1::schema::ProviderInfo as Route;
+use agent_client_protocol::v1::schema::{ProviderInfo as Route, SessionConfigOptionCategory};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -6,8 +6,11 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use super::{App, Key, LocalEffect};
-use crate::acp::{Action, LoginMethod, ProviderEdit, ProviderInfo, ProviderLoginState};
+use crate::acp::{
+    Action, LoginMethod, ModelChange, ProviderEdit, ProviderInfo, ProviderLoginState,
+};
 use crate::composer::Composer;
+use crate::options;
 use crate::theme::Palette;
 use crate::transcript::Role;
 
@@ -23,6 +26,8 @@ const TYPE_FIELD: usize = 1;
 pub(super) struct Selected {
     pub(super) id: String,
     methods: Vec<LoginMethod>,
+    setup_message: Option<String>,
+    refresh_model_after_login: bool,
 }
 
 pub(super) struct Dialog {
@@ -206,6 +211,54 @@ fn input_key(input: &mut Composer, key: Key) {
 }
 
 impl App {
+    pub(super) fn provider_setup_message(&self) -> Option<&str> {
+        self.selected_provider.as_ref()?.setup_message.as_deref()
+    }
+
+    pub(super) fn take_provider_login_refresh(&mut self) -> bool {
+        self.selected_provider
+            .as_mut()
+            .is_some_and(|selected| std::mem::take(&mut selected.refresh_model_after_login))
+    }
+
+    pub(super) fn activate_provider_model(&mut self) {
+        let Some(selected) = &self.selected_provider else {
+            return;
+        };
+        if self.model_change_pending {
+            return;
+        }
+        let category = SessionConfigOptionCategory::Model;
+        let Some(option) = self
+            .options
+            .iter()
+            .find(|option| options::matches_category(option, &category))
+        else {
+            return;
+        };
+        let Some(preferred) = options::choices(option).into_iter().find(|choice| {
+            options::model_provider(choice) == Some(selected.id.as_str())
+                && choice
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("hrns/model/preferred"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        }) else {
+            return;
+        };
+        if options::selected_model(&self.options)
+            .is_some_and(|active| active.value == preferred.value)
+        {
+            return;
+        }
+        self.set_config(
+            category,
+            &preferred.value.to_string(),
+            Some(ModelChange::Provider),
+        );
+    }
+
     fn local_providers_available(&mut self) -> bool {
         if self.ready && self.provider_editor {
             return true;
@@ -262,6 +315,7 @@ impl App {
     }
 
     pub(super) fn provider_list(&mut self, result: Result<Vec<ProviderInfo>, String>) {
+        let active = self.active_model_provider().map(str::to_owned);
         let Some(dialog) = &mut self.providers else {
             return;
         };
@@ -270,14 +324,20 @@ impl App {
         }
         match result {
             Ok(items) => {
-                let index = self
+                if let Some(selected) = &mut self.selected_provider {
+                    let item = items.iter().find(|item| item.id == selected.id);
+                    selected.setup_message = item.and_then(|item| item.setup_message.clone());
+                    selected.methods =
+                        item.map_or_else(Vec::new, |item| item.login_methods.clone());
+                }
+                let provider = self
                     .selected_provider
                     .as_ref()
-                    .and_then(|selected| items.iter().position(|item| item.id == selected.id));
-                self.selected_provider = index.map(|index| Selected {
-                    id: items[index].id.clone(),
-                    methods: items[index].login_methods.clone(),
-                });
+                    .map(|selected| selected.id.as_str())
+                    .or(active.as_deref());
+                let index = items
+                    .iter()
+                    .position(|item| Some(item.id.as_str()) == provider);
                 dialog.screen = Screen::List {
                     items,
                     index: index.unwrap_or_default(),
@@ -351,16 +411,15 @@ impl App {
         };
         match result {
             Ok(result) if result.done => {
-                let signed_in = self.selected_provider.as_ref().map_or_else(
-                    || "Sign-in complete.".into(),
-                    |selected| format!("Signed in to {}.", selected.id),
-                );
-                let detail = result
-                    .warning
-                    .as_deref()
-                    .unwrap_or("Choose a model with /models.");
-                let message = format!("{signed_in} {detail}");
-                self.transcript.push(Role::Note, message);
+                if let Some(selected) = &mut self.selected_provider {
+                    selected.setup_message = None;
+                    selected.refresh_model_after_login = true;
+                    self.transcript
+                        .push(Role::Note, format!("Signed in to {}.", selected.id));
+                }
+                if let Some(warning) = result.warning {
+                    self.transcript.push(Role::Note, warning);
+                }
                 self.providers = None;
             }
             Ok(result) => {
@@ -430,15 +489,24 @@ impl App {
                     };
                     match key {
                         Key::Enter => {
+                            if self.model_change_pending {
+                                dialog.error = Some("Wait for the model switch to finish.".into());
+                                return;
+                            }
                             self.selected_provider = Some(Selected {
                                 id: item.id.clone(),
                                 methods: item.login_methods.clone(),
+                                setup_message: item.setup_message.clone(),
+                                refresh_model_after_login: false,
                             });
-                            self.transcript.push(
-                                Role::Note,
-                                format!("Selected {}. Run /login to sign in.", item.id),
-                            );
                             self.providers = None;
+                            self.activate_provider_model();
+                            if let Some(message) = self.provider_setup_message().or_else(|| {
+                                self.prompt_setup_message()
+                                    .filter(|_| !self.model_change_pending)
+                            }) {
+                                self.transcript.push(Role::Note, message.to_owned());
+                            }
                         }
                         Key::Text('e') => {
                             dialog.screen = Screen::Edit(Box::new(ProviderForm::new(Some(item))));

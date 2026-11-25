@@ -6,8 +6,8 @@ use agent_client_protocol::v1::schema::{
 
 use super::{App, Key};
 use crate::{
-    acp::{Action, SessionPage},
-    options,
+    acp::{Action, ModelChange, SessionPage},
+    options::{self, model_provider},
     transcript::Role,
 };
 
@@ -110,10 +110,6 @@ impl Picker {
                 .iter()
                 .any(|tier| tier.label.to_lowercase().contains(&query))
     }
-}
-
-fn model_provider(choice: &SessionConfigSelectOption) -> Option<&str> {
-    choice.meta.as_ref()?.get("providerId")?.as_str()
 }
 
 pub(super) fn context_tier(choice: &SessionConfigSelectOption) -> Option<(&str, &str)> {
@@ -515,12 +511,20 @@ impl App {
             let source = self.picker.take().expect("picker is open").source;
             match source {
                 Source::Sessions { .. } if !row.active => self.load_session(row.value.clone()),
-                Source::Setting(SessionConfigOptionCategory::Model) if row.active => {
+                Source::Setting(SessionConfigOptionCategory::Model)
+                    if row.active && !self.provider_editor =>
+                {
                     self.choose_model_effort()
                 }
-                Source::Setting(category) if !row.active => {
-                    let choose_effort = category == SessionConfigOptionCategory::Model;
-                    self.set_config(category, &row.value, choose_effort);
+                Source::Setting(category)
+                    if !row.active || category == SessionConfigOptionCategory::Model =>
+                {
+                    let model_change = (category == SessionConfigOptionCategory::Model).then_some(
+                        ModelChange::Explicit {
+                            choose_effort: true,
+                        },
+                    );
+                    self.set_config(category, &row.value, model_change);
                 }
                 Source::Skills => self.draft.insert(&format!("${} ", row.value)),
                 _ => {}

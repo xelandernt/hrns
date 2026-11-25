@@ -592,9 +592,15 @@ models by provider and switches tabs with Tab and Shift+Tab.
 The ACP runtime reports the latest provider-supplied reasoning token count at
 model-response boundaries, including when the model's context window is unknown.
 The built-in stdio agent remembers explicit model selections in its local session
-database, scoped to the active configuration file. Fresh sessions prefer that
-selection when it is available. Saved sessions restore their own model, and
-environment model overrides govern startup.
+database, scoped to the active configuration file and provider entry. Fresh sessions
+prefer the most recent explicit selection when it is available. Saved sessions
+restore their own model, and environment model overrides govern startup. For each
+provider entry, ACP advertises the last available explicit selection, the configured
+model for that entry, or the first catalog choice, in that order of preference.
+The TUI activates the preferred model for the session when selecting a provider and after sign-in,
+using `session/set_config_option` with `hrns/model/automatic` metadata to preserve
+explicit preferences. The TUI keeps drafts and queued prompts from sending while a
+model switch is pending or the selected provider has no usable active model.
 
 API keys and Copilot tokens are stored in the OS keyring. The Codex provider
 loads and saves its rotating credentials through the same keyring. Accounts

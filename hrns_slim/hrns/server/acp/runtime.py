@@ -505,6 +505,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     name=choice.name or choice.model_id,
                     field_meta={
                         "providerId": choice.provider_id,
+                        **({"hrns/model/preferred": True} if choice.preferred_for_provider else {}),
                         **(
                             {
                                 "hrns/model/context_group": choice.context_group,

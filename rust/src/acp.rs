@@ -135,7 +135,7 @@ pub enum Action {
         id: SessionConfigId,
         value: SessionConfigOptionValue,
         category: SessionConfigOptionCategory,
-        choose_effort: bool,
+        model_change: Option<ModelChange>,
     },
     ListSessions {
         request_id: u64,
@@ -157,6 +157,12 @@ pub enum Action {
     },
     ProviderLoginStatus,
     CancelProviderLogin,
+}
+
+#[derive(Clone, Copy)]
+pub enum ModelChange {
+    Explicit { choose_effort: bool },
+    Provider,
 }
 
 pub struct PermissionChoice {
@@ -183,6 +189,7 @@ pub struct ProviderInfo {
     pub aws_profile: Option<String>,
     pub aws_region: Option<String>,
     pub login_methods: Vec<LoginMethod>,
+    pub setup_message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -248,7 +255,10 @@ pub enum Event {
     },
     Execution(ExecutionState),
     Options(Vec<SessionConfigOption>),
-    ModelSelected(Vec<SessionConfigOption>),
+    ModelSelected {
+        change: ModelChange,
+        result: Result<Vec<SessionConfigOption>, String>,
+    },
     AgentCommands(Vec<(String, String)>),
     Skills(Vec<Skill>),
     SessionTitle(Option<String>),
@@ -540,10 +550,15 @@ pub async fn connect(
                                 CancelNotification::new(session.session_id().clone())
                             )?;
                         }
-                        Some(Action::SetOption { id, value, category, choose_effort }) => {
-                            let request = SetSessionConfigOptionRequest::new(session.session_id().clone(), id, value);
+                        Some(Action::SetOption { id, value, category, model_change }) => {
+                            let mut request = SetSessionConfigOptionRequest::new(session.session_id().clone(), id, value);
+                            if matches!(model_change, Some(ModelChange::Provider)) {
+                                request.meta = Some(serde_json::Map::from_iter([(
+                                    "hrns/model/automatic".into(), serde_json::Value::Bool(true),
+                                )]));
+                            }
                             let reply = session.connection().send_request(request).block_task().await;
-                            let event = match reply {
+                            let result = match reply {
                                 Ok(reply) => {
                                     let options = reply.config_options;
                                     #[cfg(not(target_family = "wasm"))]
@@ -561,9 +576,14 @@ pub async fn connect(
                                     };
                                     #[cfg(target_family = "wasm")]
                                     let _ = category;
-                                    if choose_effort { Event::ModelSelected(options) } else { Event::Options(options) }
+                                    Ok(options)
                                 }
-                                Err(error) => Event::Error(error.message),
+                                Err(error) => Err(error.message),
+                            };
+                            let event = match (model_change, result) {
+                                (Some(change), result) => Event::ModelSelected { change, result },
+                                (None, Ok(options)) => Event::Options(options),
+                                (None, Err(error)) => Event::Error(error),
                             };
                             let _ = events.unbounded_send(event);
                         }

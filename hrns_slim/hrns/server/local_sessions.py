@@ -61,6 +61,14 @@ class LocalSessionStore:
                     model TEXT NOT NULL
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS provider_models (
+                    config_path TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    PRIMARY KEY (config_path, provider)
+                )
+            """)
             yield db
 
     def startup_model(self, config_path: Path) -> str | None:
@@ -74,6 +82,15 @@ class LocalSessionStore:
     async def remember_startup_model(self, config_path: Path, model: str) -> None:
         await asyncio.to_thread(self._write_startup_model, config_path, model)
 
+    def provider_models(self, config_path: Path) -> dict[str, str]:
+        with self._model_preferences() as db:
+            return dict(
+                db.execute(
+                    "SELECT provider, model FROM provider_models WHERE config_path = ?",
+                    (str(config_path),),
+                )
+            )
+
     def _write_startup_model(self, config_path: Path, model: str) -> None:
         with self._model_preferences() as db:
             db.execute(
@@ -82,6 +99,13 @@ class LocalSessionStore:
                 ON CONFLICT (config_path) DO UPDATE SET model = excluded.model
                 """,
                 (str(config_path), model),
+            )
+            db.execute(
+                """
+                INSERT INTO provider_models (config_path, provider, model) VALUES (?, ?, ?)
+                ON CONFLICT (config_path, provider) DO UPDATE SET model = excluded.model
+                """,
+                (str(config_path), model.partition(":")[0], model),
             )
 
     async def create(self, session_id: str, *, cwd: str, principal: object) -> None:
