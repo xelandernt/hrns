@@ -65,7 +65,9 @@ impl App {
                 && !self.remote
                 && slash_command(text).is_none_or(|command| command == "/queue")
         });
-        let references: Vec<_> = file_references(text).collect();
+        let references: Vec<_> = file_references(text)
+            .filter(|reference| !self.draft.overlaps_paste(&reference.range))
+            .collect();
         let Some(workspace) = workspace.filter(|_| !references.is_empty()) else {
             self.file_search = Search::default();
             return None;

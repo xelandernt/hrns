@@ -86,7 +86,20 @@ _CLAUDE_MODELS = frozenset(
     model.removeprefix("anthropic:")
     for model in known_model_names()
     if model.startswith("anthropic:")
-) | {"claude-fable-5-2", "claude-mythos-5-2"}
+) | {
+    # SDK suggestions omit older models that still support effort on first-party routes.
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-mythos-5",
+    "claude-mythos-5-1",
+    "claude-mythos-5-2",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-5",
+    "claude-sonnet-5",
+}
 
 
 def openai_efforts(levels: Collection[str]) -> dict[str, ModelSettings]:
@@ -179,7 +192,9 @@ def native_efforts(
             os.getenv(key) for key in ("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_ENDPOINT_URL")
         ):
             return {}
-        match = re.fullmatch(r"(?:[a-z]+\.)?anthropic\.(claude-[\w-]+?)(?:-v\d+:\d+)?", model_name)
+        match = re.fullmatch(
+            r"(?:[a-z]+\.)?anthropic\.(claude-[\w-]+?)(?:-v\d+(?::\d+)?)?", model_name
+        )
         if match is None:
             return {}
         model_name = match[1]

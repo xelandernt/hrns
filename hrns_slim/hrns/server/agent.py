@@ -9,6 +9,9 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai_harness.compaction import PruneToolResults
+from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceOverflowStore
 
 from hrns.server.capabilities import AskUser, Coder, Skills, Todo
 from hrns.shared.config.settings import SkillsSettings
@@ -40,24 +43,33 @@ def build_agent(
     :class:`~hrns.shared.config.SkillsSettings` to add libraries, narrow the selection,
     or turn the capability off.
 
-    Approval is a capability, not an adapter concern. By default every tool
-    outside :data:`hrns.server.approvals.READ_ONLY_TOOLS` is marked ``unapproved``,
-    so ACP can turn it into a permission request. Pass ``approval=False`` to
-    disable that policy.
+    Large tool results are saved to the workspace for bounded retrieval. The
+    model can replace recent tool results in its context with short summaries.
+
+    Approval is a capability. ACP turns tools marked ``unapproved`` into
+    permission requests. Pass ``approval=False`` to disable that policy.
     """
     selected = model if _allow_unconfigured else model or os.environ.get("HRNS_MODEL")
     if selected is None and not _allow_unconfigured:
         raise ValueError("Pass model= or set HRNS_MODEL to a Pydantic AI model id.")
 
     resolved_skills = Skills.from_settings(skills or SkillsSettings(), cwd=cwd)
+    workspace = LocalWorkspace[None](cwd)
     return Agent[None, str](
         selected,
         deps_type=type(None),
         name="hrns",
         model_settings=model_settings,
         capabilities=[
-            LocalWorkspace(cwd),
+            workspace,
             coder or Coder(sub_agents=False),
+            # Post-execution hooks run in reverse order, so spills see the
+            # result before Coder's truncation. An explicit workspace keeps
+            # the dedicated result readers available alongside read_file.
+            ToolOutputLimits(
+                store=WorkspaceOverflowStore(workspace=LocalWorkspaceBackend(workspace.working_dir))
+            ),
+            PruneToolResults(),
             Todo(),
             AskUser(),
             *([resolved_skills] if resolved_skills is not None else []),

@@ -11,14 +11,15 @@ use crate::transcript::Role;
 
 impl App {
     pub(super) fn submit(&mut self) {
-        let input = self.draft.text().to_owned();
-        let Some(command) = slash_command(&input) else {
-            self.send_message(input);
+        let draft = self.draft.text().to_owned();
+        let Some(command) = slash_command(&draft) else {
+            self.send_message(self.draft.expanded_text().into_owned());
             return;
         };
-        if self.has_unknown_command(&input) {
+        if self.has_unknown_command(&draft) {
             return;
         }
+        let input = self.draft.expanded_text().into_owned();
         let arguments = input[command.len()..].trim();
         let invocation = if arguments.is_empty() {
             std::borrow::Cow::Borrowed(command)

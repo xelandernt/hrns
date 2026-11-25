@@ -232,6 +232,13 @@ span to the first text block's `_meta`, leaving the typed text unchanged for
 the agent to expand. Paste, draft history and attachment staging stay shared;
 native reads paths while the browser opens its file chooser.
 
+The main composer collapses plain-text pastes over 1,000 characters into inline
+`[Pasted Content N chars]` placeholders. Each placeholder is a single editing
+unit with a byte range and its own payload stored in the draft and input
+history. Send and `/queue` expand the placeholders in place before building the
+ACP prompt. Command recognition uses the visible draft so a collapsed paste at
+the start of a prompt stays literal.
+
 `Ctrl-B` opens a sidebar with the connection identity, client I/O mode,
 session title, model, mode, permission mode, usage, cost, local queue,
 skills and recent activity. `Ctrl-O` expands tool details and the sidebar
@@ -380,6 +387,15 @@ not, so its `Coder` works on the server workspace instead of the client's.
 runtime handles deferred tool approvals for the parent run, and the delegated
 run has no way to request those approvals. Callers can supply a custom
 `Coder` when they manage delegation and approvals themselves.
+
+The built-in agent saves tool results that reach the upstream 10,000-character
+threshold under `.pydantic-ai-harness/tool-output` in its workspace. The spill
+hook runs before `Coder` truncates results. The model receives a preview and can
+search or page through the saved result with `grep_tool_result` and
+`read_tool_result`, including byte-range reads. `prune_tool_result` lets the
+model replace a result from the previous step with a shorter summary in its
+history. These tools run without an approval prompt. `Coder` continues to
+clear older results when estimated context usage reaches its threshold.
 
 ## Server-owned sessions
 

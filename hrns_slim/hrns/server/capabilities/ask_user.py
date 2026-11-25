@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pydantic_ai.tools import AgentDepsT
-from pydantic_ai_harness.ask_user import Answerer
+from pydantic_ai_harness.ask_user import AnyAnswerer
 from pydantic_ai_harness.ask_user import AskUser as _AskUser
 
 __all__ = ["AskUser"]
@@ -22,4 +22,4 @@ class AskUser(_AskUser[AgentDepsT]):
     the server and the client would never see the question.
     """
 
-    answerer: Answerer | None = None
+    answerer: AnyAnswerer[AgentDepsT] | None = None

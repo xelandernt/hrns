@@ -767,7 +767,7 @@ impl App {
             self.paste_into_picker(text);
             return;
         }
-        self.draft.insert(text);
+        self.draft.paste(text);
         self.refresh_completion();
     }
 
