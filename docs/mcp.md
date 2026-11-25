@@ -45,10 +45,16 @@ outer codes:
 `hrns agent` advertises `mcpCapabilities.acp`, `http`, and `sse`. A client exports servers
 only when the agent advertises `acp`; otherwise the declarations are omitted entirely.
 
-The native Ratatui client hosts the provider in Rust. It connects to MCP 2026-07-28
-servers over stdio or Streamable HTTP, then declares them through ACP. The
-headless runner hosts its provider in the Python client. Browser sessions have
-no client-hosted provider.
+The native Ratatui client hosts the provider in Rust. Over stdio or Streamable
+HTTP, it probes for MCP 2026-07-28 and falls back to the MCP `initialize`
+handshake for older servers. ACP still carries MCP 2026-07-28. The negotiated
+upstream revision appears in the server's `/mcp` details. The headless runner
+hosts its provider in the Python client. Browser sessions have no client-hosted
+provider.
+
+Older servers that reject discovery fall back immediately. If an upstream
+silently ignores discovery, the Rust SDK waits 10 seconds before trying
+`initialize`, and the configured startup timeout still applies.
 
 ## Configure a server
 
@@ -102,7 +108,7 @@ The provider mirrors the upstream's advertised capabilities and exposes:
 
 | Method | Behaviour |
 | --- | --- |
-| `server/discover` | Reports the proxied server's capabilities |
+| `server/discover` | Reports the supported capabilities, using the handshake response for older servers |
 | `ping` | Checks that the upstream is reachable |
 | `tools/list`, `tools/call` | Proxied; upstream `isError` results are preserved |
 | `resources/list`, `resources/read`, `resources/templates/list` | Proxied when the upstream has resources |

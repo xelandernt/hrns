@@ -138,8 +138,15 @@ startup diagnostic. On failure the transcript shows a short reason and `/mcp`
 opens a searchable server picker with wrapped diagnostics or the selected
 server's filtered tool list.
 
-The native upstream transport negotiates MCP 2026-07-28. Configured HTTP
-authorization headers take precedence. For an OAuth challenge, the native
+The native client uses the Rust MCP SDK to probe for MCP 2026-07-28 and fall
+back to `initialize` with handshake-era upstream servers. For a legacy
+upstream, the provider builds ACP-facing discovery from the negotiated
+capabilities and translates supported operations to MCP 2026-07-28. It
+omits reverse requests, subscriptions, and multi-round-trip interactions
+for legacy servers. The negotiated upstream revision appears in `/mcp`.
+Review the adapter as part of [release maintenance](MAINTENANCE.md#mcp-protocol-compatibility).
+
+Configured HTTP authorization headers take precedence. For an OAuth challenge, the native
 client can reuse stored credentials through the Python CLI's MCP OAuth client.
 The `/mcp` picker can open the browser sign-in flow and persist credentials
 in the configured token store. The active attachment keeps its declarations.

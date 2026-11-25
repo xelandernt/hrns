@@ -20,7 +20,8 @@ use agent_client_protocol::v1::schema::{
 use agent_client_protocol::{Agent, Error, RequestCancellation};
 use futures::channel::oneshot;
 use rmcp::model::{
-    ClientRequest, CustomRequest, ProgressNotificationParam, ProtocolVersion, RequestMetaObject,
+    ClientRequest, CustomRequest, DiscoverResult, ProgressNotificationParam, ProtocolVersion,
+    RequestMetaObject, ServerPeerInfo,
 };
 use rmcp::service::{
     ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext,
@@ -336,19 +337,19 @@ impl From<String> for StartupError {
     }
 }
 
-fn discovery_result(
+fn startup_result(
     result: Result<
         Result<RunningService<RoleClient, UpstreamClient>, ClientInitializeError>,
         tokio::time::error::Elapsed,
     >,
 ) -> Result<RunningService<RoleClient, UpstreamClient>, String> {
     result
-        .map_err(|_| "MCP discovery timed out")?
+        .map_err(|_| "MCP startup timed out")?
         .map_err(|error| {
             if error.auth_challenge().is_some() {
                 AUTH_REQUIRED.into()
             } else {
-                "MCP discovery failed (requires MCP 2026-07-28)".into()
+                "MCP negotiation failed".into()
             }
         })
 }
@@ -410,8 +411,9 @@ impl Upstream {
             return Err("Set either an MCP command or an HTTP URL".into());
         }
         let (progress, _) = broadcast::channel(32);
-        let lifecycle = ClientLifecycleMode::Discover {
+        let lifecycle = ClientLifecycleMode::Auto {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
         };
         let mut stderr_drain = None;
         let service = if settings.url.is_empty() {
@@ -463,7 +465,7 @@ impl Upstream {
                     () = capture_startup_stderr(&mut stderr, &mut output) => discovery.await,
                 }
             };
-            match discovery_result(service) {
+            match startup_result(service) {
                 Ok(service) => {
                     stderr_drain = Some(tokio::spawn(async move {
                         let _ = io::copy(&mut stderr, &mut io::sink()).await;
@@ -534,9 +536,9 @@ impl Upstream {
                 if matches!(&result, Ok(Err(error)) if bearer_challenge(error)) {
                     return Err(StartupError::SignInRequired);
                 }
-                discovery_result(result)?
+                startup_result(result)?
             } else {
-                discovery_result(result)?
+                startup_result(result)?
             }
         };
         Ok(Self {
@@ -554,7 +556,7 @@ impl Upstream {
         mut request: MessageMcpRequest,
         connection: ConnectionTo<Agent>,
         cancellation: RequestCancellation,
-        meta: RequestMetaObject,
+        mut meta: RequestMetaObject,
     ) -> Result<MessageMcpResponse, Error> {
         let mut params = request.params.take().unwrap_or_default();
         params.remove("_meta");
@@ -584,6 +586,25 @@ impl Upstream {
                 -32601,
                 "MCP method not available over ACP",
             )));
+        }
+        let legacy = self
+            .service
+            .peer_info()
+            .filter(|info| info.protocol_version.has_initialize());
+        if let Some(info) = legacy.as_deref() {
+            if request.method == "server/discover" {
+                return legacy_discovery(info);
+            }
+            if params.contains_key("inputResponses") || params.contains_key("requestState") {
+                return Ok(MessageMcpResponse::error(McpError::new(
+                    -32602,
+                    "MCP continuation requires a server that supports multi-round-trip requests",
+                )));
+            }
+            // Client identity and capabilities were already established by initialize.
+            for key in [PROTOCOL_VERSION, CLIENT_INFO, CLIENT_CAPABILITIES] {
+                meta.remove(key);
+            }
         }
         let mut progress = self.progress.subscribe();
         let progress_token = meta.get_progress_token();
@@ -654,31 +675,10 @@ impl Upstream {
                             .is_some_and(|name| self.tool_allowed(name))
                     });
                 }
-                if request.method == "server/discover"
-                    && let Some(discovery) = result.as_object_mut()
-                {
-                    discovery.insert("supportedVersions".into(), json!([MCP_VERSION]));
-                    if let Some(capabilities) = discovery
-                        .get_mut("capabilities")
-                        .and_then(Value::as_object_mut)
-                    {
-                        capabilities.remove("extensions");
-                        capabilities.remove("experimental");
-                        capabilities.remove("logging");
-                        if let Some(resources) = capabilities
-                            .get_mut("resources")
-                            .and_then(Value::as_object_mut)
-                        {
-                            resources.remove("subscribe");
-                        }
-                        for key in ["resources", "prompts", "tools"] {
-                            if let Some(capability) =
-                                capabilities.get_mut(key).and_then(Value::as_object_mut)
-                            {
-                                capability.remove("listChanged");
-                            }
-                        }
-                    }
+                if request.method == "server/discover" {
+                    restrict_discovery(&mut result);
+                } else if legacy.is_some() {
+                    translate_legacy_result(&request.method, &mut result);
                 }
                 Ok(MessageMcpResponse::success(result))
             }
@@ -697,6 +697,67 @@ impl Upstream {
             || self.settings.include_tools.iter().any(|tool| tool == name))
             && !self.settings.exclude_tools.iter().any(|tool| tool == name)
     }
+}
+
+fn legacy_discovery(info: &ServerPeerInfo) -> Result<MessageMcpResponse, Error> {
+    let mut discovery = DiscoverResult::new(
+        vec![ProtocolVersion::V_2026_07_28],
+        info.capabilities.clone(),
+    );
+    discovery.instructions.clone_from(&info.instructions);
+    if let Some(server_info) = &info.server_info {
+        discovery.set_server_info(server_info.clone());
+    }
+    let mut result = serde_json::to_value(discovery).map_err(backend_error)?;
+    restrict_discovery(&mut result);
+    Ok(MessageMcpResponse::success(result))
+}
+
+fn restrict_discovery(result: &mut Value) {
+    let Some(discovery) = result.as_object_mut() else {
+        return;
+    };
+    discovery.insert("supportedVersions".into(), json!([MCP_VERSION]));
+    if let Some(capabilities) = discovery
+        .get_mut("capabilities")
+        .and_then(Value::as_object_mut)
+    {
+        for key in ["extensions", "experimental", "logging"] {
+            capabilities.remove(key);
+        }
+        if let Some(resources) = capabilities
+            .get_mut("resources")
+            .and_then(Value::as_object_mut)
+        {
+            resources.remove("subscribe");
+        }
+        for key in ["resources", "prompts", "tools"] {
+            if let Some(capability) = capabilities.get_mut(key).and_then(Value::as_object_mut) {
+                capability.remove("listChanged");
+            }
+        }
+    }
+}
+
+fn translate_legacy_result(method: &str, result: &mut Value) {
+    let Some(result) = result.as_object_mut() else {
+        return;
+    };
+    match method {
+        "tools/list"
+        | "resources/list"
+        | "resources/templates/list"
+        | "prompts/list"
+        | "resources/read" => {
+            result.insert("ttlMs".into(), json!(0));
+            result.insert("cacheScope".into(), json!("private"));
+        }
+        "tools/call" | "prompts/get" | "completion/complete" => {}
+        _ => return,
+    }
+    result
+        .entry("resultType")
+        .or_insert_with(|| json!("complete"));
 }
 
 fn bearer_challenge(error: &ClientInitializeError) -> bool {

@@ -28,3 +28,23 @@ or `[model_settings].thinking` fails before inference. Check that the TUI skips 
 unsupported saved preference. If catalog or routing behavior changes, check that a
 mounted ACP client receives the updated choices after a route change. Record which
 checks used a live provider and which used captured requests or mock metadata.
+
+## MCP protocol compatibility
+
+Review the native [MCP compatibility adapter](rust/src/mcp.rs) before each
+release and when upgrading the Rust or Python MCP, FastMCP, or ACP SDKs.
+
+- Check whether the current Playwright MCP release still needs the
+  `initialize` handshake. Keep the fallback for supported upstream servers
+  that still use it.
+- Verify a handshake-era server and a `2026-07-28` server from the native
+  client. Check the negotiated revision in `/mcp`, then use the ACP agent
+  connection to discover the server, list tools, and call a tool. Record the
+  package versions and which checks used a real server.
+- Check that the ACP-facing discovery reports only capabilities the adapter
+  serves. Verify that translated results satisfy the current MCP schema and
+  preserve pagination, tool errors, and structured content. Review the
+  startup timeout and OAuth challenge handling when SDK negotiation changes.
+
+See [MCP protocol versions](https://ts.sdk.modelcontextprotocol.io/v2/protocol-versions)
+and the [MCP-over-ACP draft](https://agentclientprotocol.com/rfds/mcp-over-acp).
