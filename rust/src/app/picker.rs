@@ -4,7 +4,7 @@ use agent_client_protocol::v1::schema::{
     SessionConfigKind, SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo,
 };
 
-use super::{App, Key, agents_actions::SessionDialog};
+use super::{App, Key, agents_actions::SessionDialog, mcp_view::McpDetails};
 use crate::{
     acp::{Action, ExecutionStatus, ModelChange, SessionActivity, SessionPage, session_activity},
     options::{self, model_provider},
@@ -24,6 +24,7 @@ pub(super) enum Source {
     },
     Setting(SessionConfigOptionCategory),
     Skills,
+    Mcp(Option<McpDetails>),
 }
 
 pub(super) struct Picker {
@@ -84,6 +85,7 @@ impl Picker {
             Source::Setting(SessionConfigOptionCategory::Model) => "Select a model",
             Source::Setting(_) => "Select reasoning effort",
             Source::Skills => "Skills",
+            Source::Mcp(_) => "MCP servers",
         }
     }
 
@@ -95,6 +97,9 @@ impl Picker {
             Source::Sessions { loading: true, .. } if empty => "Loading sessions…",
             Source::Sessions { .. } if empty && self.query.is_empty() => "No saved sessions",
             Source::Skills if empty && self.query.is_empty() => "No skills available",
+            Source::Mcp(_) if empty && self.query.is_empty() => {
+                "No configured MCP servers for this connection"
+            }
             Source::Setting(SessionConfigOptionCategory::Model)
                 if empty && self.query.is_empty() =>
             {
@@ -119,6 +124,7 @@ impl Picker {
             }
             Source::Setting(_) => "  ↑/↓ select   Enter confirm   Esc close",
             Source::Skills => "  ↑/↓ move   Enter insert   Esc close",
+            Source::Mcp(_) => "  ↑/↓ move   Enter details   Esc close",
         }
     }
 
@@ -175,6 +181,16 @@ fn group_context_tiers(rows: Vec<Row>, selections: &HashMap<String, usize>) -> V
 }
 
 impl App {
+    pub(super) fn show_mcp(&mut self) {
+        self.picker = Some(Picker {
+            source: Source::Mcp(None),
+            query: String::new(),
+            selected: 0,
+            provider_tab: 0,
+            tiers: HashMap::new(),
+        });
+    }
+
     pub(super) fn show_skills(&mut self) {
         self.picker = Some(Picker {
             source: Source::Skills,
@@ -414,6 +430,19 @@ impl App {
         let tabs = self.model_provider_tabs(picker);
         let provider = tabs.get(picker.provider_tab.min(tabs.len().saturating_sub(1)));
         let mut rows: Vec<Row> = match &picker.source {
+            Source::Mcp(_) => self
+                .mcp_health
+                .iter()
+                .map(|item| Row {
+                    value: item.name.clone(),
+                    label: item.name.clone(),
+                    detail: self.mcp_status(item).to_owned(),
+                    active: false,
+                    context_tiers: Vec::new(),
+                    selected_tier: 0,
+                    session: None,
+                })
+                .collect(),
             Source::Skills => self
                 .skills
                 .iter()
@@ -594,6 +623,9 @@ impl App {
     }
 
     pub(super) fn picker_key(&mut self, key: Key) {
+        if self.mcp_picker_key(key) {
+            return;
+        }
         let Some(picker) = &self.picker else { return };
         if matches!(key, Key::Tab | Key::BackTab) {
             let count = self.model_provider_tabs(picker).len();

@@ -650,6 +650,9 @@ impl Dialog {
         let height = match &self.screen {
             Screen::List { items, .. } => (items.len().clamp(1, 10) as u16) + 6,
             Screen::Routes { items, .. } => (items.len().clamp(1, 10) as u16) + 6,
+            Screen::Methods { .. } => {
+                selected.map_or(6, |provider| provider.methods.len() as u16 + 6)
+            }
             Screen::Edit(form) => form.visible().len() as u16 + 9,
             Screen::SigningIn { .. } => 19,
             _ => 10,
@@ -681,7 +684,16 @@ impl Dialog {
         } else {
             hint
         };
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+        let paragraph = Paragraph::new(lines);
+        let paragraph = if matches!(
+            &self.screen,
+            Screen::List { .. } | Screen::Routes { .. } | Screen::Methods { .. }
+        ) {
+            paragraph
+        } else {
+            paragraph.wrap(Wrap { trim: false })
+        };
+        frame.render_widget(paragraph, body);
         frame.render_widget(
             Paragraph::new(hint)
                 .wrap(Wrap { trim: true })
@@ -804,10 +816,26 @@ impl Dialog {
             Screen::Methods { index } => {
                 let mut lines = Vec::new();
                 if let Some(selected) = selected {
-                    lines.push(Line::from(selected.id.as_str()));
-                    lines.extend(selected.methods.iter().enumerate().map(|(row, method)| {
-                        option_line(method.label().to_owned(), row == *index, palette)
-                    }));
+                    let show_provider = area.height > 1;
+                    if show_provider {
+                        lines.push(Line::from(selected.id.as_str()));
+                    }
+                    let rows = usize::from(area.height)
+                        .saturating_sub(
+                            usize::from(show_provider) + usize::from(self.error.is_some()),
+                        )
+                        .max(1);
+                    lines.extend(
+                        selected
+                            .methods
+                            .iter()
+                            .enumerate()
+                            .skip(index.saturating_sub(rows - 1))
+                            .take(rows)
+                            .map(|(row, method)| {
+                                option_line(method.label().to_owned(), row == *index, palette)
+                            }),
+                    );
                 }
                 (
                     lines,

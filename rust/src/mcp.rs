@@ -1,9 +1,10 @@
 //! Client-owned MCP servers exposed through the ACP v1 MCP-over-ACP binding.
 
+mod auth;
 mod config;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,24 +23,29 @@ use rmcp::model::{
     ClientRequest, CustomRequest, ProgressNotificationParam, ProtocolVersion, RequestMetaObject,
 };
 use rmcp::service::{
-    ClientLifecycleMode, ClientServiceExt, NotificationContext, PeerRequestOptions, RoleClient,
-    RunningService,
+    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext,
+    PeerRequestOptions, RoleClient, RunningService,
 };
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{ClientHandler, ServiceError};
 use serde_json::{Value, json};
-use tokio::process::Command;
+use tokio::io::{self, AsyncReadExt};
+use tokio::process::{ChildStderr, Command};
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 
 use crate::acp::{Event, Events};
-use crate::mcp_types::{AcpMcpNotification, ConsentDecision, Health};
+use crate::mcp_types::{AcpMcpNotification, ConsentDecision, Health, SIGN_IN_REQUIRED};
 
 const MCP_VERSION: &str = "2026-07-28";
 const PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 const MAX_ACTIVE_REQUESTS: usize = 32;
+const STARTUP_STDERR_LIMIT: usize = 16 * 1024;
+const STDERR_FLUSH_TIMEOUT: Duration = Duration::from_millis(100);
+const AUTH_REQUIRED: &str = "MCP authentication required. Set credentials in the server headers.";
 
 #[derive(Clone, Default)]
 pub struct Provider(Arc<Mutex<Registry>>);
@@ -48,6 +54,7 @@ pub struct Provider(Arc<Mutex<Registry>>);
 struct Registry {
     servers: HashMap<McpServerAcpId, Arc<Upstream>>,
     active: HashSet<(McpServerAcpId, McpRequestId)>,
+    sign_in: HashMap<String, PathBuf>,
 }
 
 struct Operation {
@@ -64,10 +71,20 @@ impl Drop for Operation {
 }
 
 struct Upstream {
+    name: String,
     service: RunningService<RoleClient, UpstreamClient>,
     progress: broadcast::Sender<ProgressNotificationParam>,
     settings: config::Server,
     timeout: Duration,
+    stderr_drain: Option<JoinHandle<()>>,
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        if let Some(drain) = &self.stderr_drain {
+            drain.abort();
+        }
+    }
 }
 
 struct UpstreamClient(broadcast::Sender<ProgressNotificationParam>);
@@ -117,7 +134,7 @@ impl Provider {
                 if decision == ConsentDecision::Deny {
                     status.state = "denied".into();
                 } else {
-                    match Upstream::connect(settings).await {
+                    match Upstream::connect(&name, settings, &path).await {
                         Ok(upstream) => {
                             if let Some(info) = upstream.service.peer_info() {
                                 status.protocol = info.protocol_version.to_string();
@@ -137,8 +154,19 @@ impl Provider {
                                 )));
                             }
                         }
-                        Err(error) => {
-                            status.state = "failed".into();
+                        Err(StartupError::SignInRequired) => {
+                            status.state = SIGN_IN_REQUIRED.into();
+                            status.startup_failure =
+                                Some("Sign-in required. Open /mcp to sign in.".into());
+                            status.detail =
+                                "Sign in, then start a new session to use this server.".into();
+                            if let Ok(mut registry) = self.0.lock() {
+                                registry.sign_in.insert(name, path);
+                            }
+                        }
+                        Err(StartupError::Unavailable(error)) => {
+                            status.state = "unavailable".into();
+                            status.startup_failure = Some(summarize_startup_error(&error));
                             status.detail = error;
                         }
                     }
@@ -148,6 +176,47 @@ impl Provider {
         }
         let _ = events.unbounded_send(Event::McpHealth(health));
         declarations
+    }
+
+    pub async fn sign_in(&self, name: &str) -> Result<(), String> {
+        let path = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|registry| registry.sign_in.get(name).cloned())
+            .ok_or("MCP sign-in is unavailable for this server")?;
+        auth::sign_in(name, &path).await
+    }
+
+    pub async fn tools(&self, name: &str) -> Result<Vec<String>, String> {
+        let upstream = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .servers
+                    .values()
+                    .find(|upstream| upstream.name == name)
+                    .cloned()
+            })
+            .ok_or("MCP server is unavailable")?;
+        if upstream
+            .service
+            .peer_info()
+            .is_some_and(|info| info.capabilities.tools.is_none())
+        {
+            return Ok(Vec::new());
+        }
+        let tools = tokio::time::timeout(upstream.timeout, upstream.service.list_all_tools())
+            .await
+            .map_err(|_| "Listing MCP tools timed out")?
+            .map_err(|_| "Could not list MCP tools")?;
+        Ok(tools
+            .into_iter()
+            .filter(|tool| upstream.tool_allowed(&tool.name))
+            .map(|tool| tool.name.into_owned())
+            .collect())
     }
 
     fn admit(&self, request: &MessageMcpRequest) -> Result<(Arc<Upstream>, Operation), Error> {
@@ -250,8 +319,89 @@ fn metadata(request: &MessageMcpRequest) -> Result<RequestMetaObject, Box<McpErr
         .map_err(|_| Box::new(McpError::new(-32602, "Invalid MCP request metadata")))
 }
 
+enum StartupError {
+    Unavailable(String),
+    SignInRequired,
+}
+
+impl From<&str> for StartupError {
+    fn from(detail: &str) -> Self {
+        Self::Unavailable(detail.into())
+    }
+}
+
+impl From<String> for StartupError {
+    fn from(detail: String) -> Self {
+        Self::Unavailable(detail)
+    }
+}
+
+fn discovery_result(
+    result: Result<
+        Result<RunningService<RoleClient, UpstreamClient>, ClientInitializeError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Result<RunningService<RoleClient, UpstreamClient>, String> {
+    result
+        .map_err(|_| "MCP discovery timed out")?
+        .map_err(|error| {
+            if error.auth_challenge().is_some() {
+                AUTH_REQUIRED.into()
+            } else {
+                "MCP discovery failed (requires MCP 2026-07-28)".into()
+            }
+        })
+}
+
+async fn capture_startup_stderr(stderr: &mut ChildStderr, output: &mut Vec<u8>) {
+    let mut buf = [0; 4096];
+    while let Ok(count @ 1..) = stderr.read(&mut buf).await {
+        // Continue draining even after the capture limit so the child cannot block on stderr.
+        let remaining = STARTUP_STDERR_LIMIT + 1 - output.len();
+        output.extend_from_slice(&buf[..count.min(remaining)]);
+    }
+}
+
+fn startup_error(reason: String, mut output: Vec<u8>) -> String {
+    let truncated = output.len() > STARTUP_STDERR_LIMIT;
+    output.truncate(STARTUP_STDERR_LIMIT);
+    let stripped = strip_ansi_escapes::strip(output);
+    let mut detail = String::from_utf8_lossy(&stripped).replace('\t', "    ");
+    detail.retain(|ch| ch == '\n' || !ch.is_control());
+    let mut detail = detail.trim().to_owned();
+    if truncated {
+        detail.push_str("\n[stderr truncated]");
+    }
+    if detail.is_empty() {
+        reason
+    } else {
+        format!("{detail}\n\n{reason}")
+    }
+}
+
+fn summarize_startup_error(detail: &str) -> String {
+    let mut lines = detail.lines();
+    let first = lines.next().unwrap_or(detail);
+    let summary = if first.starts_with("npm error code ") {
+        lines
+            .find_map(|line| line.strip_prefix("npm error notarget "))
+            .filter(|line| !line.trim().is_empty())
+            .unwrap_or(first)
+    } else {
+        first
+    };
+    match summary.char_indices().nth(120) {
+        Some((end, _)) => format!("{}…", summary[..end].trim_end()),
+        None => summary.to_owned(),
+    }
+}
+
 impl Upstream {
-    async fn connect(settings: config::Server) -> Result<Self, String> {
+    async fn connect(
+        name: &str,
+        settings: config::Server,
+        path: &Path,
+    ) -> Result<Self, StartupError> {
         let timeout = Duration::try_from_secs_f64(settings.timeout)
             .ok()
             .filter(|value| !value.is_zero())
@@ -260,10 +410,10 @@ impl Upstream {
             return Err("Set either an MCP command or an HTTP URL".into());
         }
         let (progress, _) = broadcast::channel(32);
-        let client = UpstreamClient(progress.clone());
         let lifecycle = ClientLifecycleMode::Discover {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
         };
+        let mut stderr_drain = None;
         let service = if settings.url.is_empty() {
             let mut command = Command::new(&settings.command);
             command.args(&settings.args).env_clear();
@@ -295,9 +445,41 @@ impl Upstream {
             for (name, value) in &settings.env {
                 command.env(name, config::expand(value)?);
             }
-            command.stderr(Stdio::null());
-            let transport = TokioChildProcess::new(command).map_err(|error| error.to_string())?;
-            tokio::time::timeout(timeout, client.serve_with_lifecycle(transport, lifecycle)).await
+            let (transport, stderr) = TokioChildProcess::builder(command)
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("Could not start process: {error}"))?;
+            let mut stderr = stderr.ok_or("Could not open process stderr")?;
+            let mut output = Vec::new();
+            let service = {
+                let client = UpstreamClient(progress.clone());
+                let discovery = tokio::time::timeout(
+                    timeout,
+                    client.serve_with_lifecycle(transport, lifecycle),
+                );
+                tokio::pin!(discovery);
+                tokio::select! {
+                    result = &mut discovery => result,
+                    () = capture_startup_stderr(&mut stderr, &mut output) => discovery.await,
+                }
+            };
+            match discovery_result(service) {
+                Ok(service) => {
+                    stderr_drain = Some(tokio::spawn(async move {
+                        let _ = io::copy(&mut stderr, &mut io::sink()).await;
+                    }));
+                    service
+                }
+                Err(error) => {
+                    // Discovery can see stdout close before stderr has been drained.
+                    let _ = tokio::time::timeout(
+                        STDERR_FLUSH_TIMEOUT,
+                        capture_startup_stderr(&mut stderr, &mut output),
+                    )
+                    .await;
+                    return Err(startup_error(error, output).into());
+                }
+            }
         } else {
             let url = reqwest::Url::parse(&settings.url).map_err(|_| "Invalid MCP URL")?;
             if !matches!(url.scheme(), "http" | "https")
@@ -307,7 +489,7 @@ impl Upstream {
             {
                 return Err("Use an HTTP(S) MCP URL with credentials in headers".into());
             }
-            let headers = settings
+            let headers: HashMap<_, _> = settings
                 .headers
                 .iter()
                 .map(|(name, value)| {
@@ -323,25 +505,47 @@ impl Upstream {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|_| "Could not initialize HTTP client")?;
-            let transport = StreamableHttpClientTransport::with_client(
-                http,
-                StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers),
-            );
-            tokio::time::timeout(timeout, client.serve_with_lifecycle(transport, lifecycle)).await
-        }
-        .map_err(|_| "MCP discovery timed out")?
-        .map_err(|error| {
-            if error.auth_challenge().is_some() {
-                "MCP authentication required. Set credentials in the server headers."
+            let connect = |headers| {
+                let transport = StreamableHttpClientTransport::with_client(
+                    http.clone(),
+                    StreamableHttpClientTransportConfig::with_uri(url.as_str())
+                        .custom_headers(headers),
+                );
+                let client = UpstreamClient(progress.clone());
+                tokio::time::timeout(
+                    timeout,
+                    client.serve_with_lifecycle(transport, lifecycle.clone()),
+                )
+            };
+            let result = connect(headers.clone()).await;
+            let needs_oauth = matches!(&result, Ok(Err(error)) if bearer_challenge(error))
+                && settings.uses_oauth();
+            if needs_oauth {
+                let token = auth::stored_token(name, path, &settings.url, timeout)
+                    .await
+                    .ok_or(StartupError::SignInRequired)?;
+                let mut authorization =
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                        .map_err(|_| StartupError::SignInRequired)?;
+                authorization.set_sensitive(true);
+                let mut headers = headers;
+                headers.insert(reqwest::header::AUTHORIZATION, authorization);
+                let result = connect(headers).await;
+                if matches!(&result, Ok(Err(error)) if bearer_challenge(error)) {
+                    return Err(StartupError::SignInRequired);
+                }
+                discovery_result(result)?
             } else {
-                "MCP discovery failed (requires MCP 2026-07-28)"
+                discovery_result(result)?
             }
-        })?;
+        };
         Ok(Self {
+            name: name.into(),
             service,
             progress,
             settings,
             timeout,
+            stderr_drain,
         })
     }
 
@@ -493,6 +697,13 @@ impl Upstream {
             || self.settings.include_tools.iter().any(|tool| tool == name))
             && !self.settings.exclude_tools.iter().any(|tool| tool == name)
     }
+}
+
+fn bearer_challenge(error: &ClientInitializeError) -> bool {
+    error
+        .auth_challenge()
+        .and_then(|challenge| challenge.split_whitespace().next())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
 }
 
 async fn cancel(handle: rmcp::service::RequestHandle<RoleClient>) {

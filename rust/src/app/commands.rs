@@ -107,31 +107,7 @@ impl App {
             }
             "/mcp" => {
                 self.draft.submit();
-                let text = if self.mcp_health.is_empty() {
-                    "No MCP servers are exported for this connection".into()
-                } else {
-                    self.mcp_health
-                        .iter()
-                        .map(|item| {
-                            let protocol = if item.protocol.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {}", item.protocol)
-                            };
-                            let detail = if item.detail.is_empty() {
-                                String::new()
-                            } else {
-                                format!("\n  {}", item.detail)
-                            };
-                            format!(
-                                "{} · {} · {} · {}{protocol}{detail}",
-                                item.name, item.transport, item.state, item.target
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                self.transcript.push(Role::Command("/mcp".into()), text);
+                self.show_mcp();
             }
             "/todo" | "/todos" => {
                 self.draft.submit();

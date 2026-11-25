@@ -87,10 +87,14 @@ absent from `tools/list`, and calling it returns an MCP error.
 
 ## Health
 
-The terminal's `/mcp` command prints the MCP health table, and the `Ctrl-B` sidebar lists
-each configured server's state, transport, target, and negotiated upstream
-revision. Health refreshes when a connection or session starts. If a server
-fails, the session continues with the servers that started successfully.
+In the terminal, `/mcp` opens a searchable list of configured servers and their
+status. Press Enter to see the server's connection details, available tools, or
+startup error. The `Ctrl-B` sidebar summarizes server health.
+
+For an HTTP server marked **Sign-in required**, press Space to open browser
+sign-in. Harness saves the OAuth credentials for the next session setup. Start
+a new session or reopen a saved session to use the server. If a server fails at
+startup, the session continues with the servers that connected successfully.
 
 ## What is served
 

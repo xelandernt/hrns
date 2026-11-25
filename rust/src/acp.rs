@@ -176,6 +176,10 @@ pub enum Action {
     },
     ProviderLoginStatus,
     CancelProviderLogin,
+    #[cfg(not(target_family = "wasm"))]
+    McpSignIn(String),
+    #[cfg(not(target_family = "wasm"))]
+    McpTools(String),
 }
 
 #[derive(Clone, Copy)]
@@ -343,6 +347,16 @@ pub enum Event {
     },
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     McpHealth(Vec<Health>),
+    #[cfg(not(target_family = "wasm"))]
+    McpSignIn {
+        name: String,
+        result: Result<(), String>,
+    },
+    #[cfg(not(target_family = "wasm"))]
+    McpTools {
+        name: String,
+        result: Result<Vec<String>, String>,
+    },
 }
 
 pub struct SessionPage {
@@ -544,6 +558,7 @@ pub async fn connect(
 
             let mut permissions = FuturesUnordered::new();
             let mut elicitations = FuturesUnordered::new();
+            let mut mcp_jobs = FuturesUnordered::<futures::future::LocalBoxFuture<'static, Event>>::new();
             let mut tools: HashMap<String, ToolState> = HashMap::new();
             loop {
                 let permission = async {
@@ -566,6 +581,13 @@ pub async fn connect(
                         elicitations.next().await
                     }
                 };
+                let mcp_job = async {
+                    if mcp_jobs.is_empty() {
+                        std::future::pending().await
+                    } else {
+                        mcp_jobs.next().await
+                    }
+                };
                 select_biased! {
                     permission = permission.fuse() => {
                         if let Some((request, responder, option)) = permission {
@@ -581,7 +603,28 @@ pub async fn connect(
                             }
                         }
                     }
+                    event = mcp_job.fuse() => {
+                        if let Some(event) = event {
+                            let _ = events.unbounded_send(event);
+                        }
+                    }
                     action = actions.next().fuse() => match action {
+                        #[cfg(not(target_family = "wasm"))]
+                        Some(Action::McpSignIn(name)) => {
+                            let provider = provider.clone();
+                            mcp_jobs.push(async move {
+                                let result = provider.sign_in(&name).await;
+                                Event::McpSignIn { name, result }
+                            }.boxed_local());
+                        }
+                        #[cfg(not(target_family = "wasm"))]
+                        Some(Action::McpTools(name)) => {
+                            let provider = provider.clone();
+                            mcp_jobs.push(async move {
+                                let result = provider.tools(&name).await;
+                                Event::McpTools { name, result }
+                            }.boxed_local());
+                        }
                         Some(Action::Prompt(prompt)) => session.send_prompt_blocks(prompt.into_blocks())?,
                         Some(Action::Cancel) => {
                             session.connection().send_notification(

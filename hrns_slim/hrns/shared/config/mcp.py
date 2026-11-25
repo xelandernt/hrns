@@ -183,7 +183,7 @@ def build_token_store(
 
         return KeyringStore(service_name="hrns.mcp")
 
-    from key_value.aio.stores.filetree import FileTreeStore
+    from key_value.aio.stores.filetree import FileTreeStore, FileTreeV1KeySanitizationStrategy
 
     directory = Path(path).expanduser() if path else default_token_store_path()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -191,7 +191,11 @@ def build_token_store(
         directory.chmod(0o700)
     except OSError:  # pragma: no cover - best effort on exotic filesystems
         pass
-    return FileTreeStore(data_directory=directory)
+    # FastMCP uses the server URL as part of each OAuth storage key.
+    return FileTreeStore(
+        data_directory=directory,
+        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(directory),
+    )
 
 
 def _oauth(server: McpServerSettings, store: Any, *, interactive: bool) -> Any:
@@ -264,10 +268,13 @@ def build_client(
     from fastmcp import Client
 
     transport = build_transport(server, store=store, interactive=interactive)
+    # The browser callback has its own five-minute deadline. The discovery
+    # request stays open while the user completes it.
+    timeout = server.timeout + 300 if interactive else server.timeout
     return Client(
         transport,
-        timeout=server.timeout,
-        init_timeout=server.timeout,
+        timeout=timeout,
+        init_timeout=timeout,
         # Best-effort upstream: probe the modern revision, then fall back to the
         # handshake era rather than rejecting a server outright.
         mode="auto",

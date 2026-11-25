@@ -9,6 +9,8 @@ use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse
 #[cfg(not(target_family = "wasm"))]
 use serde::{Deserialize, Serialize};
 
+pub const SIGN_IN_REQUIRED: &str = "Sign-in required";
+
 #[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
 #[request(method = "mcp/message", response = AcpMcpResponse)]
@@ -41,5 +43,6 @@ pub struct Health {
     pub target: String,
     pub state: String,
     pub detail: String,
+    pub startup_failure: Option<String>,
     pub protocol: String,
 }

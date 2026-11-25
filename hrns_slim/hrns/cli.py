@@ -384,6 +384,10 @@ def _mcp_auth_command(name: str, *, config: ConfigOption = None) -> int:
     return asyncio.run(_mcp_auth(_namespace(config=config, name=name)))
 
 
+def _mcp_native_token_command(name: str, *, config: ConfigOption = None) -> int:
+    return asyncio.run(_mcp_native_token(_namespace(config=config, name=name)))
+
+
 def _mcp_logout_command(name: str, *, config: ConfigOption = None) -> int:
     return asyncio.run(_mcp_logout(_namespace(config=config, name=name)))
 
@@ -453,6 +457,7 @@ def _register_commands(app: App) -> None:
     mcp.command(
         _mcp_logout_command, name="logout", help="Forget stored OAuth tokens for an MCP server"
     )
+    mcp.command(_mcp_native_token_command, name="_native-token", show=False)
     app.command(mcp)
 
 
@@ -1254,6 +1259,29 @@ async def _mcp_auth(args: SimpleNamespace) -> int:
         raise HrnsClientError(f"Authentication failed: {exc}") from exc
     location = settings.mcp.token_store_path or str(default_token_store_path())
     print(f"Authenticated '{args.name}': {len(tools)} tool(s). Tokens: {location}")
+    return EXIT_OK
+
+
+async def _mcp_native_token(args: SimpleNamespace) -> int:
+    """Resolve an already-authorized token for the native client's private pipe."""
+    from fastmcp.client.auth.oauth import TokenStorageAdapter
+
+    settings, _path = _mcp_config(args)
+    server = _mcp_server_or_error(settings, args.name)
+    if not server.enabled or server.oauth_config() is None:
+        return EXIT_FAILURE
+    store = build_token_store(settings.mcp.token_store, settings.mcp.token_store_path)
+    storage = TokenStorageAdapter(async_key_value=store, server_url=server.url)
+    if await storage.get_tokens() is None:
+        return EXIT_FAILURE
+
+    # Let the existing OAuth client refresh expired credentials without a browser.
+    async with build_client(server, store=store):
+        pass
+    tokens = await storage.get_tokens()
+    if tokens is None:
+        return EXIT_FAILURE
+    print(json.dumps((server.url, tokens.access_token)))
     return EXIT_OK
 
 

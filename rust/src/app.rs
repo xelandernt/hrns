@@ -3,9 +3,13 @@ mod agents_view;
 mod commands;
 #[cfg(not(target_family = "wasm"))]
 mod file_completion;
+mod mcp_view;
 mod picker;
 mod providers;
 mod render;
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use render::draw_choice_list;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -158,7 +162,15 @@ pub struct PendingMcpConsent {
     pub transport: String,
     pub target: String,
     pub respond: oneshot::Sender<ConsentDecision>,
+    selected: usize,
 }
+
+const MCP_CONSENT_CHOICES: [(&str, ConsentDecision); 4] = [
+    ("Allow once", ConsentDecision::Once),
+    ("Allow for this connection", ConsentDecision::Session),
+    ("Always allow", ConsentDecision::Always),
+    ("Deny", ConsentDecision::Deny),
+];
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "List commands"),
@@ -233,7 +245,7 @@ pub struct App {
     mcp_consent: VecDeque<PendingMcpConsent>,
     mcp_grants: HashSet<String>,
     mcp_health: Vec<Health>,
-    mcp_failures: usize,
+    mcp_signing_in: Option<String>,
     local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
@@ -316,7 +328,7 @@ impl App {
             mcp_consent: VecDeque::new(),
             mcp_grants: HashSet::new(),
             mcp_health: Vec::new(),
-            mcp_failures: 0,
+            mcp_signing_in: None,
             local_effect: None,
             options: Vec::new(),
             commands: Vec::new(),
@@ -613,6 +625,7 @@ impl App {
                 self.commands.clear();
                 self.skills.clear();
                 self.mcp_health.clear();
+                self.mcp_signing_in = None;
                 self.load_supported = false;
                 self.close_supported = false;
                 self.delete_supported = false;
@@ -627,6 +640,7 @@ impl App {
                 self.refresh_completion();
             }
             Event::Connecting => {
+                self.mcp_signing_in = None;
                 self.approval_mode = ApprovalMode::Ask;
                 self.approval_preference = None;
                 self.model_change_pending = false;
@@ -669,24 +683,30 @@ impl App {
                         transport,
                         target,
                         respond,
+                        selected: 0,
                     });
                 }
             }
             Event::McpHealth(health) => {
-                let failures = health.iter().filter(|item| item.state == "failed").count();
-                if failures > self.mcp_failures {
-                    let names = health
-                        .iter()
-                        .filter(|item| item.state == "failed")
-                        .map(|item| item.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.transcript
-                        .push(Role::Error, format!("MCP server failed · {names}"));
+                for item in &health {
+                    if let Some(reason) = &item.startup_failure
+                        && !self.mcp_health.iter().any(|previous| {
+                            previous.name == item.name
+                                && previous.startup_failure.as_ref() == Some(reason)
+                        })
+                    {
+                        self.transcript.push(
+                            Role::Error,
+                            format!("MCP {} unavailable · {reason}", item.name),
+                        );
+                    }
                 }
-                self.mcp_failures = failures;
                 self.mcp_health = health;
             }
+            #[cfg(not(target_family = "wasm"))]
+            Event::McpSignIn { name, result } => self.mcp_sign_in_result(name, result),
+            #[cfg(not(target_family = "wasm"))]
+            Event::McpTools { name, result } => self.mcp_tools_result(&name, result),
             Event::Permission(request) => self.request_permission(request),
             Event::Elicitation { form, respond } => {
                 self.transcript
@@ -1298,15 +1318,24 @@ impl App {
     }
 
     fn mcp_consent_key(&mut self, key: Key) {
+        let Some(pending) = self.mcp_consent.front_mut() else {
+            return;
+        };
         let decision = match key {
-            Key::Escape | Key::Text('n') | Key::Text('N') | Key::Text('4') => {
-                Some(ConsentDecision::Deny)
+            Key::HistoryUp => {
+                pending.selected = pending.selected.saturating_sub(1);
+                None
             }
-            Key::Enter | Key::Text('y') | Key::Text('Y') | Key::Text('1') => {
-                Some(ConsentDecision::Once)
+            Key::HistoryDown => {
+                pending.selected = (pending.selected + 1).min(MCP_CONSENT_CHOICES.len() - 1);
+                None
             }
-            Key::Text('2') => Some(ConsentDecision::Session),
-            Key::Text('3') => Some(ConsentDecision::Always),
+            Key::Enter => Some(MCP_CONSENT_CHOICES[pending.selected].1),
+            Key::Text(digit @ '1'..='4') => {
+                Some(MCP_CONSENT_CHOICES[usize::from(digit as u8 - b'1')].1)
+            }
+            Key::Text('y' | 'Y') => Some(ConsentDecision::Once),
+            Key::Escape | Key::Text('n' | 'N') => Some(ConsentDecision::Deny),
             _ => None,
         };
         if let Some(decision) = decision

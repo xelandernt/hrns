@@ -116,10 +116,10 @@ it ignores `client_io` and edits its own workspace instead.
 session's caller. The adapter advertises `mcpCapabilities` only when an `attachment_config` is
 present.
 
-In the terminal, `/mcp` prints the MCP server health and the sidebar lists it: each
-configured server's transport, export state, target, negotiated protocol, and failure
-reason. Startup and
-authentication failures also appear as transcript notices and a status hint.
+In the terminal, `/mcp` opens the server picker. Select a server to see its
+transport, target, negotiated protocol, and available tools or startup error.
+Startup failures also appear in the transcript. The client applies saved OAuth
+credentials at the next session setup.
 
 ## Session config: the `model` and setting options
 

@@ -1,20 +1,36 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use crate::acp::Event;
-use crate::app::App;
+use crate::app::{App, draw_choice_list};
 use crate::theme::Palette;
+
+#[derive(Clone, Copy)]
+enum Choice {
+    LeaveRunning,
+    StopAndQuit,
+    Stay,
+}
+
+const CHOICES: [(&str, Choice); 3] = [
+    ("Leave running", Choice::LeaveRunning),
+    ("Stop and quit", Choice::StopAndQuit),
+    ("Stay", Choice::Stay),
+];
 
 #[derive(Default)]
 pub(super) enum Quit {
     #[default]
     Closed,
     Checking,
-    Choose(Option<String>),
+    Choose {
+        error: Option<String>,
+        selected: usize,
+    },
     Stopping,
     Exit,
 }
@@ -40,54 +56,59 @@ impl Quit {
         match (&self, event) {
             (Self::Checking, Event::QuitChecked(Ok(false)))
             | (Self::Stopping, Event::QuitStopped(Ok(()))) => *self = Self::Exit,
-            (Self::Checking, Event::QuitChecked(Ok(true))) => *self = Self::Choose(None),
+            (Self::Checking, Event::QuitChecked(Ok(true))) => *self = Self::choose(None),
             (Self::Checking, Event::QuitChecked(Err(error)))
             | (Self::Stopping, Event::QuitStopped(Err(error))) => {
-                *self = Self::Choose(Some(error.clone()));
+                *self = Self::choose(Some(error.clone()));
             }
             (Self::Checking | Self::Stopping, Event::Disconnected) => {
-                *self = Self::Choose(Some("Disconnected from the Harness server".into()));
+                *self = Self::choose(Some("Disconnected from the Harness server".into()));
             }
             _ => {}
         }
+    }
+
+    fn choose(error: Option<String>) -> Self {
+        Self::Choose { error, selected: 0 }
     }
 
     pub fn key(&mut self, key: KeyEvent, app: &App) {
-        match (&self, key.code) {
-            (Self::Checking | Self::Choose(_), KeyCode::Esc) => *self = Self::Closed,
-            (Self::Choose(_), KeyCode::Char('l') | KeyCode::Enter) => *self = Self::Exit,
-            (Self::Choose(_), KeyCode::Char('s')) => {
-                *self = if app.stop_for_quit() {
-                    Self::Stopping
-                } else {
-                    Self::Choose(Some("Could not reach the Harness server".into()))
-                }
-            }
-            _ => {}
+        if matches!(self, Self::Checking | Self::Choose { .. }) && key.code == KeyCode::Esc {
+            *self = Self::Closed;
+            return;
         }
+        let Self::Choose { selected, .. } = self else {
+            return;
+        };
+        let choice = match key.code {
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(CHOICES.len() - 1);
+                return;
+            }
+            KeyCode::Enter => CHOICES[*selected].1,
+            KeyCode::Char('l') => Choice::LeaveRunning,
+            KeyCode::Char('s') => Choice::StopAndQuit,
+            _ => return,
+        };
+        *self = match choice {
+            Choice::LeaveRunning => Self::Exit,
+            Choice::Stay => Self::Closed,
+            Choice::StopAndQuit if app.stop_for_quit() => Self::Stopping,
+            Choice::StopAndQuit => Self::choose(Some("Could not reach the Harness server".into())),
+        };
     }
 
     pub fn draw(&self, frame: &mut Frame, palette: &Palette) {
-        let lines = match self {
-            Self::Checking => vec![
-                Line::from("Checking running sessions…"),
-                Line::from("Esc  Stay").fg(palette.muted),
-            ],
-            Self::Choose(error) => vec![
-                error.as_ref().map_or_else(
-                    || Line::from("This is the only session with a run in progress."),
-                    |error| Line::from(error.as_str()),
-                ),
-                Line::default(),
-                Line::from("Enter/L  Leave running     S  Stop and quit     Esc  Stay")
-                    .fg(palette.accent),
-            ],
-            Self::Stopping => vec![Line::from("Stopping this session…")],
-            Self::Closed | Self::Exit => return,
-        };
+        if matches!(self, Self::Closed | Self::Exit) {
+            return;
+        }
         let area = frame.area();
         let width = area.width.saturating_sub(2).min(70);
-        let height = area.height.saturating_sub(2).min(7);
+        let height = area.height.min(8);
         let popup = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -100,9 +121,38 @@ impl Quit {
             .style(Style::default().fg(palette.foreground).bg(palette.surface))
             .title(" Quit Harness ");
         frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
-            popup,
-        );
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        match self {
+            Self::Choose { error, selected } => {
+                let hint_height = u16::from(inner.height > 1);
+                let choice_height = (CHOICES.len() as u16).min(inner.height - hint_height);
+                let [message, choices, hint] = Layout::vertical([
+                    Constraint::Min(0),
+                    Constraint::Length(choice_height),
+                    Constraint::Length(hint_height),
+                ])
+                .areas(inner);
+                let text = error
+                    .as_deref()
+                    .unwrap_or("This is the only session with a run in progress.");
+                frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), message);
+                let options = CHOICES.iter().map(|(label, _)| Line::from(*label));
+                draw_choice_list(frame, choices, options, Some(*selected), palette);
+                frame.render_widget(
+                    Paragraph::new("↑/↓ move · Enter choose · Esc stay").fg(palette.muted),
+                    hint,
+                );
+            }
+            Self::Checking => frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from("Checking running sessions…"),
+                    Line::from("Esc stay").fg(palette.muted),
+                ]),
+                inner,
+            ),
+            Self::Stopping => frame.render_widget(Paragraph::new("Stopping this session…"), inner),
+            Self::Closed | Self::Exit => {}
+        }
     }
 }

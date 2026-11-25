@@ -131,10 +131,20 @@ before `session/new` or `session/load` and declared as `type: "acp"`. Agents
 must advertise `mcpCapabilities.acp`. They use standard `mcp/message` on the
 existing ACP connection. The Rust provider uses ACP's cancellation marker,
 correlates progress with the originating request, and reports startup and
-protocol errors through the MCP health view.
+protocol errors through the MCP health view. A server that fails to start is
+omitted from the ACP declarations while the other servers and session continue.
+The native client drains subprocess stderr through a pipe and retains a bounded
+startup diagnostic. On failure the transcript shows a short reason and `/mcp`
+opens a searchable server picker with wrapped diagnostics or the selected
+server's filtered tool list.
 
-The native upstream transport negotiates MCP 2026-07-28. HTTP credentials
-can be passed through configured headers. The native client asks before
+The native upstream transport negotiates MCP 2026-07-28. Configured HTTP
+authorization headers take precedence. For an OAuth challenge, the native
+client can reuse stored credentials through the Python CLI's MCP OAuth client.
+The `/mcp` picker can open the browser sign-in flow and persist credentials
+in the configured token store. The active attachment keeps its declarations.
+A later session setup, including reopening a saved session, can attach the
+newly authorized server. The native client asks before
 starting an enabled server unless its configuration already grants consent.
 `always allow` updates the local TOML file. Local and remote Harness servers
 consume the same declarations. Browser sessions omit client MCP capabilities.
@@ -603,9 +613,11 @@ bridged: they are not advertised, and the MCP SDK answers them with
 `INVALID_REQUEST` because MCP 2026-07-28 replaced them with MRTR.
 
 The client asks for consent before starting a server and including its declaration
-in session setup. The native TUI offers allow once, allow for the connection,
-always allow, and deny. The headless client (`hrns run`) uses only servers
-configured with `always_allow = true`.
+in session setup. The native TUI shows allow once, allow for the connection,
+always allow, and deny in a vertical list. Up and Down move the highlight,
+Enter confirms the highlighted choice, and Escape denies. The first choice is
+allow once. The headless client (`hrns run`) uses only servers configured with
+`always_allow = true`.
 
 
 Binding internals and subscription requirements are documented in

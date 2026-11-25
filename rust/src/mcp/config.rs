@@ -20,6 +20,13 @@ struct McpSettings {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum OAuth {
+    Enabled(bool),
+    Settings {},
+}
+
+#[derive(Deserialize)]
 #[serde(default)]
 pub(super) struct Server {
     pub command: String,
@@ -33,6 +40,7 @@ pub(super) struct Server {
     pub include_tools: Vec<String>,
     pub exclude_tools: Vec<String>,
     pub timeout: f64,
+    oauth: Option<OAuth>,
 }
 
 impl Default for Server {
@@ -49,11 +57,21 @@ impl Default for Server {
             include_tools: Vec::new(),
             exclude_tools: Vec::new(),
             timeout: 10.0,
+            oauth: None,
         }
     }
 }
 
 impl Server {
+    pub fn uses_oauth(&self) -> bool {
+        !self.url.is_empty()
+            && !matches!(self.oauth, Some(OAuth::Enabled(false)))
+            && !self
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+    }
+
     pub fn transport(&self) -> &'static str {
         if self.url.is_empty() { "stdio" } else { "http" }
     }

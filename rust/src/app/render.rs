@@ -10,7 +10,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Tabs, Wrap};
 
 use super::picker::{Picker, Row, Source, context_tier};
-use super::{App, PendingApproval, ScrollBar, is_local_command, slash_command};
+use super::{
+    App, MCP_CONSENT_CHOICES, PendingApproval, PendingMcpConsent, ScrollBar, is_local_command,
+    slash_command,
+};
 use crate::elicitation::FieldKind;
 use crate::options;
 use crate::theme::Palette;
@@ -42,22 +45,25 @@ impl App {
             self.draw_agents(frame, area, picker, &palette);
             return;
         }
-        let approval_active = !self.approvals.is_empty()
-            && self.mcp_consent.is_empty()
-            && self.elicitations.is_empty();
+        let mcp_pending = self.mcp_consent.front();
+        let approval_active =
+            !self.approvals.is_empty() && mcp_pending.is_none() && self.elicitations.is_empty();
+        let consent_active = mcp_pending.is_some();
         let gutter = Margin::new(if area.width >= 80 { 2 } else { 1 }, 0);
-        let prompt_height = if approval_active {
+        let prompt_height = if approval_active || consent_active {
             0
         } else if area.height >= 12 {
             6
         } else {
             area.height / 2
         };
-        let mcp_height = if self.mcp_consent.front().is_some() {
-            7
-        } else {
-            0
-        };
+        let mcp_details =
+            mcp_pending.map(|pending| format!("{} · {}", pending.transport, pending.target));
+        let mcp_height = mcp_details.as_ref().map_or(0, |details| {
+            let width = usize::from(area.inner(gutter).width.saturating_sub(4).max(1));
+            let available = usize::from(area.height.saturating_sub(TRANSCRIPT_AND_STATUS_ROWS));
+            (2 + MCP_CONSENT_CHOICES.len() + wrap(details, width).len()).min(available) as u16
+        });
         let approval_height =
             self.approvals
                 .front()
@@ -76,14 +82,18 @@ impl App {
             .height
             .saturating_sub(prompt_height + TRANSCRIPT_AND_STATUS_ROWS + follow_height)
             .min(18);
-        let question = self.elicitations.front().map(|pending| {
-            elicitation_lines(
-                pending,
-                usize::from(question_limit.saturating_sub(2)),
-                area.width,
-                &palette,
-            )
-        });
+        let question = self
+            .elicitations
+            .front()
+            .filter(|_| !consent_active)
+            .map(|pending| {
+                elicitation_lines(
+                    pending,
+                    usize::from(question_limit.saturating_sub(2)),
+                    area.width,
+                    &palette,
+                )
+            });
         let elicitation_height = question.as_ref().map_or(0, |lines| {
             u16::try_from(lines.len() + 2)
                 .unwrap_or(u16::MAX)
@@ -92,7 +102,7 @@ impl App {
         let completion_height = self
             .completion
             .as_ref()
-            .filter(|_| !approval_active)
+            .filter(|_| !approval_active && !consent_active)
             .map_or(0, |completion| {
                 let available = area.height.saturating_sub(
                     mcp_height
@@ -266,18 +276,8 @@ impl App {
             });
         }
 
-        if let Some(pending) = self.mcp_consent.front() {
-            let lines = vec![
-                Line::from(format!(" MCP server · {}", pending.name))
-                    .fg(palette.accent)
-                    .bold(),
-                Line::from(format!(" {} · {}", pending.transport, pending.target))
-                    .fg(palette.muted),
-                Line::from(" 1 allow once   2 allow for this connection   3 always allow   4 deny")
-                    .fg(palette.foreground),
-                Line::from(" y allow once · n deny · Esc deny").fg(palette.muted),
-            ];
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), mcp);
+        if let (Some(pending), Some(details)) = (mcp_pending, mcp_details.as_deref()) {
+            draw_mcp_consent(frame, mcp.inner(gutter), pending, details, &palette);
         }
         if approval_active && let Some(pending) = self.approvals.front_mut() {
             draw_approval(frame, approval.inner(gutter), pending, &palette);
@@ -381,7 +381,7 @@ impl App {
             }
         }
         let status_hint = if self.mcp_consent.front().is_some() {
-            "1 allow once · 2 until exit · 3 always · 4 deny · Esc deny"
+            "↑/↓ move · Enter choose · Esc deny"
         } else if let Some(pending) = self.elicitations.front() {
             question_hint(&pending.state)
         } else if self.approvals.front().is_some() {
@@ -589,6 +589,10 @@ impl App {
         let inner = panel.inner(popup);
         frame.render_widget(Clear, popup);
         frame.render_widget(panel, popup);
+        if matches!(picker.source, Source::Mcp(_)) {
+            self.draw_mcp_picker(frame, inner, picker, palette);
+            return;
+        }
         let rows = self.picker_rows(picker);
         let tabs = self.model_provider_tabs(picker);
         let show_tabs = tabs.len() > 1;
@@ -1037,8 +1041,9 @@ impl App {
                     ))
                     .fg(palette.muted),
                 );
-                if !item.detail.is_empty() {
-                    lines.push(Line::from(format!("  {}", item.detail)).fg(palette.muted));
+                let detail = item.startup_failure.as_deref().unwrap_or(&item.detail);
+                if !detail.is_empty() {
+                    lines.push(Line::from(format!("  {detail}")).fg(palette.muted));
                 }
             }
         }
@@ -1073,6 +1078,53 @@ fn append_status_field<'a>(line: &mut Line<'a>, field: Line<'a>, limit: usize) -
     }
     line.spans.extend(field.spans);
     true
+}
+
+pub(crate) fn draw_choice_list<'a>(
+    frame: &mut Frame,
+    area: Rect,
+    options: impl IntoIterator<Item = Line<'a>>,
+    selected: Option<usize>,
+    palette: &Palette,
+) {
+    let list = List::new(options)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().fg(palette.accent).bg(palette.panel).bold());
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_mcp_consent(
+    frame: &mut Frame,
+    area: Rect,
+    pending: &PendingMcpConsent,
+    details: &str,
+    palette: &Palette,
+) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.warning))
+        .style(Style::default().bg(palette.surface))
+        .title(format!(" MCP server · {} ", pending.name))
+        .title_style(Style::default().fg(palette.warning).bold())
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let choice_height = inner.height.min(MCP_CONSENT_CHOICES.len() as u16);
+    let [preview, choices] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(choice_height)]).areas(inner);
+    let lines = wrap(details, usize::from(preview.width.max(1)))
+        .into_iter()
+        .take(usize::from(preview.height))
+        .map(|range| Line::from(&details[range]).fg(palette.muted))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), preview);
+
+    let options = MCP_CONSENT_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(index, (label, _))| Line::from(format!("{}. {label}", index + 1)));
+    draw_choice_list(frame, choices, options, Some(pending.selected), palette);
 }
 
 fn draw_approval(frame: &mut Frame, area: Rect, pending: &mut PendingApproval, palette: &Palette) {
@@ -1137,12 +1189,8 @@ fn draw_approval(frame: &mut Frame, area: Rect, pending: &mut PendingApproval, p
             Line::from(format!("   {name}"))
         }
     });
-    let list = List::new(options)
-        .highlight_symbol("› ")
-        .highlight_style(Style::default().fg(palette.accent).bg(palette.panel).bold());
-    let mut state = ListState::default()
-        .with_selected((!request.options.is_empty()).then_some(pending.selected));
-    frame.render_stateful_widget(list, choices, &mut state);
+    let selected = (!request.options.is_empty()).then_some(pending.selected);
+    draw_choice_list(frame, choices, options, selected, palette);
     frame.render_widget(
         Paragraph::new("↑/↓ move · Enter choose · Esc cancel").fg(palette.muted),
         hint,
