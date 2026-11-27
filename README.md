@@ -53,8 +53,8 @@ executable. Published wheels are available on the platforms listed in the
 
 The launcher resolves the target and passes `client_io` (CLI, profile, then `[tui]`),
 the TOML theme, permission mode and credentials, then replaces itself with the native
-executable. Build the browser bundle with
-`trunk build --locked --release` from `rust/` and serve `rust/dist/` from the ACP origin.
+executable. To build the browser bundle, run `npm ci --prefix npm` and then
+`trunk build --locked --release` from `rust/`. Serve `rust/dist/` from the ACP origin.
 See [architecture](ARCHITECTURE.md#rust-terminal-preview) and
 [browser deployment](docs/authentication.md#serve-the-ratzilla-client-with-acp-authentication).
 

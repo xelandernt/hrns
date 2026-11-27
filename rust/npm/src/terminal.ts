@@ -1,6 +1,42 @@
+export interface TerminalOptions {
+  /** ACP WebSocket URL. Defaults to /acp/agent on the current origin. */
+  endpoint?: string;
+  /** Absolute workspace path on the ACP server. */
+  cwd?: string;
+  /** ID of an existing ACP session to resume. */
+  session?: string;
+  theme?: "hrns" | "textual-dark" | "textual-light" | "ansi-dark" | "ansi-light";
+  /** Aborting cancels a pending mount or disposes a mounted terminal. */
+  signal?: AbortSignal;
+}
+
+export interface MountedTerminal {
+  focus(): void;
+  dispose(): void;
+}
+
+interface Terminal {
+  draw(): void;
+  resize(): void;
+  free(): void;
+}
+
+type TerminalConstructor = new (
+  root: HTMLElement,
+  input: HTMLInputElement,
+  endpoint?: string,
+  cwd?: string,
+  session?: string,
+  theme?: string,
+) => Terminal;
+
 let nextTerminalId = 0;
 
-export function attachTerminal(WebTerminal, container, options = {}) {
+export function attachTerminal(
+  WebTerminal: TerminalConstructor,
+  container: HTMLElement,
+  options: TerminalOptions = {},
+): MountedTerminal {
   const { endpoint, cwd, session, theme, signal } = options;
   signal?.throwIfAborted();
 
@@ -31,14 +67,14 @@ export function attachTerminal(WebTerminal, container, options = {}) {
   root.append(input);
   container.append(root);
 
-  let terminal;
-  let observer;
-  let frame;
+  let terminal: Terminal | undefined;
+  let observer: ResizeObserver | undefined;
+  let frame: number | undefined;
   let resize = false;
   let disposed = false;
   let escapePressed = false;
 
-  function allowTabOut(event) {
+  function allowTabOut(event: KeyboardEvent) {
     if (event.key === "Shift") return;
     const leaving = escapePressed && event.key === "Tab";
     escapePressed = event.key === "Escape" && !event.isComposing;
@@ -49,42 +85,44 @@ export function attachTerminal(WebTerminal, container, options = {}) {
     escapePressed = false;
   }
 
-  function dispose() {
+  const dispose = () => {
     if (disposed) return;
     disposed = true;
     signal?.removeEventListener("abort", dispose);
     root.removeEventListener("keydown", allowTabOut, true);
     root.removeEventListener("blur", resetEscape);
-    view.cancelAnimationFrame(frame);
+    if (frame !== undefined) view.cancelAnimationFrame(frame);
     observer?.disconnect();
     try {
       terminal?.free();
     } finally {
       root.remove();
     }
-  }
-
-  function draw() {
-    try {
-      if (resize) {
-        resize = false;
-        terminal.resize();
-      }
-      terminal.draw();
-      frame = view.requestAnimationFrame(draw);
-    } catch (error) {
-      dispose();
-      throw error;
-    }
-  }
+  };
 
   try {
     root.addEventListener("keydown", allowTabOut, true);
     root.addEventListener("blur", resetEscape);
-    terminal = new WebTerminal(root, input, endpoint, cwd, session, theme);
+    const mounted = new WebTerminal(root, input, endpoint, cwd, session, theme);
+    terminal = mounted;
     observer = new view.ResizeObserver(() => { resize = true; });
     observer.observe(root);
     signal?.addEventListener("abort", dispose, { once: true });
+
+    const draw = () => {
+      try {
+        if (resize) {
+          resize = false;
+          mounted.resize();
+        }
+        mounted.draw();
+        frame = view.requestAnimationFrame(draw);
+      } catch (error) {
+        dispose();
+        throw error;
+      }
+    };
+
     draw();
     return { focus: () => root.focus(), dispose };
   } catch (error) {

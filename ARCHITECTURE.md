@@ -56,8 +56,9 @@ shared application state. ACP work is driven on a native worker thread or
 a browser task so the composer renders independently of connection setup.
 
 Build the terminal with `cargo build --locked --manifest-path rust/Cargo.toml`
-and the browser with `trunk build --locked --release` from `rust/` with
-`wasm32-unknown-unknown` installed. The browser renders through Ratzilla's
+and the browser from `rust/` with `npm ci --prefix npm` followed by
+`trunk build --locked --release` with `wasm32-unknown-unknown` installed.
+The browser renders through Ratzilla's
 canvas backend. The DOM backend stayed above 20 seconds for a 500-line stream;
 canvas completed the same stream in 1.5 seconds, and synthetic keydown-to-next-
 frame p95 was 13.5 ms for typing and 12.9 ms for scrolling. Canvas has no text
@@ -112,12 +113,15 @@ verifies the resulting wheels and source
 distributions. The development workspace resolves the local Rust crate.
 See [the release guide](docs/release.md#version-matched-native-dependency).
 
-The release also ships `@xelandernt/hrns-tui`, an ES module with the browser
-Wasm and TypeScript declarations. `mountTerminal` embeds Ratzilla's canvas in the
+The release also ships `@xelandernt/hrns-tui` as compiled ES modules with
+generated TypeScript declarations and prebuilt browser Wasm.
+`mountTerminal` embeds Ratzilla's canvas in the
 host element and returns a handle for focus and disposal. Resizing recreates the
 canvas while keeping the terminal session. Disposal stops drawing, removes input
-listeners, and ends the ACP connection. The standalone Trunk build and npm package
-use the same Rust browser client and DOM lifecycle code.
+listeners, and ends the ACP connection. Both builds share the Rust browser
+client and the TypeScript wrapper for the DOM lifecycle. Trunk compiles the
+wrapper before copying its JavaScript into the standalone bundle. The npm build
+compiles the package entry point against the generated Wasm bindings.
 
 The approval panel takes the composer's place while a tool approval is in
 focus. It shows the tool kind and a scrollable preview above numbered choices.

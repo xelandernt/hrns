@@ -53,8 +53,8 @@ still receives that value and decides whether anonymous access is allowed. Retur
 
 ## Serve the Ratzilla client with ACP authentication
 
-Build the browser bundle with `trunk build --locked --release` from `rust/` after
-installing the Rust `wasm32-unknown-unknown` target. Serve `rust/dist/` over HTTPS
+Install Node.js and the Rust `wasm32-unknown-unknown` target. From `rust/`, run
+`npm ci --prefix npm` followed by `trunk build --locked --release`. Serve `rust/dist/` over HTTPS
 on the same origin as the authenticated ACP endpoint. The app defaults to
 `/acp/agent`. Set the `endpoint` query parameter to select a different WebSocket
 URL and `cwd` to select the remote workspace. An optional `session` parameter

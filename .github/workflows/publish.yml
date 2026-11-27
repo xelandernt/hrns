@@ -114,6 +114,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: trunk@0.21.14
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci --prefix rust/npm
       - run: trunk build --locked --release
         working-directory: rust
       - name: Package the browser bundle
@@ -145,6 +149,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm install --global npm@11.21.3
+      - run: npm ci
       - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
       - uses: taiki-e/install-action@v2
         with:

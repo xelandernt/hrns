@@ -64,11 +64,12 @@ Install `@xelandernt/hrns-tui` with npm. See the [React example](https://github.
 for the mount API, cleanup, and Vite configuration. Embedded terminals use the
 same ACP endpoint and deployment authentication as the standalone bundle.
 
-To build a package locally, install the Rust `wasm32-unknown-unknown` target
-and the `wasm-bindgen` CLI version in `rust/Cargo.lock`, then run:
+To build a package locally, install Node.js, the Rust `wasm32-unknown-unknown`
+target, and the `wasm-bindgen` CLI version in `rust/Cargo.lock`.
 
 ```sh
 cd rust/npm
+npm ci
 npm run build
 npm pack
 ```

@@ -11,13 +11,17 @@
   },
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
-  "files": ["index.js", "index.d.ts", "terminal.js", "wasm/*.js", "wasm/*.wasm"],
+  "files": ["dist/*.js", "dist/*.d.ts", "wasm/*.js", "wasm/*.wasm"],
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs && tsc -p tsconfig.package.json",
+    "build:wrapper": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   },
   "publishConfig": {
     "access": "public"
