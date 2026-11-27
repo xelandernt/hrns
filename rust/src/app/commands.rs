@@ -47,11 +47,19 @@ impl App {
                     "Wheel / PgUp / PgDn  Scroll the transcript".to_owned(),
                     "Esc  Close a picker or cancel the turn".to_owned(),
                 ];
-                commands.extend(
-                    self.commands
-                        .iter()
-                        .map(|(name, description)| format!("/agent {name}  {description}")),
-                );
+                if !self.commands.is_empty() {
+                    commands.push(String::new());
+                    for command in &self.commands {
+                        let slash = format!("/{}", command.name);
+                        let hint = command.hint_suffix();
+                        let label = if is_local_command(&slash) {
+                            format!("/agent {}{hint}", command.name)
+                        } else {
+                            format!("{slash}{hint}")
+                        };
+                        commands.push(format!("agent:{label}  {}", command.description));
+                    }
+                }
                 self.transcript
                     .push(Role::Command("/help".into()), commands.join("\n"));
             }
@@ -251,18 +259,44 @@ impl App {
                 self.draft.submit();
                 self.apply_setting(text["/settings ".len()..].trim());
             }
+            "/agent" => {
+                self.draft.submit();
+                if self.commands.is_empty() {
+                    self.transcript.push(
+                        Role::Command("/agent".into()),
+                        "The agent has not advertised any commands".into(),
+                    );
+                } else {
+                    let lines: Vec<String> = self
+                        .commands
+                        .iter()
+                        .map(|command| {
+                            let slash = format!("/{}", command.name);
+                            let hint = command.hint_suffix();
+                            let overlap = if is_local_command(&slash) {
+                                " (overlaps local command)"
+                            } else {
+                                ""
+                            };
+                            format!(
+                                "agent:/agent {}{hint}  {}{overlap}",
+                                command.name, command.description
+                            )
+                        })
+                        .collect();
+                    self.transcript
+                        .push(Role::Command("/agent".into()), lines.join("\n"));
+                }
+            }
             command if command.starts_with("/agent ") => {
                 let command = command["/agent ".len()..].trim();
                 let name = command.split_whitespace().next();
                 if self
                     .commands
                     .iter()
-                    .any(|(advertised, _)| name == Some(advertised.as_str()))
+                    .any(|advertised| name == Some(advertised.name.as_str()))
                 {
-                    if super::COMMANDS
-                        .iter()
-                        .any(|(local, _)| local.trim_start_matches('/') == name.unwrap_or_default())
-                    {
+                    if name.is_some_and(|name| is_local_command(&format!("/{name}"))) {
                         self.transcript.push(
                             Role::Note,
                             format!(
@@ -271,7 +305,7 @@ impl App {
                             ),
                         );
                     }
-                    self.send_draft(format!("/{command}"));
+                    self.send_message(format!("/{command}"));
                 } else {
                     self.transcript.push(
                         Role::Error,

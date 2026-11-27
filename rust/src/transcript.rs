@@ -9,8 +9,8 @@ use agent_client_protocol::v1::schema::ToolCallStatus;
 
 pub(crate) use self::actions::ACTION_FRAME_MILLIS;
 use self::actions::ActionBlocks;
-use crate::acp::{PermissionRequest, ToolDisplay};
-use entry::Entry;
+use crate::acp::{CompactionEvent, CompactionPhase, PermissionRequest, ToolDisplay};
+use entry::{CompactionMeta, Entry};
 pub use entry::{ManualApproval, Role};
 pub(crate) use layout::{wrap, wrap_up_to};
 
@@ -64,6 +64,7 @@ impl Transcript {
             id: None,
             expanded,
             tool_status: None,
+            compaction: None,
             approval: None,
             action_heading: false,
             action_visible: true,
@@ -131,6 +132,7 @@ impl Transcript {
             id: Some(id),
             expanded: false,
             tool_status: Some(status),
+            compaction: None,
             approval: None,
             action_heading: false,
             action_visible: true,
@@ -139,12 +141,135 @@ impl Transcript {
         });
     }
 
-    fn tool_index(&self, id: &str) -> Option<usize> {
+    fn entry_index(&self, role: Role, id: &str) -> Option<usize> {
         let start = self.replay_from.unwrap_or(0);
         self.entries[start..]
             .iter()
-            .rposition(|entry| entry.id.as_deref() == Some(id))
+            .rposition(|entry| entry.role == role && entry.id.as_deref() == Some(id))
             .map(|index| start + index)
+    }
+
+    fn tool_index(&self, id: &str) -> Option<usize> {
+        self.entry_index(Role::Tool, id)
+    }
+
+    fn compaction_index(&self, id: &str) -> Option<usize> {
+        self.entry_index(Role::Compaction, id)
+    }
+
+    pub fn compaction(&mut self, event: CompactionEvent) {
+        self.output_pending |= !self.following;
+        self.finish_actions();
+        let CompactionEvent {
+            id,
+            status,
+            summary,
+            clear_summary,
+            error,
+            mode,
+            tokens_before,
+            tokens_after,
+            messages_before,
+            messages_after,
+            focus,
+        } = event;
+        if let Some(index) = self.compaction_index(&id) {
+            let entry = &mut self.entries[index];
+            let meta = entry.compaction.get_or_insert(CompactionMeta {
+                status,
+                mode: None,
+                tokens_before: None,
+                tokens_after: None,
+                messages_before: None,
+                messages_after: None,
+                focus: None,
+                error: None,
+            });
+            meta.status = status;
+            if mode.is_some() {
+                meta.mode = mode;
+            }
+            if tokens_before.is_some() {
+                meta.tokens_before = tokens_before;
+            }
+            if tokens_after.is_some() {
+                meta.tokens_after = tokens_after;
+            }
+            if messages_before.is_some() {
+                meta.messages_before = messages_before;
+            }
+            if messages_after.is_some() {
+                meta.messages_after = messages_after;
+            }
+            if focus.is_some() {
+                meta.focus = focus;
+            }
+            if error.is_some() {
+                meta.error = error;
+            } else if status != CompactionPhase::Failed {
+                meta.error = None;
+            }
+            entry.text = meta.title();
+            if clear_summary {
+                entry.detail = None;
+            } else if let Some(summary) = summary {
+                entry.detail = Some(sanitize_summary(summary));
+            }
+            self.measured = self.measured.min(index);
+            return;
+        }
+        let meta = CompactionMeta {
+            status,
+            mode,
+            tokens_before,
+            tokens_after,
+            messages_before,
+            messages_after,
+            focus,
+            error,
+        };
+        let text = meta.title();
+        let detail = if clear_summary {
+            None
+        } else {
+            summary.map(sanitize_summary)
+        };
+        self.entries.push(Entry {
+            role: Role::Compaction,
+            text,
+            rows: Vec::new(),
+            code_rows: Vec::new(),
+            table_rows: BTreeMap::new(),
+            detail,
+            detail_rows: Vec::new(),
+            preview_start: None,
+            shell: false,
+            id: Some(id),
+            expanded: false,
+            tool_status: None,
+            compaction: Some(meta),
+            approval: None,
+            action_heading: false,
+            action_visible: true,
+            action_preview: false,
+            end: 0,
+        });
+    }
+
+    pub fn compaction_summary_chunk(&mut self, id: &str, chunk: String) {
+        self.output_pending |= !self.following;
+        let sanitized = sanitize_summary(chunk);
+        if sanitized.is_empty() {
+            return;
+        }
+        if let Some(index) = self.compaction_index(id) {
+            let entry = &mut self.entries[index];
+            match &mut entry.detail {
+                Some(detail) => detail.push_str(&sanitized),
+                None => entry.detail = Some(sanitized),
+            }
+            self.measured = self.measured.min(index);
+        }
     }
 
     pub fn show_pending_approval(&mut self, request: &PermissionRequest) {
@@ -234,6 +359,7 @@ impl Transcript {
                             }
             }
             Role::Thought => row == start,
+            Role::Compaction => entry.has_detail() && row < start + entry.rows.len(),
             _ => false,
         };
         if !header_hit {
@@ -278,7 +404,14 @@ impl Transcript {
     }
 
     pub fn animating_actions(&self) -> bool {
-        !self.replaying() && self.actions.animating()
+        !self.replaying()
+            && (self.actions.animating()
+                || self.entries.iter().any(|entry| {
+                    entry
+                        .compaction
+                        .as_ref()
+                        .is_some_and(|meta| meta.status == CompactionPhase::InProgress)
+                }))
     }
 
     pub fn finish_actions(&mut self) {
@@ -312,4 +445,9 @@ impl Transcript {
             self.push_entry(role, text, expand_new, live);
         }
     }
+}
+
+fn sanitize_summary(mut text: String) -> String {
+    text.retain(|ch| matches!(ch, '\n' | '\t') || !ch.is_control());
+    text.replace('\t', "    ")
 }

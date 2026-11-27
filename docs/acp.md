@@ -85,7 +85,7 @@ The adapter calls these methods on the connected client:
 
 | Method | Sent when |
 | --- | --- |
-| `session/update` | Always, once per streamed event: agent text, thought text, tool call start/update/completion, plan updates (from `Todo`), and a `UsageUpdate` gauge with context tokens and session cost |
+| `session/update` | Always, once per streamed event: agent text, thought text, tool call start/update/completion, plan updates (from `Todo`), `available_commands_update` (from capabilities implementing `SupportsSlashCommands`), `compaction_update` / `compaction_summary_chunk` (when the client advertises `session.compaction`, with an agent text fallback otherwise), and a `UsageUpdate` gauge with context tokens and session cost |
 | `session/request_permission` | A tool call that is `unapproved` (see [approval](capabilities.md#approval)) needs a decision; one request per batch for `apply_changes` |
 | `fs/read_text_file` | Only when the agent uses `AcpFileSystemToolset` / `acp_filesystem`, and the client advertises `fs.readTextFile` |
 | `fs/write_text_file` | Same, when the client also advertises `fs.writeTextFile`; otherwise writes fall back to a local `FileSystem` bounded by the session `cwd` |
@@ -144,6 +144,22 @@ The adapter advertises them when a
   on the next request of that same turn. A request already in flight keeps its settings.
 - `providers/set` and `providers/disable` can change which settings a model offers. When
   they do, resident sessions receive a `config_option_update` with the complete new state.
+
+## Capability slash commands and compaction
+
+Capabilities attached to an agent (or to per-session `AcpSessionConfig.capabilities`)
+can implement `SupportsSlashCommands` (or use `SlashCommands`) to advertise ACP slash
+commands via `available_commands_update`. When a `session/prompt` begins with `/<name>`,
+the runtime dispatches to the matching command handler before invoking the agent: the
+handler can complete the turn directly (`CommandHandled`), rewrite it into a prompt
+(`CommandPrompt`), or fall through.
+
+The built-in `hrns` agent includes the reusable `Compaction` capability, which runs
+automatic `TieredCompaction` during turns and advertises `/compact [focus]` for
+unconditional `SummarizingCompaction`. When the client advertises
+`clientCapabilities.session.compaction`, compaction streams `compaction_update` and
+`compaction_summary_chunk` updates and updates the `UsageUpdate` context gauge; clients
+without `session.compaction` receive a plain-text agent message fallback.
 
 ## Skills in `_meta`
 

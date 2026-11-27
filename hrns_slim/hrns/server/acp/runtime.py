@@ -46,17 +46,31 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.output import OutputDataT, OutputSpec
 from pydantic_ai.run import AgentRunResultEvent
+from pydantic_ai.settings import merge_model_settings
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, DynamicToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai_harness.compaction import resolve_context_window
 
 from hrns.server.capabilities import (
+    CommandContext,
+    CommandHandled,
+    CommandPrompt,
+    CompactionCompleted,
+    CompactionFailed,
+    CompactionStarted,
+    CompactionSummaryChunkEvent,
     SkillInfo,
+    SlashCommand,
     TodoStore,
     TodoUpdated,
     bind_invoked_skills,
     find_skills,
+    find_slash_commands,
+    parse_slash_command,
 )
+from hrns.server.capabilities.commands import run_command_handler
+from hrns.server.capabilities.compaction import COMPACTION_META_KEY, _compaction_meta
 from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
 
@@ -178,6 +192,55 @@ class SessionRuntime(
         #: The last usage gauge sent, so a turn that changes nothing does not repeat it.
         self._usage_update: schema.UsageUpdate | schema.SessionInfoUpdate | None = None
         self._reasoning_tokens: int | None = None
+
+    def _supports_compaction_updates(self) -> bool:
+        caps = self._client_capabilities
+        return caps is not None and caps.session is not None and caps.session.compaction is not None
+
+    def _slash_commands(self) -> tuple[SlashCommand[AgentDepsT], ...]:
+        extra = (
+            self._state.config.capabilities
+            if self._state is not None and self._state.config.capabilities
+            else ()
+        )
+        return find_slash_commands(self._agent, extra)
+
+    def _replayable_update(self, update: SessionUpdate) -> SessionUpdate | None:
+        """Translate persisted compaction updates for clients without compaction support."""
+        if self._supports_compaction_updates():
+            return update
+        if isinstance(update, schema.SessionUpdateCompactionSummaryChunk):
+            return None
+        if isinstance(update, schema.SessionUpdateCompactionUpdate):
+            if update.status == "failed":
+                error = update.error or "unknown error"
+                return updates.update_agent_message_text(f"[Compaction failed: {error}]")
+            if update.status != "completed":
+                return None
+            meta = (update.field_meta or {}).get(COMPACTION_META_KEY)
+            meta_dict = meta if isinstance(meta, dict) else {}
+            mode = "auto" if meta_dict.get("mode") == "auto" else "manual"
+            tokens_before = meta_dict.get("tokens_before")
+            tokens_after = meta_dict.get("tokens_after")
+            summary_parts = [
+                block.text
+                for block in (update.summary or ())
+                if isinstance(block, schema.TextContentBlock) and block.text
+            ]
+            summary = "".join(summary_parts) or None
+            if isinstance(tokens_before, int) and isinstance(tokens_after, int):
+                text = updates.compaction_fallback_notice(
+                    mode=mode,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_after,
+                    summary=summary,
+                )
+            elif summary:
+                text = f"[Context compacted]\n\n{summary}"
+            else:
+                text = "[Context compacted]"
+            return updates.update_agent_message_text(text)
+        return update
 
     async def create(self, session_id: str, cwd: str) -> None:
         config = await self._build_config(session_id, cwd)
@@ -324,7 +387,19 @@ class SessionRuntime(
         async def deliver() -> None:
             try:
                 for update in replay:
-                    await conn.session_update(session_id=self.state.session_id, update=update)
+                    translated = self._replayable_update(update)
+                    if translated is not None:
+                        await conn.session_update(
+                            session_id=self.state.session_id, update=translated
+                        )
+                commands = self._slash_commands()
+                if commands:
+                    await conn.session_update(
+                        session_id=self.state.session_id,
+                        update=updates.update_available_commands(
+                            [command.to_acp() for command in commands]
+                        ),
+                    )
                 if self._title is not None:
                     await conn.session_update(
                         session_id=self.state.session_id,
@@ -381,6 +456,144 @@ class SessionRuntime(
     def _client_toolset(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         return CombinedToolset(list(self.attachment_toolsets)) if self.attachment_toolsets else None
 
+    def _find_slash_command(
+        self, prompt: Sequence[PromptContentBlock]
+    ) -> tuple[SlashCommand[AgentDepsT], str] | None:
+        if len(prompt) != 1 or not isinstance(prompt[0], schema.TextContentBlock):
+            return None
+        parsed = parse_slash_command(prompt[0].text)
+        if parsed is None:
+            return None
+        name, arguments = parsed
+        key = name.lower()
+        for command in self._slash_commands():
+            if command.name.lower() == key:
+                return command, arguments
+        return None
+
+    async def _emit_context_usage_estimate(
+        self,
+        state: SessionState[AgentDepsT],
+        *,
+        used_tokens: int,
+        spent: Decimal | None = None,
+    ) -> None:
+        """Publish an estimated context-usage gauge immediately after compaction."""
+        resolved = self._resolve_run_model(state.model)
+        model = resolved.model if resolved is not None else self._agent.model
+        size = _context_window(model)
+        if size is None and model is not None:
+            size = resolve_context_window(model)
+        total = state.cost if spent is None else spent
+        amount = float(total) if total is not None else None
+        if size is None:
+            return
+        update = schema.UsageUpdate(
+            used=max(used_tokens, 0),
+            size=size,
+            cost=schema.Cost(amount=amount, currency="USD") if amount is not None else None,
+            field_meta={"hrns/usage/estimated_cost": True} if amount is not None else None,
+        )
+        if update == self._usage_update:
+            return
+        self._usage_update = update
+        await self._deliver_update(update)
+
+    async def _record_user_blocks(
+        self, turn: _TurnState, prompt: Sequence[PromptContentBlock]
+    ) -> None:
+        for block in prompt:
+            update = updates.update_user_message(block)
+            if self._conn is self.prompt_origin and self.prompt_origin is not None:
+                turn.updates.append(update)
+            else:
+                await self._send_update(turn, update)
+
+    async def _dispatch_slash_command(
+        self,
+        state: SessionState[AgentDepsT],
+        turn: _TurnState,
+        command: SlashCommand[AgentDepsT],
+        arguments: str,
+    ) -> tuple[schema.PromptResponse | None, str | None]:
+        """Run a matched capability slash command.
+
+        Returns ``(prompt_response, rewritten_text)``: a non-``None`` response completes the
+        turn immediately; otherwise the caller continues into the normal agent loop (with
+        ``rewritten_text`` replacing the prompt when provided).
+        """
+        config = state.config
+        resolved_model = self._resolve_run_model(state.model)
+        effective_model = resolved_model.model if resolved_model is not None else self._agent.model
+        effective_settings = self._resolver_settings(state)
+        if resolved_model is not None and resolved_model.settings is not None:
+            effective_settings = (
+                merge_model_settings(resolved_model.settings, effective_settings)
+                or effective_settings
+            )
+
+        new_history: list[ModelMessage] | None = None
+
+        def replace_history(messages: list[ModelMessage]) -> None:
+            nonlocal new_history
+            new_history = list(messages)
+
+        async def emit_update(update: SessionUpdate) -> None:
+            await self._send_update(turn, update)
+
+        async def emit_text(text: str) -> None:
+            await self._emit_text(turn, text, thought=False)
+
+        async def emit_context_usage(used_tokens: int, delta_cost: Decimal | None) -> None:
+            spent = state.cost
+            if delta_cost is not None:
+                spent = (spent or Decimal(0)) + delta_cost
+            await self._emit_context_usage_estimate(state, used_tokens=used_tokens, spent=spent)
+
+        command_ctx = CommandContext[AgentDepsT](
+            session_id=state.session_id,
+            cwd=state.cwd,
+            command=command.name,
+            arguments=arguments,
+            history=list(state.history),
+            deps=config.deps,
+            model=effective_model,
+            model_settings=effective_settings,
+            emit_update=emit_update,
+            emit_text=emit_text,
+            emit_context_usage=emit_context_usage,
+            replace_history=replace_history,
+        )
+        result = await run_command_handler(command, command_ctx)
+        if isinstance(result, CommandHandled):
+            if result.message:
+                await self._emit_text(turn, result.message, thought=False)
+            if new_history is not None:
+                state.history = new_history
+            if result.cost is not None:
+                state.cost = (state.cost or Decimal(0)) + result.cost
+            state.transcript.extend(turn.updates)
+            self.live_updates = []
+            await self._announce_title(state)
+            try:
+                await self._persist(state)
+            except asyncio.CancelledError:
+                _logger.warning(
+                    "persisting ACP session %s was cancelled; durable state is now behind",
+                    state.session_id,
+                )
+                return schema.PromptResponse(stop_reason="cancelled"), None
+            return (
+                schema.PromptResponse(
+                    stop_reason=result.stop_reason,
+                    usage=_to_acp_usage(result.usage) if result.usage is not None else None,
+                ),
+                None,
+            )
+        if isinstance(result, CommandPrompt):
+            return None, result.text
+        return None, None
+
     async def execute(self, prompt: list[PromptContentBlock]) -> schema.PromptResponse:
         skills = await self._resolve_skills(prompt)
         try:
@@ -399,16 +612,7 @@ class SessionRuntime(
         user_content: list[UserContent],
         skills: Sequence[SkillInfo] = (),
     ) -> schema.PromptResponse:
-        history = state.history
         config = state.config
-        usage = RunUsage()
-        stop_reason: schema.StopReason = "end_turn"
-        deferred_results: DeferredToolResults | None = None
-        run_input: list[UserContent] | None = user_content
-        output_type: OutputSpec[OutputDataT | DeferredToolRequests] = [
-            self._agent.output_type,
-            DeferredToolRequests,
-        ]
         turn = _TurnState(
             session_id=state.session_id,
             cwd=state.cwd,
@@ -416,13 +620,30 @@ class SessionRuntime(
             known_non_approval_names=self._known_non_approval_names(config),
         )
         self.live_updates = turn.updates
-        for block in prompt:
-            update = updates.update_user_message(block)
-            if self._conn is self.prompt_origin and self.prompt_origin is not None:
-                turn.updates.append(update)
-            else:
-                await self._send_update(turn, update)
-        run_input = await self._with_skill_instructions(state, user_content, skills)
+        await self._record_user_blocks(turn, prompt)
+
+        matched_command = self._find_slash_command(prompt)
+        if matched_command is not None and matched_command[0].handler is not None:
+            command, arguments = matched_command
+            handled_response, rewritten_text = await self._dispatch_slash_command(
+                state, turn, command, arguments
+            )
+            if handled_response is not None:
+                return handled_response
+            if rewritten_text is not None:
+                user_content = [rewritten_text]
+
+        history = state.history
+        usage = RunUsage()
+        stop_reason: schema.StopReason = "end_turn"
+        deferred_results: DeferredToolResults | None = None
+        run_input: list[UserContent] | None = await self._with_skill_instructions(
+            state, user_content, skills
+        )
+        output_type: OutputSpec[OutputDataT | DeferredToolRequests] = [
+            self._agent.output_type,
+            DeferredToolRequests,
+        ]
         await self._announce_skills(turn, skills)
 
         captured: list[ModelMessage] = []
@@ -616,7 +837,9 @@ class SessionRuntime(
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
         turn.updates.append(update)
-        await self._deliver_update(update)
+        translated = self._replayable_update(update)
+        if translated is not None:
+            await self._deliver_update(translated)
 
     async def _emit_usage(
         self,
@@ -710,7 +933,54 @@ class SessionRuntime(
         )
 
     async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
-        if isinstance(event, TodoUpdated):
+        if isinstance(event, CompactionStarted):
+            await self._send_update(
+                turn,
+                updates.update_compaction(
+                    event.compaction_id,
+                    "in_progress",
+                    meta=_compaction_meta(
+                        mode=event.mode,
+                        tokens_before=event.tokens_before,
+                        messages_before=event.messages_before,
+                        focus=event.focus,
+                    ),
+                ),
+            )
+        elif isinstance(event, CompactionSummaryChunkEvent):
+            await self._send_update(
+                turn,
+                updates.update_compaction_summary_chunk(event.compaction_id, event.delta),
+            )
+        elif isinstance(event, CompactionCompleted):
+            await self._send_update(
+                turn,
+                updates.update_compaction(
+                    event.compaction_id,
+                    "completed",
+                    summary=event.summary,
+                    meta=_compaction_meta(
+                        mode=event.mode,
+                        tokens_before=event.tokens_before,
+                        tokens_after=event.tokens_after,
+                        messages_before=event.messages_before,
+                        messages_after=event.messages_after,
+                        focus=event.focus,
+                    ),
+                ),
+            )
+            await self._emit_context_usage_estimate(self.state, used_tokens=event.tokens_after)
+        elif isinstance(event, CompactionFailed):
+            await self._send_update(
+                turn,
+                updates.update_compaction(
+                    event.compaction_id,
+                    "failed",
+                    error=event.error,
+                    meta=_compaction_meta(mode=event.mode),
+                ),
+            )
+        elif isinstance(event, TodoUpdated):
             await self._send_update(
                 turn,
                 schema.AgentPlanUpdate(

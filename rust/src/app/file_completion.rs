@@ -243,6 +243,7 @@ fn matches(files: &[File], query: &str) -> Vec<Suggestion> {
         .map(|(_, _, path)| Suggestion {
             insert: path.to_owned(),
             description: String::new(),
+            kind: super::SuggestionKind::File,
         })
         .collect()
 }

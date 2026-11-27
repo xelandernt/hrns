@@ -8,6 +8,8 @@ approval handling.
 | --- | --- | --- |
 | [Coder](#coder) | `hrns.server.capabilities.Coder` | File tools, shell commands, delegation, and context management |
 | [ApplyChanges](#apply_changes) | `hrns.server.capabilities.changes.ApplyChanges` | Batched file writes and edits; included in `Coder` |
+| [Compaction](#compaction) | `hrns.server.capabilities.Compaction` | Automatic tiered compaction and manual `/compact [focus]` over ACP |
+| [SlashCommands](#slash-commands) | `hrns.server.capabilities.SlashCommands` | Declare capability-owned ACP slash commands (`available_commands_update`) |
 | [Todo](#todo) | `hrns.server.capabilities.Todo` | Task lists and `TodoUpdated` events |
 | [Skills](#skills) | `hrns.server.capabilities.Skills` | Skill discovery, a host catalog, and `$name` invocation |
 | [AskUser](#ask-user) | `hrns.server.capabilities.AskUser` | Questions delivered through ACP form elicitation |
@@ -294,11 +296,37 @@ require_approval(read_only=READ_ONLY_TOOLS | {"apply_changes"})
 `build_agent` installs `require_approval()` by default. Pass `approval=False` to leave
 tool approval to the surrounding deployment.
 
+## Compaction
+
+`Compaction` wraps [`pydantic_ai_harness.compaction`](https://pydantic.dev/docs/ai/harness/compaction/)
+to provide both automatic in-run context compaction (`TieredCompaction`:
+`DeduplicateFileReads` → `ClearToolResults` → `SummarizingCompaction`) and an
+ACP-advertised `/compact [focus]` slash command that runs unconditional
+`SummarizingCompaction` via `compact_now`.
+
+```python
+from hrns.server.capabilities import Compaction
+
+agent = Agent("anthropic:claude-sonnet-5-5", capabilities=[Compaction()])
+```
+
+`build_agent` includes `Compaction()` by default (replacing `PruneToolResults`). Custom
+agents hosted on `AcpServer` / `HrnsServer` are opt-in and can attach `Compaction()`
+whenever they want the same behavior.
+
+## Slash commands
+
+Any capability implementing `SupportsSlashCommands` (`get_slash_commands()`) — or
+constructing the helper capability `SlashCommands([...])` — automatically advertises its
+commands over ACP `available_commands_update` and handles `/<name>` prompts in the
+session runtime. See `examples/fastapi_app.py` for a complete custom command example.
+
 ## Default agent composition
 
-`build_agent` composes `LocalWorkspace(cwd)`, `Coder(sub_agents=False)`, `Todo()`,
-`AskUser()`, `Skills.from_settings(...)` (when a library exists), and
-`require_approval()` (unless `approval=False`) in that order. `LocalWorkspace`
-roots the tools at `cwd`. `Coder` supplies the coding tools, including
-`apply_changes`, with delegation disabled. `Skills` contributes the deferred
-skill catalog and its bundled-file tools.
+`build_agent` composes `LocalWorkspace(cwd)`, `Coder(sub_agents=False)`,
+`ToolOutputLimits(...)`, `Compaction()`, `Todo()`, `AskUser()`,
+`Skills.from_settings(...)` (when a library exists), and `require_approval()` (unless
+`approval=False`) in that order. `LocalWorkspace` roots the tools at `cwd`. `Coder`
+supplies the coding tools, including `apply_changes`, with delegation disabled.
+`Compaction` keeps context within the model window and advertises `/compact`. `Skills`
+contributes the deferred skill catalog and its bundled-file tools.

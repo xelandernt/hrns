@@ -1,7 +1,8 @@
+use crate::acp::AgentCommand;
 use crate::skills::Skill;
 use crate::theme;
 
-use super::{App, COMMANDS, Completion, DETAILS_CHOICES, Suggestion};
+use super::{App, COMMANDS, Completion, DETAILS_CHOICES, Suggestion, SuggestionKind};
 
 impl App {
     pub(super) fn refresh_completion(&mut self) {
@@ -14,7 +15,7 @@ impl App {
         let input = self.draft.text();
         self.completion = self
             .argument_suggestions(input)
-            .or_else(|| suggestions(input, &self.skills))
+            .or_else(|| suggestions(input, &self.commands, &self.skills))
             .map(|items| Completion {
                 items,
                 selected: 0,
@@ -23,11 +24,14 @@ impl App {
     }
 
     pub(super) fn is_command(&self, command: &str) -> bool {
-        is_local_command(command)
-            || self
-                .commands
-                .iter()
-                .any(|(name, _)| command.strip_prefix('/') == Some(name.as_str()))
+        is_local_command(command) || self.agent_command(command).is_some()
+    }
+
+    pub(super) fn agent_command(&self, command: &str) -> Option<&AgentCommand> {
+        let name = command.strip_prefix('/')?;
+        self.commands
+            .iter()
+            .find(|advertised| advertised.name == name)
     }
 
     pub(super) fn has_unknown_command(&self, input: &str) -> bool {
@@ -77,6 +81,11 @@ impl App {
             .into_iter()
             .map(|(value, description)| (value.into(), description.into()))
             .collect(),
+            "/agent" => self
+                .commands
+                .iter()
+                .map(|command| (command.name.clone(), command.description_with_hint()))
+                .collect(),
             "/effort" | "/model" | "/models" => {
                 let category = if command == "/effort" {
                     SessionConfigOptionCategory::ThoughtLevel
@@ -109,10 +118,19 @@ impl App {
                     && value.to_ascii_lowercase().starts_with(&prefix)
             })
             .map(|(value, description)| {
-                let suffix = if command == "/provider" { " " } else { "" };
+                let suffix = if matches!(command, "/provider" | "/agent") {
+                    " "
+                } else {
+                    ""
+                };
                 Suggestion {
                     insert: format!("{command} {value}{suffix}"),
                     description,
+                    kind: if command == "/agent" {
+                        SuggestionKind::AgentCommand
+                    } else {
+                        SuggestionKind::LocalCommand
+                    },
                 }
             })
             .collect();
@@ -166,7 +184,11 @@ pub(super) fn slash_command(text: &str) -> Option<&str> {
         .then(|| &text[..text.find(char::is_whitespace).unwrap_or(text.len())])
 }
 
-pub(super) fn suggestions(text: &str, skills: &[Skill]) -> Option<Vec<Suggestion>> {
+pub(super) fn suggestions(
+    text: &str,
+    commands: &[AgentCommand],
+    skills: &[Skill],
+) -> Option<Vec<Suggestion>> {
     if text.contains('\n') || text.trim().is_empty() {
         return None;
     }
@@ -181,19 +203,32 @@ pub(super) fn suggestions(text: &str, skills: &[Skill]) -> Option<Vec<Suggestion
             .map(|skill| Suggestion {
                 insert: format!("${} ", skill.id),
                 description: skill.description.clone(),
+                kind: SuggestionKind::Skill,
             })
             .collect();
         return (!items.is_empty()).then_some(items);
     }
     if start == 0 && token.starts_with('/') {
-        let items: Vec<Suggestion> = COMMANDS
+        let mut items: Vec<Suggestion> = COMMANDS
             .iter()
             .filter(|(command, _)| command.starts_with(token) && *command != token)
             .map(|(command, description)| Suggestion {
                 insert: format!("{command} "),
                 description: (*description).to_owned(),
+                kind: SuggestionKind::LocalCommand,
             })
             .collect();
+        for command in commands {
+            let slash = format!("/{}", command.name);
+            if is_local_command(&slash) || !slash.starts_with(token) || slash == token {
+                continue;
+            }
+            items.push(Suggestion {
+                insert: format!("{slash} "),
+                description: command.description_with_hint(),
+                kind: SuggestionKind::AgentCommand,
+            });
+        }
         return (!items.is_empty()).then_some(items);
     }
     None

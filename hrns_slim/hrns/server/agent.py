@@ -11,10 +11,9 @@ from pydantic_ai.exceptions import ModelConnectionError
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.workspaces import LocalWorkspaceBackend
-from pydantic_ai_harness.compaction import PruneToolResults
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceOverflowStore
 
-from hrns.server.capabilities import AskUser, Coder, Skills, Todo
+from hrns.server.capabilities import AskUser, Coder, Compaction, Skills, Todo
 from hrns.shared.config.settings import SkillsSettings
 
 from .approvals import require_approval
@@ -44,8 +43,9 @@ def build_agent(
     :class:`~hrns.shared.config.SkillsSettings` to add libraries, narrow the selection,
     or turn the capability off.
 
-    Large tool results are saved to the workspace for bounded retrieval. The
-    model can replace recent tool results in its context with short summaries.
+    Large tool results are saved to the workspace for bounded retrieval. Context is
+    managed by :class:`~hrns.server.capabilities.Compaction` (automatic tiered compaction
+    plus the ``/compact`` ACP slash command).
 
     Approval is a capability. ACP turns tools marked ``unapproved`` into
     permission requests. Pass ``approval=False`` to disable that policy.
@@ -71,7 +71,7 @@ def build_agent(
             ToolOutputLimits(
                 store=WorkspaceOverflowStore(workspace=LocalWorkspaceBackend(workspace.working_dir))
             ),
-            PruneToolResults(),
+            Compaction(),
             Todo(),
             AskUser(),
             *([resolved_skills] if resolved_skills is not None else []),

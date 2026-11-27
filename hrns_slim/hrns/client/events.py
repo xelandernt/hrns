@@ -65,6 +65,27 @@ class ToolEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class CompactionEvent:
+    """Context compaction lifecycle update (``compaction_update``)."""
+
+    session_id: str
+    compaction_id: str
+    status: str
+    summary: str | None = None
+    error: str | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionSummaryChunk:
+    """Streamed summary text chunk for an in-progress compaction."""
+
+    session_id: str
+    compaction_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class PlanChanged:
     """The agent's plan was updated; ``cleared`` marks a removal update."""
 

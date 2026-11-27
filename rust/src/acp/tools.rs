@@ -1,13 +1,15 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, SessionUpdate, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind,
+    AvailableCommandInput, CompactionStatus, ContentBlock, SessionUpdate, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolKind,
 };
 
 use crate::tool_input;
 
-use super::Event;
+use super::{AgentCommand, CompactionEvent, CompactionPhase, Event};
 
 fn estimated_cost(amount: f64) -> String {
     format!("est. {amount:.6} USD")
@@ -32,7 +34,19 @@ pub(super) fn text_update(
             update
                 .available_commands
                 .into_iter()
-                .map(|command| (command.name, command.description))
+                .map(|command| {
+                    let input_hint = command.input.and_then(|input| match input {
+                        AvailableCommandInput::Unstructured(unstructured) => {
+                            Some(unstructured.hint)
+                        }
+                        _ => None,
+                    });
+                    AgentCommand {
+                        name: command.name,
+                        description: command.description,
+                        input_hint,
+                    }
+                })
                 .collect(),
         )),
         SessionUpdate::SessionInfoUpdate(update) => {
@@ -98,6 +112,72 @@ pub(super) fn text_update(
             let state = tools.entry(id.clone()).or_default();
             state.apply(&update);
             Some(state.event(&id))
+        }
+        SessionUpdate::CompactionUpdate(update) => {
+            let status = match update.status {
+                CompactionStatus::InProgress => CompactionPhase::InProgress,
+                CompactionStatus::Completed => CompactionPhase::Completed,
+                CompactionStatus::Failed => CompactionPhase::Failed,
+                CompactionStatus::Cancelled => CompactionPhase::Cancelled,
+                _ => CompactionPhase::InProgress,
+            };
+            let (summary, clear_summary) = match update.summary {
+                MaybeUndefined::Undefined => (None, false),
+                MaybeUndefined::Null => (None, true),
+                MaybeUndefined::Value(blocks) if blocks.is_empty() => (None, true),
+                MaybeUndefined::Value(blocks) => {
+                    let text: String = blocks
+                        .iter()
+                        .filter_map(content_text)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if text.is_empty() {
+                        (None, true)
+                    } else {
+                        (Some(text), false)
+                    }
+                }
+            };
+            let error = match update.error {
+                MaybeUndefined::Value(error) if !error.is_empty() => Some(error),
+                _ => None,
+            };
+            let compaction_meta = match update.meta {
+                MaybeUndefined::Value(meta) => meta.get("hrns/compaction").cloned(),
+                _ => None,
+            };
+            let meta_str = |key: &str| {
+                compaction_meta
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let meta_u64 = |key: &str| {
+                compaction_meta
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                    .and_then(serde_json::Value::as_u64)
+            };
+            Some(Event::Compaction(CompactionEvent {
+                id: update.compaction_id.to_string(),
+                status,
+                summary,
+                clear_summary,
+                error,
+                mode: meta_str("mode"),
+                tokens_before: meta_u64("tokens_before"),
+                tokens_after: meta_u64("tokens_after"),
+                messages_before: meta_u64("messages_before"),
+                messages_after: meta_u64("messages_after"),
+                focus: meta_str("focus"),
+            }))
+        }
+        SessionUpdate::CompactionSummaryChunk(chunk) => {
+            content_text(&chunk.content).map(|text| Event::CompactionSummaryChunk {
+                id: chunk.compaction_id.to_string(),
+                text: text.into_owned(),
+            })
         }
         _ => None,
     }

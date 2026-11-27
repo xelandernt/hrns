@@ -339,11 +339,13 @@ provider-routing capability expose their routes through `providers/list`,
 ### ACP SDK pin and extension surface
 
 The Rust client pins `agent-client-protocol = 5.4.0` (schema 1.19.0) and uses
-the stable v1 types. It sends `clientCapabilities` and reads the agent's
+the stable v1 types plus the unstable `session.compaction` client capability. It sends
+`clientCapabilities` (including `session.compaction`) and reads the agent's
 `loadSession`, prompt, MCP and session capabilities at initialize. It handles
 `session/update` for user, agent and thought chunks (including non-text blocks
 as labels), tool calls and updates, plans, session titles, current mode, config
-options, available commands and usage with cost. It reads `_hrns/session/state`
+options, available commands, compaction updates (`compaction_update` and
+`compaction_summary_chunk`) and usage with cost. It reads `_hrns/session/state`
 as a notification and from the `session/new` or `session/load` `_meta`, along
 with `hrns/skills`. It sends `hrns/skills` mentions on the first prompt text
 block. It answers `session/request_permission`, `elicitation/create`, `fs/*` and
@@ -351,9 +353,19 @@ block. It answers `session/request_permission`, `elicitation/create`, `fs/*` and
 session-scoped requests. Provider methods and extension requests use the SDK's
 untyped message type because the stable schema does not expose them.
 
-The built-in server supplies session titles through `session_info_update`.
-`/agent` runs slash commands advertised by the connected agent.
-The built-in server omits `available_commands_update` and `session/resume`.
+The built-in server supplies session titles through `session_info_update` and
+advertises capability-declared slash commands through `available_commands_update`.
+In the TUI, non-colliding agent-advertised commands are invocable and completed
+directly as `/<name>` with a dedicated `agent_command` theme color and `[agent]`
+marker; local TUI commands always win on name collision, and `/agent <name>` lists
+and invokes any advertised agent command (including overlaps).
+The built-in `hrns` agent replaces `PruneToolResults` with the reusable `Compaction`
+capability (automatic `TieredCompaction` during turns plus manual `/compact [focus]`
+via `SummarizingCompaction` / `compact_now`). Compaction emits ACP `compaction_update`
+and `compaction_summary_chunk` updates (falling back to agent text for clients that do
+not advertise `session.compaction`), refreshes the context usage gauge, and renders as
+an expandable transcript banner with live spinner, token delta, and summary.
+The built-in server omits `session/resume`.
 `session/delete` returning `-32002` is treated as success. Listing defaults to
 the current workspace.
 

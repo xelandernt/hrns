@@ -39,6 +39,8 @@ SessionUpdate: TypeAlias = (
     | schema.ConfigOptionUpdate
     | schema.SessionInfoUpdate
     | schema.UsageUpdate
+    | schema.SessionUpdateCompactionUpdate
+    | schema.SessionUpdateCompactionSummaryChunk
 )
 
 

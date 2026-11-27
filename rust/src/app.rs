@@ -23,7 +23,8 @@ use futures::channel::{mpsc, oneshot};
 use ratatui::layout::Rect;
 
 use crate::acp::{
-    Action, ClientIoMode, ConnectTarget, ExecutionState, PermissionRequest, SessionTarget,
+    Action, AgentCommand, ClientIoMode, ConnectTarget, ExecutionState, PermissionRequest,
+    SessionTarget,
 };
 use crate::attachments::{Attachment, Prompt};
 use crate::composer::Composer;
@@ -91,9 +92,19 @@ pub enum Key {
     Escape,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuggestionKind {
+    LocalCommand,
+    AgentCommand,
+    Skill,
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    File,
+}
+
 struct Suggestion {
     insert: String,
     description: String,
+    kind: SuggestionKind,
 }
 
 fn path_match_rank(path: &str, query: &str) -> Option<u8> {
@@ -264,7 +275,7 @@ pub struct App {
     mcp_authentication: Option<(String, AuthAction)>,
     local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
-    commands: Vec<(String, String)>,
+    commands: Vec<AgentCommand>,
     skills: Vec<Skill>,
     completion: Option<Completion>,
     #[cfg(not(target_family = "wasm"))]

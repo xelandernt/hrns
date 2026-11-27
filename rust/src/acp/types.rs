@@ -250,6 +250,52 @@ pub struct ProviderLoginState {
     pub warning: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
+    pub input_hint: Option<String>,
+}
+
+impl AgentCommand {
+    pub fn hint_suffix(&self) -> String {
+        self.input_hint
+            .as_deref()
+            .filter(|hint| !hint.is_empty())
+            .map_or(String::new(), |hint| format!(" <{hint}>"))
+    }
+
+    pub fn description_with_hint(&self) -> String {
+        match self.input_hint.as_deref().filter(|hint| !hint.is_empty()) {
+            Some(hint) => format!("{}  <{hint}>", self.description),
+            None => self.description.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionPhase {
+    InProgress,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompactionEvent {
+    pub id: String,
+    pub status: CompactionPhase,
+    pub summary: Option<String>,
+    pub clear_summary: bool,
+    pub error: Option<String>,
+    pub mode: Option<String>,
+    pub tokens_before: Option<u64>,
+    pub tokens_after: Option<u64>,
+    pub messages_before: Option<u64>,
+    pub messages_after: Option<u64>,
+    pub focus: Option<String>,
+}
+
 pub enum Event {
     Ready {
         session: String,
@@ -273,7 +319,12 @@ pub enum Event {
         change: ModelChange,
         result: Result<Vec<SessionConfigOption>, String>,
     },
-    AgentCommands(Vec<(String, String)>),
+    AgentCommands(Vec<AgentCommand>),
+    Compaction(CompactionEvent),
+    CompactionSummaryChunk {
+        id: String,
+        text: String,
+    },
     Skills(Vec<Skill>),
     SessionTitle(Option<String>),
     ReasoningTokens(Option<u64>),

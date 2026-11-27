@@ -364,6 +364,7 @@ impl Transcript {
                         entry.line(
                             entry_row.saturating_sub(usize::from(entry.action_heading)),
                             palette,
+                            animation_tick,
                             is_command,
                         )
                     };
@@ -458,6 +459,7 @@ impl Transcript {
             } else {
                 let indent = match entry.role {
                     Role::Tool => 4 + 2 * usize::from(entry.approval.is_some()),
+                    Role::Compaction => 4 + if entry.has_detail() { 16 } else { 0 },
                     Role::Command(_) => 2,
                     _ => 0,
                 };

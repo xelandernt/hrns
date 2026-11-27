@@ -21,6 +21,7 @@ from acp.schema import (
     CancelElicitationResponse,
     ClientCapabilities,
     ClientSessionCapabilities,
+    CompactionCapabilities,
     DeclineElicitationResponse,
     DeniedOutcome,
     ElicitationCapabilities,
@@ -124,9 +125,10 @@ class HrnsAcpClient:
             ),
             terminal=TERMINAL in offered,
             session=ClientSessionCapabilities(
+                compaction=CompactionCapabilities(),
                 config_options=SessionConfigOptionsCapabilities(
                     boolean=BooleanConfigOptionCapabilities(),
-                )
+                ),
             ),
             plan=PlanCapabilities(),
             elicitation=ElicitationCapabilities(form={}, url={}),

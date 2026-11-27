@@ -22,6 +22,11 @@ skill library with the app, and the client sees them in ``/skills`` exactly like
 discovered ones. The agent loads one itself with ``load_capability``, or a person
 writes ``$release-notes`` in the composer.
 
+Capabilities can also advertise ACP slash commands via ``available_commands_update``:
+this example attaches ``Compaction()`` (automatic tiered compaction plus ``/compact``)
+and ``SlashCommands`` (``/status`` handled directly on the server, and ``/review``
+expanding into a structured prompt for the model).
+
 The agent also installs the ACP client filesystem and terminal toolsets. A client
 that connects with ``client_io = "all"`` (the terminal's default) gives it
 ``read_file``, ``write_file``, and ``run_command`` against the client's machine;
@@ -67,7 +72,17 @@ from hrns.server.acp import (
     acp_filesystem,
     acp_terminal,
 )
-from hrns.server.capabilities import AskUser, Skills, Todo
+from hrns.server.capabilities import (
+    AskUser,
+    CommandContext,
+    CommandHandled,
+    CommandPrompt,
+    Compaction,
+    Skills,
+    SlashCommand,
+    SlashCommands,
+    Todo,
+)
 from hrns.server.reasoning import native_efforts
 
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -315,12 +330,55 @@ class UserSessionStore(ListableSessionStore[Principal], DeletableSessionStore[Pr
         self._owners.pop(session_id, None)
 
 
+def _handle_status(ctx: CommandContext[None]) -> CommandHandled:
+    """Example server-side slash command that replies without invoking the model."""
+    return CommandHandled(
+        message=(
+            f"Session `{ctx.session_id}` in `{ctx.cwd}` — "
+            f"{len(ctx.history)} messages in model history."
+        )
+    )
+
+
+def _handle_review(ctx: CommandContext[None]) -> CommandPrompt:
+    """Example slash command that rewrites into a structured prompt for the agent."""
+    target = ctx.arguments.strip() or "the current changes"
+    return CommandPrompt(
+        text=(
+            f"Review {target}. Focus on correctness bugs, edge cases, and missing error "
+            "handling, and keep findings concise with file/line references."
+        )
+    )
+
+
+_EXAMPLE_COMMANDS = SlashCommands[None](
+    commands=(
+        SlashCommand(
+            name="status",
+            description="Show session id, workspace, and message history count",
+            handler=_handle_status,
+        ),
+        SlashCommand(
+            name="review",
+            description="Ask the agent for a focused code review",
+            input_hint="optional file or topic",
+            handler=_handle_review,
+        ),
+    )
+)
+
+
 def agent_factory(session: SessionContext) -> AbstractAgent[None, str]:
     # Todo emits native ACP plan updates for the client's Todos panel; AskUser
     # travels as a form elicitation whenever the client advertises one. Skills
     # advertises the two programmatic skills on ``session/new`` and expands a
-    # ``$release-notes`` reference without a model round trip.
-    return Agent(capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS])
+    # ``$release-notes`` reference without a model round trip. Compaction opts
+    # this agent into automatic tiered compaction plus ``/compact``, and
+    # _EXAMPLE_COMMANDS advertises ``/status`` and ``/review`` over ACP.
+    return Agent(
+        deps_type=type(None),
+        capabilities=[Todo(), AskUser(), _EXAMPLE_SKILLS, Compaction(), _EXAMPLE_COMMANDS],
+    )
 
 
 def attachment_config(session: AcpSession) -> AcpAttachmentConfig[None]:

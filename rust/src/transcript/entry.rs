@@ -5,6 +5,7 @@ use agent_client_protocol::v1::schema::ToolCallStatus;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 
+use crate::acp::CompactionPhase;
 use crate::theme::Palette;
 
 #[derive(PartialEq)]
@@ -13,6 +14,7 @@ pub enum Role {
     Agent,
     Thought,
     Tool,
+    Compaction,
     Command(String),
     Note,
     Warning,
@@ -65,7 +67,7 @@ impl Role {
                     .bg(palette.panel),
                 );
             }
-            Self::Tool => return None,
+            Self::Tool | Self::Compaction => return None,
         };
         Some(Line::styled(name, Style::default().fg(color).bold()))
     }
@@ -76,6 +78,82 @@ pub enum ManualApproval {
     Pending,
     Granted,
     Rejected,
+}
+
+#[derive(Clone)]
+pub(super) struct CompactionMeta {
+    pub(super) status: CompactionPhase,
+    pub(super) mode: Option<String>,
+    pub(super) tokens_before: Option<u64>,
+    pub(super) tokens_after: Option<u64>,
+    pub(super) messages_before: Option<u64>,
+    pub(super) messages_after: Option<u64>,
+    pub(super) focus: Option<String>,
+    pub(super) error: Option<String>,
+}
+
+impl CompactionMeta {
+    pub(super) fn title(&self) -> String {
+        let manual = self.mode.as_deref() == Some("manual");
+        let label = match self.status {
+            CompactionPhase::InProgress => {
+                if manual {
+                    "Compacting context…"
+                } else {
+                    "Auto-compacting context…"
+                }
+            }
+            CompactionPhase::Completed => {
+                if manual {
+                    "Context compacted"
+                } else {
+                    "Context auto-compacted"
+                }
+            }
+            CompactionPhase::Failed => "Compaction failed",
+            CompactionPhase::Cancelled => "Compaction cancelled",
+        };
+        let mut parts = vec![label.to_owned()];
+        if let (Some(before), Some(after)) = (self.tokens_before, self.tokens_after) {
+            let delta = if before > 0 && after <= before {
+                let pct = ((before - after) * 100) / before;
+                format!(" ({pct}% saved)")
+            } else {
+                String::new()
+            };
+            parts.push(format!(
+                "~{} → ~{} tok{delta}",
+                format_compact_count(before),
+                format_compact_count(after),
+            ));
+        } else if let Some(before) = self.tokens_before
+            && self.status == CompactionPhase::InProgress
+        {
+            parts.push(format!("~{} tok", format_compact_count(before)));
+        }
+        if let (Some(before), Some(after)) = (self.messages_before, self.messages_after)
+            && before != after
+        {
+            parts.push(format!("{before} → {after} msgs"));
+        }
+        if let Some(focus) = self.focus.as_deref().filter(|text| !text.is_empty()) {
+            parts.push(format!("focus: {focus}"));
+        }
+        if let Some(error) = self.error.as_deref().filter(|text| !text.is_empty()) {
+            parts.push(error.to_owned());
+        }
+        parts.join(" · ")
+    }
+}
+
+fn format_compact_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
 }
 
 pub(super) struct Entry {
@@ -91,6 +169,7 @@ pub(super) struct Entry {
     pub(super) id: Option<String>,
     pub(super) expanded: bool,
     pub(super) tool_status: Option<ToolCallStatus>,
+    pub(super) compaction: Option<CompactionMeta>,
     pub(super) approval: Option<ManualApproval>,
     pub(super) action_heading: bool,
     pub(super) action_visible: bool,
@@ -126,7 +205,19 @@ impl Entry {
 
     pub(super) fn heading_rows(&self) -> usize {
         usize::from(self.action_heading)
-            + usize::from(self.action_visible && self.role != Role::Tool)
+            + usize::from(
+                self.action_visible && !matches!(self.role, Role::Tool | Role::Compaction),
+            )
+    }
+
+    pub(super) fn compaction_color(&self, palette: &Palette) -> Option<Color> {
+        let meta = self.compaction.as_ref()?;
+        Some(match meta.status {
+            CompactionPhase::InProgress => palette.warning,
+            CompactionPhase::Completed => palette.agent_command,
+            CompactionPhase::Failed => palette.error,
+            CompactionPhase::Cancelled => palette.muted,
+        })
     }
 
     pub(super) fn approval_rows(&self) -> usize {
@@ -137,6 +228,7 @@ impl Entry {
         &self,
         mut row: usize,
         palette: &Palette,
+        animation_tick: Option<u128>,
         is_command: fn(&str) -> bool,
     ) -> Line<'_> {
         if let Some(heading) = self.role.label(palette, self.expanded) {
@@ -157,6 +249,39 @@ impl Entry {
             let text = &self.text[range.clone()];
             if let Some(color) = self.role.notice_color(palette) {
                 return notice_line(&self.text, range.clone(), color, is_command);
+            }
+            if let Some(meta) = &self.compaction {
+                const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                let color = self.compaction_color(palette).unwrap_or(palette.accent);
+                let (marker, badge) = match meta.status {
+                    CompactionPhase::InProgress => (
+                        animation_tick.map_or("◐", |tick| {
+                            SPINNER[(tick % SPINNER.len() as u128) as usize]
+                        }),
+                        palette.warning,
+                    ),
+                    CompactionPhase::Completed => ("◈", color),
+                    CompactionPhase::Failed => ("✕", palette.error),
+                    CompactionPhase::Cancelled => ("–", palette.muted),
+                };
+                if row == 0 {
+                    let mut spans = vec![
+                        "▌ ".fg(badge),
+                        marker.fg(badge).bold(),
+                        " ".into(),
+                        text.fg(badge).bold(),
+                    ];
+                    if self.has_detail() {
+                        let disclosure = if self.expanded {
+                            "  ▾ hide summary"
+                        } else {
+                            "  ▸ summary"
+                        };
+                        spans.push(disclosure.fg(palette.muted));
+                    }
+                    return Line::from(spans).bg(palette.panel);
+                }
+                return Line::from(vec!["▌   ".fg(badge), text.fg(badge)]).bg(palette.panel);
             }
             if let Some(status) = self.tool_status {
                 let (marker, color) = match status {
@@ -226,15 +351,11 @@ impl Entry {
             }
             if matches!(self.role, Role::Agent | Role::Thought) {
                 let at_line_start = range.start == 0 || self.text[..range.start].ends_with('\n');
-                if at_line_start {
-                    let trimmed = text.trim_start();
-                    let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
-                    if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-                        return Line::styled(
-                            trimmed[hashes..].trim_start(),
-                            Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-                        );
-                    }
+                if at_line_start && let Some(heading) = markdown_heading(text) {
+                    return Line::styled(
+                        heading,
+                        Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                    );
                 }
                 let line = Line::from(inline(text));
                 return if self.role == Role::Thought {
@@ -245,7 +366,16 @@ impl Entry {
             }
             if matches!(self.role, Role::Command(_)) {
                 let mut parts = vec!["▏ ".fg(palette.border)];
-                if let Some((name, description)) = text.split_once("  ") {
+                if let Some(agent_row) = text.strip_prefix("agent:") {
+                    if let Some((name, description)) = agent_row.split_once("  ") {
+                        parts.push(name.fg(palette.agent_command).bold());
+                        parts.push(" [agent]".fg(palette.agent_command));
+                        parts.push("  ".into());
+                        parts.push(description.fg(palette.foreground));
+                    } else {
+                        parts.push(agent_row.fg(palette.agent_command));
+                    }
+                } else if let Some((name, description)) = text.split_once("  ") {
                     parts.push(name.fg(palette.accent));
                     parts.push("  ".into());
                     parts.push(description.fg(palette.foreground));
@@ -276,6 +406,36 @@ impl Entry {
             && let Some(range) = self.detail_rows.get(detail_row)
         {
             let text = &detail[range.clone()];
+            if self.role == Role::Compaction {
+                let border = self.compaction_color(palette).unwrap_or(palette.border);
+                let at_line_start = range.start == 0 || detail[..range.start].ends_with('\n');
+                let heading =
+                    at_line_start
+                        .then(|| markdown_heading(text))
+                        .flatten()
+                        .map(|heading| {
+                            vec![Span::styled(
+                                heading,
+                                Style::default().fg(palette.foreground).bold(),
+                            )]
+                        });
+                let styled = heading.unwrap_or_else(|| {
+                    inline(text)
+                        .into_iter()
+                        .map(|span| {
+                            if span.style.fg.is_none() {
+                                span.fg(palette.muted)
+                            } else {
+                                span
+                            }
+                        })
+                        .collect()
+                });
+                let mut spans = Vec::with_capacity(styled.len() + 1);
+                spans.push("▏ ".fg(border));
+                spans.extend(styled);
+                return Line::from(spans).bg(palette.surface);
+            }
             if self.shell || !self.expanded {
                 let prefix = if detail_row == 0 { "  ↳ " } else { "    " };
                 return Line::from(vec![prefix.fg(palette.border), text.fg(palette.muted)]);
@@ -389,6 +549,13 @@ pub(super) fn inline(text: &str) -> Vec<Span<'_>> {
         rest = &rest[next..];
     }
     spans
+}
+
+fn markdown_heading(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+    ((1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' '))
+        .then(|| trimmed[hashes..].trim_start())
 }
 
 fn link(text: &str) -> Option<(&str, &str, &str)> {

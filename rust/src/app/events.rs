@@ -132,7 +132,31 @@ impl App {
             }
             #[cfg(not(target_family = "wasm"))]
             Event::QuitChecked(_) | Event::QuitStopped(_) | Event::QuitDeleted => {}
-            Event::AgentCommands(commands) => self.commands = commands,
+            Event::AgentCommands(commands) => {
+                self.commands = commands;
+                self.refresh_completion();
+            }
+            Event::Compaction(event) => {
+                let activity = match event.status {
+                    crate::acp::CompactionPhase::InProgress => "compacting context".into(),
+                    crate::acp::CompactionPhase::Completed => {
+                        match (event.tokens_before, event.tokens_after) {
+                            (Some(before), Some(after)) => {
+                                format!("compacted ~{before} → ~{after} tok")
+                            }
+                            _ => "context compacted".into(),
+                        }
+                    }
+                    crate::acp::CompactionPhase::Failed => "compaction failed".into(),
+                    crate::acp::CompactionPhase::Cancelled => "compaction cancelled".into(),
+                };
+                self.activity.push_back(activity);
+                self.trim_activity();
+                self.transcript.compaction(event);
+            }
+            Event::CompactionSummaryChunk { id, text } => {
+                self.transcript.compaction_summary_chunk(&id, text);
+            }
             Event::Skills(skills) => {
                 self.skills = skills;
                 if let Some(picker) = &mut self.picker

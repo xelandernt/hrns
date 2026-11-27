@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(target_family = "wasm"))]
 use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ClientCapabilities, CloseSessionRequest, CreateElicitationResponse,
-    ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities,
-    FileSystemCapabilities, Implementation, InitializeRequest, ListProvidersRequest,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, RequestPermissionRequest,
-    SessionId, SessionNotification, SetSessionConfigOptionRequest, StopReason,
+    CancelNotification, ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
+    CompactionCapabilities, CreateElicitationResponse, ElicitationCapabilities,
+    ElicitationContentValue, ElicitationFormCapabilities, FileSystemCapabilities, Implementation,
+    InitializeRequest, ListProvidersRequest, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, RequestPermissionRequest, SessionId, SessionNotification,
+    SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
 use agent_client_protocol::{
@@ -32,10 +33,10 @@ use crate::mcp_types::{AcpMcpRequest, AcpMcpResponse};
 pub use rpc::request_error;
 pub use tools::{ToolDisplay, status_label};
 pub use types::{
-    Action, Actions, ClientIoMode, ConnectTarget, Connection, Event, Events, ExecutionState,
-    ExecutionStatus, LoginMethod, ModelChange, PermissionChoice, PermissionRequest, ProviderEdit,
-    ProviderInfo, ProviderLoginState, Services, SessionActivity, SessionConnection, SessionPage,
-    SessionTarget, session_activity,
+    Action, Actions, AgentCommand, ClientIoMode, CompactionEvent, CompactionPhase, ConnectTarget,
+    Connection, Event, Events, ExecutionState, ExecutionStatus, LoginMethod, ModelChange,
+    PermissionChoice, PermissionRequest, ProviderEdit, ProviderInfo, ProviderLoginState, Services,
+    SessionActivity, SessionConnection, SessionPage, SessionTarget, session_activity,
 };
 
 use rpc::{delete_session, find_workspace, flush_prompts, needs_workspace, provider_call, respond};
@@ -118,6 +119,7 @@ pub async fn connect(
                         .write_text_file(services.client_io.writes()),
                 )
                 .terminal(services.client_io.terminal())
+                .session(ClientSessionCapabilities::new().compaction(CompactionCapabilities::new()))
                 .elicitation(
                     ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
                 );

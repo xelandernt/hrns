@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use super::{App, MCP_CONSENT_CHOICES, ScrollBar, is_local_command, slash_command};
+use super::{App, MCP_CONSENT_CHOICES, ScrollBar, SuggestionKind, is_local_command, slash_command};
 use crate::theme::Palette;
 use crate::transcript::{wrap, wrap_up_to};
 #[cfg(not(target_family = "wasm"))]
@@ -317,30 +317,47 @@ impl App {
                     .take(visible)
                     .map(|(index, suggestion)| {
                         let selected = index == completion.selected;
-                        let row = if completion.file.is_some() {
+                        if completion.file.is_some() {
                             let marker = if selected { "›" } else { " " };
-                            format!(" {marker} {}", suggestion.insert)
-                        } else {
-                            let label = suggestion.insert.trim_end();
-                            let padding = label_width.saturating_sub(label.width());
-                            format!(
-                                " {label}{}  {}",
-                                " ".repeat(padding),
-                                suggestion.description
-                            )
-                        };
-                        if selected {
-                            let color = if completion.file.is_some() {
-                                palette.file_reference
-                            } else if suggestion.insert.starts_with('$') {
-                                palette.skill_reference
+                            let row = format!(" {marker} {}", suggestion.insert);
+                            return if selected {
+                                Line::from(row).fg(palette.file_reference).bold()
                             } else {
-                                palette.accent
+                                Line::from(row).fg(palette.muted)
                             };
-                            Line::from(row).fg(color).bold()
-                        } else {
-                            Line::from(row).fg(palette.muted)
                         }
+                        let label = suggestion.insert.trim_end();
+                        let padding = label_width.saturating_sub(label.width());
+                        let is_agent = suggestion.kind == SuggestionKind::AgentCommand;
+                        let selected_color = match suggestion.kind {
+                            SuggestionKind::File => palette.file_reference,
+                            SuggestionKind::Skill => palette.skill_reference,
+                            SuggestionKind::AgentCommand => palette.agent_command,
+                            SuggestionKind::LocalCommand => palette.accent,
+                        };
+                        let label_style = if selected {
+                            Style::default().fg(selected_color).bold()
+                        } else if is_agent {
+                            Style::default().fg(palette.agent_command)
+                        } else {
+                            Style::default().fg(palette.muted)
+                        };
+                        let desc_style = if selected {
+                            Style::default().fg(selected_color).bold()
+                        } else {
+                            Style::default().fg(palette.muted)
+                        };
+                        let mut spans = vec![
+                            Span::raw(" "),
+                            Span::styled(label, label_style),
+                            Span::raw(" ".repeat(padding)),
+                        ];
+                        if is_agent {
+                            spans.push(" [agent]".fg(palette.agent_command));
+                        }
+                        spans.push("  ".into());
+                        spans.push(Span::styled(suggestion.description.as_str(), desc_style));
+                        Line::from(spans)
                     })
                     .collect()
             };
@@ -414,6 +431,13 @@ impl App {
             }
         } else if let Some(message) = self.prompt_setup_message() {
             message
+        } else if let Some(hint) = slash_command(self.draft.text())
+            .filter(|command| !is_local_command(command))
+            .and_then(|command| self.agent_command(command))
+            .and_then(|command| command.input_hint.as_deref())
+            .filter(|hint| !hint.is_empty())
+        {
+            hint
         } else if slash_command(self.draft.text()) == Some("/queue") {
             "Enter queue message"
         } else {
@@ -459,7 +483,12 @@ impl App {
         let draft = self.draft.text();
         let mut highlights = Vec::new();
         if let Some(command) = slash_command(draft).filter(|command| self.is_command(command)) {
-            highlights.push((0..command.len(), palette.accent));
+            let color = if is_local_command(command) {
+                palette.accent
+            } else {
+                palette.agent_command
+            };
+            highlights.push((0..command.len(), color));
         }
         #[cfg(not(target_family = "wasm"))]
         highlights.extend(

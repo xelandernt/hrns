@@ -7,8 +7,12 @@ expressed directly against ``acp.schema``.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal
 
 from acp import schema
+
+CompactionStatus = Literal["in_progress", "completed", "failed", "cancelled"]
+CompactionMode = Literal["auto", "manual"]
 
 ToolCallContent = (
     schema.ContentToolCallContent | schema.FileEditToolCallContent | schema.TerminalToolCallContent
@@ -92,3 +96,50 @@ def tool_diff_content(
     return schema.FileEditToolCallContent(
         type="diff", path=path, new_text=new_text, old_text=old_text
     )
+
+
+def update_available_commands(
+    commands: Sequence[schema.AvailableCommand],
+) -> schema.AvailableCommandsUpdate:
+    return schema.AvailableCommandsUpdate(
+        session_update="available_commands_update",
+        available_commands=list(commands),
+    )
+
+
+def update_compaction(
+    compaction_id: str,
+    status: CompactionStatus,
+    *,
+    summary: str | None = None,
+    error: str | None = None,
+    meta: dict[str, object] | None = None,
+) -> schema.SessionUpdateCompactionUpdate:
+    return schema.SessionUpdateCompactionUpdate(
+        compaction_id=compaction_id,
+        status=status,
+        summary=[text_block(summary)] if summary else None,
+        error=error,
+        field_meta=meta,
+    )
+
+
+def update_compaction_summary_chunk(
+    compaction_id: str, text: str
+) -> schema.SessionUpdateCompactionSummaryChunk:
+    return schema.SessionUpdateCompactionSummaryChunk(
+        compaction_id=compaction_id,
+        content=text_block(text),
+    )
+
+
+def compaction_fallback_notice(
+    *,
+    mode: CompactionMode,
+    tokens_before: int,
+    tokens_after: int,
+    summary: str | None,
+) -> str:
+    label = "Context compacted" if mode == "manual" else "Context automatically compacted"
+    header = f"[{label}: ~{tokens_before:,} -> ~{tokens_after:,} tokens]"
+    return f"{header}\n\n{summary}" if summary else header
