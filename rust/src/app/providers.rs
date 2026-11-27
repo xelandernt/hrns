@@ -21,7 +21,40 @@ const TYPES: [&str; 5] = [
     "openai-codex",
     "bedrock",
 ];
-const TYPE_FIELD: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderField {
+    Id,
+    ApiType,
+    BaseUrl,
+    Models,
+    AwsProfile,
+    AwsRegion,
+}
+
+impl ProviderField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Id => 0,
+            Self::ApiType => 1,
+            Self::BaseUrl => 2,
+            Self::Models => 3,
+            Self::AwsProfile => 4,
+            Self::AwsRegion => 5,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Id => "Name",
+            Self::ApiType => "Provider type",
+            Self::BaseUrl => "Base URL",
+            Self::Models => "Custom model IDs",
+            Self::AwsProfile => "AWS profile",
+            Self::AwsRegion => "AWS region",
+        }
+    }
+}
 
 pub(super) struct Selected {
     pub(super) id: String,
@@ -74,37 +107,57 @@ enum Screen {
 struct ProviderForm {
     create: bool,
     fields: [Composer; 6],
-    focused: usize,
+    focused: ProviderField,
 }
 
 impl ProviderForm {
     fn new(provider: Option<&ProviderInfo>) -> Self {
-        let mut fields: [Composer; 6] = Default::default();
-        fields[TYPE_FIELD].set_text(TYPES[0]);
+        let mut form = Self {
+            create: provider.is_none(),
+            fields: Default::default(),
+            focused: if provider.is_some() {
+                ProviderField::ApiType
+            } else {
+                ProviderField::Id
+            },
+        };
+        form.field_mut(ProviderField::ApiType).set_text(TYPES[0]);
         if let Some(provider) = provider {
-            for (field, value) in fields.iter_mut().zip([
-                provider.id.as_str(),
-                provider.api_type.as_str(),
-                provider.base_url.as_str(),
-                &provider.models.join(", "),
-                provider.aws_profile.as_deref().unwrap_or_default(),
-                provider.aws_region.as_deref().unwrap_or_default(),
-            ]) {
-                field.set_text(value);
+            let models = provider.models.join(", ");
+            for (field, value) in [
+                (ProviderField::Id, provider.id.as_str()),
+                (ProviderField::ApiType, provider.api_type.as_str()),
+                (ProviderField::BaseUrl, provider.base_url.as_str()),
+                (ProviderField::Models, models.as_str()),
+                (
+                    ProviderField::AwsProfile,
+                    provider.aws_profile.as_deref().unwrap_or_default(),
+                ),
+                (
+                    ProviderField::AwsRegion,
+                    provider.aws_region.as_deref().unwrap_or_default(),
+                ),
+            ] {
+                form.field_mut(field).set_text(value);
             }
         }
-        Self {
-            create: provider.is_none(),
-            fields,
-            focused: usize::from(provider.is_some()),
-        }
+        form
     }
 
-    fn visible(&self) -> &'static [usize] {
-        match self.fields[TYPE_FIELD].text() {
-            "bedrock" => &[0, 1, 2, 3, 4, 5],
-            "github-copilot" | "openai-codex" | "deepseek" => &[0, 1, 3],
-            _ => &[0, 1, 2, 3],
+    fn field(&self, field: ProviderField) -> &Composer {
+        &self.fields[field.index()]
+    }
+
+    fn field_mut(&mut self, field: ProviderField) -> &mut Composer {
+        &mut self.fields[field.index()]
+    }
+
+    fn visible(&self) -> &'static [ProviderField] {
+        use ProviderField::{ApiType, AwsProfile, AwsRegion, BaseUrl, Id, Models};
+        match self.field(ApiType).text() {
+            "bedrock" => &[Id, ApiType, BaseUrl, Models, AwsProfile, AwsRegion],
+            "github-copilot" | "openai-codex" | "deepseek" => &[Id, ApiType, Models],
+            _ => &[Id, ApiType, BaseUrl, Models],
         }
     }
 
@@ -130,8 +183,8 @@ impl ProviderForm {
                 };
                 self.focused = visible[next];
             }
-            Key::Left | Key::Right if self.focused == TYPE_FIELD => {
-                let field = &mut self.fields[TYPE_FIELD];
+            Key::Left | Key::Right if self.focused == ProviderField::ApiType => {
+                let field = self.field_mut(ProviderField::ApiType);
                 let current = TYPES.iter().position(|&kind| kind == field.text());
                 let next = if matches!(key, Key::Left) {
                     current.map_or(TYPES.len() - 1, |i| (i + TYPES.len() - 1) % TYPES.len())
@@ -149,17 +202,21 @@ impl ProviderForm {
     }
 
     fn focused_input(&mut self) -> Option<&mut Composer> {
-        (self.focused != TYPE_FIELD).then(|| &mut self.fields[self.focused])
+        (self.focused != ProviderField::ApiType).then(|| self.field_mut(self.focused))
     }
 
     fn edit(&self) -> ProviderEdit {
-        let [id, api_type, base_url, models, profile, region] =
-            self.fields.each_ref().map(|field| field.text().trim());
+        let id = self.field(ProviderField::Id).text().trim();
+        let api_type = self.field(ProviderField::ApiType).text().trim();
+        let base_url = self.field(ProviderField::BaseUrl).text().trim();
+        let models = self.field(ProviderField::Models).text().trim();
+        let profile = self.field(ProviderField::AwsProfile).text().trim();
+        let region = self.field(ProviderField::AwsRegion).text().trim();
         ProviderEdit {
             id: id.into(),
             create: self.create,
             api_type: api_type.into(),
-            base_url: if self.visible().contains(&2) {
+            base_url: if self.visible().contains(&ProviderField::BaseUrl) {
                 base_url.into()
             } else {
                 String::new()
@@ -781,29 +838,21 @@ impl Dialog {
                 (lines, hint)
             }
             Screen::Edit(form) => {
-                let labels = [
-                    "Name",
-                    "Provider type",
-                    "Base URL",
-                    "Custom model IDs",
-                    "AWS profile",
-                    "AWS region",
-                ];
                 let mut lines: Vec<_> = form
                     .visible()
                     .iter()
-                    .map(|&index| {
-                        let focused = index == form.focused;
-                        let field = &form.fields[index];
-                        let value = if index == TYPE_FIELD && focused {
+                    .map(|&kind| {
+                        let focused = kind == form.focused;
+                        let field = form.field(kind);
+                        let value = if kind == ProviderField::ApiType && focused {
                             format!("◀ {} ▶", field.text())
                         } else {
                             field_value(field, focused)
                         };
-                        option_line(format!("{}  {value}", labels[index]), focused, palette)
+                        option_line(format!("{}  {value}", kind.label()), focused, palette)
                     })
                     .collect();
-                if form.focused == TYPE_FIELD {
+                if form.focused == ProviderField::ApiType {
                     lines.push(Line::from("←/→ change provider type").fg(palette.muted));
                 }
                 (lines, "Tab / Shift+Tab field · Enter save · Esc back")

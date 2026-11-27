@@ -130,18 +130,15 @@ impl ClientIo {
             return Err("fs/write_text_file is not advertised".into());
         }
         let target = self.resolve_for_write(session, path)?;
-        let root = self.root(session)?;
-        let relative = target
-            .strip_prefix(root)
-            .map_err(|_| format!("{}: outside the session working directory", path.display()))?;
-        if read_only(relative) {
-            return Err(format!(
-                "{}: version-control, credential, and key paths are read-only",
-                path.display()
-            ));
-        }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|error| reason(path, error))?;
+            let resolved_parent = parent.canonicalize().map_err(|error| reason(path, error))?;
+            if !resolved_parent.starts_with(self.root(session)?) {
+                return Err(format!(
+                    "{}: outside the session working directory",
+                    path.display()
+                ));
+            }
         }
         std::fs::write(&target, content).map_err(|error| reason(path, error))
     }
@@ -305,44 +302,65 @@ impl ClientIo {
                 path.display()
             ));
         }
-        if normalized.exists() {
-            return normalized
-                .canonicalize()
-                .map_err(|error| reason(path, error));
+        if let Ok(meta) = std::fs::symlink_metadata(&normalized) {
+            let resolved = normalized.canonicalize().map_err(|error| {
+                if meta.file_type().is_symlink() {
+                    format!("{}: dangling symlink cannot be written", path.display())
+                } else {
+                    reason(path, error)
+                }
+            })?;
+            return self.check_writable(root, path, resolved);
         }
         let parent = normalized
             .parent()
             .ok_or_else(|| format!("{}: invalid path", path.display()))?;
         let mut ancestor = parent;
-        while !ancestor.exists() {
+        while std::fs::symlink_metadata(ancestor).is_err() {
             ancestor = ancestor
                 .parent()
                 .ok_or_else(|| format!("{}: invalid path", path.display()))?;
         }
-        if !ancestor.starts_with(root)
-            || !ancestor
-                .canonicalize()
-                .map_err(|error| reason(path, error))?
-                .starts_with(root)
-        {
+        if !ancestor.starts_with(root) {
             return Err(format!(
                 "{}: outside the session working directory",
                 path.display()
             ));
         }
-        std::fs::create_dir_all(parent).map_err(|error| reason(path, error))?;
-        let parent = parent.canonicalize().map_err(|error| reason(path, error))?;
-        if !parent.starts_with(root) {
+        let resolved_ancestor = ancestor
+            .canonicalize()
+            .map_err(|error| reason(path, error))?;
+        if !resolved_ancestor.starts_with(root) {
             return Err(format!(
                 "{}: outside the session working directory",
                 path.display()
             ));
         }
-        Ok(parent.join(
-            normalized
-                .file_name()
-                .ok_or_else(|| format!("{}: invalid path", path.display()))?,
-        ))
+        let tail = normalized
+            .strip_prefix(ancestor)
+            .map_err(|_| format!("{}: invalid path", path.display()))?;
+        self.check_writable(root, path, resolved_ancestor.join(tail))
+    }
+
+    fn check_writable(
+        &self,
+        root: &Path,
+        display: &Path,
+        target: PathBuf,
+    ) -> Result<PathBuf, String> {
+        let relative = target.strip_prefix(root).map_err(|_| {
+            format!(
+                "{}: outside the session working directory",
+                display.display()
+            )
+        })?;
+        if read_only(relative) {
+            return Err(format!(
+                "{}: version-control, credential, and key paths are read-only",
+                display.display()
+            ));
+        }
+        Ok(target)
     }
 
     fn terminal(&mut self, session: &str, id: &str) -> Result<&mut Terminal, String> {

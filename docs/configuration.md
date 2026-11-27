@@ -66,11 +66,8 @@ args = ["-y", "@playwright/mcp@latest"]
 enabled = true
 
 [tui]
-theme = "hrns"
-auto_expand_tools = false
-show_thoughts = false
+theme = "dark"
 client_io = "all"                      # off | read | all
-sidebar_width = 76
 last_connection = "builtin"
 
 [profile.team]
@@ -96,16 +93,12 @@ notes = "scratch agent"
 
 Terminal defaults and the last connection. `theme` and `client_io`
 seed the native client when it has no stored value; the client keeps later changes in its
-own state file. `auto_expand_tools`, `show_thoughts` and `sidebar_width` are accepted for
-older clients; the native client stores those toggles in its state file instead.
+own state file.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `theme` | string | `"hrns"` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark`, or `ansi-light` |
-| `auto_expand_tools` | bool | `false` | Render every tool result expanded |
-| `show_thoughts` | bool | `false` | Stream the agent's reasoning expanded; collapsed reasoning headers remain visible when false |
+| `theme` | `dark` \| `light` | `"dark"` | Terminal color theme |
 | `client_io` | `off` \| `read` \| `all` | `"all"` | Local and stdio default for filesystem and terminal access |
-| `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
 | `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |
 
 New sessions start in Ask. Use `/permissions ask`, `/permissions reads` (auto-approve

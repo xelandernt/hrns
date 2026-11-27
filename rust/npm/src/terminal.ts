@@ -5,7 +5,7 @@ export interface TerminalOptions {
   cwd?: string;
   /** ID of an existing ACP session to resume. */
   session?: string;
-  theme?: "hrns" | "textual-dark" | "textual-light" | "ansi-dark" | "ansi-light";
+  theme?: "dark" | "light";
   /** Aborting cancels a pending mount or disposes a mounted terminal. */
   signal?: AbortSignal;
 }
@@ -57,7 +57,7 @@ export function attachTerminal(
     width: "100%",
     height: "100%",
     overflow: "hidden",
-    backgroundColor: "#121212",
+    backgroundColor: theme === "light" ? "#f8f7fb" : "#0c0b0f",
   });
 
   const input = doc.createElement("input");

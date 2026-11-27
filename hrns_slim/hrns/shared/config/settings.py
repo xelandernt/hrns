@@ -149,16 +149,16 @@ class Profile(BaseModel):
         return f"{command}{where}"
 
 
+ThemeName = Literal["dark", "light"]
+
+
 class TuiSettings(BaseModel):
     """Terminal preferences; the client owns this section and saves it as it changes."""
 
     model_config = ConfigDict(extra="forbid")
 
-    theme: str = "hrns"
-    auto_expand_tools: bool = False
-    show_thoughts: bool = False
+    theme: ThemeName = "dark"
     client_io: ClientIoMode = "all"
-    sidebar_width: int = Field(default=52, ge=32, le=76)
     last_connection: str = ""
 
 

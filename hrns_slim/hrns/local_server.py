@@ -12,9 +12,8 @@ from contextlib import contextmanager
 from hashlib import sha256
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
-from typing import Annotated
 
-from cyclopts import App, Parameter
+from cyclopts import App
 from platformdirs import user_runtime_path
 from pydantic import BaseModel, Field, ValidationError
 
@@ -31,6 +30,8 @@ class Endpoint(BaseModel):
 def runtime_directory(store: Path) -> Path:
     path = user_runtime_path("hrns") / _store_id(store)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(path, 0o700)
     return path
 
 
@@ -46,6 +47,7 @@ def try_store_lock(store: Path) -> Generator[bool]:
             if os.name == "nt":
                 import msvcrt
 
+                lock.seek(0)
                 msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
@@ -103,8 +105,8 @@ def _start(
         if os.name == "nt"
         else {"start_new_session": True}
     )
-    fd = os.open(directory / "server.log", os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "ab") as log:
+    fd = os.open(directory / "server.log", os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "wb") as log:
         return subprocess.Popen(
             [sys.executable, "-m", "hrns.server.runtime", "--local-daemon", *args],
             stdin=subprocess.DEVNULL,
@@ -114,18 +116,25 @@ def _start(
         )
 
 
+def _healthy_endpoint(directory: Path, settings: HrnsConfig, *, env_only: bool) -> Endpoint | None:
+    endpoint = _read_endpoint(directory)
+    if endpoint is None or _request(endpoint, "GET", "/health") != 204:
+        return None
+    if endpoint.configuration != configuration_id(settings, env_only=env_only):
+        raise SystemExit(
+            "The local Harness server uses a different configuration for this session store. "
+            "Use the same configuration or select a separate store."
+        )
+    return endpoint
+
+
 def _find_or_start(settings: HrnsConfig, *, env_only: bool, setup: bool) -> Endpoint:
     directory = runtime_directory(settings.store)
     child: subprocess.Popen[bytes] | None = None
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        endpoint = _read_endpoint(directory)
-        if endpoint is not None and _request(endpoint, "GET", "/health") == 204:
-            if endpoint.configuration != configuration_id(settings, env_only=env_only):
-                raise SystemExit(
-                    "The local Harness server uses a different configuration for this session store. "
-                    "Use the same configuration or select a separate store."
-                )
+        endpoint = _healthy_endpoint(directory, settings, env_only=env_only)
+        if endpoint is not None:
             return endpoint
         if child is None or child.poll() == 0:
             # Wait for any retiring daemon to release its store before starting another.
@@ -133,6 +142,9 @@ def _find_or_start(settings: HrnsConfig, *, env_only: bool, setup: bool) -> Endp
                 if acquired:
                     child = _start(settings, directory, env_only=env_only, setup=setup)
         elif child.returncode is not None:
+            endpoint = _healthy_endpoint(directory, settings, env_only=env_only)
+            if endpoint is not None:
+                return endpoint
             break
         time.sleep(0.1)
     raise SystemExit(f"Could not start the local Harness server. See {directory / 'server.log'}")
@@ -168,7 +180,6 @@ def print_endpoint(
     config: Path | None = None,
     env_only: bool = False,
     setup: bool = False,
-    cwd: Annotated[str, Parameter(show=False)] = ".",
 ) -> None:
     """Print the endpoint for the native TUI. The TUI supplies its cwd over ACP."""
     settings = load_settings(config, env_only=env_only)

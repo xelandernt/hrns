@@ -1,474 +1,51 @@
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
-#[cfg(not(target_family = "wasm"))]
-use std::path::Path;
-use std::path::PathBuf;
+mod rpc;
+mod tools;
+mod types;
 
-use agent_client_protocol::v1::schema::{
-    CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
-    CreateElicitationResponse, DeleteSessionRequest, DisableProviderRequest,
-    ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities,
-    FileSystemCapabilities, Implementation, InitializeRequest, ListProvidersRequest,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionKind,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionId, SessionInfo, SessionNotification, SessionUpdate,
-    SetProviderRequest, SetSessionConfigOptionRequest, StopReason, ToolCallContent,
-    ToolCallLocation, ToolCallStatus, ToolKind,
-};
-use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
-use agent_client_protocol::{
-    Agent, Client, Error, ErrorCode, JsonRpcNotification, UntypedMessage, schema::ProtocolVersion,
-    util::MatchDispatch,
-};
-use futures::channel::{mpsc, oneshot};
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt, select_biased};
-use serde::{Deserialize, Serialize};
-
-use crate::attachments::{Attachment, Prompt};
-use crate::elicitation::{self, Form};
-#[cfg(not(target_family = "wasm"))]
-use crate::mcp_types::{AcpMcpRequest, AcpMcpResponse, AuthAction};
-use crate::mcp_types::{ConsentDecision, Health};
-use crate::skills::Skill;
-use crate::tool_input;
-
+use std::collections::{BTreeMap, HashMap};
 #[cfg(not(target_family = "wasm"))]
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_family = "wasm"))]
-use crate::client_io::{self, ClientIo};
+use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
+use agent_client_protocol::v1::schema::{
+    CancelNotification, ClientCapabilities, CloseSessionRequest, CreateElicitationResponse,
+    ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities,
+    FileSystemCapabilities, Implementation, InitializeRequest, ListProvidersRequest,
+    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, RequestPermissionRequest,
+    SessionId, SessionNotification, SetSessionConfigOptionRequest, StopReason,
+};
+use agent_client_protocol::v1::{ConnectionTo, SessionMessage};
+use agent_client_protocol::{
+    Agent, Client, Error, ErrorCode, schema::ProtocolVersion, util::MatchDispatch,
+};
+use futures::channel::oneshot;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt, select_biased};
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonRpcNotification)]
-#[notification(method = "_hrns/session/state")]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionState {
-    pub session_id: String,
-    pub revision: u64,
-    pub status: ExecutionStatus,
-    #[serde(default)]
-    pub active_turn_id: Option<String>,
-    #[serde(default)]
-    pub last_outcome: Option<String>,
-    #[serde(default)]
-    pub last_usage: Option<TurnUsage>,
-}
+#[cfg(not(target_family = "wasm"))]
+use crate::client_io::ClientIo;
+use crate::elicitation;
+#[cfg(not(target_family = "wasm"))]
+use crate::mcp_types::{AcpMcpRequest, AcpMcpResponse};
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionStatus {
-    Idle,
-    Running,
-    Waiting,
-}
+pub use rpc::request_error;
+pub use tools::{ToolDisplay, status_label};
+pub use types::{
+    Action, Actions, ClientIoMode, ConnectTarget, Connection, Event, Events, ExecutionState,
+    ExecutionStatus, LoginMethod, ModelChange, PermissionChoice, PermissionRequest, ProviderEdit,
+    ProviderInfo, ProviderLoginState, Services, SessionActivity, SessionConnection, SessionPage,
+    SessionTarget, session_activity,
+};
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionActivity {
-    pub status: ExecutionStatus,
-    pub attached_elsewhere: bool,
-}
-
-pub fn session_activity(info: &SessionInfo) -> Option<SessionActivity> {
-    let activity = info.meta.as_ref()?.get("hrns/session/activity")?;
-    SessionActivity::deserialize(activity).ok()
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnUsage {
-    #[serde(default)]
-    pub input_tokens: Option<u64>,
-    #[serde(default)]
-    pub output_tokens: Option<u64>,
-    #[serde(default)]
-    pub total_tokens: Option<u64>,
-    #[serde(default)]
-    pub cached_read_tokens: Option<u64>,
-    #[serde(default)]
-    pub cached_write_tokens: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ClientIoMode {
-    #[default]
-    Off,
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    Read,
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    All,
-}
-
-impl ClientIoMode {
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    pub fn parse(value: &str) -> Self {
-        match value {
-            "read" => Self::Read,
-            "all" => Self::All,
-            _ => Self::Off,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Read => "read",
-            Self::All => "all",
-        }
-    }
-
-    pub(crate) fn reads(self) -> bool {
-        matches!(self, Self::Read | Self::All)
-    }
-
-    pub(crate) fn writes(self) -> bool {
-        matches!(self, Self::All)
-    }
-
-    pub(crate) fn terminal(self) -> bool {
-        matches!(self, Self::All)
-    }
-}
-
-#[cfg_attr(target_family = "wasm", allow(dead_code))]
-#[derive(Clone, Default)]
-pub struct Services {
-    pub client_io: ClientIoMode,
-    pub approval_scope: String,
-    pub mcp_config: Option<PathBuf>,
-    pub remote: bool,
-    pub local_provider_management: bool,
-    pub managed_sessions: bool,
-    #[cfg(not(target_family = "wasm"))]
-    pub effort_profile: Option<crate::effort::EffortProfile>,
-}
-
-pub enum Action {
-    Prompt(Prompt),
-    Cancel,
-    SetOption {
-        id: SessionConfigId,
-        value: SessionConfigOptionValue,
-        category: SessionConfigOptionCategory,
-        model_change: Option<ModelChange>,
-    },
-    ListSessions {
-        request_id: u64,
-        cursor: Option<String>,
-        cwd: Option<PathBuf>,
-    },
-    PrepareSwitch(SessionTarget),
-    #[cfg(not(target_family = "wasm"))]
-    CheckQuit,
-    #[cfg(not(target_family = "wasm"))]
-    StopForQuit,
-    #[cfg(not(target_family = "wasm"))]
-    PruneForQuit {
-        discard: Option<String>,
-    },
-    CloseSession(String),
-    DeleteSession(String),
-    ListProviders,
-    ListProviderRoutes,
-    SetProviderRoute(SetProviderRequest),
-    DisableProviderRoute(DisableProviderRequest),
-    SaveProvider(ProviderEdit),
-    RemoveProvider(String),
-    ProviderLogin {
-        id: String,
-        method: LoginMethod,
-        key: Option<String>,
-    },
-    ProviderLoginStatus,
-    CancelProviderLogin,
-    #[cfg(not(target_family = "wasm"))]
-    McpAuthenticate {
-        name: String,
-        action: AuthAction,
-    },
-    #[cfg(not(target_family = "wasm"))]
-    McpTools(String),
-}
-
-#[derive(Clone, Copy)]
-pub enum ModelChange {
-    Explicit { choose_effort: bool },
-    Provider,
-}
-
-pub struct PermissionChoice {
-    pub name: String,
-    pub kind: PermissionOptionKind,
-}
-
-pub struct PermissionRequest {
-    pub tool_call_id: String,
-    pub title: String,
-    pub kind: Option<ToolKind>,
-    pub detail: String,
-    pub shell: bool,
-    pub options: Vec<PermissionChoice>,
-    pub respond: oneshot::Sender<Option<usize>>,
-}
-
-#[derive(Deserialize)]
-pub struct ProviderInfo {
-    pub id: String,
-    pub api_type: String,
-    pub base_url: String,
-    pub models: Vec<String>,
-    pub aws_profile: Option<String>,
-    pub aws_region: Option<String>,
-    pub login_methods: Vec<LoginMethod>,
-    pub setup_message: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ProviderList {
-    providers: Vec<ProviderInfo>,
-}
-
-#[derive(Serialize)]
-pub struct ProviderEdit {
-    pub id: String,
-    pub create: bool,
-    pub api_type: String,
-    pub base_url: String,
-    pub models: Option<Vec<String>>,
-    pub aws_profile: Option<String>,
-    pub aws_region: Option<String>,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LoginMethod {
-    ApiKey,
-    Copilot,
-    Codex,
-    Aws,
-    AwsSso,
-}
-
-impl LoginMethod {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ApiKey => "API key",
-            Self::Copilot => "GitHub device login",
-            Self::Codex => "Sign in with ChatGPT",
-            Self::Aws => "Use the AWS credential chain",
-            Self::AwsSso => "Sign in with AWS SSO",
-        }
-    }
-}
-
-#[derive(Deserialize)]
-pub struct ProviderLoginState {
-    #[serde(default)]
-    pub done: bool,
-    pub url: Option<String>,
-    pub code: Option<String>,
-    pub warning: Option<String>,
-}
-
-pub enum Event {
-    Ready {
-        session: String,
-        approval_scope: String,
-        workspace: PathBuf,
-        remote: bool,
-        client_io: ClientIoMode,
-        attachments_supported: bool,
-        loaded: bool,
-        load_supported: bool,
-        close_supported: bool,
-        delete_supported: bool,
-        managed_sessions: bool,
-        provider_editor: bool,
-        provider_routing: bool,
-        execution: Option<ExecutionState>,
-    },
-    Execution(ExecutionState),
-    Options(Vec<SessionConfigOption>),
-    ModelSelected {
-        change: ModelChange,
-        result: Result<Vec<SessionConfigOption>, String>,
-    },
-    AgentCommands(Vec<(String, String)>),
-    Skills(Vec<Skill>),
-    SessionTitle(Option<String>),
-    ReasoningTokens(Option<u64>),
-    Mode(String),
-    Providers(Result<Vec<ProviderInfo>, String>),
-    ProviderRoutes(Result<Vec<agent_client_protocol::v1::schema::ProviderInfo>, String>),
-    ProviderChanged(Result<(), String>),
-    ProviderLogin(Result<ProviderLoginState, String>),
-    ProviderLoginCancelled,
-    LoadingAttachment,
-    Attachment(Result<Box<Attachment>, String>),
-    Plan(Vec<agent_client_protocol::v1::schema::PlanEntry>),
-    Usage {
-        context: Option<(u64, u64)>,
-        cost: Option<String>,
-    },
-    Sessions {
-        request_id: u64,
-        result: Result<SessionPage, String>,
-    },
-    SwitchPrepared(Result<SessionTarget, String>),
-    #[cfg(not(target_family = "wasm"))]
-    QuitChecked(Result<bool, String>),
-    #[cfg(not(target_family = "wasm"))]
-    QuitStopped(Result<(), String>),
-    #[cfg(not(target_family = "wasm"))]
-    QuitDeleted,
-    SessionClosed(String),
-    SessionDeleteResult {
-        id: String,
-        result: Result<(), String>,
-    },
-    Tool {
-        id: String,
-        display: ToolDisplay,
-    },
-    UserChunk(String),
-    Chunk(String),
-    Thought(String),
-    CommandStatus(String),
-    Warning(String),
-    End {
-        interrupted: bool,
-    },
-    Error(String),
-    Connecting,
-    SwitchReplayReset,
-    ConnectionChanged(String),
-    Disconnected,
-    Permission(PermissionRequest),
-    Elicitation {
-        form: Form,
-        respond: oneshot::Sender<Option<BTreeMap<String, ElicitationContentValue>>>,
-    },
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    McpConsent {
-        name: String,
-        transport: String,
-        target: String,
-        respond: oneshot::Sender<ConsentDecision>,
-    },
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
-    McpHealth(Vec<Health>),
-    #[cfg(not(target_family = "wasm"))]
-    McpAuthenticated {
-        name: String,
-        action: AuthAction,
-        result: Result<(), String>,
-    },
-    #[cfg(not(target_family = "wasm"))]
-    McpTools {
-        name: String,
-        result: Result<Vec<String>, String>,
-    },
-}
-
-pub struct SessionPage {
-    pub items: Vec<SessionInfo>,
-    pub cursor: Option<String>,
-}
-
-pub enum Connection {
-    Reconnect,
-    Switch(SessionTarget),
-    Connect(ConnectTarget),
-}
-
-pub struct ConnectTarget {
-    pub endpoint: String,
-    pub cwd: Option<PathBuf>,
-}
-
-#[derive(Clone)]
-pub struct SessionTarget {
-    pub cwd: Option<PathBuf>,
-    pub session: Option<String>,
-}
-
-pub struct SessionConnection {
-    target: SessionTarget,
-    previous: Option<SessionTarget>,
-    warning: Option<String>,
-    ready: bool,
-}
-
-impl SessionConnection {
-    pub fn new(target: SessionTarget) -> Self {
-        Self {
-            target,
-            previous: None,
-            warning: None,
-            ready: false,
-        }
-    }
-
-    pub fn begin_attempt(&mut self) -> SessionTarget {
-        self.ready = false;
-        self.target.clone()
-    }
-
-    pub fn switch(&mut self, target: SessionTarget, can_restore: bool) {
-        self.previous = (can_restore && self.ready && self.target.session.is_some())
-            .then(|| self.target.clone());
-        self.target = target;
-    }
-
-    pub fn forward(&mut self, event: Event, events: &Events) {
-        if let Event::Ready {
-            session,
-            workspace,
-            load_supported,
-            ..
-        } = &event
-        {
-            if *load_supported {
-                self.target.cwd = Some(workspace.clone());
-                self.target.session = Some(session.clone());
-            }
-            self.ready = true;
-            self.previous = None;
-        }
-        let _ = events.unbounded_send(event);
-        if self.ready
-            && let Some(warning) = self.warning.take()
-        {
-            let _ = events.unbounded_send(Event::Warning(warning));
-        }
-    }
-
-    /// Returns true when the previous session should be reattached immediately.
-    pub fn finish(&mut self, result: Result<(), String>, events: &Events) -> bool {
-        self.ready = false;
-        if let Some(previous) = self.previous.take() {
-            self.target = previous;
-            let reason = result
-                .err()
-                .unwrap_or_else(|| "Disconnected before the session opened".into());
-            self.warning = Some(format!("Could not switch sessions: {reason}"));
-            let _ = events.unbounded_send(Event::SwitchReplayReset);
-            return true;
-        }
-        if let Err(error) = result {
-            let _ = events.unbounded_send(Event::Error(error));
-        }
-        let _ = events.unbounded_send(Event::Disconnected);
-        if let Some(warning) = self.warning.take() {
-            let _ = events.unbounded_send(Event::Warning(warning));
-        }
-        false
-    }
-}
-
-pub type Events = mpsc::UnboundedSender<Event>;
-pub type Actions = mpsc::UnboundedReceiver<Action>;
+use rpc::{delete_session, find_workspace, flush_prompts, needs_workspace, provider_call, respond};
+#[cfg(not(target_family = "wasm"))]
+use rpc::{
+    exit_status, only_active_session, prune_for_quit, wait_for_terminal_exit, with_client_io,
+    with_client_io_blocking,
+};
+use tools::{ToolState, text_update};
+use types::ProviderList;
 
 pub async fn connect(
     transport: impl agent_client_protocol::ConnectTo<Client> + 'static,
@@ -962,18 +539,25 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::ReadTextFileRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = with_client_io(&io, |io| {
-                                            io.read(
-                                                &request.session_id.to_string(),
-                                                &request.path,
-                                                request.line,
-                                                request.limit,
-                                            )
-                                        });
-                                        match result {
-                                            Ok(content) => responder.respond(agent_client_protocol::v1::schema::ReadTextFileResponse::new(content)),
-                                            Err(error) => responder.respond_with_error(error),
-                                        }
+                                        let io = Arc::clone(&io);
+                                        connection.spawn(async move {
+                                            let result = with_client_io_blocking(io, move |io| {
+                                                io.read(
+                                                    &request.session_id.to_string(),
+                                                    &request.path,
+                                                    request.line,
+                                                    request.limit,
+                                                )
+                                            })
+                                            .await;
+                                            let _ = match result {
+                                                Ok(content) => responder.respond(
+                                                    agent_client_protocol::v1::schema::ReadTextFileResponse::new(content),
+                                                ),
+                                                Err(error) => responder.respond_with_error(error),
+                                            };
+                                            Ok(())
+                                        })
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
@@ -985,13 +569,24 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::WriteTextFileRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = with_client_io(&io, |io| {
-                                            io.write(&request.session_id.to_string(), &request.path, &request.content)
-                                        });
-                                        match result {
-                                            Ok(()) => responder.respond(agent_client_protocol::v1::schema::WriteTextFileResponse::new()),
-                                            Err(error) => responder.respond_with_error(error),
-                                        }
+                                        let io = Arc::clone(&io);
+                                        connection.spawn(async move {
+                                            let result = with_client_io_blocking(io, move |io| {
+                                                io.write(
+                                                    &request.session_id.to_string(),
+                                                    &request.path,
+                                                    &request.content,
+                                                )
+                                            })
+                                            .await;
+                                            let _ = match result {
+                                                Ok(()) => responder.respond(
+                                                    agent_client_protocol::v1::schema::WriteTextFileResponse::new(),
+                                                ),
+                                                Err(error) => responder.respond_with_error(error),
+                                            };
+                                            Ok(())
+                                        })
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
@@ -1003,23 +598,34 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::CreateTerminalRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = with_client_io(&io, |io| {
-                                            let env = request.env.iter().map(|variable| (variable.name.clone(), variable.value.clone())).collect::<Vec<_>>();
-                                            io.create_terminal(
-                                                &request.session_id.to_string(),
-                                                &request.command,
-                                                &request.args,
-                                                &env,
-                                                request.cwd.as_deref(),
-                                                request.output_byte_limit,
-                                            )
-                                        });
-                                        match result {
-                                            Ok(id) => responder.respond(agent_client_protocol::v1::schema::CreateTerminalResponse::new(
-                                                agent_client_protocol::v1::schema::TerminalId::new(id),
-                                            )),
-                                            Err(error) => responder.respond_with_error(error),
-                                        }
+                                        let io = Arc::clone(&io);
+                                        connection.spawn(async move {
+                                            let result = with_client_io_blocking(io, move |io| {
+                                                let env = request
+                                                    .env
+                                                    .iter()
+                                                    .map(|variable| (variable.name.clone(), variable.value.clone()))
+                                                    .collect::<Vec<_>>();
+                                                io.create_terminal(
+                                                    &request.session_id.to_string(),
+                                                    &request.command,
+                                                    &request.args,
+                                                    &env,
+                                                    request.cwd.as_deref(),
+                                                    request.output_byte_limit,
+                                                )
+                                            })
+                                            .await;
+                                            let _ = match result {
+                                                Ok(id) => responder.respond(
+                                                    agent_client_protocol::v1::schema::CreateTerminalResponse::new(
+                                                        agent_client_protocol::v1::schema::TerminalId::new(id),
+                                                    ),
+                                                ),
+                                                Err(error) => responder.respond_with_error(error),
+                                            };
+                                            Ok(())
+                                        })
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
@@ -1081,13 +687,23 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::KillTerminalRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = with_client_io(&io, |io| {
-                                            io.kill_terminal(&request.session_id.to_string(), &request.terminal_id.to_string())
-                                        });
-                                        match result {
-                                            Ok(()) => responder.respond(agent_client_protocol::v1::schema::KillTerminalResponse::new()),
-                                            Err(error) => responder.respond_with_error(error),
-                                        }
+                                        let io = Arc::clone(&io);
+                                        connection.spawn(async move {
+                                            let result = with_client_io_blocking(io, move |io| {
+                                                io.kill_terminal(
+                                                    &request.session_id.to_string(),
+                                                    &request.terminal_id.to_string(),
+                                                )
+                                            })
+                                            .await;
+                                            let _ = match result {
+                                                Ok(()) => responder.respond(
+                                                    agent_client_protocol::v1::schema::KillTerminalResponse::new(),
+                                                ),
+                                                Err(error) => responder.respond_with_error(error),
+                                            };
+                                            Ok(())
+                                        })
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
@@ -1099,13 +715,23 @@ pub async fn connect(
                                 .if_request(async |request: agent_client_protocol::v1::schema::ReleaseTerminalRequest, responder| {
                                     #[cfg(not(target_family = "wasm"))]
                                     {
-                                        let result = with_client_io(&io, |io| {
-                                            io.release_terminal(&request.session_id.to_string(), &request.terminal_id.to_string())
-                                        });
-                                        match result {
-                                            Ok(()) => responder.respond(agent_client_protocol::v1::schema::ReleaseTerminalResponse::new()),
-                                            Err(error) => responder.respond_with_error(error),
-                                        }
+                                        let io = Arc::clone(&io);
+                                        connection.spawn(async move {
+                                            let result = with_client_io_blocking(io, move |io| {
+                                                io.release_terminal(
+                                                    &request.session_id.to_string(),
+                                                    &request.terminal_id.to_string(),
+                                                )
+                                            })
+                                            .await;
+                                            let _ = match result {
+                                                Ok(()) => responder.respond(
+                                                    agent_client_protocol::v1::schema::ReleaseTerminalResponse::new(),
+                                                ),
+                                                Err(error) => responder.respond_with_error(error),
+                                            };
+                                            Ok(())
+                                        })
                                     }
                                     #[cfg(target_family = "wasm")]
                                     {
@@ -1124,724 +750,4 @@ pub async fn connect(
             Ok(())
         })
         .await
-}
-
-#[cfg(not(target_family = "wasm"))]
-async fn wait_for_terminal_exit(
-    io: &Mutex<ClientIo>,
-    session_id: &str,
-    terminal_id: &str,
-) -> Result<client_io::Exit, Error> {
-    loop {
-        let status = with_client_io(io, |io| io.wait_for_exit(session_id, terminal_id))?;
-        if let Some(exit) = status {
-            return Ok(exit);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn with_client_io<T>(
-    io: &Mutex<ClientIo>,
-    operation: impl FnOnce(&mut ClientIo) -> Result<T, String>,
-) -> Result<T, Error> {
-    let mut io = io
-        .lock()
-        .map_err(|_| Error::new(ErrorCode::INTERNAL_ERROR, "client I/O is unavailable"))?;
-    operation(&mut io).map_err(io_error)
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn io_error(message: String) -> Error {
-    // The I/O service reports an unadvertised capability with this wording; map it
-    // to the JSON-RPC method-not-found the ACP contract expects.
-    if message.ends_with("is not advertised") {
-        Error::method_not_found()
-    } else {
-        Error::new(ErrorCode::INVALID_PARAMS, message)
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn exit_status(exit: client_io::Exit) -> agent_client_protocol::v1::schema::TerminalExitStatus {
-    let status = agent_client_protocol::v1::schema::TerminalExitStatus::new();
-    let status = match exit.code {
-        Some(code) => status.exit_code(u32::try_from(code).unwrap_or(0)),
-        None => status,
-    };
-    match exit.signal {
-        Some(signal) => status.signal(signal),
-        None => status,
-    }
-}
-
-async fn provider_call<T: serde::de::DeserializeOwned>(
-    connection: &ConnectionTo<Agent>,
-    method: &str,
-    params: impl Serialize,
-) -> Result<T, String> {
-    let request = UntypedMessage::new(&format!("_hrns/providers/{method}"), &params)
-        .map_err(|error| error.message)?;
-    let result = connection
-        .send_request(request)
-        .block_task()
-        .await
-        .map_err(|error| {
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("reason"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or(error.message)
-        })?;
-    serde_json::from_value(result).map_err(|_| "Invalid local provider response".into())
-}
-
-async fn find_workspace(
-    connection: &ConnectionTo<Agent>,
-    id: &SessionId,
-) -> Result<PathBuf, Error> {
-    let mut cursor = None;
-    let mut visited = HashSet::new();
-    loop {
-        let page = connection
-            .send_request(ListSessionsRequest::new().cursor(cursor))
-            .block_task()
-            .await?;
-        if let Some(session) = page
-            .sessions
-            .into_iter()
-            .find(|session| &session.session_id == id)
-        {
-            return Ok(session.cwd);
-        }
-        let Some(next) = page.next_cursor else {
-            return Err(Error::new(
-                ErrorCode::INVALID_PARAMS,
-                "The agent did not list that session; provide its workspace with --cwd",
-            ));
-        };
-        if !visited.insert(next.clone()) {
-            return Err(Error::new(
-                ErrorCode::INTERNAL_ERROR,
-                "The agent returned a repeated session-list cursor",
-            ));
-        }
-        cursor = Some(next);
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-async fn only_active_session(
-    connection: &ConnectionTo<Agent>,
-    current: &SessionId,
-) -> Result<bool, Error> {
-    flush_prompts(connection).await?;
-    let mut cursor = None;
-    let mut visited = HashSet::new();
-    let mut current_active = false;
-    loop {
-        let page = connection
-            .send_request(ListSessionsRequest::new().cursor(cursor))
-            .block_task()
-            .await?;
-        for info in &page.sessions {
-            if session_activity(info)
-                .is_some_and(|activity| !matches!(activity.status, ExecutionStatus::Idle))
-            {
-                if &info.session_id != current {
-                    return Ok(false);
-                }
-                current_active = true;
-            }
-        }
-        let Some(next) = page.next_cursor else {
-            return Ok(current_active);
-        };
-        if !visited.insert(next.clone()) {
-            return Err(Error::new(
-                ErrorCode::INTERNAL_ERROR,
-                "Repeated session-list cursor",
-            ));
-        }
-        cursor = Some(next);
-    }
-}
-
-/// Discard the session the client opened and every untitled session left in its workspace.
-#[cfg(not(target_family = "wasm"))]
-async fn prune_for_quit(
-    connection: &ConnectionTo<Agent>,
-    current: &SessionId,
-    cwd: &Path,
-    discard: Option<String>,
-    supported: bool,
-) {
-    if !supported {
-        return;
-    }
-    let sweep = untitled_sessions(connection, current, cwd)
-        .await
-        .unwrap_or_default();
-    for id in discard.into_iter().chain(sweep) {
-        let _ = delete_session(connection, id).await;
-    }
-}
-
-/// The sessions in `cwd` that never received a title and that no client is using.
-#[cfg(not(target_family = "wasm"))]
-async fn untitled_sessions(
-    connection: &ConnectionTo<Agent>,
-    current: &SessionId,
-    cwd: &Path,
-) -> Result<Vec<String>, Error> {
-    let mut cursor = None;
-    let mut visited = HashSet::new();
-    let mut ids = Vec::new();
-    loop {
-        let page = connection
-            .send_request(
-                ListSessionsRequest::new()
-                    .cursor(cursor)
-                    .cwd(Some(cwd.to_path_buf())),
-            )
-            .block_task()
-            .await?;
-        for info in &page.sessions {
-            let in_use = session_activity(info).is_some_and(|activity| {
-                activity.attached_elsewhere || !matches!(activity.status, ExecutionStatus::Idle)
-            });
-            let untitled = info.title.as_deref().is_none_or(str::is_empty);
-            if untitled && !in_use && &info.session_id != current {
-                ids.push(info.session_id.to_string());
-            }
-        }
-        let Some(next) = page.next_cursor else {
-            return Ok(ids);
-        };
-        if !visited.insert(next.clone()) {
-            return Err(Error::new(
-                ErrorCode::INTERNAL_ERROR,
-                "Repeated session-list cursor",
-            ));
-        }
-        cursor = Some(next);
-    }
-}
-
-async fn delete_session(connection: &ConnectionTo<Agent>, id: String) -> Result<(), String> {
-    match connection
-        .send_request(DeleteSessionRequest::new(id))
-        .block_task()
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) if error.code == ErrorCode::RESOURCE_NOT_FOUND => Ok(()),
-        Err(error) => Err(error.message),
-    }
-}
-
-async fn flush_prompts(connection: &ConnectionTo<Agent>) -> Result<(), Error> {
-    let request = UntypedMessage::new("_hrns/session/flush", serde_json::json!({}))?;
-    connection.send_request(request).block_task().await?;
-    Ok(())
-}
-
-pub fn request_error(error: &Error) -> String {
-    error
-        .data
-        .as_ref()
-        .and_then(|data| data.get("reason"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| error.message.clone())
-}
-
-fn needs_workspace() -> Error {
-    Error::new(
-        ErrorCode::INVALID_PARAMS,
-        "Provide the saved session workspace with --cwd or the browser cwd parameter",
-    )
-}
-
-fn respond(
-    request: RequestPermissionRequest,
-    responder: agent_client_protocol::Responder<RequestPermissionResponse>,
-    option: Option<usize>,
-) -> Result<(), Error> {
-    let outcome = option.and_then(|index| request.options.get(index)).map_or(
-        RequestPermissionOutcome::Cancelled,
-        |option| {
-            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                option.option_id.clone(),
-            ))
-        },
-    );
-    responder.respond(RequestPermissionResponse::new(outcome))
-}
-
-fn estimated_cost(amount: f64) -> String {
-    format!("est. {amount:.6} USD")
-}
-
-fn text_update(update: SessionUpdate, tools: &mut HashMap<String, ToolState>) -> Option<Event> {
-    match update {
-        SessionUpdate::UserMessageChunk(chunk) => {
-            content_text(&chunk.content).map(|text| Event::UserChunk(text.into_owned()))
-        }
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            content_text(&chunk.content).map(|text| Event::Chunk(text.into_owned()))
-        }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            content_text(&chunk.content).map(|text| Event::Thought(text.into_owned()))
-        }
-        SessionUpdate::ConfigOptionUpdate(update) => Some(Event::Options(update.config_options)),
-        SessionUpdate::AvailableCommandsUpdate(update) => Some(Event::AgentCommands(
-            update
-                .available_commands
-                .into_iter()
-                .map(|command| (command.name, command.description))
-                .collect(),
-        )),
-        SessionUpdate::SessionInfoUpdate(update) => {
-            if let Some(cost) = update
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("hrns/usage/cost_without_context"))
-            {
-                return Some(Event::Usage {
-                    context: None,
-                    cost: cost.as_f64().map(estimated_cost),
-                });
-            }
-            if let Some(tokens) = update
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("hrns/usage/reasoning_tokens"))
-            {
-                Some(Event::ReasoningTokens(tokens.as_u64()))
-            } else {
-                Some(Event::SessionTitle(update.title.take()))
-            }
-        }
-        SessionUpdate::CurrentModeUpdate(update) => {
-            Some(Event::Mode(update.current_mode_id.to_string()))
-        }
-        SessionUpdate::Plan(plan) => Some(Event::Plan(plan.entries)),
-        SessionUpdate::UsageUpdate(usage) => {
-            let estimated = usage
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("hrns/usage/estimated_cost"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            Some(Event::Usage {
-                context: (usage.size > 0).then_some((usage.used, usage.size)),
-                cost: usage.cost.map(|cost| {
-                    if estimated && cost.currency == "USD" {
-                        estimated_cost(cost.amount)
-                    } else {
-                        format!("{:.4} {}", cost.amount, cost.currency)
-                    }
-                }),
-            })
-        }
-        SessionUpdate::ToolCall(call) => {
-            let id = call.tool_call_id.to_string();
-            let state = ToolState {
-                title: call.title,
-                status: call.status,
-                kind: Some(call.kind),
-                content: call.content,
-                locations: call.locations,
-                raw_input: call.raw_input,
-                raw_output: call.raw_output,
-            };
-            let event = state.event(&id);
-            tools.insert(id, state);
-            Some(event)
-        }
-        SessionUpdate::ToolCallUpdate(update) => {
-            let id = update.tool_call_id.to_string();
-            let state = tools.entry(id.clone()).or_default();
-            state.apply(&update);
-            Some(state.event(&id))
-        }
-        _ => None,
-    }
-}
-
-fn content_text(block: &ContentBlock) -> Option<Cow<'_, str>> {
-    match block {
-        ContentBlock::Text(text) => Some(text.text.as_str().into()),
-        ContentBlock::Image(_) => Some("[image]".into()),
-        ContentBlock::Audio(_) => Some("[audio]".into()),
-        ContentBlock::ResourceLink(link) => Some(format!("[resource] {}", link.name).into()),
-        ContentBlock::Resource(_) => Some("[embedded resource]".into()),
-        _ => None,
-    }
-}
-
-pub struct ToolDisplay {
-    pub title: String,
-    pub subject: String,
-    pub status: ToolCallStatus,
-    pub detail: String,
-    pub output: String,
-    pub preview_output: bool,
-    pub shell: bool,
-}
-
-impl ToolDisplay {
-    pub fn prepare_detail(&mut self) -> Option<usize> {
-        for text in [&mut self.detail, &mut self.output] {
-            text.retain(|ch| matches!(ch, '\n' | '\t') || !ch.is_control());
-            *text = text.trim_end().replace('\t', "    ");
-        }
-        if self.output.is_empty() {
-            return None;
-        }
-        if self.shell && self.detail.is_empty() {
-            self.detail = std::mem::take(&mut self.output);
-            return Some(0);
-        }
-        if !self.detail.is_empty() {
-            self.detail.push('\n');
-        }
-        self.detail.push_str("Output\n");
-        let start = self.detail.len();
-        self.detail.push_str(&self.output);
-        Some(start)
-    }
-}
-
-#[derive(Clone, Default)]
-struct ToolState {
-    title: String,
-    status: ToolCallStatus,
-    kind: Option<ToolKind>,
-    content: Vec<ToolCallContent>,
-    locations: Vec<ToolCallLocation>,
-    raw_input: Option<serde_json::Value>,
-    raw_output: Option<serde_json::Value>,
-}
-
-impl ToolState {
-    fn apply(&mut self, update: &agent_client_protocol::v1::schema::ToolCallUpdate) {
-        if let Some(title) = update.fields.title.clone() {
-            self.title = title;
-        }
-        if let Some(status) = update.fields.status {
-            self.status = status;
-        }
-        if let Some(kind) = update.fields.kind {
-            self.kind = Some(kind);
-        }
-        if let Some(locations) = &update.fields.locations {
-            self.locations.clone_from(locations);
-        }
-        if let Some(content) = update.fields.content.clone() {
-            self.content = content;
-        }
-        if let Some(raw_input) = update.fields.raw_input.clone() {
-            self.raw_input = Some(raw_input);
-        }
-        if let Some(raw_output) = update.fields.raw_output.clone() {
-            self.raw_output = Some(raw_output);
-        }
-    }
-
-    fn event(&self, id: &str) -> Event {
-        Event::Tool {
-            id: id.to_owned(),
-            display: self.display(),
-        }
-    }
-
-    fn display(&self) -> ToolDisplay {
-        let decoded = self.raw_input.as_ref().map(tool_input::decode);
-        let input = decoded.as_deref().unwrap_or(&serde_json::Value::Null);
-        let has_diff = self
-            .content
-            .iter()
-            .any(|part| matches!(part, ToolCallContent::Diff(_)));
-        let presentation = tool_input::present(&self.title, input, has_diff);
-        if presentation.is_none() && self.is_shell(input) {
-            return self.shell_display(input);
-        }
-        let (title, subject, arguments) = if let Some(presentation) = presentation {
-            (
-                presentation.title.to_owned(),
-                presentation.summary,
-                presentation.detail,
-            )
-        } else {
-            let (title, subject) = self.summary(input);
-            let arguments = match input {
-                serde_json::Value::Null => String::new(),
-                serde_json::Value::Object(values) if values.is_empty() => String::new(),
-                _ if input.get("truncated").and_then(serde_json::Value::as_bool) == Some(true) => {
-                    tool_input::text(input, "preview").map_or_else(
-                        || tool_input::pretty_value(input),
-                        |preview| format!("… Input truncated\n{preview}"),
-                    )
-                }
-                _ => tool_input::pretty_value(input),
-            };
-            (title, subject, arguments)
-        };
-        let (detail, output) = self.detail(arguments);
-        ToolDisplay {
-            title,
-            subject,
-            status: self.status,
-            detail,
-            output,
-            preview_output: self.status == ToolCallStatus::Failed
-                || matches!(self.kind, Some(ToolKind::Read | ToolKind::Search))
-                || matches!(
-                    self.title.as_str(),
-                    "read_file"
-                        | "read_text_file"
-                        | "list_files"
-                        | "list_directory"
-                        | "glob"
-                        | "grep"
-                        | "search_files"
-                        | "find_files"
-                ),
-            shell: false,
-        }
-    }
-
-    fn is_shell(&self, input: &serde_json::Value) -> bool {
-        matches!(
-            self.title.as_str(),
-            "shell" | "bash" | "terminal" | "execute" | "run_command"
-        ) || (self.kind == Some(ToolKind::Execute)
-            && (tool_input::text(input, "command").is_some() || self.title.starts_with("Run ")))
-    }
-
-    fn shell_display(&self, input: &serde_json::Value) -> ToolDisplay {
-        let (_, fallback) = self.summary(input);
-        let command = tool_input::text(input, "command").unwrap_or(&fallback);
-        let mut arguments =
-            tool_input::fields(input, &[("mode", "Mode"), ("timeout", "Timeout (seconds)")]);
-        let summary = tool_input::preview(command);
-        if summary != command {
-            arguments = if arguments.is_empty() {
-                format!("Command\n{command}")
-            } else {
-                format!("Command\n{command}\n{arguments}")
-            };
-        }
-        let content: Vec<_> = self
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                ToolCallContent::Content(content) => content_text(&content.content),
-                ToolCallContent::Terminal(terminal) => {
-                    Some(format!("Terminal {}", terminal.terminal_id).into())
-                }
-                _ => None,
-            })
-            .collect();
-        let raw = self.raw_output.as_ref();
-        let detail = if content.is_empty() {
-            raw.map_or_else(String::new, tool_input::pretty_value)
-        } else {
-            content.join("\n")
-        };
-        let (output, exit_code) = shell_result(&detail);
-        let status = if self.status == ToolCallStatus::Completed
-            && exit_code.is_some_and(|code| code != 0)
-        {
-            ToolCallStatus::Failed
-        } else {
-            self.status
-        };
-        let title = match status {
-            ToolCallStatus::Pending => "Queued",
-            ToolCallStatus::InProgress => "Running",
-            ToolCallStatus::Failed if exit_code.is_none() => "Failed",
-            _ => "Ran",
-        };
-        let subject = match exit_code {
-            Some(code) if code != 0 => format!("{summary}  (exit {code})"),
-            _ => summary,
-        };
-        ToolDisplay {
-            title: title.into(),
-            subject,
-            status,
-            detail: arguments,
-            output: output.to_owned(),
-            preview_output: true,
-            shell: true,
-        }
-    }
-
-    fn summary(&self, arguments: &serde_json::Value) -> (String, String) {
-        let verb = match self.kind {
-            Some(ToolKind::Read) => "Read",
-            Some(ToolKind::Edit) => "Edit",
-            Some(ToolKind::Delete) => "Delete",
-            Some(ToolKind::Move) => "Move",
-            Some(ToolKind::Search) => "Search",
-            Some(ToolKind::Execute) => "Run",
-            Some(ToolKind::Think) => "Think",
-            Some(ToolKind::Fetch) => "Fetch",
-            Some(ToolKind::SwitchMode) => "Switch mode",
-            _ => "",
-        };
-        let location = self.locations.first().map(|location| {
-            let mut path = location.path.display().to_string();
-            if let Some(line) = location.line {
-                path.push_str(&format!(":{line}"));
-            }
-            if self.locations.len() > 1 {
-                path.push_str(&format!(" (+{})", self.locations.len() - 1));
-            }
-            path
-        });
-        let input = [
-            "command",
-            "path",
-            "file_path",
-            "query",
-            "pattern",
-            "url",
-            "target",
-            "command_id",
-        ]
-        .into_iter()
-        .find_map(|key| tool_input::text(arguments, key));
-        let inferred = match self.title.as_str() {
-            "read_file" | "read_text_file" => "Read",
-            "write_file" | "write_text_file" | "edit_file" | "apply_patch" => "Edit",
-            "list_files" | "list_directory" => "List",
-            "grep" | "glob" | "search_files" | "find_files" => "Search",
-            "shell" | "bash" | "terminal" | "execute" | "run_command" => "Run",
-            _ => "",
-        };
-        let verb = if verb.is_empty() { inferred } else { verb };
-        if verb.is_empty() {
-            (
-                if self.title.is_empty() {
-                    "Tool call".into()
-                } else {
-                    self.title.clone()
-                },
-                location
-                    .or_else(|| input.map(str::to_owned))
-                    .unwrap_or_default(),
-            )
-        } else {
-            let subject =
-                if !self.title.is_empty() && inferred.is_empty() && self.title.contains(' ') {
-                    let (leading, remainder) =
-                        self.title.split_once(' ').unwrap_or((&self.title, ""));
-                    if leading.eq_ignore_ascii_case(verb) {
-                        remainder.to_owned()
-                    } else {
-                        self.title.clone()
-                    }
-                } else {
-                    location
-                        .or_else(|| input.map(str::to_owned))
-                        .or_else(|| {
-                            (inferred.is_empty()
-                                && !self.title.is_empty()
-                                && !self.title.eq_ignore_ascii_case(verb))
-                            .then(|| self.title.clone())
-                        })
-                        .unwrap_or_default()
-                };
-            (verb.into(), subject)
-        }
-    }
-
-    fn detail(&self, arguments: String) -> (String, String) {
-        let mut changes = Vec::new();
-        let mut output = Vec::new();
-        for content in &self.content {
-            match content {
-                ToolCallContent::Content(content) => {
-                    if let Some(text) = content_text(&content.content) {
-                        output.push(text);
-                    }
-                }
-                ToolCallContent::Diff(diff) => {
-                    changes.push(diff.path.display().to_string());
-                    if let Some(old) = &diff.old_text {
-                        changes.extend(old.lines().map(|line| format!("- {line}")));
-                    }
-                    changes.extend(diff.new_text.lines().map(|line| format!("+ {line}")));
-                }
-                ToolCallContent::Terminal(terminal) => {
-                    output.push(format!("Terminal {}", terminal.terminal_id).into());
-                }
-                _ => {}
-            }
-        }
-        if output.is_empty()
-            && let Some(raw) = self.raw_output.as_ref().filter(|v| !v.is_null())
-        {
-            output.push(tool_input::pretty_value(raw).into());
-        }
-        let detail = [
-            (!arguments.is_empty()).then(|| format!("Arguments\n{arguments}")),
-            (!changes.is_empty()).then(|| format!("Changes\n{}", changes.join("\n"))),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n");
-        (detail, output.join("\n"))
-    }
-}
-
-// The workspace shell ends a completed result with its supervisor handles and exit record.
-fn shell_result(text: &str) -> (&str, Option<i64>) {
-    let text = text.trim_end();
-    let Some((handles, exit)) = text.rsplit_once('\n') else {
-        return (text, None);
-    };
-    let Some(exit) = serde_json::from_str::<serde_json::Value>(exit).ok() else {
-        return (text, None);
-    };
-    let (output, trailer) = handles
-        .rsplit_once("\nPID: ")
-        .unwrap_or(("", handles.strip_prefix("PID: ").unwrap_or("")));
-    let mut lines = trailer.lines();
-    let pid = lines
-        .next()
-        .and_then(|line| line.split_once(" (supervisor; use `"))
-        .and_then(|(pid, _)| pid.parse::<u64>().ok());
-    if pid.is_some()
-        && exit.get("pid").and_then(serde_json::Value::as_u64) == pid
-        && lines
-            .next()
-            .is_some_and(|line| line.starts_with("Output: "))
-        && lines
-            .next()
-            .is_some_and(|line| line.starts_with("Status: "))
-        && lines.next().is_none()
-        && let Some(code) = exit.get("exit_code").and_then(serde_json::Value::as_i64)
-    {
-        return (output, Some(code));
-    }
-    (text, None)
-}
-
-pub fn status_label(status: ToolCallStatus) -> &'static str {
-    match status {
-        ToolCallStatus::Pending => "pending",
-        ToolCallStatus::InProgress => "running",
-        ToolCallStatus::Completed => "done",
-        ToolCallStatus::Failed => "failed",
-        _ => "unknown",
-    }
 }

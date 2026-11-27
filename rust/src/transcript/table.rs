@@ -127,7 +127,8 @@ impl Table {
                 .collect();
             let height = wrapped.iter().map(Vec::len).max().unwrap_or(0);
             for line in 0..height {
-                let mut spans = vec!["│".dim()];
+                let mut spans = Vec::with_capacity(columns.len() * 2 + 1);
+                spans.push("│".dim());
                 for (column, &width) in columns.iter().enumerate() {
                     let text = wrapped[column].get(line).map_or("", String::as_str);
                     let space = width.saturating_sub(text.width());
@@ -136,11 +137,12 @@ impl Table {
                         Alignment::Center => space / 2,
                         _ => 0,
                     };
-                    let cell = format!(
-                        "{}{text}{}",
-                        " ".repeat(left + padding),
-                        " ".repeat(space - left + padding)
-                    );
+                    let left_pad = left + padding;
+                    let right_pad = space - left + padding;
+                    let mut cell = String::with_capacity(left_pad + text.len() + right_pad);
+                    cell.extend(std::iter::repeat_n(' ', left_pad));
+                    cell.push_str(text);
+                    cell.extend(std::iter::repeat_n(' ', right_pad));
                     spans.push(if index == 0 {
                         cell.bold()
                     } else {
@@ -186,13 +188,19 @@ impl Table {
 }
 
 fn border(columns: &[usize], padding: usize, [left, join, right]: [char; 3]) -> Line<'static> {
-    let mut output = String::new();
+    let dashes: usize = columns.iter().map(|width| width + 2 * padding).sum();
+    let mut output = String::with_capacity(
+        left.len_utf8()
+            + right.len_utf8()
+            + columns.len().saturating_sub(1) * join.len_utf8()
+            + dashes * '─'.len_utf8(),
+    );
     output.push(left);
     for (index, width) in columns.iter().enumerate() {
         if index > 0 {
             output.push(join);
         }
-        output.push_str(&"─".repeat(width + 2 * padding));
+        output.extend(std::iter::repeat_n('─', width + 2 * padding));
     }
     output.push(right);
     Line::from(output.dim())

@@ -1,4 +1,4 @@
-"""Launch the native TUI preview for an existing resolved connection."""
+"""Launch the native TUI for an existing resolved connection."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def native_executable() -> str | None:
     return shutil.which("hrns-tui", path=scripts) or shutil.which("hrns-tui")
 
 
-def run_rust_preview(
+def run_native_tui(
     target: ConnectionTarget,
     *,
     session: str | None,

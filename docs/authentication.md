@@ -72,8 +72,7 @@ separate configuration.
 
 The browser build advertises no client filesystem, terminal or MCP capability
 and never launches a local agent, so the deployment needs no host-side client
-bridge. Query parameters select presentation only: `theme` accepts `hrns`,
-`textual-dark`, `textual-light`, `ansi-dark` or `ansi-light`, and `permission`
+bridge. Query parameters select presentation only: `theme` accepts `dark` or `light`, and `permission`
 accepts `ask`, `reads` or `all`. They never carry secrets. A rejected upgrade,
 expired cookie or dropped socket leaves the draft and transcript on screen and
 shows the disconnected state; `Ctrl-R` retries with the same endpoint.

@@ -84,7 +84,7 @@ authenticated ACP mount. The app connects to `/acp/agent` by default.
 | `endpoint` | Absolute `wss://` ACP URL; `ws://` is accepted for loopback development. Credentials are not allowed in the URL. |
 | `cwd` | Absolute remote workspace path. Optional when `session` is set and the runtime supports listing. |
 | `session` | Saved session ID to load. |
-| `theme` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark` or `ansi-light`. |
+| `theme` | `dark` or `light`. |
 | `permission` | `ask`, `reads` or `all`. |
 
 The browser advertises form elicitation only. It sends no client filesystem, terminal

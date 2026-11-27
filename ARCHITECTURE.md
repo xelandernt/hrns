@@ -304,8 +304,7 @@ change the current session only. The TUI saves the mode on the device under a
 key derived from the connection identity and session ID. Native writes each
 entry atomically alongside the TUI state, and the browser uses local storage
 in its current origin. Local daemon identity uses the session store instead
-of the daemon's transient port. The built-in themes are
-`hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
+of the daemon's transient port. The built-in themes are `dark` and `light`.
 
 The Ratatui transcript groups tool calls and reasoning between user and agent
 messages. With details off, the active block shows its action count, an
