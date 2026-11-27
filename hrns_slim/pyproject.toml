@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2.10,<3",
     "cyclopts>=3,<6",
     "platformdirs>=4",
+    "psutil>=7,<8",
     "tomli-w>=1.2,<2",
     "keyring>=25",
 ]

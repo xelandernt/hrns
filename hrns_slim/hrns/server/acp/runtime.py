@@ -27,10 +27,12 @@ from pydantic_ai.agent import AbstractAgent, ModelRequestNode
 from pydantic_ai.capabilities import AgentNode, Hooks
 from pydantic_ai.exceptions import ModelConnectionError
 from pydantic_ai.messages import (
+    INTERRUPTED_TOOL_RETURN_CONTENT,
     AgentStreamEvent,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
+    ModelRequest,
     ModelResponse,
     OutputToolCallEvent,
     PartDeltaEvent,
@@ -41,7 +43,9 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ThinkingPartDelta,
     ToolCallPart,
+    ToolReturnPart,
     UserContent,
+    UserPromptPart,
     repair_messages,
 )
 from pydantic_ai.output import OutputDataT, OutputSpec
@@ -60,7 +64,6 @@ from hrns.server.capabilities import (
     CompactionFailed,
     CompactionStarted,
     CompactionSummaryChunkEvent,
-    SkillInfo,
     SlashCommand,
     TodoStore,
     TodoUpdated,
@@ -572,16 +575,9 @@ class SessionRuntime(
                 state.history = new_history
             if result.cost is not None:
                 state.cost = (state.cost or Decimal(0)) + result.cost
-            state.transcript.extend(turn.updates)
-            self.live_updates = []
-            await self._announce_title(state)
             try:
-                await self._persist(state)
+                await self._commit_turn(state, turn)
             except asyncio.CancelledError:
-                _logger.warning(
-                    "persisting ACP session %s was cancelled; durable state is now behind",
-                    state.session_id,
-                )
                 return schema.PromptResponse(stop_reason="cancelled"), None
             return (
                 schema.PromptResponse(
@@ -595,11 +591,8 @@ class SessionRuntime(
         return None, None
 
     async def execute(self, prompt: list[PromptContentBlock]) -> schema.PromptResponse:
-        skills = await self._resolve_skills(prompt)
         try:
-            return await self._run_turn(
-                self.state, prompt, prompt_blocks_to_user_content(prompt), skills
-            )
+            return await self._run_turn(self.state, prompt, prompt_blocks_to_user_content(prompt))
         except _TurnCancelled:
             return schema.PromptResponse(stop_reason="cancelled")
         finally:
@@ -610,7 +603,6 @@ class SessionRuntime(
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
-        skills: Sequence[SkillInfo] = (),
     ) -> schema.PromptResponse:
         config = state.config
         turn = _TurnState(
@@ -620,32 +612,16 @@ class SessionRuntime(
             known_non_approval_names=self._known_non_approval_names(config),
         )
         self.live_updates = turn.updates
-        await self._record_user_blocks(turn, prompt)
-
-        matched_command = self._find_slash_command(prompt)
-        if matched_command is not None and matched_command[0].handler is not None:
-            command, arguments = matched_command
-            handled_response, rewritten_text = await self._dispatch_slash_command(
-                state, turn, command, arguments
-            )
-            if handled_response is not None:
-                return handled_response
-            if rewritten_text is not None:
-                user_content = [rewritten_text]
 
         history = state.history
         usage = RunUsage()
         stop_reason: schema.StopReason = "end_turn"
         deferred_results: DeferredToolResults | None = None
-        run_input: list[UserContent] | None = await self._with_skill_instructions(
-            state, user_content, skills
-        )
+        run_input: list[UserContent] | None = user_content
         output_type: OutputSpec[OutputDataT | DeferredToolRequests] = [
             self._agent.output_type,
             DeferredToolRequests,
         ]
-        await self._announce_skills(turn, skills)
-
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
         connection_error: ModelConnectionError | None = None
@@ -674,6 +650,20 @@ class SessionRuntime(
 
         steering = Hooks[AgentDepsT](before_node_run=inject_steering)
         try:
+            skills = await self._resolve_skills(prompt)
+            await self._record_user_blocks(turn, prompt)
+            matched_command = self._find_slash_command(prompt)
+            if matched_command is not None and matched_command[0].handler is not None:
+                command, arguments = matched_command
+                handled_response, rewritten_text = await self._dispatch_slash_command(
+                    state, turn, command, arguments
+                )
+                if handled_response is not None:
+                    return handled_response
+                if rewritten_text is not None:
+                    user_content = [rewritten_text]
+            run_input = await self._with_skill_instructions(state, user_content, skills)
+            await self._announce_skills(turn, skills)
             while True:
                 result = None
                 native_run_id = uuid4().hex
@@ -730,12 +720,12 @@ class SessionRuntime(
                         break
                     self.interactions.waiting = True
                     self.on_state()
+                    run_input = None
                     try:
                         deferred_results = await self._resolve_approvals(turn, state, output)
                     finally:
                         self.interactions.waiting = False
                         self.on_state()
-                    run_input = None
                     continue
                 if output is not None and not isinstance(output, str):
                     await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
@@ -743,14 +733,45 @@ class SessionRuntime(
                 stop_reason = _finish_reason_to_stop_reason(result.response.finish_reason)
                 break
         except (asyncio.CancelledError, _TurnCancelled) as exc:
+            interrupted = RunCancelled.from_cancellation(exc)
+            partial_history = (
+                (interrupted.all_messages() if interrupted is not None else [])
+                or captured
+                or history
+            )
+            if run_input is not None and partial_history == history:
+                # Cancellation can arrive before the run records its first request.
+                partial_history = [*history, ModelRequest(parts=[UserPromptPart(run_input)])]
+            if partial_history and isinstance(tail := partial_history[-1], ModelResponse):
+                if tail.state == "interrupted" and not tail.parts:
+                    partial_history = partial_history[:-1]
+            history = repair_messages(partial_history)
+            # Providers don't receive the lifecycle state of a partial response.
+            history.append(
+                ModelRequest(parts=[UserPromptPart("[hrns] The preceding turn was interrupted.")])
+            )
             if self.observer is not None:
-                interrupted = RunCancelled.from_cancellation(exc)
-                self.observer.interrupted(
-                    interrupted.all_messages() if interrupted is not None else captured
-                )
+                self.observer.interrupted(history)
             with anyio.CancelScope(shield=True):
-                await self._fail_outstanding_tool_calls(turn)
-                await self._persist_interrupted_todos(state, turn)
+                if not turn.updates:
+                    await self._record_user_blocks(turn, prompt)
+                # A result may have been captured before its stream event was delivered.
+                new_messages = interrupted.new_messages() if interrupted is not None else ()
+                for message in new_messages:
+                    if not isinstance(message, ModelRequest):
+                        continue
+                    for part in message.parts:
+                        if (
+                            isinstance(part, ToolReturnPart)
+                            and part.tool_call_id in turn.started
+                            and part.tool_call_id not in turn.resulted
+                        ):
+                            await self._emit_event(turn, FunctionToolResultEvent(part))
+                await self._fail_outstanding_tool_calls(
+                    turn, record=True, raw_output=INTERRUPTED_TOOL_RETURN_CONTENT
+                )
+                state.history = history
+                await self._commit_turn(state, turn)
             raise
         except (ModelConnectionError, UsageLimitExceeded) as exc:
             await self._fail_outstanding_tool_calls(turn, record=True)
@@ -788,20 +809,22 @@ class SessionRuntime(
         await self._emit_usage(state, response=last_response)
 
         state.history = history
-        state.transcript.extend(turn.updates)
-        self.live_updates = []
-        await self._announce_title(state)
-        try:
-            await self._persist(state)
-        except asyncio.CancelledError:
-            _logger.warning(
-                "persisting ACP session %s was cancelled; durable state is now behind",
-                state.session_id,
-            )
-            stop_reason = "cancelled"
+        await self._commit_turn(state, turn)
         if connection_error is not None:
             raise connection_error
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
+
+    async def _commit_turn(self, state: SessionState[AgentDepsT], turn: _TurnState) -> None:
+        state.transcript.extend(turn.updates)
+        self.live_updates = []
+        await self._announce_title(state)
+        save = asyncio.create_task(self._persist(state))
+        try:
+            await asyncio.shield(save)
+        except asyncio.CancelledError:
+            # A cancellation during the save must settle before the next turn starts.
+            await save
+            raise
 
     async def _announce_title(self, state: SessionState[AgentDepsT]) -> None:
         """Name the session from its first user text, the same way ``session/list`` does.
@@ -827,9 +850,13 @@ class SessionRuntime(
             self.live_updates = []
             await self._persist(state)
 
-    async def _fail_outstanding_tool_calls(self, turn: _TurnState, *, record: bool = False) -> None:
+    async def _fail_outstanding_tool_calls(
+        self, turn: _TurnState, *, record: bool = False, raw_output: str | None = None
+    ) -> None:
         for tool_call_id in turn.started - turn.resulted:
-            update = updates.update_tool_call(tool_call_id=tool_call_id, status="failed")
+            update = updates.update_tool_call(
+                tool_call_id=tool_call_id, status="failed", raw_output=raw_output
+            )
             if record:
                 turn.updates.append(update)
             with contextlib.suppress(Exception):

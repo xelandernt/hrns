@@ -376,5 +376,7 @@ variable name, plus whether a value is present.
 
 `hrns clean --config` removes the document; `hrns clean` removes session history.
 The local server exits after five seconds with no connected clients and no unfinished runs.
-Use `hrns stop` to stop it immediately, disconnect clients, and cancel unfinished runs.
+Use `hrns stop` to request a graceful shutdown, disconnect clients, and cancel unfinished runs.
+Use `hrns stop --force` to terminate the local daemon immediately, even if it is unresponsive.
+Force stopping skips graceful cleanup and can interrupt unfinished runs.
 Use `hrns stop --config PATH` to select the session store from a specific configuration file.

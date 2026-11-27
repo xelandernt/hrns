@@ -8,13 +8,18 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import compare_digest, token_urlsafe
-from tempfile import NamedTemporaryFile
 
 import acp
 import uvicorn
 from fastapi import FastAPI, Request, Response, WebSocket
 
-from ..local_server import Endpoint, runtime_directory, try_store_lock
+from ..local_server import (
+    Endpoint,
+    publish_daemon_process,
+    publish_metadata,
+    runtime_directory,
+    try_store_lock,
+)
 from .acp import AcpServer
 from .fastapi import _ACP_MESSAGE_LIMIT, _serve_acp
 
@@ -32,8 +37,9 @@ def serve(
     with try_store_lock(store) as acquired:
         if not acquired:
             return
-        endpoint_path = runtime_directory(store) / "endpoint.json"
-        with socket.create_server(("127.0.0.1", 0)) as listener:
+        directory = runtime_directory(store)
+        endpoint_path = directory / "endpoint.json"
+        with publish_daemon_process(directory), socket.create_server(("127.0.0.1", 0)) as listener:
             endpoint = Endpoint(
                 port=listener.getsockname()[1], token=token_urlsafe(32), configuration=configuration
             )
@@ -68,21 +74,13 @@ def _serve(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with server:
-            with NamedTemporaryFile(dir=endpoint_path.parent, delete=False) as stream:
-                temporary = Path(stream.name)
+            with publish_metadata(endpoint_path, endpoint):
+                idle_monitor = asyncio.create_task(stop_when_idle())
                 try:
-                    stream.write(endpoint.model_dump_json().encode())
-                    stream.close()
-                    temporary.replace(endpoint_path)
+                    yield
                 finally:
-                    temporary.unlink(missing_ok=True)
-            idle_monitor = asyncio.create_task(stop_when_idle())
-            try:
-                yield
-            finally:
-                idle_monitor.cancel()
-                await asyncio.gather(idle_monitor, return_exceptions=True)
-                endpoint_path.unlink(missing_ok=True)
+                    idle_monitor.cancel()
+                    await asyncio.gather(idle_monitor, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 

@@ -194,10 +194,19 @@ def _clean_command(
     return clean(assume_yes=yes, dry_run=dry_run, config=config, keys=keys)
 
 
-def _stop_command(*, config: ConfigOption = None) -> int:
+def _stop_command(
+    *,
+    config: ConfigOption = None,
+    force: Annotated[
+        bool,
+        Parameter(
+            name="--force", help="Terminate the daemon immediately without graceful shutdown."
+        ),
+    ] = False,
+) -> int:
     from ..local_server import load_settings, stop
 
-    if stop(load_settings(config, env_only=False).store):
+    if stop(load_settings(config, env_only=False).store, force=force):
         print("Stopped the local Harness server.")
     else:
         print("The local Harness server is already stopped.")

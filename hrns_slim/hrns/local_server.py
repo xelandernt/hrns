@@ -12,10 +12,12 @@ from contextlib import contextmanager
 from hashlib import sha256
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
+import psutil
 from cyclopts import App
 from platformdirs import user_runtime_path
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, FiniteFloat, ValidationError
 
 from .shared.config import HrnsConfig
 from .shared.errors import HrnsClientError
@@ -25,6 +27,36 @@ class Endpoint(BaseModel):
     port: int = Field(ge=1, le=65535)
     token: str
     configuration: str
+
+
+class DaemonProcess(BaseModel):
+    pid: int = Field(gt=0)
+    created_at: FiniteFloat = Field(gt=0)
+
+
+@contextmanager
+def publish_metadata(path: Path, metadata: BaseModel) -> Generator[None]:
+    """Publish daemon metadata atomically and remove it on graceful exit."""
+    with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(metadata.model_dump_json().encode())
+            stream.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@contextmanager
+def publish_daemon_process(directory: Path) -> Generator[None]:
+    process = psutil.Process()
+    identity = DaemonProcess(pid=process.pid, created_at=process.create_time())
+    with publish_metadata(directory / "process.json", identity):
+        yield
 
 
 def runtime_directory(store: Path) -> Path:
@@ -150,8 +182,52 @@ def _find_or_start(settings: HrnsConfig, *, env_only: bool, setup: bool) -> Endp
     raise SystemExit(f"Could not start the local Harness server. See {directory / 'server.log'}")
 
 
-def stop(store: Path) -> bool:
+def _read_daemon_process(path: Path) -> DaemonProcess | None:
+    try:
+        return DaemonProcess.model_validate_json(path.read_bytes())
+    except (OSError, ValidationError):
+        return None
+
+
+def _force_stop(store: Path) -> bool:
+    directory = runtime_directory(store)
+    process_path = directory / "process.json"
+    terminated: DaemonProcess | None = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with try_store_lock(store) as acquired:
+            if acquired:
+                process_path.unlink(missing_ok=True)
+                (directory / "endpoint.json").unlink(missing_ok=True)
+                return terminated is not None
+        identity = _read_daemon_process(process_path)
+        if identity is not None:
+            if terminated is not None and identity != terminated:
+                return True  # A new daemon acquired the store lock.
+            if terminated is None:
+                try:
+                    process = psutil.Process(identity.pid)
+                    if process.create_time() == identity.created_at:
+                        process.kill()
+                        terminated = identity
+                except psutil.NoSuchProcess:
+                    pass  # The daemon may have exited before the signal was sent.
+                except psutil.Error as exc:
+                    raise HrnsClientError(
+                        f"Could not terminate the local Harness server: {exc}"
+                    ) from exc
+        time.sleep(0.1)
+    if terminated is None:
+        raise HrnsClientError("Could not verify the local Harness server process for force stop.")
+    raise HrnsClientError(
+        "Timed out waiting for the terminated local Harness server to release its lock."
+    )
+
+
+def stop(store: Path, *, force: bool = False) -> bool:
     """Stop the local daemon for this store and wait for it to release the lock."""
+    if force:
+        return _force_stop(store)
     directory = runtime_directory(store)
     stopped: Endpoint | None = None
     deadline = time.monotonic() + 10

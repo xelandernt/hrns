@@ -410,7 +410,11 @@ the runs independently of terminal connections. The local daemon shuts down
 after five seconds without ACP clients or active or queued runs. `hrns stop`
 requests shutdown over authenticated loopback HTTP. Shutdown disconnects
 clients, cancels unfinished runs through the ACP server lifecycle, and releases
-the store lock. `hrns clean` takes the same lock before removing session files.
+the store lock. The daemon publishes its PID and creation time while holding
+the store lock. `hrns stop --force` verifies that process identity and terminates
+it directly, bypassing HTTP and graceful cleanup. The CLI removes stale daemon
+metadata once it acquires the store lock. `hrns clean` takes the same lock before
+removing session files.
 The packaged WebSocket servers accept ACP messages up to 64 MiB on the wire
 and report oversized messages with WebSocket close code 1009. The packaged `hrns serve`
 command accepts session workspaces within its configured `--cwd` root.
@@ -621,11 +625,14 @@ joins receive messages and state within a short observation-only `RUN_STARTED` /
 `RUN_FINISHED` envelope with a fresh run ID. Idle state updates use the same envelopes;
 these protocol runs hydrate observers and never execute an agent.
 
-History conversion uses
-`AGUIAdapter.dump_messages`; observer-only response-order/tool-call identity tables
-reconcile live IDs with dumped messages. Completed display history is cached. Native
-cancellation snapshots preserve partial display without committing it to model
-history or persistence. No custom partial-delta reducer is implemented.
+History conversion uses `AGUIAdapter.dump_messages`. Observer-only response-order
+and tool-call identity tables reconcile live IDs with dumped messages. Display
+history includes cancelled turns. On cancellation, the ACP runtime commits the
+available model messages and transcript before the next turn starts. Pydantic AI
+repairs dangling tool calls with interrupted outcomes, and a runtime notice tells
+the next model that the preceding turn was interrupted. The transcript
+replays the output streamed up to cancellation and closes outstanding calls using
+the ACP `failed` status with an explanation.
 
 The current native-run encoded prefix grows with event volume and is released at
 completion. Subscriber queues hold 256 events; overflow closes the subscription for
@@ -633,8 +640,9 @@ snapshot/replay reconnect instead of dropping deltas or blocking execution. ACP 
 Server/session shutdown closes subscribers and pending deliveries.
 
 Deployment is one process/worker per runtime. Stores may recover committed state
-after restart; live tasks, queues, pending decisions, partial display history, and
-subscriptions are not durable. Cross-worker ownership/fan-out is outside this API.
+after restart. Live tasks, queues, pending decisions, live updates from turns
+that have yet to settle, and subscriptions are process-local. Cross-worker
+ownership/fan-out is outside this API.
 
 ## MCP over ACP
 
@@ -972,8 +980,8 @@ The adapter binds a session-owned `TodoStore` during each run using task-local
 context, without mutating the shared agent. That binding takes precedence over
 an explicitly supplied standalone store. Nested runs use separate state. Each
 session retains todos across prompts; `StoredSession.todos` preserves them across
-load/reconnect when a session store is configured. Published changes from an
-interrupted turn are saved without committing its incomplete model history.
+load/reconnect when a session store is configured. Cancelling a turn saves
+published todo changes alongside its captured history and transcript.
 Durability across process restarts depends on the chosen session-store backend;
 the example's `InMemorySessionStore` is process-local.
 
