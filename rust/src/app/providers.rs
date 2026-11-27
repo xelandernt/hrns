@@ -439,8 +439,7 @@ impl App {
                 if let Some(selected) = &mut self.selected_provider {
                     selected.setup_message = None;
                     selected.refresh_model_after_login = true;
-                    self.transcript
-                        .push(Role::Note, format!("Signed in to {}.", selected.id));
+                    self.command_status = Some(format!("Signed in to {}.", selected.id));
                 }
                 if let Some(warning) = result.warning {
                     self.transcript.push(Role::Warning, warning);

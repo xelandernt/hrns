@@ -4,7 +4,7 @@ use agent_client_protocol::v1::schema::{
     SessionConfigKind, SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo,
 };
 
-use super::{App, Key, agents_actions::SessionDialog, mcp_view::McpDetails};
+use super::{App, DETAILS_CHOICES, Key, agents_actions::SessionDialog, mcp_view::McpDetails};
 use crate::{
     acp::{Action, ExecutionStatus, ModelChange, SessionActivity, SessionPage, session_activity},
     options::{self, model_provider},
@@ -23,6 +23,7 @@ pub(super) enum Source {
         notice: Option<String>,
     },
     Setting(SessionConfigOptionCategory),
+    Details,
     Skills,
     Mcp(Option<McpDetails>),
 }
@@ -84,6 +85,7 @@ impl Picker {
             Source::Sessions { .. } => "Agents",
             Source::Setting(SessionConfigOptionCategory::Model) => "Select a model",
             Source::Setting(_) => "Select reasoning effort",
+            Source::Details => "Transcript details",
             Source::Skills => "Skills",
             Source::Mcp(_) => "MCP servers",
         }
@@ -122,7 +124,7 @@ impl Picker {
             Source::Setting(_) if provider_tabs => {
                 "  ↑/↓ select   Tab / Shift+Tab provider   Enter confirm"
             }
-            Source::Setting(_) => "  ↑/↓ select   Enter confirm   Esc close",
+            Source::Setting(_) | Source::Details => "  ↑/↓ select   Enter confirm   Esc close",
             Source::Skills => "  ↑/↓ move   Enter insert   Esc close",
             Source::Mcp(_) => "  ↑/↓ move   Enter details   Esc close",
         }
@@ -181,6 +183,16 @@ fn group_context_tiers(rows: Vec<Row>, selections: &HashMap<String, usize>) -> V
 }
 
 impl App {
+    pub(super) fn show_details_picker(&mut self) {
+        self.picker = Some(Picker {
+            source: Source::Details,
+            query: String::new(),
+            selected: usize::from(!self.transcript.details_shown()),
+            provider_tab: 0,
+            tiers: HashMap::new(),
+        });
+    }
+
     pub(super) fn show_mcp(&mut self) {
         self.picker = Some(Picker {
             source: Source::Mcp(None),
@@ -430,6 +442,18 @@ impl App {
         let tabs = self.model_provider_tabs(picker);
         let provider = tabs.get(picker.provider_tab.min(tabs.len().saturating_sub(1)));
         let mut rows: Vec<Row> = match &picker.source {
+            Source::Details => DETAILS_CHOICES
+                .into_iter()
+                .map(|(value, label)| Row {
+                    value: value.into(),
+                    label: label.into(),
+                    detail: String::new(),
+                    active: false,
+                    context_tiers: Vec::new(),
+                    selected_tier: 0,
+                    session: None,
+                })
+                .collect(),
             Source::Mcp(_) => self
                 .mcp_health
                 .iter()
@@ -700,6 +724,7 @@ impl App {
                     self.set_config(category, &row.value, model_change);
                 }
                 Source::Skills => self.draft.insert(&format!("${} ", row.value)),
+                Source::Details => self.apply_details(&row.value),
                 _ => {}
             }
             return;
@@ -751,11 +776,11 @@ impl App {
             Key::ScrollDown => picker.selected = (picker.selected + 7).min(last),
             Key::Home => picker.selected = 0,
             Key::End => picker.selected = last,
-            Key::Text(ch) if !ch.is_control() => {
+            Key::Text(ch) if !matches!(picker.source, Source::Details) && !ch.is_control() => {
                 picker.query.push(ch);
                 picker.selected = 0;
             }
-            Key::Backspace => {
+            Key::Backspace if !matches!(picker.source, Source::Details) => {
                 picker.query.pop();
                 picker.selected = 0;
             }

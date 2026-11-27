@@ -334,7 +334,7 @@ pub enum Event {
     UserChunk(String),
     Chunk(String),
     Thought(String),
-    Note(String),
+    CommandStatus(String),
     Warning(String),
     End {
         interrupted: bool,
@@ -843,14 +843,14 @@ pub async fn connect(
                         }
                         Some(Action::SetProviderRoute(request)) if provider_routing => {
                             let event = match session.connection().send_request(request).block_task().await {
-                                Ok(_) => Event::Note("Provider route updated".into()),
+                                Ok(_) => Event::CommandStatus("Provider route updated".into()),
                                 Err(error) => Event::Error(error.message),
                             };
                             let _ = events.unbounded_send(event);
                         }
                         Some(Action::DisableProviderRoute(request)) if provider_routing => {
                             let event = match session.connection().send_request(request).block_task().await {
-                                Ok(_) => Event::Note("Provider route disabled".into()),
+                                Ok(_) => Event::CommandStatus("Provider route disabled".into()),
                                 Err(error) => Event::Error(error.message),
                             };
                             let _ = events.unbounded_send(event);

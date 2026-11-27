@@ -189,7 +189,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/login", "Sign in to the selected local provider"),
     ("/provider", "Add, edit or remove a provider"),
     ("/permissions", "Show or set the approval mode"),
-    ("/yolo", "Auto-approve tools in this session"),
+    ("/yolo", "Auto-approve tools and collapse agent actions"),
+    ("/details", "Show or collapse agent actions"),
     ("/settings", "Show or set terminal settings"),
     ("/theme", "Show or select a theme"),
     ("/mcp", "Show MCP server health"),
@@ -209,6 +210,13 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/agent", "Run an advertised agent command"),
 ];
 
+const DETAILS_CHOICES: [(&str, &str); 4] = [
+    ("on", "On for this session"),
+    ("off", "Off for this session"),
+    ("always-on", "Always on"),
+    ("always-off", "Always off"),
+];
+
 pub struct App {
     destination: String,
     workspace: Option<PathBuf>,
@@ -217,6 +225,7 @@ pub struct App {
     session_title: Option<String>,
     mode: Option<String>,
     status: &'static str,
+    command_status: Option<String>,
     ready: bool,
     turns: usize,
     execution: Option<ExecutionState>,
@@ -290,6 +299,7 @@ impl App {
     ) -> Self {
         let mut transcript = Transcript::new();
         transcript.show_thoughts(preferences.show_thoughts);
+        transcript.show_details(preferences.show_details);
         let theme = preferences
             .theme
             .clone()
@@ -303,6 +313,7 @@ impl App {
             session_title: None,
             mode: None,
             status: "Connecting",
+            command_status: None,
             ready: false,
             turns: 0,
             execution: None,
@@ -371,6 +382,11 @@ impl App {
         theme::palette(&self.theme)
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub fn animating_actions(&self) -> bool {
+        self.transcript.animating_actions()
+    }
+
     pub fn event(&mut self, event: Event) {
         if matches!(
             &event,
@@ -422,7 +438,11 @@ impl App {
                 self.workspace = Some(workspace);
                 self.remote = remote;
                 self.client_io = client_io;
-                if self.session.as_deref() != Some(&session) {
+                let session_changed = self.session.as_deref() != Some(&session);
+                if !loaded || session_changed {
+                    self.transcript.show_details(self.preferences.show_details);
+                }
+                if session_changed {
                     self.selected_provider = None;
                     if self.managed_sessions {
                         self.restore_session_input(&session);
@@ -527,14 +547,10 @@ impl App {
                     .iter()
                     .any(|item| item.name == attachment.name)
                 {
-                    self.transcript
-                        .push(Role::Note, format!("Attached {}", attachment.name));
+                    self.command_status = Some(format!("Attached {}", attachment.name));
                     self.attachments.push(*attachment);
                 } else {
-                    self.transcript.push(
-                        Role::Note,
-                        format!("{} is already attached", attachment.name),
-                    );
+                    self.command_status = Some(format!("{} is already attached", attachment.name));
                 }
             }
             Event::Plan(plan) => {
@@ -549,10 +565,8 @@ impl App {
                 self.usage_cost = cost;
             }
             Event::SessionClosed(id) => {
-                self.transcript.push(
-                    Role::Note,
-                    format!("Closed session {id}; the agent keeps its history"),
-                );
+                self.command_status =
+                    Some(format!("Closed session {id}; the agent keeps its history"));
                 if self.session.as_deref() == Some(&id) {
                     self.new_session();
                 }
@@ -565,12 +579,12 @@ impl App {
                     display.title
                 ));
                 self.trim_activity();
-                self.transcript.tool(id, display);
+                self.transcript.tool(id, display, self.turns > 0);
             }
             Event::UserChunk(text) => self.transcript.append(Role::User, text),
             Event::Chunk(text) => self.transcript.append(Role::Agent, text),
             Event::Thought(text) => self.transcript.append_thought(text, self.turns > 0),
-            Event::Note(text) => self.transcript.push(Role::Note, text),
+            Event::CommandStatus(text) => self.command_status = Some(text),
             Event::Warning(text) => self.transcript.push(Role::Warning, text),
             Event::Error(text) => {
                 if !self.ready {
@@ -579,6 +593,7 @@ impl App {
                 self.transcript.push(Role::Error, text);
             }
             Event::End { interrupted } => {
+                self.transcript.finish_actions();
                 self.turns = self.turns.saturating_sub(1);
                 self.activity.push_back(if interrupted {
                     "turn cancelled".into()
@@ -595,6 +610,7 @@ impl App {
                 }
             }
             Event::Disconnected => {
+                self.transcript.finish_actions();
                 self.approval_mode = ApprovalMode::Ask;
                 self.approval_preference = None;
                 self.preparing_switch = false;
@@ -742,8 +758,6 @@ impl App {
             Event::McpTools { name, result } => self.mcp_tools_result(&name, result),
             Event::Permission(request) => self.request_permission(request),
             Event::Elicitation { form, respond } => {
-                self.transcript
-                    .push(Role::Warning, format!("Agent question · {}", form.message));
                 self.elicitations.push_back(PendingElicitation {
                     state: FormState::new(form),
                     respond,
@@ -825,7 +839,9 @@ impl App {
     }
 
     fn paste_into_picker(&mut self, text: &str) {
-        if let Some(picker) = &mut self.picker {
+        if let Some(picker) = &mut self.picker
+            && !matches!(picker.source, picker::Source::Details)
+        {
             picker
                 .query
                 .extend(text.chars().filter(|ch| !ch.is_control()));
@@ -840,8 +856,7 @@ impl App {
 
     pub fn reconnect(&mut self) {
         if self.ready || matches!(self.status, "Reconnecting" | "Connecting") {
-            self.transcript
-                .push(Role::Note, "The connection is already open".into());
+            self.command_status = Some("The connection is already open".into());
             return;
         }
         if self.loaded || (self.load_supported && self.session.is_some()) {
@@ -1020,8 +1035,7 @@ impl App {
             .filter(|id| !id.is_empty())
             .or_else(|| self.session.clone())
         else {
-            self.transcript
-                .push(Role::Note, "There is no current session to close".into());
+            self.command_status = Some("There is no current session to close".into());
             return;
         };
         if self.session.as_deref() == Some(&id) && (self.turns > 0 || self.remote_busy()) {
@@ -1074,8 +1088,7 @@ impl App {
             return;
         }
         self.session_inputs.remove(&id);
-        self.transcript
-            .push(Role::Note, format!("Deleted session {id}"));
+        self.command_status = Some(format!("Deleted session {id}"));
         let active = self.session.as_deref() == Some(&id);
         self.agents_delete_completed(&id, active);
         if active {
@@ -1496,6 +1509,10 @@ impl App {
             .into_iter()
             .map(|(value, description)| (value.into(), description.into()))
             .collect(),
+            "/details" => DETAILS_CHOICES
+                .into_iter()
+                .map(|(value, label)| (value.into(), label.into()))
+                .collect(),
             "/provider" if self.provider_editor => [
                 ("add", "Add a provider"),
                 ("edit", "Edit a provider"),
@@ -1587,36 +1604,34 @@ impl App {
         } else {
             "collapsed"
         };
-        self.transcript
-            .push(Role::Note, format!("Reasoning is now {state}"));
+        self.command_status = Some(format!("Reasoning is now {state}"));
         self.save_preferences();
     }
 
     pub fn set_theme(&mut self, name: String) {
         self.theme.clone_from(&name);
         self.preferences.theme = Some(name);
+        self.command_status = Some(format!("Theme · {}", self.theme));
         self.save_preferences();
     }
 
-    pub fn set_approval_mode(&mut self, mode: ApprovalMode) {
+    pub fn set_approval_mode(&mut self, mode: ApprovalMode) -> bool {
         let Some(key) = self.approval_preference.as_ref().filter(|_| self.ready) else {
             self.transcript.push(
                 Role::Warning,
                 "Open a session before changing its approval mode".into(),
             );
-            return;
+            return false;
         };
         self.approval_mode = mode;
-        self.transcript.push(
-            Role::Note,
-            format!("Session approval mode · {}", mode.label()),
-        );
+        self.command_status = Some(format!("Session approval mode · {}", mode.label()));
         if let Err(error) = key.save(mode) {
             self.transcript.push(
                 Role::Warning,
                 format!("Could not save this session's approval mode ({error})"),
             );
         }
+        true
     }
 
     fn save_preferences(&mut self) {

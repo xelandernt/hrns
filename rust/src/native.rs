@@ -27,6 +27,7 @@ use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments;
 use crate::effort::EffortProfile;
 use crate::socket;
+use crate::transcript::ACTION_FRAME_MILLIS;
 
 const HELP: &str =
     "Usage: hrns-tui [--cwd PATH] [--session ID] [--server URL | --stdio COMMAND [ARGS...]]
@@ -236,7 +237,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Print(MOUSE_ENCODING)
         )?;
         let mut dirty = true;
-        let mut next_refresh = Instant::now() + Duration::from_secs(2);
+        let started = Instant::now();
+        let mut next_refresh = started + Duration::from_secs(2);
+        let mut last_draw_tick = 0;
         let mut quit = quit::Quit::default();
         loop {
             for _ in 0..256 {
@@ -265,11 +268,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 dirty = true;
             }
-            if dirty {
+            let animation_tick = started.elapsed().as_millis() / ACTION_FRAME_MILLIS;
+            if dirty || (animation_tick != last_draw_tick && app.animating_actions()) {
                 terminal.draw(|frame| {
-                    app.draw(frame);
+                    app.draw(frame, animation_tick);
                     quit.draw(frame, &app.palette());
                 })?;
+                last_draw_tick = animation_tick;
                 dirty = false;
             }
             if !event::poll(Duration::from_millis(16))? {

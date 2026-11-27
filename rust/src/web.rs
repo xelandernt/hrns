@@ -26,6 +26,7 @@ use crate::acp::{
 use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments::{Attachment, MAX_FILE_BYTES};
 use crate::socket;
+use crate::transcript::ACTION_FRAME_MILLIS;
 
 #[wasm_bindgen]
 pub struct WebTerminal {
@@ -123,9 +124,10 @@ impl WebTerminal {
             apply_effect(&mut app, &self.requests, effect);
         }
         if let Some(display) = self.display.as_mut() {
+            let animation_tick = js_sys::Date::now() as u128 / ACTION_FRAME_MILLIS;
             display
                 .terminal
-                .draw(|frame| app.draw(frame))
+                .draw(|frame| app.draw(frame, animation_tick))
                 .map_err(js_error)?;
         }
         Ok(())

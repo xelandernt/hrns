@@ -1,3 +1,4 @@
+mod actions;
 mod table;
 
 use std::collections::BTreeMap;
@@ -9,6 +10,8 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+pub(crate) use self::actions::ACTION_FRAME_MILLIS;
+use self::actions::{ActionBlocks, ActionRows};
 use crate::acp::{PermissionRequest, ToolDisplay};
 use crate::theme::Palette;
 
@@ -25,6 +28,10 @@ pub enum Role {
 }
 
 impl Role {
+    fn is_action(&self) -> bool {
+        matches!(self, Self::Thought | Self::Tool)
+    }
+
     fn notice_color(&self, palette: &Palette) -> Option<Color> {
         match self {
             Self::Note => Some(palette.system),
@@ -34,11 +41,13 @@ impl Role {
         }
     }
 
-    fn indent(&self, width: usize) -> &'static str {
-        if width >= 10 && matches!(self, Self::Thought | Self::Tool) {
-            "  "
-        } else {
+    fn indent(&self, width: usize, nested: bool) -> &'static str {
+        if width < 10 || !self.is_action() {
             ""
+        } else if nested {
+            "   "
+        } else {
+            "  "
         }
     }
 
@@ -91,10 +100,21 @@ struct Entry {
     expanded: bool,
     tool_status: Option<ToolCallStatus>,
     approval: Option<ManualApproval>,
+    action_heading: bool,
+    action_visible: bool,
+    action_preview: bool,
     end: usize,
 }
 
 impl Entry {
+    fn preview_prefix_width(&self, width: usize) -> usize {
+        if self.action_preview && width >= 10 {
+            2
+        } else {
+            0
+        }
+    }
+
     fn has_more_output(&self) -> bool {
         !self.expanded
             && self.detail_rows.last().is_some_and(|row| {
@@ -113,7 +133,8 @@ impl Entry {
     }
 
     fn heading_rows(&self) -> usize {
-        usize::from(self.role != Role::Tool)
+        usize::from(self.action_heading)
+            + usize::from(self.action_visible && self.role != Role::Tool)
     }
 
     fn approval_rows(&self) -> usize {
@@ -392,6 +413,7 @@ enum AnchorRow {
 #[derive(Default)]
 pub struct Transcript {
     entries: Vec<Entry>,
+    actions: ActionBlocks,
     replay_from: Option<usize>,
     measured: usize,
     laid_out: usize,
@@ -414,12 +436,17 @@ impl Transcript {
     }
 
     pub fn push(&mut self, role: Role, text: String) {
-        self.push_entry(role, text, false);
+        self.push_entry(role, text, false, false);
     }
 
-    fn push_entry(&mut self, role: Role, mut text: String, expanded: bool) {
+    fn push_entry(&mut self, role: Role, mut text: String, expanded: bool, live: bool) {
         self.output_pending |= !self.following;
         text.retain(|ch| ch == '\n' || !ch.is_control());
+        if matches!(role, Role::User | Role::Agent) {
+            self.finish_actions();
+        } else if role == Role::Thought && !text.trim().is_empty() {
+            self.register_action(self.entries.len(), live);
+        }
         self.entries.push(Entry {
             role,
             text,
@@ -434,11 +461,14 @@ impl Transcript {
             expanded,
             tool_status: None,
             approval: None,
+            action_heading: false,
+            action_visible: true,
+            action_preview: false,
             end: 0,
         });
     }
 
-    pub fn tool(&mut self, id: String, mut display: ToolDisplay) {
+    pub fn tool(&mut self, id: String, mut display: ToolDisplay, live: bool) {
         let preview_start = display.prepare_detail().filter(|_| {
             display.preview_output
                 && matches!(
@@ -483,6 +513,7 @@ impl Transcript {
             self.measured = self.measured.min(index);
             return;
         }
+        self.register_action(self.entries.len(), live);
         self.entries.push(Entry {
             role: Role::Tool,
             text,
@@ -497,6 +528,9 @@ impl Transcript {
             expanded: false,
             tool_status: Some(status),
             approval: None,
+            action_heading: false,
+            action_visible: true,
+            action_preview: false,
             end: 0,
         });
     }
@@ -522,6 +556,7 @@ impl Transcript {
                     preview_output: false,
                     shell: request.shell,
                 },
+                true,
             );
             self.entries.len() - 1
         });
@@ -571,6 +606,17 @@ impl Transcript {
         }
         let start = self.entry_start(index);
         let entry = &mut self.entries[index];
+        if entry.action_heading && row == start {
+            self.actions.toggle(index);
+            self.measured = self.measured.min(index);
+            self.following = false;
+            self.selected_prompt = None;
+            return true;
+        }
+        if !entry.action_visible {
+            return false;
+        }
+        let start = start + usize::from(entry.action_heading);
         let header_hit = match entry.role {
             Role::Tool => {
                 entry.has_detail()
@@ -610,25 +656,56 @@ impl Transcript {
     }
 
     pub fn append(&mut self, role: Role, text: String) {
-        self.append_chunk(role, text, false);
+        self.append_chunk(role, text, false, false);
     }
 
     pub fn append_thought(&mut self, text: String, live: bool) {
-        self.append_chunk(Role::Thought, text, live && self.show_thoughts);
+        self.append_chunk(Role::Thought, text, live && self.show_thoughts, live);
     }
 
-    fn append_chunk(&mut self, role: Role, mut text: String, expand_new: bool) {
+    pub fn show_details(&mut self, show: bool) {
+        if self.actions.set_compact(!show) {
+            self.measured = 0;
+        }
+    }
+
+    pub fn details_shown(&self) -> bool {
+        !self.actions.compact()
+    }
+
+    pub fn animating_actions(&self) -> bool {
+        !self.replaying() && self.actions.animating()
+    }
+
+    pub fn finish_actions(&mut self) {
+        if let Some(index) = self.actions.finish() {
+            self.measured = self.measured.min(index);
+        }
+    }
+
+    fn register_action(&mut self, index: usize, live: bool) {
+        self.measured = self.measured.min(self.actions.push(index, live));
+    }
+
+    fn append_chunk(&mut self, role: Role, mut text: String, expand_new: bool, live: bool) {
         self.output_pending |= !self.following;
         let start = self.replay_from.unwrap_or(0);
-        if let Some(entry) = self.entries[start..]
-            .last_mut()
-            .filter(|entry| entry.role == role)
+        if let Some(index) = self.entries.len().checked_sub(1)
+            && index >= start
+            && self.entries[index].role == role
+            && (role != Role::Thought || self.actions.can_extend(index))
         {
+            let entry = &mut self.entries[index];
             text.retain(|ch| ch == '\n' || !ch.is_control());
+            let new_thought =
+                role == Role::Thought && entry.text.trim().is_empty() && !text.trim().is_empty();
             entry.text.push_str(&text);
-            self.measured = self.measured.min(self.entries.len() - 1);
+            self.measured = self.measured.min(index);
+            if new_thought {
+                self.register_action(index, live);
+            }
         } else {
-            self.push_entry(role, text, expand_new);
+            self.push_entry(role, text, expand_new, live);
         }
     }
 
@@ -677,6 +754,7 @@ impl Transcript {
     }
 
     pub fn begin_replay(&mut self) {
+        self.finish_actions();
         self.replay_from = Some(self.entries.len());
     }
 
@@ -701,12 +779,15 @@ impl Transcript {
     /// Discards everything from `from` onward, keeping the prefix intact.
     fn trim(&mut self, from: usize) {
         self.entries.truncate(from.min(self.entries.len()));
+        self.actions.trim(from);
         self.reset_layout();
     }
 
     pub fn commit_replay(&mut self) {
         if let Some(from) = self.replay_from.take() {
+            self.finish_actions();
             self.entries.drain(..from.min(self.entries.len()));
+            self.actions.discard_prefix(from);
             self.reset_layout();
             self.follow();
         }
@@ -750,6 +831,9 @@ impl Transcript {
         let entry = &self.entries[index];
         let start = self.entry_start(index);
         if entry.end == start {
+            return start;
+        }
+        if !entry.action_visible {
             return start;
         }
         let row_at = |rows: &[Range<usize>], byte: usize| {
@@ -865,10 +949,20 @@ impl Transcript {
         else {
             return false;
         };
+        let mut reflow = false;
+        if self.entries[index].role.is_action()
+            && let Some(first) = self.actions.reveal(index)
+        {
+            self.measured = self.measured.min(first);
+            reflow = true;
+        }
         let reveal = !in_text || self.entries[index].role == Role::Thought;
         if reveal && !self.entries[index].expanded {
             self.entries[index].expanded = true;
             self.measured = self.measured.min(index);
+            reflow = true;
+        }
+        if reflow {
             self.measure();
         }
         let entry = &self.entries[index];
@@ -907,6 +1001,7 @@ impl Transcript {
         width: u16,
         height: u16,
         palette: &Palette,
+        animation_tick: u128,
         is_command: fn(&str) -> bool,
     ) -> VisibleTranscript<'_> {
         let mut visible = VisibleTranscript::default();
@@ -939,6 +1034,8 @@ impl Transcript {
 
         let mut row = self.top;
         let mut index = self.entries.partition_point(|entry| entry.end <= row);
+        let animation_tick = self.animating_actions().then_some(animation_tick);
+        let compact = self.actions.compact();
         visible.lines.reserve(usize::from(height));
         while let Some(entry) = self.entries.get(index) {
             let start = self.entry_start(index);
@@ -946,10 +1043,32 @@ impl Transcript {
             let content_rows = entry.heading_rows() + entry.rows.len();
             while row < entry.end {
                 let entry_row = row - start;
-                let mut line = entry.line(entry_row, palette, is_command);
-                let indent = entry.role.indent(usize::from(width));
-                if !indent.is_empty() && !line.spans.is_empty() {
-                    line.spans.insert(0, Span::raw(indent));
+                let is_action_heading = entry_row == 0 && entry.action_heading;
+                let mut line =
+                    if is_action_heading && let Some(heading) = self.actions.layout(index).0 {
+                        heading.line(palette, animation_tick)
+                    } else {
+                        entry.line(
+                            entry_row.saturating_sub(usize::from(entry.action_heading)),
+                            palette,
+                            is_command,
+                        )
+                    };
+                let indent = entry
+                    .role
+                    .indent(usize::from(width), compact && !is_action_heading);
+                if !line.spans.is_empty() {
+                    if !is_action_heading && entry.preview_prefix_width(usize::from(width)) > 0 {
+                        let prefix = if entry_row == usize::from(entry.action_heading) {
+                            "↳ "
+                        } else {
+                            "  "
+                        };
+                        line.spans.insert(0, prefix.fg(palette.border));
+                    }
+                    if !indent.is_empty() {
+                        line.spans.insert(0, Span::raw(indent));
+                    }
                 }
                 if entry.role == Role::User && entry_row < content_rows {
                     if line.width() == 0 {
@@ -975,22 +1094,45 @@ impl Transcript {
                 row += 1;
             }
             index += 1;
+            if self
+                .entries
+                .get(index)
+                .is_some_and(|entry| entry.end <= row)
+            {
+                index += self.entries[index..].partition_point(|entry| entry.end <= row);
+            }
         }
         visible
     }
 
     fn measure(&mut self) {
+        let compact = self.actions.compact();
         let mut end = self
             .measured
             .checked_sub(1)
             .map_or(0, |prev| self.entries[prev].end);
-        for entry in &mut self.entries[self.measured..] {
+        for (index, entry) in self.entries.iter_mut().enumerate().skip(self.measured) {
             if entry.role == Role::Thought && entry.text.trim().is_empty() {
                 entry.end = end;
                 continue;
             }
+            if entry.role.is_action() {
+                let (heading, rows) = self.actions.layout(index);
+                entry.action_heading = heading.is_some();
+                entry.action_preview = rows == ActionRows::Preview;
+                entry.action_visible =
+                    rows != ActionRows::Hidden || entry.approval == Some(ManualApproval::Pending);
+                if !entry.action_visible {
+                    end += usize::from(entry.action_heading);
+                    entry.end = end;
+                    continue;
+                }
+            }
             let viewport_width = usize::from(self.width);
-            let width = viewport_width.saturating_sub(entry.role.indent(viewport_width).len());
+            let width = viewport_width.saturating_sub(
+                entry.role.indent(viewport_width, compact).len()
+                    + entry.preview_prefix_width(viewport_width),
+            );
             entry.table_rows.clear();
             if entry.role == Role::Thought && !entry.expanded {
                 entry.rows.clear();

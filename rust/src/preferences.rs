@@ -101,6 +101,7 @@ pub struct Preferences {
     pub sidebar: bool,
     pub sidebar_width: u16,
     pub show_thoughts: bool,
+    pub show_details: bool,
     pub theme: Option<String>,
 }
 
@@ -110,6 +111,7 @@ impl Default for Preferences {
             sidebar: false,
             sidebar_width: 0,
             show_thoughts: true,
+            show_details: true,
             theme: None,
         }
     }

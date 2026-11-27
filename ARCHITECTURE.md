@@ -296,6 +296,8 @@ touching connection configuration: native writes JSON under
 local storage. The activity sidebar is suppressed below 96 columns. The status
 bar shows the connection and contextual keyboard hints. When space allows it
 also shows the session, model, context usage, cost, effort and approvals.
+Routine slash-command feedback appears in the status bar until the next
+submission. Warnings, errors and command output can appear in the transcript.
 `/theme`, `/settings`, and the `theme` page parameter expose theme settings.
 Approval mode starts in Ask for each new session. `/permissions` and `/yolo`
 change the current session only. The TUI saves the mode on the device under a
@@ -304,6 +306,18 @@ entry atomically alongside the TUI state, and the browser uses local storage
 in its current origin. Local daemon identity uses the session store instead
 of the daemon's transient port. The built-in themes are
 `hrns`, `textual-dark`, `textual-light`, `ansi-dark` and `ansi-light`.
+
+The Ratatui transcript groups tool calls and reasoning between user and agent
+messages. With details off, the active block shows its action count, an
+animated indicator and a preview of its latest two actions. For live turns
+initiated by the client, the elapsed time runs from the first action until the
+next message or the end of the turn. The clickable summary retains the final
+count and elapsed time.
+Pending approvals and transcript notices stay visible. The transcript retains
+the actions for expansion and search. `/details on`, `/details off` and `/yolo`
+change visibility for the current session. `/details always-on` and
+`/details always-off` save the client default in the TUI state. The initial
+default is on. Bare `/details` opens a picker for the four visibility options.
 
 ACP plan snapshots populate the Todos panel with completion counts, item
 status and priority. The first nonempty snapshot for a session opens Todos.

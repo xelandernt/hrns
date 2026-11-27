@@ -110,8 +110,17 @@ older clients; the native client stores those toggles in its state file instead.
 
 New sessions start in Ask. Use `/permissions ask`, `/permissions reads` (auto-approve
 read-only tools), or `/permissions all` (auto-approve eligible tool calls) in the
-session. `/yolo` is an alias for `/permissions all`. When you reopen the session,
-the TUI restores the mode saved on this device.
+session. `/yolo` sets the approval mode to `all` and turns off transcript details
+for the current session. When you reopen the session, the TUI restores the
+approval mode saved on this device.
+
+Transcript details are on by default. Run `/details` to choose a visibility
+option. With details off, the transcript shows a running action count, elapsed
+time, and the latest two actions while the agent works. When a message starts
+or the turn ends, the action block collapses into a row you can click to expand. Use
+`/details on` or `/details off` for the current session. Session switches and
+restarts use the saved default, which you can change with `/details always-on`
+or `/details always-off`.
 
 `client_io` advertises ACP client capabilities; it does not by itself give the agent
 tools. The agent must install `acp_filesystem` / `acp_terminal` through

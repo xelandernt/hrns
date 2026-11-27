@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::picker::{Picker, Row, Source, context_tier};
 use super::{
-    App, MCP_CONSENT_CHOICES, PendingApproval, PendingMcpConsent, ScrollBar, is_local_command,
-    slash_command,
+    App, DETAILS_CHOICES, MCP_CONSENT_CHOICES, PendingApproval, PendingMcpConsent, ScrollBar,
+    is_local_command, slash_command,
 };
 use crate::elicitation::FieldKind;
 use crate::options;
@@ -24,7 +24,7 @@ const PROMPT_MARKER_WIDTH: u16 = 2;
 const TRANSCRIPT_AND_STATUS_ROWS: u16 = 2;
 
 impl App {
-    pub fn draw(&mut self, frame: &mut Frame) {
+    pub fn draw(&mut self, frame: &mut Frame, animation_tick: u128) {
         let palette = self.palette();
         let area = frame.area();
         frame.render_widget(
@@ -204,6 +204,7 @@ impl App {
             transcript.width,
             transcript.height,
             &palette,
+            animation_tick,
             is_local_command,
         );
         frame.render_widget(
@@ -426,10 +427,17 @@ impl App {
         } else {
             palette.muted
         };
+        let command_status =
+            if prompt_active && self.draft.text().is_empty() && self.status != "Disconnected" {
+                self.command_status.as_deref()
+            } else {
+                None
+            };
         self.draw_status(
             frame,
             status.inner(gutter),
             status_hint.fg(hint_color),
+            command_status,
             &palette,
         );
         if sidebar.width > 0 {
@@ -583,8 +591,15 @@ impl App {
     }
 
     fn draw_picker(&self, frame: &mut Frame, area: Rect, picker: &Picker, palette: &Palette) {
-        let width = area.width.saturating_sub(2).min(88);
-        let height = area.height.saturating_sub(2).min(26);
+        let details = matches!(picker.source, Source::Details);
+        let width = area
+            .width
+            .saturating_sub(2)
+            .min(if details { 48 } else { 88 });
+        let height = area
+            .height
+            .saturating_sub(2)
+            .min(if details { 7 } else { 26 });
         let popup = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -599,6 +614,22 @@ impl App {
         let inner = panel.inner(popup);
         frame.render_widget(Clear, popup);
         frame.render_widget(panel, popup);
+        if details {
+            let [choices, keys] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            draw_choice_list(
+                frame,
+                choices,
+                DETAILS_CHOICES.map(|(_, label)| Line::from(label)),
+                Some(picker.selected),
+                palette,
+            );
+            frame.render_widget(
+                Paragraph::new(picker.hint(false, false)).fg(palette.muted),
+                keys,
+            );
+            return;
+        }
         if matches!(picker.source, Source::Mcp(_)) {
             self.draw_mcp_picker(frame, inner, picker, palette);
             return;
@@ -768,7 +799,14 @@ impl App {
         );
     }
 
-    fn draw_status(&self, frame: &mut Frame, area: Rect, hint: Span<'_>, palette: &Palette) {
+    fn draw_status(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        hint: Span<'_>,
+        command_status: Option<&str>,
+        palette: &Palette,
+    ) {
         let width = usize::from(area.width);
         let model_ready = !self.model_change_pending && !self.provider_model_missing();
         let model = if model_ready {
@@ -793,8 +831,9 @@ impl App {
         let model = model.map_or_else(Line::default, |model| {
             Line::from(model.fg(palette.accent).bold())
         });
+        let model_budget = width.saturating_sub(command_status.map_or(0, |text| text.width() + 2));
         let model_width = match model.width() {
-            size if size <= width => size,
+            size if size <= model_budget => size,
             _ => 0,
         };
         let left_budget = if model_width > 0 {
@@ -809,11 +848,16 @@ impl App {
             _ => palette.accent,
         };
         let mut left = Line::from(vec!["● ".fg(status_color), self.status.fg(status_color)]);
+        if let Some(text) = command_status
+            && !append_status_field(&mut left, Line::from(text.fg(palette.accent)), left_budget)
+        {
+            left = Line::from(text.fg(palette.accent));
+        }
         if hint.width() > 0 {
             if left.width() + 3 + hint.width() <= left_budget {
                 left.push_span(" · ");
                 left.push_span(hint);
-            } else if left_budget == width {
+            } else if left_budget == width && command_status.is_none() {
                 left = Line::from(hint);
             }
         }

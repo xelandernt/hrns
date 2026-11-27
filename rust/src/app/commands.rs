@@ -11,6 +11,7 @@ use crate::transcript::Role;
 
 impl App {
     pub(super) fn submit(&mut self) {
+        self.command_status = None;
         let draft = self.draft.text().to_owned();
         let Some(command) = slash_command(&draft) else {
             self.send_message(self.draft.expanded_text().into_owned());
@@ -34,14 +35,14 @@ impl App {
                         .to_owned(),
                     "Connection  /connect · /reconnect · /providers · /login · /mcp".to_owned(),
                     "Model  /models · /effort · /provider".to_owned(),
-                    "Transcript  /thoughts · /find <text> · /copy · /todo".to_owned(),
+                    "Transcript  /details · /thoughts · /find <text> · /copy · /todo".to_owned(),
                     "Composer  /attach · /detach · /queue · /edit-queue · /clear-queue".to_owned(),
                     "Settings  /settings · /permissions · /yolo · /theme · /sidebar".to_owned(),
                     "Agent  /skills · /agent <command>".to_owned(),
                     String::new(),
                     "Tab  Complete a command or argument".to_owned(),
                     "Ctrl+G  Open the Agents view".to_owned(),
-                    "Click a header  Toggle reasoning or tool output".to_owned(),
+                    "Click a header  Toggle actions, reasoning or tool output".to_owned(),
                     "Ctrl+O  Toggle all tool output".to_owned(),
                     "Wheel / PgUp / PgDn  Scroll the transcript".to_owned(),
                     "Esc  Close a picker or cancel the turn".to_owned(),
@@ -200,12 +201,24 @@ impl App {
             }
             "/yolo" => {
                 self.draft.submit();
-                self.set_approval_mode(ApprovalMode::All);
+                if self.set_approval_mode(ApprovalMode::All) {
+                    self.transcript.show_details(false);
+                }
+            }
+            "/details" => {
+                self.draft.submit();
+                self.show_details_picker();
+            }
+            text if text.starts_with("/details ") => {
+                self.draft.submit();
+                self.apply_details(&text["/details ".len()..]);
             }
             text if text.starts_with("/permissions ") => {
                 self.draft.submit();
                 match ApprovalMode::parse(text["/permissions ".len()..].trim()) {
-                    Some(mode) => self.set_approval_mode(mode),
+                    Some(mode) => {
+                        self.set_approval_mode(mode);
+                    }
                     None => self
                         .transcript
                         .push(Role::Warning, "Use /permissions ask · reads · all".into()),
@@ -223,7 +236,6 @@ impl App {
                 let name = text["/theme ".len()..].trim();
                 if theme::NAMES.contains(&name) {
                     self.set_theme(name.to_owned());
-                    self.transcript.push(Role::Note, format!("Theme · {name}"));
                 } else {
                     self.transcript.push(
                         Role::Warning,
@@ -333,15 +345,13 @@ impl App {
                 } else if let Some(text) = self.transcript.latest_agent() {
                     self.local_effect = Some(LocalEffect::Copy(text.to_owned()));
                 } else {
-                    self.transcript
-                        .push(Role::Note, "No completed response to copy".into());
+                    self.command_status = Some("No completed response to copy".into());
                 }
             }
             text if text.starts_with("/find ") => {
                 self.draft.submit();
                 if !self.transcript.find(text["/find ".len()..].trim()) {
-                    self.transcript
-                        .push(Role::Note, "No matching transcript text".into());
+                    self.command_status = Some("No matching transcript text".into());
                 }
             }
             command if command == "/attach" || command.starts_with("/attach ") => {
@@ -391,8 +401,7 @@ impl App {
 
     pub(super) fn edit_queued_prompt(&mut self) {
         if self.queue.is_empty() {
-            self.transcript
-                .push(Role::Note, "No queued messages to edit".into());
+            self.command_status = Some("No queued messages to edit".into());
         } else if self.attachment_reads > 0 || !self.attachments.is_empty() {
             self.transcript.push(
                 Role::Warning,
@@ -420,6 +429,33 @@ impl App {
             Role::Command("/provider".into()),
             "/provider add <name> <type> [url|-] [model,model]".into(),
         );
+    }
+
+    pub(super) fn apply_details(&mut self, choice: &str) {
+        let (show, save) = match choice {
+            "on" => (true, false),
+            "off" => (false, false),
+            "always-on" => (true, true),
+            "always-off" => (false, true),
+            _ => {
+                self.transcript.push(
+                    Role::Warning,
+                    "Use /details on · off · always-on · always-off".into(),
+                );
+                return;
+            }
+        };
+        self.transcript.show_details(show);
+        if save {
+            self.preferences.show_details = show;
+            self.save_preferences();
+        }
+        let scope = if save {
+            "saved default"
+        } else {
+            "this session"
+        };
+        self.command_status = Some(format!("Details {} · {scope}", on_off(show)));
     }
 
     fn print_settings(&mut self) {
@@ -459,13 +495,14 @@ impl App {
         match (name, value) {
             ("theme", Some(name)) if theme::NAMES.contains(&name) => {
                 self.set_theme(name.to_owned());
-                self.transcript.push(Role::Note, format!("Theme · {name}"));
             }
             ("theme", _) => self
                 .transcript
                 .push(Role::Note, format!("Theme · {}", theme::NAMES.join(" · "))),
             ("permissions", Some(value)) => match ApprovalMode::parse(value) {
-                Some(mode) => self.set_approval_mode(mode),
+                Some(mode) => {
+                    self.set_approval_mode(mode);
+                }
                 None => self
                     .transcript
                     .push(Role::Warning, "Use ask, reads or all".into()),
