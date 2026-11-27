@@ -74,7 +74,7 @@ class ProviderLoginError(ValueError):
 
 
 class ProviderLogin:
-    """One cancellable sign-in attempt per local runtime."""
+    """A cancellable sign-in attempt with a result retained for its caller."""
 
     def __init__(
         self, *, refresh_models: Callable[[str], Awaitable[str | None]] | None = None
@@ -85,21 +85,32 @@ class ProviderLogin:
 
     @property
     def active(self) -> bool:
-        return self._task is not None
+        return self._task is not None and not self._task.done()
+
+    def _track(self, task: asyncio.Task[str | None]) -> None:
+        self._task = task
+        # The terminal may disconnect before polling a failed attempt.
+        task.add_done_callback(
+            lambda finished: None if finished.cancelled() else finished.exception()
+        )
 
     async def start(
         self, name: str, entry: ProviderEntry, method: LoginMethod, key: str | None
     ) -> dict[str, object]:
         if method not in login_methods(entry.provider_id(name)):
             raise ProviderLoginError("This sign-in method is unavailable for the provider.")
-        if self._task is not None:
+        if self.active:
             raise ProviderLoginError("Finish or cancel the current sign-in first.")
+        self._challenge = {}
         account = login_account(name, entry)
         match method:
             case "api-key":
                 if not key or not key.strip():
                     raise ProviderLoginError("Enter an API key.")
-                await asyncio.to_thread(_save_secret, account, key.strip())
+                task = asyncio.create_task(asyncio.to_thread(_save_secret, account, key.strip()))
+                self._track(task)
+                await asyncio.shield(task)
+                self._task = None
                 return {"done": True}
             case "copilot":
                 from pydantic_ai.providers.github_copilot import GitHubCopilotOAuthFlow
@@ -122,7 +133,7 @@ class ProviderLogin:
                     await asyncio.to_thread(_save_secret, account, credentials.access_token)
                     return await self._refresh_models(name) if self._refresh_models else None
 
-                self._task = asyncio.create_task(copilot())
+                self._track(asyncio.create_task(copilot()))
                 return {}
             case "codex":
                 from pydantic_ai.providers.openai_codex import OpenAICodexOAuthFlow
@@ -136,10 +147,10 @@ class ProviderLogin:
                     await CodexKeyring(account).save(credentials)
                     return await self._refresh_models(name) if self._refresh_models else None
 
-                self._task = asyncio.create_task(codex())
+                self._track(asyncio.create_task(codex()))
                 return {"url": codex_flow.authorization_url()}
             case "aws" | "aws-sso":
-                self._task = asyncio.create_task(_aws_login(entry, sso=method == "aws-sso"))
+                self._track(asyncio.create_task(_aws_login(entry, sso=method == "aws-sso")))
                 return {}
 
     async def status(self) -> dict[str, object]:
@@ -147,10 +158,10 @@ class ProviderLogin:
         if task is None:
             raise ProviderLoginError("No sign-in is in progress.")
         await asyncio.wait((task,), timeout=0.5)
+        if self._task is not task:
+            raise ProviderLoginError("The sign-in attempt has ended. Run /login to try again.")
         if not task.done():
             return {"done": False, **self._challenge}
-        if self._task is not task:
-            return {"done": False}
         self._task = None
         self._challenge = {}
         try:
@@ -164,11 +175,13 @@ class ProviderLogin:
         return {"done": True, "warning": warning}
 
     async def cancel(self) -> None:
-        task, self._task = self._task, None
-        self._challenge = {}
+        task = self._task
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if self._task is task:
+                self._task = None
+                self._challenge = {}
 
 
 def codex_source(name: str, entry: ProviderEntry) -> CodexKeyring | None:

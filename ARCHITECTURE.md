@@ -191,6 +191,8 @@ agent receives a result instead of waiting forever.
 Both frontends keep one action queue for the process lifetime and can retry the
 transport after a disconnect. `Ctrl-R`, or the `/reconnect` command, starts
 another attempt with the same transport options and connection identity.
+Both frontends remember the session ID and workspace from the Ready event when
+the agent supports session loading.
 `Ctrl-R` edits nothing, so the draft survives; `/reconnect` is an ordinary
 command and therefore consumes the current draft line. The transcript and
 queued prompts survive a reconnect to the same session. The next `Ready`
@@ -374,7 +376,10 @@ port, and writes its endpoint and bearer token into a private runtime directory.
 The launcher reads the normal configuration, checks the authenticated endpoint
 before reuse, and starts the runtime in a separate process on a cold launch.
 Endpoint discovery uses only the base Python package. The server owns
-the runs independently of terminal connections. The packaged `hrns serve`
+the runs independently of terminal connections. `hrns clean` takes the same
+store lock before removing session files and reports when the daemon holds it.
+The packaged WebSocket servers accept ACP messages up to 64 MiB on the wire
+and report oversized messages with WebSocket close code 1009. The packaged `hrns serve`
 command accepts session workspaces within its configured `--cwd` root.
 
 `/models` searches the advertised model choices and marks the current model.
@@ -685,7 +690,9 @@ display name and value.
 The built-in agent advertises `hrns/providers/manage`. The native
 client enables it for the local Harness server. The private
 `_hrns/providers/*` requests list and edit local TOML entries and manage one
-sign-in attempt. Saving provider settings and authenticating are separate operations.
+active sign-in per runtime. A completed attempt releases the runtime for the next
+sign-in or edit. Its result is available to the connection that started it.
+Saving provider settings and authenticating are separate operations.
 Edits and successful sign-ins refresh ACP model options for open sessions.
 The built-in agent fetches the Copilot account's catalog on startup and after
 sign-in. It keeps each model's Chat Completions or Responses endpoint in memory

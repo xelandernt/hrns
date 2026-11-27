@@ -213,42 +213,56 @@ fn run_connection(
 ) {
     wasm_bindgen_futures::spawn_local(async move {
         use futures::{FutureExt, select_biased};
-        let mut config = config;
-        let mut target =
-            config
-                .as_ref()
-                .map(|(_, target)| target.clone())
-                .unwrap_or(SessionTarget {
+        let (mut endpoint, mut target) = match config {
+            Ok((endpoint, target)) => (Ok(endpoint), target),
+            Err(error) => (
+                Err(error),
+                SessionTarget {
                     cwd: None,
                     session: None,
-                });
+                },
+            ),
+        };
         loop {
-            let request = select_biased! {
-                request = requests_rx.next().fuse() => request,
-                result = connect_attempt(
-                    config.clone(),
+            let request = {
+                let (attempt_events, updates) = mpsc::unbounded();
+                let mut updates = updates.fuse();
+                let connection = connect_attempt(
+                    endpoint.clone(),
                     target.clone(),
                     &mut action_rx,
-                    event_tx.clone(),
-                ).fuse() => {
-                    if let Err(error) = result {
-                        let _ = event_tx.unbounded_send(Event::Error(error));
+                    attempt_events,
+                )
+                .fuse();
+                futures::pin_mut!(connection);
+                loop {
+                    select_biased! {
+                        request = requests_rx.next().fuse() => break request,
+                        event = updates.select_next_some() => {
+                            target.remember(&event);
+                            let _ = event_tx.unbounded_send(event);
+                        }
+                        result = connection => {
+                            if let Err(error) = result {
+                                let _ = event_tx.unbounded_send(Event::Error(error));
+                            }
+                            let _ = event_tx.unbounded_send(Event::Disconnected);
+                            break requests_rx.next().await;
+                        }
                     }
-                    let _ = event_tx.unbounded_send(Event::Disconnected);
-                    requests_rx.next().await
                 }
             };
             match request {
                 Some(Connection::Reconnect) => {}
                 Some(Connection::Switch(next)) => target = next,
                 Some(Connection::Connect(next)) => match connection_target(&next) {
-                    Ok((endpoint, cwd)) => {
-                        let _ = event_tx.unbounded_send(Event::ConnectionChanged(endpoint.host()));
+                    Ok((url, cwd)) => {
+                        let _ = event_tx.unbounded_send(Event::ConnectionChanged(url.host()));
                         target = SessionTarget {
                             cwd: Some(cwd),
                             session: None,
                         };
-                        config = Ok((endpoint, target.clone()));
+                        endpoint = Ok(url);
                     }
                     Err(error) => {
                         let _ = event_tx.unbounded_send(Event::Error(error));
@@ -262,12 +276,12 @@ fn run_connection(
 }
 
 async fn connect_attempt(
-    config: Result<(Url, SessionTarget), String>,
+    endpoint: Result<Url, String>,
     target: SessionTarget,
     actions: &mut crate::acp::Actions,
     events: crate::acp::Events,
 ) -> Result<(), String> {
-    let (endpoint, _) = config?;
+    let endpoint = endpoint?;
     let (_, ws) = WsMeta::connect(endpoint.href(), None)
         .await
         .map_err(|_| "Could not open the remote ACP WebSocket".to_owned())?;

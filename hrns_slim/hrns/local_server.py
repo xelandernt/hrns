@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from hashlib import sha256
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
@@ -33,6 +35,30 @@ def runtime_directory(store: Path) -> Path:
 
 def _store_id(store: Path) -> str:
     return sha256(os.fsencode(store.resolve())).hexdigest()[:24]
+
+
+@contextmanager
+def try_store_lock(store: Path) -> Generator[bool]:
+    """Hold the daemon's exclusive store lock for the lifetime of the context."""
+    with (runtime_directory(store) / "server.lock").open("ab") as lock:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            acquired = False
+        except OSError:
+            if os.name != "nt":
+                raise
+            acquired = False
+        else:
+            acquired = True
+        yield acquired
 
 
 def load_settings(config: Path | None, *, env_only: bool) -> HrnsConfig:

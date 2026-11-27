@@ -12,6 +12,7 @@ import os
 import sqlite3
 import sys
 import tomllib
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -303,10 +304,19 @@ def clean(
     removed = 0
     failures: list[str] = []
     if remove_sessions:
-        for artifact in sessions:
-            count, problems = _remove(_files_for(artifact))
-            removed += count
-            failures.extend(problems)
+        from ..local_server import try_store_lock
+
+        with ExitStack() as locks:
+            for artifact in sessions:
+                if not locks.enter_context(try_store_lock(artifact.path)):
+                    raise HrnsClientError(
+                        f"The local Harness server is using {_display_path(artifact.path)}. "
+                        "Stop the server before cleaning its session history."
+                    )
+            for artifact in sessions:
+                count, problems = _remove(_files_for(artifact))
+                removed += count
+                failures.extend(problems)
         print(f"Removed session history ({removed} file{'s' if removed != 1 else ''}).")
     if remove_config:
         deleted = 0

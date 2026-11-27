@@ -2,41 +2,20 @@
 
 from __future__ import annotations
 
-import os
 import socket
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import compare_digest, token_urlsafe
 from tempfile import NamedTemporaryFile
-from typing import BinaryIO
 
 import acp
 import uvicorn
 from fastapi import FastAPI, Request, Response, WebSocket
 
-from ..local_server import Endpoint, runtime_directory
+from ..local_server import Endpoint, runtime_directory, try_store_lock
 from .acp import AcpServer
-from .fastapi import _serve_acp
-
-
-def _try_lock(lock: BinaryIO) -> bool:
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return False
-    except OSError:
-        if os.name == "nt":
-            return False
-        raise
-    return True
+from .fastapi import _ACP_MESSAGE_LIMIT, _serve_acp
 
 
 def serve(
@@ -45,11 +24,10 @@ def serve(
     store: Path,
     configuration: str,
 ) -> None:
-    directory = runtime_directory(store)
-    endpoint_path = directory / "endpoint.json"
-    with (directory / "server.lock").open("ab") as lock:
-        if not _try_lock(lock):
+    with try_store_lock(store) as acquired:
+        if not acquired:
             return
+        endpoint_path = runtime_directory(store) / "endpoint.json"
         with socket.create_server(("127.0.0.1", 0)) as listener:
             endpoint = Endpoint(
                 port=listener.getsockname()[1], token=token_urlsafe(32), configuration=configuration
@@ -98,5 +76,5 @@ def _serve(
             return
         await _serve_acp(websocket, adapter())
 
-    runner = uvicorn.Server(uvicorn.Config(app, access_log=False))
+    runner = uvicorn.Server(uvicorn.Config(app, access_log=False, ws_max_size=_ACP_MESSAGE_LIMIT))
     runner.run(sockets=[listener])

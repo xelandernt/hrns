@@ -393,6 +393,21 @@ pub struct SessionTarget {
     pub session: Option<String>,
 }
 
+impl SessionTarget {
+    pub(crate) fn remember(&mut self, event: &Event) {
+        if let Event::Ready {
+            session,
+            workspace,
+            load_supported: true,
+            ..
+        } = event
+        {
+            self.cwd = Some(workspace.clone());
+            self.session = Some(session.clone());
+        }
+    }
+}
+
 pub type Events = mpsc::UnboundedSender<Event>;
 pub type Actions = mpsc::UnboundedReceiver<Action>;
 

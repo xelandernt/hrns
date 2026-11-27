@@ -290,6 +290,7 @@ def _serve_command(
 
     from .server import AcpServer
     from .server.agent import build_agent
+    from .server.fastapi import _ACP_MESSAGE_LIMIT
 
     server = AcpServer[None]()
     workspace_root = Path(cwd).expanduser().resolve()
@@ -308,7 +309,7 @@ def _serve_command(
 
     app = FastAPI(lifespan=lifespan)
     server.mount_acp(app)
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, ws_max_size=_ACP_MESSAGE_LIMIT)
     return EXIT_OK
 
 

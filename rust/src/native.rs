@@ -17,6 +17,7 @@ use futures::channel::mpsc;
 use ratatui::layout::Position;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::{WebSocketConfig, frame::coding::CloseCode};
 
 use crate::acp::{self, Actions, ClientIoMode, Connection, Event, Events, Services, SessionTarget};
 use crate::app::{App, Key, LocalEffect, Startup};
@@ -463,10 +464,8 @@ async fn supervise(
                     _ = stop.next() => return,
                     request = requests.next() => break Ok(request),
                     event = scoped_receiver.select_next_some() => {
-                        if let Event::Ready { session, workspace, load_supported, .. } = &event {
-                            if *load_supported {
-                                target = SessionTarget { cwd: Some(workspace.clone()), session: Some(session.clone()) };
-                            }
+                        target.remember(&event);
+                        if matches!(&event, Event::Ready { .. }) {
                             ready = true;
                             rollback = None;
                         }
@@ -675,9 +674,11 @@ async fn connect_websocket(
         header.set_sensitive(true);
         request.headers_mut().insert("authorization", header);
     }
+    // Match the Harness WebSocket bridge's message limit even for unfragmented frames.
+    let config = WebSocketConfig::default().max_frame_size(Some(64 * 1024 * 1024));
     let (ws, _) = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio_tungstenite::connect_async(request),
+        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
     )
     .await
     .map_err(|_| "Timed out connecting to the ACP endpoint")?
@@ -700,6 +701,10 @@ fn message_text(message: Message) -> Result<Option<String>, String> {
     match message {
         Message::Text(text) => Ok(Some(text.to_string())),
         Message::Binary(_) => Err("The ACP endpoint sent a binary WebSocket frame".into()),
+        Message::Close(Some(frame)) if frame.code != CloseCode::Normal => Err(format!(
+            "ACP WebSocket closed ({}) {}",
+            frame.code, frame.reason
+        )),
         _ => Ok(None),
     }
 }

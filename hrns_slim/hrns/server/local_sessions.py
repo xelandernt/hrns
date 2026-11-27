@@ -125,10 +125,14 @@ class LocalSessionStore:
                     (session_id, session.cwd, title, updated, payload),
                 )
             else:
-                db.execute(
+                cursor = db.execute(
                     "UPDATE acp_sessions SET title = coalesce(?, title), updated = ?, state = ? WHERE id = ?",
                     (title, updated, payload, session_id),
                 )
+                if cursor.rowcount == 0:
+                    raise SessionStoreError(
+                        f"Session {session_id!r} no longer exists in the store."
+                    )
 
     async def load(
         self, session_id: str, *, principal: object, operation: SessionAccess

@@ -7,9 +7,9 @@ import json
 import logging
 import os
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -263,7 +263,7 @@ class RuntimeModelResolver(ProviderModelResolver):
         self.last_provider_models: dict[str, str] = {}
         self._copilot_models: dict[str, dict[str, _CopilotModel]] = {}
         self._codex_models: dict[str, tuple[str, ...]] = {}
-        self.login = ProviderLogin(refresh_models=self.refresh_provider_models)
+        self._active_login: ProviderLogin | None = None
 
     async def refresh_provider_models(self, name: str) -> str | None:
         match self.settings.provider_id(name):
@@ -374,7 +374,13 @@ class RuntimeModelResolver(ProviderModelResolver):
             )
         )
 
-    async def manage_provider(self, method: str, params: dict[str, object]) -> dict[str, object]:
+    def provider_editor(self) -> Callable[[str, dict[str, object]], Awaitable[dict[str, object]]]:
+        login = ProviderLogin(refresh_models=self.refresh_provider_models)
+        return partial(self.manage_provider, login=login)
+
+    async def manage_provider(
+        self, method: str, params: dict[str, object], *, login: ProviderLogin
+    ) -> dict[str, object]:
         if method == "hrns/providers/list":
             return {
                 "providers": [
@@ -394,18 +400,21 @@ class RuntimeModelResolver(ProviderModelResolver):
         if method == "hrns/providers/login":
             request = _ProviderSignIn.model_validate(params)
             entry = self.settings.require_entry(request.id)
-            return await self.login.start(
+            if self._active_login is not None and self._active_login.active:
+                raise ValueError("Finish or cancel the current sign-in first.")
+            self._active_login = login
+            return await login.start(
                 request.id,
                 entry,
                 request.method,
                 request.key.get_secret_value() if request.key is not None else None,
             )
         if method == "hrns/providers/login-status":
-            return await self.login.status()
+            return await login.status()
         if method == "hrns/providers/login-cancel":
-            await self.login.cancel()
+            await login.cancel()
             return {}
-        if self.login.active:
+        if self._active_login is not None and self._active_login.active:
             raise ValueError("Finish or cancel the current sign-in before changing providers.")
         removed = self.edit_provider_document(method, params)
         if removed is not None:
@@ -931,7 +940,6 @@ def run(
             _allow_unconfigured=True,
         )
 
-    provider_editor = None if env_only else resolver.manage_provider
     model_memory = remember_model if scope is not None else None
     mcp_capabilities = schema.McpCapabilities(acp=True, http=True, sse=True)
     if local_daemon:
@@ -949,7 +957,7 @@ def run(
 
         def adapter():
             connection = registration.connection()
-            connection._provider_editor = provider_editor
+            connection._provider_editor = None if env_only else resolver.provider_editor()
             connection._remember_model = model_memory
             return connection
 
@@ -962,7 +970,7 @@ def run(
         session_store=store,
         attachment_config=_attachment_config,
         mcp_capabilities=mcp_capabilities,
-        _provider_editor=provider_editor,
+        _provider_editor=None if env_only else resolver.provider_editor(),
         _remember_model=model_memory,
     )
 
