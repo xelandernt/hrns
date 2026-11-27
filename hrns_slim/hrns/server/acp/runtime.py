@@ -25,6 +25,7 @@ from pydantic_ai import (
 )
 from pydantic_ai.agent import AbstractAgent, ModelRequestNode
 from pydantic_ai.capabilities import AgentNode, Hooks
+from pydantic_ai.exceptions import ModelConnectionError
 from pydantic_ai.messages import (
     AgentStreamEvent,
     FunctionToolCallEvent,
@@ -41,6 +42,7 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolCallPart,
     UserContent,
+    repair_messages,
 )
 from pydantic_ai.output import OutputDataT, OutputSpec
 from pydantic_ai.run import AgentRunResultEvent
@@ -425,6 +427,7 @@ class SessionRuntime(
 
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
+        connection_error: ModelConnectionError | None = None
 
         async def inject_steering(
             ctx: RunContext[AgentDepsT], *, node: AgentNode[AgentDepsT]
@@ -528,17 +531,30 @@ class SessionRuntime(
                 await self._fail_outstanding_tool_calls(turn)
                 await self._persist_interrupted_todos(state, turn)
             raise
-        except UsageLimitExceeded as exc:
-            if self.observer is not None:
-                self.observer.interrupted(captured)
+        except (ModelConnectionError, UsageLimitExceeded) as exc:
             await self._fail_outstanding_tool_calls(turn, record=True)
             if captured:
                 earlier_runs = {message.run_id for message in history}
                 for message in captured:
                     if isinstance(message, ModelResponse) and message.run_id not in earlier_runs:
                         usage.incr(message.usage)
-                history = _committable_history(captured, turn.started)
-            stop_reason = _usage_limit_stop_reason(exc)
+            if isinstance(exc, ModelConnectionError):
+                connection_error = exc
+                history = captured or history
+                # A connection failure can leave an empty response in the capture.
+                if history and isinstance(tail := history[-1], ModelResponse):
+                    if tail.state == "interrupted" and not tail.parts:
+                        history = history[:-1]
+                history = repair_messages(history)
+                last_response = _last_response(history)
+                if self.observer is not None:
+                    self.observer.interrupted(history)
+            else:
+                if self.observer is not None:
+                    self.observer.interrupted(captured)
+                if captured:
+                    history = _committable_history(captured, turn.started)
+                stop_reason = _usage_limit_stop_reason(exc)
         except Exception:
             if self.observer is not None:
                 self.observer.interrupted(captured)
@@ -562,6 +578,8 @@ class SessionRuntime(
                 state.session_id,
             )
             stop_reason = "cancelled"
+        if connection_error is not None:
+            raise connection_error
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
 
     async def _announce_title(self, state: SessionState[AgentDepsT]) -> None:

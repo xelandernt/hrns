@@ -735,6 +735,14 @@ using `session/set_config_option` with `hrns/model/automatic` metadata to preser
 explicit preferences. The TUI keeps drafts and queued prompts from sending while a
 model switch is pending or the selected provider has no usable active model.
 
+The built-in agent uses Pydantic AI's `RetryOnModelErrors` for connection
+failures. The capability defaults to three attempts per model request and retries
+a streamed request only before output reaches the client.
+When a prompt ends with Pydantic AI's `ModelConnectionError`, the session saves
+the captured history, including completed tool results, and the visible transcript.
+The next prompt is added as a new user message to that history. The ACP adapter
+returns a short provider connection message and logs the exception with the session ID.
+
 API keys and Copilot tokens are stored in the OS keyring. The Codex provider
 loads and saves its rotating credentials through the same keyring. Accounts
 are scoped to the provider entry, type, and base URL. A login attempt runs in

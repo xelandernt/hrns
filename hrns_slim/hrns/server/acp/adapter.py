@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager, nullcontext
 from typing import Generic, Literal
@@ -10,7 +11,7 @@ from typing import Generic, Literal
 import acp
 from acp import schema
 from acp.interfaces import Client
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.exceptions import ModelConnectionError, ModelHTTPError
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 
@@ -30,6 +31,8 @@ from .store import (
     SessionSummary,
     StoredSession,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -176,6 +179,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
             handle = await session._accept(prompt, self._conn, steer=True)
         try:
             result = await handle.result()
+        except ModelConnectionError as exc:
+            _logger.warning(
+                "Model provider connection failed for session %s", session_id, exc_info=True
+            )
+            raise acp.RequestError(-32603, "Connection to the model provider failed.") from exc
         except ModelHTTPError as exc:
             if self._provider_editor is not None and exc.status_code in {401, 403}:
                 raise acp.RequestError(

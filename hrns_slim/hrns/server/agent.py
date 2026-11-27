@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.capabilities import LocalWorkspace, RetryOnModelErrors
+from pydantic_ai.exceptions import ModelConnectionError
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.workspaces import LocalWorkspaceBackend
@@ -61,6 +62,7 @@ def build_agent(
         name="hrns",
         model_settings=model_settings,
         capabilities=[
+            RetryOnModelErrors[None](retry_on=(ModelConnectionError,)),
             workspace,
             coder or Coder(sub_agents=False),
             # Post-execution hooks run in reverse order, so spills see the
