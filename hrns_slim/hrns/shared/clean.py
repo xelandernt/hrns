@@ -311,7 +311,7 @@ def clean(
                 if not locks.enter_context(try_store_lock(artifact.path)):
                     raise HrnsClientError(
                         f"The local Harness server is using {_display_path(artifact.path)}. "
-                        "Stop the server before cleaning its session history."
+                        "Run `hrns stop` before cleaning its session history."
                     )
             for artifact in sessions:
                 count, problems = _remove(_files_for(artifact))

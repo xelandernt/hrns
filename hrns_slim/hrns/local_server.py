@@ -19,6 +19,7 @@ from platformdirs import user_runtime_path
 from pydantic import BaseModel, Field, ValidationError
 
 from .shared.config import HrnsConfig
+from .shared.errors import HrnsClientError
 
 
 class Endpoint(BaseModel):
@@ -71,59 +72,95 @@ def configuration_id(settings: HrnsConfig, *, env_only: bool) -> str:
     return "environment" if env_only else str(settings.path.resolve())
 
 
-def _running(path: Path) -> Endpoint | None:
+def _read_endpoint(path: Path) -> Endpoint | None:
     try:
-        endpoint = Endpoint.model_validate_json((path / "endpoint.json").read_bytes())
+        return Endpoint.model_validate_json((path / "endpoint.json").read_bytes())
     except (OSError, ValidationError):
         return None
+
+
+def _request(endpoint: Endpoint, method: str, path: str) -> int | None:
     connection = HTTPConnection("127.0.0.1", endpoint.port, timeout=0.3)
     try:
-        connection.request("GET", "/health", headers={"Authorization": f"Bearer {endpoint.token}"})
-        return endpoint if connection.getresponse().status == 204 else None
+        connection.request(method, path, headers={"Authorization": f"Bearer {endpoint.token}"})
+        return connection.getresponse().status
     except (OSError, HTTPException):
         return None
     finally:
         connection.close()
 
 
+def _start(
+    settings: HrnsConfig, directory: Path, *, env_only: bool, setup: bool
+) -> subprocess.Popen[bytes]:
+    args = ["--env-only"] if env_only else []
+    if settings.config_file is not None:
+        args.extend(["--config", str(settings.path)])
+    if setup:
+        args.append("--setup")
+    options = (
+        {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+        if os.name == "nt"
+        else {"start_new_session": True}
+    )
+    fd = os.open(directory / "server.log", os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "ab") as log:
+        return subprocess.Popen(
+            [sys.executable, "-m", "hrns.server.runtime", "--local-daemon", *args],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            **options,
+        )
+
+
 def _find_or_start(settings: HrnsConfig, *, env_only: bool, setup: bool) -> Endpoint:
     directory = runtime_directory(settings.store)
-    endpoint = _running(directory)
-    if endpoint is None:
-        args = ["--env-only"] if env_only else []
-        if settings.config_file is not None:
-            args.extend(["--config", str(settings.path)])
-        if setup:
-            args.append("--setup")
-        options = (
-            {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
-            if os.name == "nt"
-            else {"start_new_session": True}
-        )
-        fd = os.open(directory / "server.log", os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "ab") as log:
-            child = subprocess.Popen(
-                [sys.executable, "-m", "hrns.server.runtime", "--local-daemon", *args],
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                **options,
-            )
-        deadline = time.monotonic() + 20
-        while endpoint is None and time.monotonic() < deadline:
-            child.poll()
-            time.sleep(0.1)
-            endpoint = _running(directory)
-    if endpoint is None:
-        raise SystemExit(
-            f"Could not start the local Harness server. See {directory / 'server.log'}"
-        )
-    if endpoint.configuration != configuration_id(settings, env_only=env_only):
-        raise SystemExit(
-            "The local Harness server uses a different configuration for this session store. "
-            "Use the same configuration or select a separate store."
-        )
-    return endpoint
+    child: subprocess.Popen[bytes] | None = None
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        endpoint = _read_endpoint(directory)
+        if endpoint is not None and _request(endpoint, "GET", "/health") == 204:
+            if endpoint.configuration != configuration_id(settings, env_only=env_only):
+                raise SystemExit(
+                    "The local Harness server uses a different configuration for this session store. "
+                    "Use the same configuration or select a separate store."
+                )
+            return endpoint
+        if child is None or child.poll() == 0:
+            # Wait for any retiring daemon to release its store before starting another.
+            with try_store_lock(settings.store) as acquired:
+                if acquired:
+                    child = _start(settings, directory, env_only=env_only, setup=setup)
+        elif child.returncode is not None:
+            break
+        time.sleep(0.1)
+    raise SystemExit(f"Could not start the local Harness server. See {directory / 'server.log'}")
+
+
+def stop(store: Path) -> bool:
+    """Stop the local daemon for this store and wait for it to release the lock."""
+    directory = runtime_directory(store)
+    stopped: Endpoint | None = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with try_store_lock(store) as acquired:
+            if acquired:
+                return stopped is not None
+        endpoint = _read_endpoint(directory)
+        if stopped is not None:
+            if endpoint is not None and endpoint != stopped:
+                return True  # A new daemon acquired the lock after the old one stopped.
+        elif endpoint is not None:
+            status = _request(endpoint, "POST", "/shutdown")
+            if status == 202:
+                stopped = endpoint
+            elif status is not None:
+                raise HrnsClientError(
+                    f"The local Harness server rejected shutdown (HTTP {status})."
+                )
+        time.sleep(0.1)
+    raise HrnsClientError("Timed out waiting for the local Harness server to stop.")
 
 
 def print_endpoint(

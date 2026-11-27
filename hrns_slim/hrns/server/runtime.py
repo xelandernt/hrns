@@ -961,7 +961,13 @@ def run(
             connection._remember_model = model_memory
             return connection
 
-        serve(server, adapter, store.path, configuration_id(settings, env_only=env_only))
+        serve(
+            server,
+            adapter,
+            store.path,
+            configuration_id(settings, env_only=env_only),
+            has_pending_runs=registration._has_pending_runs,
+        )
         return
 
     run_acp_stdio(

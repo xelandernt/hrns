@@ -393,6 +393,9 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
     async def close(self) -> None:
         await asyncio.gather(*(session.close() for session in tuple(self._sessions.values())))
 
+    def _has_pending_runs(self) -> bool:
+        return any(session.execution_status() != "idle" for session in self._sessions.values())
+
 
 class AcpServer(Generic[PrincipalT]):
     """Own registered agents and live sessions in one process and event loop."""

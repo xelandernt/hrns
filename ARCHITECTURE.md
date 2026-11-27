@@ -395,8 +395,11 @@ port, and writes its endpoint and bearer token into a private runtime directory.
 The launcher reads the normal configuration, checks the authenticated endpoint
 before reuse, and starts the runtime in a separate process on a cold launch.
 Endpoint discovery uses only the base Python package. The server owns
-the runs independently of terminal connections. `hrns clean` takes the same
-store lock before removing session files and reports when the daemon holds it.
+the runs independently of terminal connections. The local daemon shuts down
+after five seconds without ACP clients or active or queued runs. `hrns stop`
+requests shutdown over authenticated loopback HTTP. Shutdown disconnects
+clients, cancels unfinished runs through the ACP server lifecycle, and releases
+the store lock. `hrns clean` takes the same lock before removing session files.
 The packaged WebSocket servers accept ACP messages up to 64 MiB on the wire
 and report oversized messages with WebSocket close code 1009. The packaged `hrns serve`
 command accepts session workspaces within its configured `--cwd` root.

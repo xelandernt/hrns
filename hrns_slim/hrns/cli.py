@@ -230,6 +230,16 @@ def _clean_command(
     return clean(assume_yes=yes, dry_run=dry_run, config=config, keys=keys)
 
 
+def _stop_command(*, config: ConfigOption = None) -> int:
+    from .local_server import load_settings, stop
+
+    if stop(load_settings(config, env_only=False).store):
+        print("Stopped the local Harness server.")
+    else:
+        print("The local Harness server is already stopped.")
+    return EXIT_OK
+
+
 def _agent_command(
     *,
     config: ConfigOption = None,
@@ -396,6 +406,7 @@ def _register_commands(app: App) -> None:
     app.command(_acp_command, name="acp", help="Run an agent over ACP stdio")
     app.command(_serve_command, name="serve", help="Serve the agent over WebSocket and FastAPI")
     app.command(_login_command, name="login", help="Sign in to a configured provider")
+    app.command(_stop_command, name="stop", help="Stop the local server and cancel unfinished runs")
     app.command(
         _clean_command,
         name="clean",
