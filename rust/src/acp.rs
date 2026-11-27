@@ -277,6 +277,7 @@ pub enum Event {
         approval_scope: String,
         workspace: PathBuf,
         remote: bool,
+        client_io: ClientIoMode,
         attachments_supported: bool,
         loaded: bool,
         load_supported: bool,
@@ -340,7 +341,6 @@ pub enum Event {
     },
     Error(String),
     Connecting,
-    #[cfg(not(target_family = "wasm"))]
     SwitchReplayReset,
     ConnectionChanged(String),
     Disconnected,
@@ -393,18 +393,77 @@ pub struct SessionTarget {
     pub session: Option<String>,
 }
 
-impl SessionTarget {
-    pub(crate) fn remember(&mut self, event: &Event) {
+pub struct SessionConnection {
+    target: SessionTarget,
+    previous: Option<SessionTarget>,
+    warning: Option<String>,
+    ready: bool,
+}
+
+impl SessionConnection {
+    pub fn new(target: SessionTarget) -> Self {
+        Self {
+            target,
+            previous: None,
+            warning: None,
+            ready: false,
+        }
+    }
+
+    pub fn begin_attempt(&mut self) -> SessionTarget {
+        self.ready = false;
+        self.target.clone()
+    }
+
+    pub fn switch(&mut self, target: SessionTarget, can_restore: bool) {
+        self.previous = (can_restore && self.ready && self.target.session.is_some())
+            .then(|| self.target.clone());
+        self.target = target;
+    }
+
+    pub fn forward(&mut self, event: Event, events: &Events) {
         if let Event::Ready {
             session,
             workspace,
-            load_supported: true,
+            load_supported,
             ..
-        } = event
+        } = &event
         {
-            self.cwd = Some(workspace.clone());
-            self.session = Some(session.clone());
+            if *load_supported {
+                self.target.cwd = Some(workspace.clone());
+                self.target.session = Some(session.clone());
+            }
+            self.ready = true;
+            self.previous = None;
         }
+        let _ = events.unbounded_send(event);
+        if self.ready
+            && let Some(warning) = self.warning.take()
+        {
+            let _ = events.unbounded_send(Event::Warning(warning));
+        }
+    }
+
+    /// Returns true when the previous session should be reattached immediately.
+    pub fn finish(&mut self, result: Result<(), String>, events: &Events) -> bool {
+        self.ready = false;
+        if let Some(previous) = self.previous.take() {
+            self.target = previous;
+            let reason = result
+                .err()
+                .unwrap_or_else(|| "Disconnected before the session opened".into());
+            self.warning = Some(format!("Could not switch sessions: {reason}"));
+            let _ = events.unbounded_send(Event::SwitchReplayReset);
+            return true;
+        }
+        if let Err(error) = result {
+            let _ = events.unbounded_send(Event::Error(error));
+        }
+        let _ = events.unbounded_send(Event::Disconnected);
+        if let Some(warning) = self.warning.take() {
+            let _ = events.unbounded_send(Event::Warning(warning));
+        }
+        false
     }
 }
 
@@ -572,6 +631,7 @@ pub async fn connect(
                 approval_scope: services.approval_scope,
                 workspace: cwd.clone(),
                 remote: services.remote,
+                client_io: services.client_io,
                 attachments_supported: caps.prompt_capabilities.embedded_context,
                 loaded,
                 load_supported,

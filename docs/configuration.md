@@ -104,7 +104,7 @@ older clients; the native client stores those toggles in its state file instead.
 | `theme` | string | `"hrns"` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark`, or `ansi-light` |
 | `auto_expand_tools` | bool | `false` | Render every tool result expanded |
 | `show_thoughts` | bool | `false` | Stream the agent's reasoning expanded; collapsed reasoning headers remain visible when false |
-| `client_io` | `off` \| `read` \| `all` | `"all"` | What this terminal offers the agent: nothing, filesystem reads, or reads plus writes and terminal commands |
+| `client_io` | `off` \| `read` \| `all` | `"all"` | Local and stdio default for filesystem and terminal access |
 | `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
 | `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |
 
@@ -121,11 +121,11 @@ that installs the toolsets, such as `examples/fastapi_app.py`, exposes `read_fil
 `write_file`, and `run_command` when the client uses `"all"`. With `"read"`, writes
 fall back to the server's own filesystem instead of the client's.
 
-On a `server` profile, `remote_cwd` is the workspace path sent to the agent. The
-current `client_io` implementation also uses that string as its local root, so a
-remote path that does not exist on the client makes `fs/*` requests fail. Until the
-root is decoupled from `remote_cwd`, omit it or set it to a path that also exists
-locally.
+Remote connections default to `client_io = "off"`. To opt in for a trusted
+endpoint, set `client_io` in its server profile or launch with `--client-io`.
+An in-app `/connect` to a different remote endpoint uses `off`.
+With remote client I/O enabled, the session workspace path must also exist on
+the client machine because it supplies the local filesystem root.
 
 ### `[profile.<name>]`
 
@@ -143,7 +143,7 @@ A saved connection. The table key is the profile's name.
 | `token` | string | `""` | Bearer token or secret reference (server) |
 | `remote_cwd` | string | `""` | Workspace path passed directly to a remote agent |
 | `auth_method` | string | `""` | Agent-advertised auth method id to try automatically |
-| `client_io` | `off` \| `read` \| `all` | unset | Overrides `[tui].client_io` for this connection |
+| `client_io` | `off` \| `read` \| `all` | unset | Sets this profile's client I/O mode. The CLI flag takes precedence |
 | `default` | bool | `false` | Candidate for a launch that names no profile |
 | `notes` | string | `""` | Free-form text carried with the profile |
 

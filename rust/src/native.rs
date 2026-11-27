@@ -19,7 +19,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{WebSocketConfig, frame::coding::CloseCode};
 
-use crate::acp::{self, Actions, ClientIoMode, Connection, Event, Events, Services, SessionTarget};
+use crate::acp::{
+    self, Actions, ClientIoMode, Connection, Event, Events, Services, SessionConnection,
+    SessionTarget,
+};
 use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments;
 use crate::effort::EffortProfile;
@@ -134,6 +137,10 @@ impl Options {
             None => Some(env::current_dir().map_err(|error| error.to_string())?),
         };
         let target = target.unwrap_or_else(Target::builtin);
+        let client_io = client_io.unwrap_or(match &target {
+            Target::Remote(_) => ClientIoMode::Off,
+            _ => ClientIoMode::All,
+        });
         let mcp_config = mcp_config
             .or_else(|| env::var_os("HRNS_CONFIG_FILE").map(PathBuf::from))
             .map(std::path::absolute)
@@ -142,7 +149,7 @@ impl Options {
         Ok(Some(Self {
             session: SessionTarget { cwd, session },
             target,
-            client_io: client_io.unwrap_or(ClientIoMode::All),
+            client_io,
             theme,
             mcp_config,
             effort_profile,
@@ -440,19 +447,16 @@ async fn supervise(
     services: Services,
 ) {
     use futures::{FutureExt, StreamExt, select_biased};
-    let mut target = options.session.clone();
+    let mut session = SessionConnection::new(options.session.clone());
     let mut transport = options.target.clone();
-    let mut rollback = None;
-    let mut switch_error = None;
     loop {
-        let mut ready = false;
         let request = {
             let (scoped_events, scoped_receiver) = mpsc::unbounded();
             let mut scoped_receiver = scoped_receiver.fuse();
             let connection = connect(
                 &transport,
                 &options.target,
-                target.clone(),
+                session.begin_attempt(),
                 actions,
                 scoped_events,
                 services.clone(),
@@ -463,35 +467,16 @@ async fn supervise(
                 select_biased! {
                     _ = stop.next() => return,
                     request = requests.next() => break Ok(request),
-                    event = scoped_receiver.select_next_some() => {
-                        target.remember(&event);
-                        if matches!(&event, Event::Ready { .. }) {
-                            ready = true;
-                            rollback = None;
-                        }
-                        let _ = events.unbounded_send(event);
-                        if ready && let Some(message) = switch_error.take() {
-                            let _ = events.unbounded_send(Event::Warning(message));
-                        }
-                    }
+                    event = scoped_receiver.select_next_some() => session.forward(event, &events),
                     result = connection => break Err(result),
                 }
             }
         };
         let request = match request {
             Ok(request) => request,
-            Err(Err(error)) if !ready && rollback.is_some() => {
-                if let Some(previous) = rollback.take() {
-                    target = previous;
-                }
-                switch_error = Some(format!("Could not switch sessions: {error}"));
-                let _ = events.unbounded_send(Event::SwitchReplayReset);
-                continue;
-            }
             Err(result) => {
-                finish(&events, result);
-                if let Some(message) = switch_error.take() {
-                    let _ = events.unbounded_send(Event::Warning(message));
+                if session.finish(result, &events) {
+                    continue;
                 }
                 select_biased! {
                     _ = stop.next() => return,
@@ -500,33 +485,32 @@ async fn supervise(
             }
         };
         let Some(request) = request else { return };
-        if ready
-            && matches!(request, Connection::Switch(_))
-            && !matches!(transport, Target::Stdio { .. })
-        {
-            rollback = Some(target.clone());
-        }
-        apply(options, &mut transport, &mut target, request, &events);
+        apply(options, &mut transport, &mut session, request, &events);
     }
 }
 
 fn apply(
     options: &Options,
     transport: &mut Target,
-    target: &mut SessionTarget,
+    session: &mut SessionConnection,
     request: Connection,
     events: &Events,
 ) {
     match request {
         Connection::Reconnect => {}
-        Connection::Switch(next) => *target = next,
+        Connection::Switch(next) => {
+            session.switch(next, !matches!(transport, Target::Stdio { .. }))
+        }
         Connection::Connect(next) => match connection_target(&options.target, &next) {
             Ok((next_transport, cwd, label)) => {
                 *transport = next_transport;
-                *target = SessionTarget {
-                    cwd: Some(cwd),
-                    session: None,
-                };
+                session.switch(
+                    SessionTarget {
+                        cwd: Some(cwd),
+                        session: None,
+                    },
+                    false,
+                );
                 let _ = events.unbounded_send(Event::ConnectionChanged(label));
             }
             Err(error) => {
@@ -643,9 +627,12 @@ async fn connect(
             services.remote = true;
             services.managed_sessions = true;
             services.approval_scope = format!("websocket:{url}");
-            let token = matches!(startup, Target::Remote(original) if original == url)
-                .then(|| env::var("HRNS_TUI_TOKEN").ok())
-                .flatten();
+            let token = if transport == startup {
+                env::var("HRNS_TUI_TOKEN").ok()
+            } else {
+                services.client_io = ClientIoMode::Off;
+                None
+            };
             connect_websocket(url, token.as_deref(), target, actions, events, services).await
         }
     }
@@ -707,13 +694,6 @@ fn message_text(message: Message) -> Result<Option<String>, String> {
         )),
         _ => Ok(None),
     }
-}
-
-fn finish(events: &Events, result: Result<(), String>) {
-    if let Err(error) = result {
-        let _ = events.unbounded_send(Event::Error(error));
-    }
-    let _ = events.unbounded_send(Event::Disconnected);
 }
 
 fn translate(key: KeyEvent) -> Option<Key> {

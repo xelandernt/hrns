@@ -692,7 +692,6 @@ impl Transcript {
         true
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub fn retry_replay(&mut self) {
         if let Some(from) = self.replay_from {
             self.trim(from);

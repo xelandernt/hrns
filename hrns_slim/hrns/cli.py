@@ -1062,13 +1062,13 @@ def _command_connect(args: SimpleNamespace) -> int:
     # Record the identity before exec. A profile or the built-in runtime reopens on a
     # bare launch; an ad-hoc command line has no document entry to reopen.
     config.remember_connection(config.connection_identity(target.profile))
-    # Precedence: CLI flag, then profile, then [tui].
-    client_io = args.client_io or target.profile.client_io or config.tui.client_io
+    default_client_io = "off" if target.kind == "remote" else config.tui.client_io
+    client_io = args.client_io or target.profile.client_io or default_client_io
     return run_rust_preview(
         target,
         session=args.session,
         explicit_cwd=args.cwd,
-        client_io=client_io or "all",
+        client_io=client_io,
         theme=config.tui.theme,
         config=config,
     )

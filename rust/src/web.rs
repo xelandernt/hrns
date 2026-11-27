@@ -20,7 +20,9 @@ use web_sys::{
 };
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
-use crate::acp::{self, ClientIoMode, Connection, Event, Services, SessionTarget};
+use crate::acp::{
+    self, ClientIoMode, Connection, Event, Services, SessionConnection, SessionTarget,
+};
 use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments::{Attachment, MAX_FILE_BYTES};
 use crate::socket;
@@ -213,7 +215,7 @@ fn run_connection(
 ) {
     wasm_bindgen_futures::spawn_local(async move {
         use futures::{FutureExt, select_biased};
-        let (mut endpoint, mut target) = match config {
+        let (mut endpoint, target) = match config {
             Ok((endpoint, target)) => (Ok(endpoint), target),
             Err(error) => (
                 Err(error),
@@ -223,13 +225,14 @@ fn run_connection(
                 },
             ),
         };
+        let mut session = SessionConnection::new(target);
         loop {
             let request = {
                 let (attempt_events, updates) = mpsc::unbounded();
                 let mut updates = updates.fuse();
                 let connection = connect_attempt(
                     endpoint.clone(),
-                    target.clone(),
+                    session.begin_attempt(),
                     &mut action_rx,
                     attempt_events,
                 )
@@ -237,31 +240,34 @@ fn run_connection(
                 futures::pin_mut!(connection);
                 loop {
                     select_biased! {
-                        request = requests_rx.next().fuse() => break request,
-                        event = updates.select_next_some() => {
-                            target.remember(&event);
-                            let _ = event_tx.unbounded_send(event);
-                        }
-                        result = connection => {
-                            if let Err(error) = result {
-                                let _ = event_tx.unbounded_send(Event::Error(error));
-                            }
-                            let _ = event_tx.unbounded_send(Event::Disconnected);
-                            break requests_rx.next().await;
-                        }
+                        request = requests_rx.next().fuse() => break Ok(request),
+                        event = updates.select_next_some() => session.forward(event, &event_tx),
+                        result = connection => break Err(result),
                     }
+                }
+            };
+            let request = match request {
+                Ok(request) => request,
+                Err(result) => {
+                    if session.finish(result, &event_tx) {
+                        continue;
+                    }
+                    requests_rx.next().await
                 }
             };
             match request {
                 Some(Connection::Reconnect) => {}
-                Some(Connection::Switch(next)) => target = next,
+                Some(Connection::Switch(next)) => session.switch(next, true),
                 Some(Connection::Connect(next)) => match connection_target(&next) {
                     Ok((url, cwd)) => {
                         let _ = event_tx.unbounded_send(Event::ConnectionChanged(url.host()));
-                        target = SessionTarget {
-                            cwd: Some(cwd),
-                            session: None,
-                        };
+                        session.switch(
+                            SessionTarget {
+                                cwd: Some(cwd),
+                                session: None,
+                            },
+                            false,
+                        );
                         endpoint = Ok(url);
                     }
                     Err(error) => {
@@ -475,11 +481,11 @@ fn bind_input(
         })?
     };
     let paste = Listener::new(terminal.clone(), "paste", move |event: ClipboardEvent| {
-        if let Some(data) = event.clipboard_data() {
-            if let Ok(text) = data.get_data("text/plain") {
-                event.prevent_default();
-                app.borrow_mut().paste(&text);
-            }
+        if let Some(data) = event.clipboard_data()
+            && let Ok(text) = data.get_data("text/plain")
+        {
+            event.prevent_default();
+            app.borrow_mut().paste(&text);
         }
     })?;
     Ok(InputBindings {

@@ -51,9 +51,10 @@ local Rust source. Run either command after editing the TUI to refresh the
 executable. Published wheels are available on the platforms listed in the
 [release guide](docs/release.md#version-matched-native-dependency).
 
-The launcher resolves the target and passes `client_io` (CLI, profile, then `[tui]`),
-the TOML theme, permission mode and credentials, then replaces itself with the native
-executable. To build the browser bundle, run `npm ci --prefix npm` and then
+The launcher passes the connection settings to the native executable. Remote
+client I/O is off unless enabled for that endpoint by a CLI flag or profile.
+See [client I/O configuration](docs/configuration.md#tui) for details.
+To build the browser bundle, run `npm ci --prefix npm` and then
 `trunk build --locked --release` from `rust/`. Serve `rust/dist/` from the ACP origin.
 See [architecture](ARCHITECTURE.md#rust-terminal-preview) and
 [browser deployment](docs/authentication.md#serve-the-ratzilla-client-with-acp-authentication).

@@ -94,9 +94,12 @@ capabilities are never advertised.
 The Python dispatcher always launches the installed native wheel; the release
 installs it with the Python client. A source checkout without the wheel reports an
 install hint instead of opening a Python terminal. The dispatcher resolves the target
-and existing credential references before replacing the Python process on POSIX. It also resolves `client_io` with the
-documented precedence (CLI, profile, `[tui]`) and passes the TOML theme and
-permission mode as launch defaults. The native process
+and existing credential references before replacing the Python process on POSIX.
+The CLI flag takes precedence over the profile's `client_io`. Local and stdio
+launches fall back to `[tui].client_io`, and remote launches fall back to `off`.
+The native client uses `off` when changing to a remote endpoint other than its
+launch target. The client advertises and enforces the same mode for each connection.
+The native process
 inherits the terminal and owns terminal restoration and the ACP connection.
 The Rust state file is authoritative only for values the user changes in the
 native UI; unchanged values keep following the Python document. The default uv
@@ -356,7 +359,9 @@ latest session activity. Search filters paged ACP summaries by title, ID, and wo
 Tab switches between the current
 workspace and all accessible workspaces. On a Harness server the view refreshes
 while open, showing running, waiting for input, and attached-elsewhere states.
-Selecting a session loads it and releases the previous attachment. Background
+Selecting a session loads it and releases the previous attachment. Native
+WebSocket and browser clients reattach the previous session if the switch fails
+and the server supports loading that session. Background
 status is visible in this view. Ctrl+N creates a session in the current
 workspace or opens an editable workspace path in the all-workspaces view.
 Path completion matches local directories on local connections and known

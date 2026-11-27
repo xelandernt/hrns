@@ -388,6 +388,7 @@ impl App {
                 approval_scope,
                 workspace,
                 remote,
+                client_io,
                 attachments_supported,
                 loaded,
                 load_supported,
@@ -420,6 +421,7 @@ impl App {
                 }
                 self.workspace = Some(workspace);
                 self.remote = remote;
+                self.client_io = client_io;
                 if self.session.as_deref() != Some(&session) {
                     self.selected_provider = None;
                     if self.managed_sessions {
@@ -685,10 +687,10 @@ impl App {
                 self.status = "Reconnecting";
                 self.refresh_completion();
             }
-            #[cfg(not(target_family = "wasm"))]
             Event::SwitchReplayReset => {
                 self.transcript.retry_replay();
                 self.replay_plan = None;
+                self.event(Event::Connecting);
             }
             Event::McpConsent {
                 name,
