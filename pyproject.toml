@@ -47,7 +47,7 @@ bump = true
 fallback-version = "0.0.1"
 
 [tool.hatch.metadata.hooks.uv-dynamic-versioning]
-dependencies = ["hrns-slim[client,server]=={{ version }}"]
+dependencies = ["hrns-slim[client,headless,server]=={{ version }}"]
 
 [tool.hatch.metadata.hooks.uv-dynamic-versioning.optional-dependencies]
 ag-ui = ["hrns-slim[ag-ui]=={{ version }}"]

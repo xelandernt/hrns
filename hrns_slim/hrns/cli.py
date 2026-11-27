@@ -384,10 +384,6 @@ def _mcp_auth_command(name: str, *, config: ConfigOption = None) -> int:
     return asyncio.run(_mcp_auth(_namespace(config=config, name=name)))
 
 
-def _mcp_native_token_command(name: str, *, config: ConfigOption = None) -> int:
-    return asyncio.run(_mcp_native_token(_namespace(config=config, name=name)))
-
-
 def _mcp_logout_command(name: str, *, config: ConfigOption = None) -> int:
     return asyncio.run(_mcp_logout(_namespace(config=config, name=name)))
 
@@ -457,7 +453,6 @@ def _register_commands(app: App) -> None:
     mcp.command(
         _mcp_logout_command, name="logout", help="Forget stored OAuth tokens for an MCP server"
     )
-    mcp.command(_mcp_native_token_command, name="_native-token", show=False)
     app.command(mcp)
 
 
@@ -498,12 +493,15 @@ def _config(args: SimpleNamespace) -> HrnsConfig:
     return HrnsConfig(config_file=path) if path is not None else HrnsConfig()
 
 
-def _require_client_extra() -> None:
+def _require_headless_extra() -> None:
     """Fail with an install hint instead of an ImportError from a missing extra."""
-    if all(importlib.util.find_spec(name) is not None for name in ("acp", "websockets", "fastmcp")):
+    if all(
+        importlib.util.find_spec(name) is not None
+        for name in ("acp", "websockets", "fastmcp", "mcp")
+    ):
         return
     raise HrnsClientError(
-        "This command needs the client extra. Install it with `pip install 'hrns-slim[client]'`."
+        "This command needs the headless extra. Install it with `pip install 'hrns-slim[headless]>0.0.28'`."
     )
 
 
@@ -879,7 +877,7 @@ def _answers(args: SimpleNamespace) -> dict[str, Any]:
 
 
 async def _command_run(args: SimpleNamespace) -> int:
-    _require_client_extra()
+    _require_headless_extra()
     from .client.client import HrnsAcpClient
     from .client.headless import run_headless
     from .client.interactions import HeadlessInteractions
@@ -983,7 +981,6 @@ def _command_profiles(args: SimpleNamespace) -> int:
 
 
 async def _command_login(args: SimpleNamespace) -> int:
-    _require_client_extra()
     _require_server_extra()
     from getpass import getpass
 
@@ -1049,14 +1046,13 @@ def _initial_connection(
 
 
 def _command_connect(args: SimpleNamespace) -> int:
-    _require_client_extra()
     config = _config(args)
     from .client.rust_preview import native_executable, run_rust_preview
 
     if native_executable() is None:
         raise HrnsClientError(
             "The native client is not installed. Install it with "
-            "`python -m pip install hrns-tui`, or run `just install` in a source "
+            "`pip install 'hrns-slim[client]>0.0.28'`, or run `just install` in a source "
             "checkout."
         )
     target, reason = _initial_connection(config, args)
@@ -1240,7 +1236,16 @@ def _mcp_get(args: SimpleNamespace) -> int:
     return EXIT_OK
 
 
+def _require_python_mcp() -> None:
+    if importlib.util.find_spec("fastmcp") is None:
+        raise HrnsClientError(
+            "Python MCP OAuth needs the headless or server extra. Install "
+            "`hrns-slim[headless]>0.0.28`, or manage terminal sign-in in /mcp."
+        )
+
+
 async def _mcp_auth(args: SimpleNamespace) -> int:
+    _require_python_mcp()
     settings, _path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     if not server.is_http:
@@ -1262,30 +1267,8 @@ async def _mcp_auth(args: SimpleNamespace) -> int:
     return EXIT_OK
 
 
-async def _mcp_native_token(args: SimpleNamespace) -> int:
-    """Resolve an already-authorized token for the native client's private pipe."""
-    from fastmcp.client.auth.oauth import TokenStorageAdapter
-
-    settings, _path = _mcp_config(args)
-    server = _mcp_server_or_error(settings, args.name)
-    if not server.enabled or server.oauth_config() is None:
-        return EXIT_FAILURE
-    store = build_token_store(settings.mcp.token_store, settings.mcp.token_store_path)
-    storage = TokenStorageAdapter(async_key_value=store, server_url=server.url)
-    if await storage.get_tokens() is None:
-        return EXIT_FAILURE
-
-    # Let the existing OAuth client refresh expired credentials without a browser.
-    async with build_client(server, store=store):
-        pass
-    tokens = await storage.get_tokens()
-    if tokens is None:
-        return EXIT_FAILURE
-    print(json.dumps((server.url, tokens.access_token)))
-    return EXIT_OK
-
-
 async def _mcp_logout(args: SimpleNamespace) -> int:
+    _require_python_mcp()
     settings, _path = _mcp_config(args)
     server = _mcp_server_or_error(settings, args.name)
     store = build_token_store(settings.mcp.token_store, settings.mcp.token_store_path)

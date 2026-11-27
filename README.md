@@ -12,14 +12,17 @@ for terminals and editors.
 ## Install
 
 ```sh
-uvx hrns
+uvx --from 'hrns>0.0.28' hrns
 ```
 
-Or install with `pip install hrns`. Both include the terminal client and server; `pip`
-also installs the native `hrns-tui` binary on Linux x64, macOS and Windows x64.
+Or install with `pip install 'hrns>0.0.28'`. The full install includes the native
+terminal, headless runner, and server. The native wheel supports Linux x64 with
+glibc, macOS arm64 and x64, and Windows x64. The version floor excludes older
+releases that shipped the Python terminal.
 
-For a minimal installation, use `hrns-slim`, adding `[client]` for the terminal or
-`[server]` for the agent and HTTP entry points. Without extras, it provides the shared
+For a smaller install, use `hrns-slim` with `[client]` for the native terminal,
+`[headless]` for scripted prompts, or `[server]` for the agent and HTTP entry points.
+See the [install commands](docs/release.md#version-matched-native-dependency). Without extras, it provides the shared
 `hrns config`, `profiles`, and `mcp` commands. Python imports and the command remain `hrns`.
 
 For local development, install Rust 1.90 or newer and run `just install`.
@@ -105,7 +108,7 @@ server.mount_acp(app, prefix="/acp")
 server.mount_ag_ui(app, prefix="/ag-ui")
 ```
 
-Install observation support with `pip install 'hrns[ag-ui]'`.
+Install observation support with `pip install 'hrns[ag-ui]>0.0.28'`.
 Use `AcpServer` when only ACP is needed. Register multiple factories under different
 agent IDs. One ACP client may interact with a session while any number of AG-UI clients
 observe it. Execution survives client disconnects.

@@ -3,9 +3,9 @@
 ## Distribution packages
 
 `hrns` is the default distribution: a metadata-only wrapper depending on the same
-version of `hrns-slim[client,server]`. Its `ag-ui` extra forwards to `hrns-slim[ag-ui]`.
+version of `hrns-slim[client,headless,server]`. Its `ag-ui` extra forwards to `hrns-slim[ag-ui]`.
 `hrns-slim`, defined in `hrns_slim/pyproject.toml`, owns all code in `hrns_slim/hrns` and retains
-the `client`, `server`, and `ag-ui` extras. Both distributions expose the `hrns` command;
+the `client`, `headless`, `server`, and `ag-ui` extras. Both distributions expose the `hrns` command;
 Python imports remain `hrns`. Runtime version reporting reads `hrns-slim` metadata.
 
 Both packages use Hatchling with the `uv-dynamic-versioning` version source and
@@ -103,14 +103,21 @@ development group resolves `hrns-tui` from `rust/`. Maturin builds the local
 wheel. uv tracks the Cargo manifests and Rust sources when deciding whether to
 rebuild it. The local binary reports the crate's preview version.
 
-The published `hrns` wheel declares `hrns-tui==<version>` with markers for Linux
-x64, macOS arm64/x64 and Windows x64, so `pip install hrns` installs the native
-client at the same version while `hrns-slim[server]` and `hrns-slim[client]`
-stay Python-only. Source installs use the local development dependency.
-The publish workflow sets the release pin in the wrapper metadata with
-`scripts/release_native_dependency.py` after `just check`, rebuilds `dist/`, and
-asserts the result. See
-[the release guide](docs/release.md#version-matched-native-dependency).
+The published `hrns-slim[client]` extra declares `hrns-tui==<version>`. The wrapper
+uses `hrns-slim[client,headless,server]`. Requests for the native client need a
+compatible wheel from the release matrix. The `headless` extra owns the Python
+ACP and MCP stack for `hrns run`, and the `server` extra owns the Python runtime.
+The publish workflow sets the pin in the slim metadata after `just check` and
+verifies the resulting wheels and source
+distributions. The development workspace resolves the local Rust crate.
+See [the release guide](docs/release.md#version-matched-native-dependency).
+
+The release also ships `@xelandernt/hrns-tui`, an ES module with the browser
+Wasm and TypeScript declarations. `mountTerminal` embeds Ratzilla's canvas in the
+host element and returns a handle for focus and disposal. Resizing recreates the
+canvas while keeping the terminal session. Disposal stops drawing, removes input
+listeners, and ends the ACP connection. The standalone Trunk build and npm package
+use the same Rust browser client and DOM lifecycle code.
 
 The approval panel takes the composer's place while a tool approval is in
 focus. It shows the tool kind and a scrollable preview above numbered choices.
@@ -151,15 +158,23 @@ omits reverse requests, subscriptions, and multi-round-trip interactions
 for legacy servers. The negotiated upstream revision appears in `/mcp`.
 Review the adapter as part of [release maintenance](MAINTENANCE.md#mcp-protocol-compatibility).
 
-Configured HTTP authorization headers take precedence. For an OAuth challenge, the native
-client can reuse stored credentials through the Python CLI's MCP OAuth client.
-The `/mcp` picker can open the browser sign-in flow and persist credentials
-in the configured token store. The active attachment keeps its declarations.
+Configured HTTP authorization headers take precedence. When an upstream requires
+OAuth, the native client uses the Rust MCP SDK for authorization server discovery,
+registration, PKCE, and token refresh. The
+`/mcp` menu opens an authorization page in the browser and receives the callback
+over loopback. Native credentials use the configured file or OS keyring backend
+under a dedicated namespace. The file backend publishes token updates atomically,
+and the store coordinates refreshes between terminal processes. A credential
+write or delete retains the lock through its blocking operation. Signing out
+in `/mcp` clears the native credentials even when the server is offline and
+drops any active upstream from the session.
+The Python MCP commands and headless sessions use the Python credential namespace.
+
 A later session setup, including reopening a saved session, can attach the
-newly authorized server. The native client asks before
-starting an enabled server unless its configuration already grants consent.
-`always allow` updates the local TOML file. Local and remote Harness servers
-consume the same declarations. Browser sessions omit client MCP capabilities.
+newly authorized server. The native client asks before starting an enabled
+server unless its configuration already grants consent. `always allow`
+updates the local TOML file. Local and remote Harness servers consume the same
+declarations. Browser sessions omit client MCP capabilities.
 
 Agent forms (`elicitation/create`) render as a dock above the composer. A form
 walks its fields in order: typing edits text and number fields, `1`-`6` choose,

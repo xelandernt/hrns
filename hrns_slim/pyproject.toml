@@ -21,7 +21,10 @@ dependencies = [
 ]
 
 [tool.hatch.metadata.hooks.uv-dynamic-versioning.optional-dependencies]
+# Release builds add the version-matched native wheel to this extra.
 client = [
+]
+headless = [
     "agent-client-protocol>=1.0.0,<2",
     "websockets>=13,<16",
     "PyYAML>=6,<7",

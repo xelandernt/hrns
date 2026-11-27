@@ -144,11 +144,18 @@ declare and reconnect the same way as `session/new`. `hrns agent` itself support
 | Streamable HTTP | `url`, `headers` | Pass credentials in client-side headers |
 | Legacy HTTP+SSE | `url` | Supported by the Python headless client |
 
-Headers and environment values support `{env:NAME}` expansion. The Python headless
-client keeps OAuth tokens in the configured token store. Run
-`hrns mcp auth <name>` to perform an interactive login and
-`hrns mcp logout <name>` to clear the tokens. Complete interactive authentication before exporting.
-Authentication failures are logged and the affected server is skipped for that session.
+Headers and environment values support `{env:NAME}` expansion.
+
+- In the Rust terminal, open `/mcp` and press Space on a server marked **Sign-in
+  required**. Complete the browser login, then start a new session to use the
+  server. Open the server’s details and press **Shift+L** to clear its stored
+  credentials, including when the server is offline.
+- For Python sessions, run `hrns mcp auth <name>` to sign in and
+  `hrns mcp logout <name>` to clear the Python credentials. These commands are
+  available with the `headless` or `server` extra.
+
+Each client stores its own credentials using the backend configured in `[mcp]`.
+Authentication failures appear in the server’s health status.
 
 ## Request scope
 

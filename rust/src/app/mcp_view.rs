@@ -9,7 +9,7 @@ use super::{
     picker::{Picker, Source},
 };
 #[cfg(not(target_family = "wasm"))]
-use crate::acp::Action;
+use crate::{acp::Action, mcp_types::AuthAction};
 use crate::{
     mcp_types::{Health, SIGN_IN_REQUIRED},
     theme::Palette,
@@ -24,11 +24,16 @@ pub(super) struct McpDetails {
 
 impl App {
     pub(super) fn mcp_status<'a>(&'a self, item: &'a Health) -> &'a str {
-        if self.mcp_signing_in.as_deref() == Some(&item.name) {
-            "Signing in…"
-        } else {
-            &item.state
+        #[cfg(not(target_family = "wasm"))]
+        if let Some((name, action)) = &self.mcp_authentication
+            && name == &item.name
+        {
+            return match action {
+                AuthAction::SignIn => "Signing in…",
+                AuthAction::SignOut => "Signing out…",
+            };
         }
+        &item.state
     }
 
     pub(super) fn mcp_picker_key(&mut self, key: Key) -> bool {
@@ -39,7 +44,11 @@ impl App {
             return false;
         };
         #[cfg(not(target_family = "wasm"))]
-        if matches!(key, Key::Text(' ')) {
+        if let Some(action) = match key {
+            Key::Text(' ') => Some(AuthAction::SignIn),
+            Key::Text('L') if detail.is_some() => Some(AuthAction::SignOut),
+            _ => None,
+        } {
             let name = detail
                 .as_ref()
                 .map(|detail| detail.name.clone())
@@ -49,17 +58,23 @@ impl App {
                         .map(|row| row.value.clone())
                 });
             if let Some(name) = name
-                && self.mcp_signing_in.is_none()
-                && self
-                    .mcp_health
-                    .iter()
-                    .any(|item| item.name == name && item.state == SIGN_IN_REQUIRED)
+                && self.mcp_authentication.is_none()
+                && self.mcp_health.iter().any(|item| {
+                    item.name == name
+                        && match action {
+                            AuthAction::SignIn => item.state == SIGN_IN_REQUIRED,
+                            AuthAction::SignOut => item.can_sign_out,
+                        }
+                })
                 && self
                     .actions
-                    .unbounded_send(Action::McpSignIn(name.clone()))
+                    .unbounded_send(Action::McpAuthenticate {
+                        name: name.clone(),
+                        action,
+                    })
                     .is_ok()
             {
-                self.mcp_signing_in = Some(name);
+                self.mcp_authentication = Some((name, action));
             }
             return true;
         }
@@ -120,18 +135,44 @@ impl App {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub(super) fn mcp_sign_in_result(&mut self, name: String, result: Result<(), String>) {
-        if self.mcp_signing_in.as_deref() != Some(&name) {
+    pub(super) fn mcp_authentication_result(
+        &mut self,
+        name: String,
+        action: AuthAction,
+        result: Result<(), String>,
+    ) {
+        if !self
+            .mcp_authentication
+            .as_ref()
+            .is_some_and(|(pending, operation)| pending == &name && *operation == action)
+        {
             return;
         }
-        self.mcp_signing_in = None;
+        self.mcp_authentication = None;
         if let Some(item) = self.mcp_health.iter_mut().find(|item| item.name == name) {
             match result {
-                Ok(()) => {
-                    item.state = "Signed in · reconnect or start a new session".into();
-                    item.detail = "Available at the next session setup. Start a new session or reopen a saved one.".into();
-                    item.startup_failure = None;
-                }
+                Ok(()) => match action {
+                    AuthAction::SignIn => {
+                        item.startup_failure = None;
+                        item.oauth_signed_in = true;
+                        item.state = "Signed in · reconnect or start a new session".into();
+                        item.detail = "Available at the next session setup. Start a new session or reopen a saved one.".into();
+                    }
+                    AuthAction::SignOut if item.oauth_signed_in => {
+                        item.startup_failure = None;
+                        item.oauth_signed_in = false;
+                        item.state = SIGN_IN_REQUIRED.into();
+                        item.detail =
+                            "Signed out. Sign in and start a new session to use this server."
+                                .into();
+                    }
+                    AuthAction::SignOut => {
+                        const CLEARED: &str = "Stored MCP credentials cleared.";
+                        if !item.detail.starts_with(CLEARED) {
+                            item.detail = format!("{CLEARED}\n\n{}", item.detail);
+                        }
+                    }
+                },
                 Err(error) => {
                     item.detail = error;
                     if let Some(Picker {
@@ -188,8 +229,17 @@ impl App {
         let status = detail
             .map(|(item, _)| self.mcp_status(item))
             .or_else(|| selected.map(|row| row.detail.as_str()));
-        let sign_in = if status == Some(SIGN_IN_REQUIRED) && self.mcp_signing_in.is_none() {
+        #[cfg(not(target_family = "wasm"))]
+        let authentication_idle = self.mcp_authentication.is_none();
+        #[cfg(target_family = "wasm")]
+        let authentication_idle = false;
+        let sign_in = if authentication_idle && status == Some(SIGN_IN_REQUIRED) {
             "   Space sign in"
+        } else {
+            ""
+        };
+        let sign_out = if authentication_idle && detail.is_some_and(|(item, _)| item.can_sign_out) {
+            "   L sign out"
         } else {
             ""
         };
@@ -263,7 +313,7 @@ impl App {
             picker.hint(false, false)
         };
         frame.render_widget(
-            Line::from(format!("{hint}{sign_in}")).fg(palette.muted),
+            Line::from(format!("{hint}{sign_in}{sign_out}")).fg(palette.muted),
             footer,
         );
     }

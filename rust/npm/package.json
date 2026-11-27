@@ -1,0 +1,25 @@
+{
+  "name": "@xelandernt/hrns-tui",
+  "version": "0.0.0",
+  "description": "Mount the hrns terminal in a browser application",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xelandernt/hrns.git",
+    "directory": "rust/npm"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": ["index.js", "index.d.ts", "terminal.js", "wasm/*.js", "wasm/*.wasm"],
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

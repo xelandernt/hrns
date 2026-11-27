@@ -36,6 +36,13 @@ pub enum ConsentDecision {
     Deny,
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthAction {
+    SignIn,
+    SignOut,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Health {
     pub name: String,
@@ -45,4 +52,7 @@ pub struct Health {
     pub detail: String,
     pub startup_failure: Option<String>,
     pub protocol: String,
+    #[cfg(not(target_family = "wasm"))]
+    pub oauth_signed_in: bool,
+    pub can_sign_out: bool,
 }

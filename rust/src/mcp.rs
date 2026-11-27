@@ -4,7 +4,7 @@ mod auth;
 mod config;
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,7 +27,9 @@ use rmcp::service::{
     ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext,
     PeerRequestOptions, RoleClient, RunningService,
 };
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClient, StreamableHttpClientTransportConfig,
+};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{ClientHandler, ServiceError};
 use serde_json::{Value, json};
@@ -37,7 +39,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::acp::{Event, Events};
-use crate::mcp_types::{AcpMcpNotification, ConsentDecision, Health, SIGN_IN_REQUIRED};
+use crate::mcp_types::{AcpMcpNotification, AuthAction, ConsentDecision, Health, SIGN_IN_REQUIRED};
 
 const MCP_VERSION: &str = "2026-07-28";
 const PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
@@ -55,7 +57,8 @@ pub struct Provider(Arc<Mutex<Registry>>);
 struct Registry {
     servers: HashMap<McpServerAcpId, Arc<Upstream>>,
     active: HashSet<(McpServerAcpId, McpRequestId)>,
-    sign_in: HashMap<String, PathBuf>,
+    logins: HashMap<String, auth::Login>,
+    credential_stores: HashMap<String, auth::Store>,
 }
 
 struct Operation {
@@ -125,6 +128,14 @@ impl Provider {
                 target: settings.target(),
                 ..Health::default()
             };
+            if let (Some(oauth), Ok(url)) = (settings.oauth(), reqwest::Url::parse(&settings.url))
+                && let Ok(store) =
+                    auth::Store::new(&settings.credentials, &url, oauth.client_id.trim())
+                && let Ok(mut registry) = self.0.lock()
+            {
+                registry.credential_stores.insert(name.clone(), store);
+                status.can_sign_out = true;
+            }
             if !settings.enabled {
                 status.state = "disabled".into();
             } else if !supported {
@@ -135,14 +146,18 @@ impl Provider {
                 if decision == ConsentDecision::Deny {
                     status.state = "denied".into();
                 } else {
-                    match Upstream::connect(&name, settings, &path).await {
-                        Ok(upstream) => {
+                    match Upstream::connect(&name, settings).await {
+                        Ok((upstream, login)) => {
                             if let Some(info) = upstream.service.peer_info() {
                                 status.protocol = info.protocol_version.to_string();
                             }
                             let id = McpServerAcpId::new(uuid::Uuid::new_v4().to_string());
                             if let Ok(mut registry) = self.0.lock() {
                                 registry.servers.insert(id.clone(), Arc::new(upstream));
+                                if let Some(login) = login {
+                                    registry.logins.insert(name.clone(), login);
+                                    status.oauth_signed_in = true;
+                                }
                                 declarations.push(McpServer::Acp(McpServerAcp::new(name, id)));
                                 status.state = "connected".into();
                             }
@@ -155,14 +170,14 @@ impl Provider {
                                 )));
                             }
                         }
-                        Err(StartupError::SignInRequired) => {
+                        Err(StartupError::SignInRequired(login)) => {
                             status.state = SIGN_IN_REQUIRED.into();
                             status.startup_failure =
                                 Some("Sign-in required. Open /mcp to sign in.".into());
                             status.detail =
                                 "Sign in, then start a new session to use this server.".into();
                             if let Ok(mut registry) = self.0.lock() {
-                                registry.sign_in.insert(name, path);
+                                registry.logins.insert(name, *login);
                             }
                         }
                         Err(StartupError::Unavailable(error)) => {
@@ -179,14 +194,31 @@ impl Provider {
         declarations
     }
 
-    pub async fn sign_in(&self, name: &str) -> Result<(), String> {
-        let path = self
-            .0
-            .lock()
-            .ok()
-            .and_then(|registry| registry.sign_in.get(name).cloned())
-            .ok_or("MCP sign-in is unavailable for this server")?;
-        auth::sign_in(name, &path).await
+    pub async fn authenticate(&self, name: &str, action: AuthAction) -> Result<(), String> {
+        match action {
+            AuthAction::SignIn => {
+                let login = self
+                    .0
+                    .lock()
+                    .ok()
+                    .and_then(|registry| registry.logins.get(name).cloned())
+                    .ok_or("MCP OAuth is unavailable for this server")?;
+                login.sign_in().await
+            }
+            AuthAction::SignOut => {
+                let store = self
+                    .0
+                    .lock()
+                    .ok()
+                    .and_then(|registry| registry.credential_stores.get(name).cloned())
+                    .ok_or("MCP OAuth is unavailable for this server")?;
+                store.sign_out().await.map_err(auth::credential_error)?;
+                if let Ok(mut registry) = self.0.lock() {
+                    registry.servers.retain(|_, server| server.name != name);
+                }
+                Ok(())
+            }
+        }
     }
 
     pub async fn tools(&self, name: &str) -> Result<Vec<String>, String> {
@@ -322,7 +354,7 @@ fn metadata(request: &MessageMcpRequest) -> Result<RequestMetaObject, Box<McpErr
 
 enum StartupError {
     Unavailable(String),
-    SignInRequired,
+    SignInRequired(Box<auth::Login>),
 }
 
 impl From<&str> for StartupError {
@@ -401,8 +433,7 @@ impl Upstream {
     async fn connect(
         name: &str,
         settings: config::Server,
-        path: &Path,
-    ) -> Result<Self, StartupError> {
+    ) -> Result<(Self, Option<auth::Login>), StartupError> {
         let timeout = Duration::try_from_secs_f64(settings.timeout)
             .ok()
             .filter(|value| !value.is_zero())
@@ -416,6 +447,7 @@ impl Upstream {
             legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
         };
         let mut stderr_drain = None;
+        let mut login = None;
         let service = if settings.url.is_empty() {
             let mut command = Command::new(&settings.command);
             command.args(&settings.args).env_clear();
@@ -507,48 +539,45 @@ impl Upstream {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|_| "Could not initialize HTTP client")?;
-            let connect = |headers| {
-                let transport = StreamableHttpClientTransport::with_client(
-                    http.clone(),
-                    StreamableHttpClientTransportConfig::with_uri(url.as_str())
-                        .custom_headers(headers),
-                );
-                let client = UpstreamClient(progress.clone());
-                tokio::time::timeout(
-                    timeout,
-                    client.serve_with_lifecycle(transport, lifecycle.clone()),
-                )
-            };
-            let result = connect(headers.clone()).await;
-            let needs_oauth = matches!(&result, Ok(Err(error)) if bearer_challenge(error))
-                && settings.uses_oauth();
-            if needs_oauth {
-                let token = auth::stored_token(name, path, &settings.url, timeout)
+            let config =
+                StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
+            let result =
+                connect_http(http.clone(), config.clone(), &progress, &lifecycle, timeout).await;
+            let challenge = result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.as_ref().err())
+                .and_then(bearer_challenge);
+            if let (Some(challenge), Some(oauth)) = (challenge, settings.oauth()) {
+                let authorization =
+                    auth::Login::new(url, challenge.to_owned(), oauth, &settings.credentials)?;
+                let client = tokio::time::timeout(timeout, authorization.client(http))
                     .await
-                    .ok_or(StartupError::SignInRequired)?;
-                let mut authorization =
-                    reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                        .map_err(|_| StartupError::SignInRequired)?;
-                authorization.set_sensitive(true);
-                let mut headers = headers;
-                headers.insert(reqwest::header::AUTHORIZATION, authorization);
-                let result = connect(headers).await;
-                if matches!(&result, Ok(Err(error)) if bearer_challenge(error)) {
-                    return Err(StartupError::SignInRequired);
+                    .map_err(|_| "MCP OAuth startup timed out")??;
+                let Some(client) = client else {
+                    return Err(StartupError::SignInRequired(Box::new(authorization)));
+                };
+                let result = connect_http(client, config, &progress, &lifecycle, timeout).await;
+                if matches!(&result, Ok(Err(error)) if bearer_challenge(error).is_some()) {
+                    return Err(StartupError::SignInRequired(Box::new(authorization)));
                 }
+                login = Some(authorization);
                 startup_result(result)?
             } else {
                 startup_result(result)?
             }
         };
-        Ok(Self {
-            name: name.into(),
-            service,
-            progress,
-            settings,
-            timeout,
-            stderr_drain,
-        })
+        Ok((
+            Self {
+                name: name.into(),
+                service,
+                progress,
+                settings,
+                timeout,
+                stderr_drain,
+            },
+            login,
+        ))
     }
 
     async fn request(
@@ -760,11 +789,32 @@ fn translate_legacy_result(method: &str, result: &mut Value) {
         .or_insert_with(|| json!("complete"));
 }
 
-fn bearer_challenge(error: &ClientInitializeError) -> bool {
-    error
-        .auth_challenge()
-        .and_then(|challenge| challenge.split_whitespace().next())
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+fn bearer_challenge(error: &ClientInitializeError) -> Option<&str> {
+    error.auth_challenge().filter(|challenge| {
+        challenge
+            .split_whitespace()
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+    })
+}
+
+async fn connect_http(
+    http: impl StreamableHttpClient,
+    config: StreamableHttpClientTransportConfig,
+    progress: &broadcast::Sender<ProgressNotificationParam>,
+    lifecycle: &ClientLifecycleMode,
+    timeout: Duration,
+) -> Result<
+    Result<RunningService<RoleClient, UpstreamClient>, ClientInitializeError>,
+    tokio::time::error::Elapsed,
+> {
+    let transport = StreamableHttpClientTransport::with_client(http, config);
+    let client = UpstreamClient(progress.clone());
+    tokio::time::timeout(
+        timeout,
+        client.serve_with_lifecycle(transport, lifecycle.clone()),
+    )
+    .await
 }
 
 async fn cancel(handle: rmcp::service::RequestHandle<RoleClient>) {

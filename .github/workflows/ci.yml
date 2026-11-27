@@ -81,6 +81,14 @@ jobs:
           name: web-bundle
           path: rust/dist/
           if-no-files-found: error
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+      - run: npm run build && npm pack --dry-run
+        working-directory: rust/npm
 
   docs:
     runs-on: ubuntu-latest

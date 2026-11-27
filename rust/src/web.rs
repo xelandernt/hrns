@@ -9,11 +9,14 @@ use ratatui::Terminal;
 use ratatui::layout::Position;
 use ratzilla::backend::canvas::CanvasBackendOptions;
 use ratzilla::event::{MouseButton, MouseEventKind};
-use ratzilla::{CanvasBackend, CellSized, WebRenderer};
-use wasm_bindgen::{JsCast, closure::Closure};
+use ratzilla::{CanvasBackend, WebRenderer};
+use wasm_bindgen::{
+    JsCast, JsValue, closure::Closure, convert::FromWasmAbi, prelude::wasm_bindgen,
+};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    ClipboardEvent, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url, WheelEvent, window,
+    ClipboardEvent, Element, EventTarget, File, HtmlElement, HtmlInputElement, KeyboardEvent, Url,
+    WheelEvent, window,
 };
 use ws_stream_wasm::{WsErr, WsMessage, WsMeta};
 
@@ -22,72 +25,192 @@ use crate::app::{App, Key, LocalEffect, Startup};
 use crate::attachments::{Attachment, MAX_FILE_BYTES};
 use crate::socket;
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (action_tx, mut action_rx) = mpsc::unbounded();
-    let (event_tx, mut event_rx) = mpsc::unbounded();
-    let (requests_tx, mut requests_rx) = mpsc::unbounded();
-    let config = web_config();
-    let label = config
-        .as_ref()
-        .map(|(endpoint, _)| endpoint.host())
-        .unwrap_or_else(|_| "Remote".into());
-    let startup = startup_config();
-    let app = Rc::new(RefCell::new(App::new(
-        label,
-        action_tx,
-        crate::preferences::load(),
-        startup,
-    )));
-    let backend = CanvasBackend::new_with_options(CanvasBackendOptions::new().grid_id("terminal"))?;
-    let cell_size = backend.cell_size_css_px();
-    let mut terminal = Terminal::new(backend)?;
-    let pointer_app = Rc::clone(&app);
-    terminal.on_mouse_event(move |event| {
-        let mut app = pointer_app.borrow_mut();
-        let position = Position::new(event.col, event.row);
-        match event.kind {
-            MouseEventKind::Moved => {
-                app.pointer_drag(position);
-                app.pointer_move(position);
-            }
-            MouseEventKind::ButtonDown(MouseButton::Left) => {
-                app.pointer_down(position);
-            }
-            MouseEventKind::ButtonUp(MouseButton::Left) => {
-                app.pointer_up(position);
-            }
-            _ => {}
+#[wasm_bindgen]
+pub struct WebTerminal {
+    display: Option<Display>,
+    root: HtmlElement,
+    app: Rc<RefCell<App>>,
+    events: mpsc::UnboundedReceiver<Event>,
+    requests: mpsc::UnboundedSender<Connection>,
+    _input: InputBindings,
+}
+
+struct Display {
+    terminal: Terminal<CanvasBackend>,
+    canvas: Element,
+    size: (u32, u32),
+}
+
+impl Drop for Display {
+    fn drop(&mut self) {
+        self.canvas.remove();
+    }
+}
+
+#[wasm_bindgen]
+impl WebTerminal {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        root: HtmlElement,
+        input: HtmlInputElement,
+        endpoint: Option<String>,
+        cwd: Option<String>,
+        session: Option<String>,
+        theme: Option<String>,
+    ) -> Result<WebTerminal, JsValue> {
+        let (action_tx, action_rx) = mpsc::unbounded();
+        let (event_tx, events) = mpsc::unbounded();
+        let (requests, requests_rx) = mpsc::unbounded();
+        let config = web_config(endpoint, cwd, session);
+        let label = config
+            .as_ref()
+            .map(|(endpoint, _)| endpoint.host())
+            .unwrap_or_else(|_| "Remote".into());
+        let startup = Startup {
+            client_io: ClientIoMode::Off,
+            theme: theme.filter(|name| crate::theme::NAMES.contains(&name.as_str())),
+        };
+        let app = Rc::new(RefCell::new(App::new(
+            label,
+            action_tx,
+            crate::preferences::load(),
+            startup,
+        )));
+        let display = display_size(&root)
+            .map(|size| Display::new(&root, size, Rc::clone(&app)))
+            .transpose()
+            .map_err(js_error)?;
+        let input =
+            bind_input(&root, input, Rc::clone(&app), requests.clone()).map_err(js_error)?;
+        run_connection(config, action_rx, event_tx, requests_rx);
+        Ok(Self {
+            display,
+            root,
+            app,
+            events,
+            requests,
+            _input: input,
+        })
+    }
+
+    pub fn resize(&mut self) -> Result<(), JsValue> {
+        let Some(size) = display_size(&self.root) else {
+            self.display = None;
+            return Ok(());
+        };
+        if self
+            .display
+            .as_ref()
+            .is_none_or(|display| display.size != size)
+        {
+            self.display =
+                Some(Display::new(&self.root, size, Rc::clone(&self.app)).map_err(js_error)?);
         }
-    })?;
-    bind_input(Rc::clone(&app), requests_tx.clone(), cell_size)?;
-    terminal.draw_web(move |frame| {
-        let mut app = app.borrow_mut();
+        Ok(())
+    }
+
+    pub fn draw(&mut self) -> Result<(), JsValue> {
+        let mut app = self.app.borrow_mut();
         for _ in 0..256 {
-            let Ok(update) = event_rx.try_recv() else {
+            let Ok(update) = self.events.try_recv() else {
                 break;
             };
             app.event(update);
         }
         if let Some(effect) = app.take_local_effect() {
-            match effect {
-                LocalEffect::Reconnect => {
-                    let _ = requests_tx.unbounded_send(Connection::Reconnect);
-                }
-                LocalEffect::Connect(target) => {
-                    send_connect(&mut app, &requests_tx, target);
-                }
-                LocalEffect::Switch(target) => {
-                    let _ = requests_tx.unbounded_send(Connection::Switch(target));
-                }
-                LocalEffect::SavePreferences(preferences) => {
-                    crate::preferences::save(&preferences);
-                }
-                LocalEffect::Copy(_) | LocalEffect::Attach(_) => {}
-            }
+            apply_effect(&mut app, &self.requests, effect);
         }
-        app.draw(frame);
-    });
+        if let Some(display) = self.display.as_mut() {
+            display
+                .terminal
+                .draw(|frame| app.draw(frame))
+                .map_err(js_error)?;
+        }
+        Ok(())
+    }
+}
 
+impl Drop for WebTerminal {
+    fn drop(&mut self) {
+        self.requests.close_channel();
+    }
+}
+
+// Ratzilla's canvas uses a fixed 10 × 19 CSS pixel cell.
+const CELL_WIDTH: i32 = 10;
+const CELL_HEIGHT: i32 = 19;
+
+fn display_size(root: &HtmlElement) -> Option<(u32, u32)> {
+    let width = root.client_width();
+    let height = root.client_height();
+    (width >= CELL_WIDTH && height >= CELL_HEIGHT).then_some((
+        width.min(i32::from(u16::MAX)) as u32,
+        height.min(i32::from(u16::MAX)) as u32,
+    ))
+}
+
+impl Display {
+    fn new(
+        root: &HtmlElement,
+        size: (u32, u32),
+        app: Rc<RefCell<App>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let backend = CanvasBackend::new_with_options(
+            CanvasBackendOptions::new().grid_id(&root.id()).size(size),
+        )?;
+        let canvas = root
+            .last_element_child()
+            .ok_or_else(|| io::Error::other("Terminal canvas unavailable"))?;
+        let mut display = Self {
+            terminal: Terminal::new(backend)?,
+            canvas,
+            size,
+        };
+        display.terminal.on_mouse_event(move |event| {
+            let mut app = app.borrow_mut();
+            let position = Position::new(event.col, event.row);
+            match event.kind {
+                MouseEventKind::Moved => {
+                    app.pointer_drag(position);
+                    app.pointer_move(position);
+                }
+                MouseEventKind::ButtonDown(MouseButton::Left) => {
+                    app.pointer_down(position);
+                }
+                MouseEventKind::ButtonUp(MouseButton::Left) => {
+                    app.pointer_up(position);
+                }
+                _ => {}
+            }
+        })?;
+        Ok(display)
+    }
+}
+
+fn js_error(error: impl std::fmt::Display) -> JsValue {
+    js_sys::Error::new(&error.to_string()).into()
+}
+
+fn apply_effect(app: &mut App, requests: &mpsc::UnboundedSender<Connection>, effect: LocalEffect) {
+    match effect {
+        LocalEffect::Reconnect => {
+            let _ = requests.unbounded_send(Connection::Reconnect);
+        }
+        LocalEffect::Connect(target) => send_connect(app, requests, target),
+        LocalEffect::Switch(target) => {
+            let _ = requests.unbounded_send(Connection::Switch(target));
+        }
+        LocalEffect::SavePreferences(preferences) => crate::preferences::save(&preferences),
+        LocalEffect::Copy(_) | LocalEffect::Attach(_) => {}
+    }
+}
+
+fn run_connection(
+    config: Result<(Url, SessionTarget), String>,
+    mut action_rx: crate::acp::Actions,
+    event_tx: crate::acp::Events,
+    mut requests_rx: mpsc::UnboundedReceiver<Connection>,
+) {
     wasm_bindgen_futures::spawn_local(async move {
         use futures::{FutureExt, select_biased};
         let mut config = config;
@@ -136,8 +259,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = event_tx.unbounded_send(Event::Connecting);
         }
     });
-
-    Ok(())
 }
 
 async fn connect_attempt(
@@ -175,33 +296,18 @@ async fn connect_attempt(
     session.map_err(|error| acp::request_error(&error))
 }
 
-fn startup_config() -> Startup {
-    let Some(window) = window() else {
-        return Startup::default();
-    };
-    let Ok(search) = window.location().search() else {
-        return Startup::default();
-    };
-    let query = web_sys::UrlSearchParams::new_with_str(&search).ok();
-    let theme = query
-        .as_ref()
-        .and_then(|query| query.get("theme"))
-        .filter(|name| crate::theme::NAMES.contains(&name.as_str()));
-    Startup {
-        client_io: ClientIoMode::Off,
-        theme,
-    }
-}
-
-fn web_config() -> Result<(Url, SessionTarget), String> {
+fn web_config(
+    endpoint: Option<String>,
+    cwd: Option<String>,
+    session: Option<String>,
+) -> Result<(Url, SessionTarget), String> {
     let window = window().ok_or("Browser window unavailable")?;
     let page = window
         .location()
         .href()
         .map_err(|_| "Page URL unavailable")?;
     let page = Url::new(&page).map_err(|_| "Invalid page URL")?;
-    let query = page.search_params();
-    let endpoint = match query.get("endpoint") {
+    let endpoint = match endpoint {
         Some(endpoint) => Url::new(&endpoint).map_err(|_| "Invalid ACP endpoint")?,
         None => {
             let endpoint = Url::new_with_base("/acp/agent", &page.href())
@@ -216,10 +322,8 @@ fn web_config() -> Result<(Url, SessionTarget), String> {
     };
     let endpoint = validate_endpoint(endpoint)?;
     endpoint.set_hash("");
-    let session = query.get("session").filter(|id| !id.is_empty());
-    let cwd = query
-        .get("cwd")
-        .or_else(|| session.is_none().then(|| "/".into()));
+    let session = session.filter(|id| !id.is_empty());
+    let cwd = cwd.or_else(|| session.is_none().then(|| "/".into()));
     if cwd.as_ref().is_some_and(|path| !path.starts_with('/')) {
         return Err("Enter an absolute remote workspace path".into());
     }
@@ -282,22 +386,58 @@ fn message_text(message: WsMessage) -> Result<Option<String>, String> {
     }
 }
 
+struct Listener<T: 'static> {
+    target: EventTarget,
+    event: &'static str,
+    callback: Closure<dyn FnMut(T)>,
+}
+
+impl<T: FromWasmAbi + 'static> Listener<T> {
+    fn new(
+        target: impl Into<EventTarget>,
+        event: &'static str,
+        callback: impl FnMut(T) + 'static,
+    ) -> io::Result<Self> {
+        let target = target.into();
+        let callback = Closure::<dyn FnMut(T)>::new(callback);
+        target
+            .add_event_listener_with_callback(event, callback.as_ref().unchecked_ref())
+            .map_err(|_| io::Error::other(format!("Could not bind the {event} listener")))?;
+        Ok(Self {
+            target,
+            event,
+            callback,
+        })
+    }
+}
+
+impl<T: 'static> Drop for Listener<T> {
+    fn drop(&mut self) {
+        let _ = self.target.remove_event_listener_with_callback(
+            self.event,
+            self.callback.as_ref().unchecked_ref(),
+        );
+    }
+}
+
+struct InputBindings {
+    _wheel: Listener<WheelEvent>,
+    _change: Listener<web_sys::Event>,
+    _keyboard: Listener<KeyboardEvent>,
+    _paste: Listener<ClipboardEvent>,
+}
+
 fn bind_input(
+    terminal: &HtmlElement,
+    input: HtmlInputElement,
     app: Rc<RefCell<App>>,
     requests: mpsc::UnboundedSender<Connection>,
-    cell_size: (f32, f32),
-) -> io::Result<()> {
-    let terminal = window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id("terminal"))
-        .and_then(|element| element.dyn_into::<HtmlElement>().ok())
-        .ok_or_else(|| io::Error::other("Terminal element unavailable"))?;
-    bind_wheel(&terminal, Rc::clone(&app), cell_size)?;
-    let input = bind_file_chooser(Rc::clone(&app))?;
+) -> io::Result<InputBindings> {
+    let wheel = bind_wheel(terminal, Rc::clone(&app))?;
+    let change = bind_file_chooser(&input, Rc::clone(&app))?;
     let keyboard = {
         let app = Rc::clone(&app);
-        let reconnect = requests.clone();
-        Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        Listener::new(terminal.clone(), "keydown", move |event: KeyboardEvent| {
             if event.is_composing() {
                 return;
             }
@@ -310,72 +450,48 @@ fn bind_input(
                 };
                 match effect {
                     Some(LocalEffect::Copy(text)) => copy(&app, &text),
-                    Some(LocalEffect::Reconnect) => {
-                        let _ = reconnect.unbounded_send(Connection::Reconnect);
-                    }
-                    Some(LocalEffect::Connect(target)) => {
-                        send_connect(&mut app.borrow_mut(), &reconnect, target);
-                    }
-                    Some(LocalEffect::Switch(target)) => {
-                        let _ = reconnect.unbounded_send(Connection::Switch(target));
-                    }
-                    Some(LocalEffect::SavePreferences(preferences)) => {
-                        crate::preferences::save(&preferences);
-                    }
                     Some(LocalEffect::Attach(path)) if path.is_empty() => input.click(),
                     Some(LocalEffect::Attach(_)) => app.borrow_mut().event(Event::Warning(
                         "Use /attach to open the browser file chooser".into(),
                     )),
+                    Some(effect) => apply_effect(&mut app.borrow_mut(), &requests, effect),
                     None => {}
                 }
             }
-        })
+        })?
     };
-    let paste = Closure::<dyn FnMut(ClipboardEvent)>::new(move |event: ClipboardEvent| {
+    let paste = Listener::new(terminal.clone(), "paste", move |event: ClipboardEvent| {
         if let Some(data) = event.clipboard_data() {
             if let Ok(text) = data.get_data("text/plain") {
                 event.prevent_default();
                 app.borrow_mut().paste(&text);
             }
         }
-    });
-    terminal
-        .add_event_listener_with_callback("keydown", keyboard.as_ref().unchecked_ref())
-        .map_err(|_| io::Error::other("Could not bind terminal keyboard input"))?;
-    keyboard.forget();
-    terminal
-        .add_event_listener_with_callback("paste", paste.as_ref().unchecked_ref())
-        .map_err(|_| io::Error::other("Could not bind terminal clipboard input"))?;
-    paste.forget();
-    let _ = terminal.focus();
-    Ok(())
+    })?;
+    Ok(InputBindings {
+        _wheel: wheel,
+        _change: change,
+        _keyboard: keyboard,
+        _paste: paste,
+    })
 }
 
-fn bind_wheel(
-    terminal: &HtmlElement,
-    app: Rc<RefCell<App>>,
-    (width, height): (f32, f32),
-) -> io::Result<()> {
-    let canvas = terminal
-        .query_selector("canvas")
-        .ok()
-        .flatten()
-        .ok_or_else(|| io::Error::other("Terminal canvas unavailable"))?;
+fn bind_wheel(terminal: &HtmlElement, app: Rc<RefCell<App>>) -> io::Result<Listener<WheelEvent>> {
     let mut remainder = 0.0;
-    let wheel = Closure::<dyn FnMut(WheelEvent)>::new(move |event: WheelEvent| {
+    Listener::new(terminal.clone(), "wheel", move |event: WheelEvent| {
         if event.ctrl_key() || event.delta_y() == 0.0 {
             return;
         }
         // Ratzilla's canvas draws the terminal grid five CSS pixels inside the element.
-        let x = f64::from(event.offset_x() - 5) / f64::from(width);
-        let y = f64::from(event.offset_y() - 5) / f64::from(height);
+        let x = f64::from(event.offset_x() - 5) / f64::from(CELL_WIDTH);
+        let y = f64::from(event.offset_y() - 5) / f64::from(CELL_HEIGHT);
         if x < 0.0 || y < 0.0 {
             return;
         }
         let delta = match event.delta_mode() {
             WheelEvent::DOM_DELTA_LINE => event.delta_y(),
             WheelEvent::DOM_DELTA_PAGE => event.delta_y() * app.borrow().transcript_page_height(),
-            _ => event.delta_y() / f64::from(height),
+            _ => event.delta_y() / f64::from(CELL_HEIGHT),
         };
         remainder += delta;
         let rows = remainder.trunc() as i32;
@@ -389,12 +505,7 @@ fn bind_wheel(
         {
             event.prevent_default();
         }
-    });
-    canvas
-        .add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())
-        .map_err(|_| io::Error::other("Could not bind the terminal wheel"))?;
-    wheel.forget();
-    Ok(())
+    })
 }
 
 fn copy(app: &Rc<RefCell<App>>, text: &str) {
@@ -412,14 +523,12 @@ fn copy(app: &Rc<RefCell<App>>, text: &str) {
     });
 }
 
-fn bind_file_chooser(app: Rc<RefCell<App>>) -> io::Result<HtmlInputElement> {
-    let input = window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id("attachment"))
-        .and_then(|element| element.dyn_into::<HtmlInputElement>().ok())
-        .ok_or_else(|| io::Error::other("File chooser unavailable"))?;
+fn bind_file_chooser(
+    input: &HtmlInputElement,
+    app: Rc<RefCell<App>>,
+) -> io::Result<Listener<web_sys::Event>> {
     let element = input.clone();
-    let change = Closure::<dyn FnMut()>::new(move || {
+    Listener::new(input.clone(), "change", move |_| {
         let Some(file) = element.files().and_then(|files| files.get(0)) else {
             return;
         };
@@ -430,12 +539,7 @@ fn bind_file_chooser(app: Rc<RefCell<App>>) -> io::Result<HtmlInputElement> {
             let attachment = read_file(file).await.map(Box::new);
             app.borrow_mut().event(Event::Attachment(attachment));
         });
-    });
-    input
-        .add_event_listener_with_callback("change", change.as_ref().unchecked_ref())
-        .map_err(|_| io::Error::other("Could not bind file chooser"))?;
-    change.forget();
-    Ok(input)
+    })
 }
 
 async fn read_file(file: File) -> Result<Attachment, String> {

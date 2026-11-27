@@ -249,7 +249,13 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 The client offers enabled servers to local and remote agents that advertise
 `mcpCapabilities.acp`. Native sessions use stdio or Streamable HTTP upstreams
 that support MCP 2026-07-28. Configure HTTP credentials in `headers`.
-The token store and OAuth fields apply to the Python headless client.
+The Rust terminal and Python client honor the token store and OAuth fields.
+With the file store, native credentials live in the `native/` subdirectory
+of the token store. With the keyring store, the native service is
+`hrns.mcp.native`. The Linux keyring backend uses Secret Service. On Windows,
+entries larger than 2,560 bytes require the file backend. For a
+pre-registered native client, register the loopback redirect URI
+`http://127.0.0.1:<callback_port>/callback` with the OAuth provider.
 
 Exporting is still gated by the client's user. At session start an interactive client
 asks whether the agent may use the server: allow once, allow for this connection, always

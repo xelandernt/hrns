@@ -740,7 +740,7 @@ wheels = [
 name = "hrns"
 source = { editable = "." }
 dependencies = [
-    { name = "hrns-slim", extra = ["client", "server"] },
+    { name = "hrns-slim", extra = ["headless", "server"] },
 ]
 
 [package.optional-dependencies]
@@ -766,7 +766,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "hrns-slim", extras = ["ag-ui"], marker = "extra == 'ag-ui'", editable = "hrns_slim" },
-    { name = "hrns-slim", extras = ["client", "server"], editable = "hrns_slim" },
+    { name = "hrns-slim", extras = ["client", "headless", "server"], editable = "hrns_slim" },
 ]
 provides-extras = ["ag-ui"]
 
@@ -801,7 +801,7 @@ dependencies = [
 ag-ui = [
     { name = "pydantic-ai-slim", extra = ["ag-ui"] },
 ]
-client = [
+headless = [
     { name = "agent-client-protocol" },
     { name = "fastmcp-slim", extra = ["client"] },
     { name = "mcp" },
@@ -823,14 +823,14 @@ server = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-client-protocol", marker = "extra == 'client'", specifier = ">=1.0.0,<2" },
+    { name = "agent-client-protocol", marker = "extra == 'headless'", specifier = ">=1.0.0,<2" },
     { name = "agent-client-protocol", marker = "extra == 'server'", specifier = ">=1.0.0,<2" },
     { name = "cyclopts", specifier = ">=3,<6" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.156,<1" },
-    { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'client'", specifier = ">=3.3,<5" },
+    { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'headless'", specifier = ">=3.3,<5" },
     { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'server'", specifier = ">=3.3,<5" },
     { name = "keyring", specifier = ">=25" },
-    { name = "mcp", marker = "extra == 'client'", specifier = ">=2.3,<3" },
+    { name = "mcp", marker = "extra == 'headless'", specifier = ">=2.3,<3" },
     { name = "mcp", marker = "extra == 'server'", specifier = ">=2.3,<3" },
     { name = "platformdirs", specifier = ">=4" },
     { name = "pydantic", specifier = ">=2.12,<3" },
@@ -839,14 +839,14 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["ag-ui"], marker = "extra == 'ag-ui'", specifier = ">=2.74.0,<3" },
     { name = "pydantic-ai-slim", extras = ["anthropic", "bedrock", "mcp", "openai"], marker = "extra == 'server'", specifier = ">=2.74.0,<3" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
-    { name = "pyyaml", marker = "extra == 'client'", specifier = ">=6,<7" },
+    { name = "pyyaml", marker = "extra == 'headless'", specifier = ">=6,<7" },
     { name = "starlette", marker = "extra == 'server'", specifier = ">=0.47,<2" },
     { name = "tomli-w", specifier = ">=1.2,<2" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.35" },
-    { name = "websockets", marker = "extra == 'client'", specifier = ">=13,<16" },
+    { name = "websockets", marker = "extra == 'headless'", specifier = ">=13,<16" },
     { name = "websockets", marker = "extra == 'server'", specifier = ">=13,<16" },
 ]
-provides-extras = ["ag-ui", "client", "server"]
+provides-extras = ["ag-ui", "client", "headless", "server"]
 
 [[package]]
 name = "hrns-tui"

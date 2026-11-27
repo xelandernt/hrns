@@ -9,10 +9,10 @@ import subprocess
 import sysconfig
 
 from ..shared.config import HrnsConfig
+from ..shared.config.credentials import secret_value
 from ..shared.config.settings import is_builtin_hrns
 from ..shared.errors import HrnsClientError
 from .launch import ConnectionTarget
-from .transport import secret_value
 
 
 def native_executable() -> str | None:

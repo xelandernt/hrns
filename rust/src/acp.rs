@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::attachments::{Attachment, Prompt};
 use crate::elicitation::{self, Form};
 #[cfg(not(target_family = "wasm"))]
-use crate::mcp_types::{AcpMcpRequest, AcpMcpResponse};
+use crate::mcp_types::{AcpMcpRequest, AcpMcpResponse, AuthAction};
 use crate::mcp_types::{ConsentDecision, Health};
 use crate::skills::Skill;
 use crate::tool_input;
@@ -183,7 +183,10 @@ pub enum Action {
     ProviderLoginStatus,
     CancelProviderLogin,
     #[cfg(not(target_family = "wasm"))]
-    McpSignIn(String),
+    McpAuthenticate {
+        name: String,
+        action: AuthAction,
+    },
     #[cfg(not(target_family = "wasm"))]
     McpTools(String),
 }
@@ -356,8 +359,9 @@ pub enum Event {
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     McpHealth(Vec<Health>),
     #[cfg(not(target_family = "wasm"))]
-    McpSignIn {
+    McpAuthenticated {
         name: String,
+        action: AuthAction,
         result: Result<(), String>,
     },
     #[cfg(not(target_family = "wasm"))]
@@ -618,11 +622,11 @@ pub async fn connect(
                     }
                     action = actions.next().fuse() => match action {
                         #[cfg(not(target_family = "wasm"))]
-                        Some(Action::McpSignIn(name)) => {
+                        Some(Action::McpAuthenticate { name, action }) => {
                             let provider = provider.clone();
                             mcp_jobs.push(async move {
-                                let result = provider.sign_in(&name).await;
-                                Event::McpSignIn { name, result }
+                                let result = provider.authenticate(&name, action).await;
+                                Event::McpAuthenticated { name, action, result }
                             }.boxed_local());
                         }
                         #[cfg(not(target_family = "wasm"))]

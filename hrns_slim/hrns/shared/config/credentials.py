@@ -5,8 +5,11 @@ Provider logins bind each account to the entry, provider type, and configured en
 
 from __future__ import annotations
 
+import os
 import threading
 from hashlib import sha256
+
+from ..errors import SecretMissing
 
 #: Keyring service that holds provider credentials.
 KEYRING_SERVICE = "hrns"
@@ -61,6 +64,35 @@ def keyring_secret(service: str, account: str, *, fresh: bool = False) -> str | 
         elif fresh:
             _LOOKUPS.pop(key, None)
         return value
+
+
+def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | None:
+    """Resolve ``env:`` and ``keyring:`` references; literals pass through unchanged."""
+    if not reference:
+        return None
+    if reference.startswith("env:"):
+        name = reference[4:]
+        if not name:
+            raise SecretMissing(reference, "no environment variable named")
+        value = (env if env is not None else os.environ).get(name)
+        if value is None:
+            raise SecretMissing(reference, f"environment variable '{name}' is not set")
+        return value
+    if reference.startswith("keyring:"):
+        remainder = reference[len("keyring:") :]
+        if not remainder:
+            raise SecretMissing(reference, "no service named")
+        service, _, username = remainder.partition("/")
+        if username == "":
+            username = "default"
+        try:
+            value = keyring_secret(service, username)
+        except Exception as exc:
+            raise SecretMissing(reference, f"keyring lookup failed ({exc})") from exc
+        if value is None:
+            raise SecretMissing(reference, f"keyring has no entry '{service}' for '{username}'")
+        return value
+    return reference
 
 
 def _forget_lookup(service: str, account: str) -> None:

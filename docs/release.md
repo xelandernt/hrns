@@ -1,53 +1,49 @@
 # Client release artifacts
 
-One release publishes the Python packages, the native client wheels and the browser
-bundle at the same version.
+One GitHub release builds the Python packages, native client wheels, standalone
+browser bundle and npm client at the release version. Use a version such as
+`0.1.0` for a stable release or `0.2.0-rc.1` for a prerelease. Cargo and npm
+use the SemVer form. Python uses the matching PEP 440 form, such as
+`0.2.0rc1`. The workflow applies the SemVer version to both Cargo files before
+any locked Rust release build.
 
 ## Artifacts
 
 | Artifact | Contents |
 | --- | --- |
-| `hrns` | Metadata wrapper depending on `hrns-slim[client,server]` and, on the four built platforms, `hrns-tui` at the same version. |
-| `hrns-slim` | Python client, headless runner, server and shared configuration. |
-| `hrns-tui` | Native Ratatui executable for the matching platform. |
-| `hrns-web.zip` | Optimized Ratzilla bundle built from `rust/`. |
+| `hrns` | PyPI wrapper for `hrns-slim[client,headless,server]`. |
+| `hrns-slim` | Python client commands, headless runner, server and shared configuration. |
+| `hrns-tui` | Native Ratatui executable for the matching platform, distributed as a PyPI wheel. |
+| `@xelandernt/hrns-tui` | Mountable Ratzilla terminal for browser applications, distributed through npm. |
+| `hrns-web.zip` | Standalone Ratzilla site attached to the GitHub release. |
 
-The publish workflow rewrites the `hrns-tui` crate version to the release tag before
-Maturin builds, so every wheel reports the same version as the Python packages. Register
-trusted publishing for both `hrns` and `hrns-tui` against the same `pypi` environment, or
-move the native wheels to their own publish job when the projects differ.
+Configure PyPI trusted publishing for `hrns`, `hrns-slim` and `hrns-tui` against
+the `pypi` GitHub environment and the `publish.yml` workflow. Configure the npm
+trusted publisher for the same workflow in the `npm` environment, with direct
+publishing enabled. If the npm package needs to be created first, publish
+a bootstrap version from an authorized npm account, then configure its trusted
+publisher before the next GitHub release. GitHub prereleases publish to the npm
+`next` tag. Stable releases publish to `latest`. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
 
 ## Version-matched native dependency
 
-`pip install hrns` installs the native client at exactly the version of the wheel, while
-`hrns-slim[server]` and `hrns-slim[client]` stay free of it. Source installs build
-the local Rust crate through the default uv development group. The publish
-workflow adds the release-version requirement to the wrapper metadata after
-validation, then rebuilds `dist/`:
+The release inserts `hrns-tui=={{ version }}` into the `hrns-slim[client]` extra
+after validating the development workspace. The Hatch metadata hook expands
+the pin to the same release version as the Maturin-built native wheel.
 
-| Step | Command |
+| Install command | What it installs |
 | --- | --- |
-| Validate the pristine tree | `just install`, `just check` |
-| Add the requirement | `python scripts/release_native_dependency.py` |
-| Rebuild `dist/` | `just build` |
-| Assert the metadata | `python scripts/release_native_dependency.py --verify dist` |
+| `pip install 'hrns-slim[client]>0.0.28'` | The native terminal and shared CLI. |
+| `pip install 'hrns-slim[headless]>0.0.28'` | The Python runner for `hrns run`. |
+| `pip install 'hrns-slim[server]'` | The Python server. |
+| `pip install 'hrns-slim[client,server]>0.0.28'` | The native terminal and Python server. |
+| `pip install 'hrns>0.0.28'` | The native terminal, Python runner, and Python server. |
 
-The requirement is `hrns-tui=={{ version }}`, expanded by the hatch metadata hook to the
-wheel's own version, with markers for the four targets CI builds:
-
-| Platform | Marker |
-| --- | --- |
-| Linux x64 | `sys_platform == "linux" and platform_machine == "x86_64"` |
-| macOS arm64 | `sys_platform == "darwin" and platform_machine == "arm64"` |
-| macOS x64 | `sys_platform == "darwin" and platform_machine == "x86_64"` |
-| Windows x64 | `sys_platform == "win32" and (platform_machine == "AMD64" or platform_machine == "x86_64")` |
-
-`hrns-slim` metadata is untouched, so only the wrapper selects the binary. Unsupported
-platforms (Linux arm64, Windows arm64, 32-bit Python, FreeBSD) evaluate every marker to
-false and install the Python packages alone. A PEP 508 marker cannot see the C library,
-so musl Linux matches the Linux x64 marker without a matching wheel; release musllinux
-wheels before advertising Alpine, or install with
-`pip install --no-deps hrns 'hrns-slim[client,server]'`.
+The version floor excludes historical releases that shipped the Python terminal.
+Native client installs require a compatible wheel. CI builds wheels for glibc Linux x64,
+macOS arm64 and x64, and Windows x64. On other platforms, pip fails to resolve
+the client requirement. The server extra remains available wherever its Python
+dependencies can be installed.
 
 Reproduce the published metadata locally:
 
@@ -59,41 +55,23 @@ python scripts/release_native_dependency.py --revert
 ```
 
 Use `--revert` before running `uv run` or `uv sync` to restore the development
-metadata used by the lockfile.
+metadata used by the lockfile. `just install` builds the native binary from the
+checkout through the workspace's development group.
 
-## Install
+## Embed the browser terminal
 
-```sh
-pip install hrns==0.1.0
-```
+Install `@xelandernt/hrns-tui` with npm. See the [React example](https://github.com/xelandernt/hrns/tree/main/rust/npm#react)
+for the mount API, cleanup, and Vite configuration. Embedded terminals use the
+same ACP endpoint and deployment authentication as the standalone bundle.
 
-That installs the wrapper and the matching native client. For a server host without the
-terminal:
-
-```sh
-pip install 'hrns-slim[server]==0.1.0'
-```
-
-For Python tooling without the agent:
+To build a package locally, install the Rust `wasm32-unknown-unknown` target
+and the `wasm-bindgen` CLI version in `rust/Cargo.lock`, then run:
 
 ```sh
-pip install 'hrns-slim[client]==0.1.0'
+cd rust/npm
+npm run build
+npm pack
 ```
-
-Bare `hrns` and `hrns connect` require the native executable. Without it they fail
-with an install hint; the non-interactive commands (`run`, `serve`, `agent`, `acp`,
-`login`, `config`, `profiles`, `mcp`, `clean`) still work. Platforms without a native
-wheel skip the `hrns-tui` requirement and therefore have no full-screen client.
-
-The wrapper's native requirement carries platform markers, so `pip install hrns` adds
-the binary on Linux x64, macOS arm64/x64 and Windows x64. Other platforms install the
-Python packages and no client binary; see
-[version-matched native dependency](#version-matched-native-dependency) for musl Linux.
-
-The launcher resolves the target, credential references, `client_io` (CLI, then
-profile, then `[tui]`), theme and permission mode, then replaces the Python process.
-The launcher passes the selected configuration path when one is set. The native
-client owns MCP connections to configured servers and restores the terminal on exit.
 
 ## Serve the browser bundle
 
@@ -121,16 +99,15 @@ See [Authentication](authentication.md#serve-the-ratzilla-client-with-acp-authen
 uvx twine check dist/*
 python scripts/release_native_dependency.py --verify dist
 python -m venv /tmp/hrns-check
-/tmp/hrns-check/bin/pip install --find-links dist hrns
+/tmp/hrns-check/bin/pip install --find-links dist 'hrns>0.0.28'
 /tmp/hrns-check/bin/hrns-tui --version
 /tmp/hrns-check/bin/hrns --version
 ```
 
-`--verify` fails unless the `hrns` wheel and sdist each declare
-`Requires-Dist: hrns-tui==<their own version>` with every supported platform marker, and
-unless `hrns-slim` declares no native dependency. The `pip install --find-links dist`
-step resolves the native wheel from `dist/` exactly as PyPI would. For local
-development, `just install` builds the native binary from the checkout through uv.
+`--verify` checks that both Python artifact types carry the expected dependency
+metadata. The slim client pins the native wheel to its own version and the wrapper
+requests all three extras. The installation command resolves the native wheel from
+`dist/` when it contains the matching artifact.
 
 Install in an empty environment, launch the interactive client against the built-in
 agent, run one headless prompt, and serve the unpacked bundle against the deployed ACP

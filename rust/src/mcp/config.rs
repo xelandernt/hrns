@@ -15,15 +15,41 @@ struct Settings {
 
 #[derive(Deserialize, Default)]
 struct McpSettings {
+    #[serde(flatten)]
+    credentials: CredentialSettings,
     #[serde(default)]
     servers: BTreeMap<String, Server>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct CredentialSettings {
+    pub token_store: StoreKind,
+    pub token_store_path: String,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum StoreKind {
+    #[default]
+    File,
+    Keyring,
 }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum OAuth {
     Enabled(bool),
-    Settings {},
+    Settings(OAuthSettings),
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct OAuthSettings {
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: Vec<String>,
+    pub callback_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +67,8 @@ pub(super) struct Server {
     pub exclude_tools: Vec<String>,
     pub timeout: f64,
     oauth: Option<OAuth>,
+    #[serde(skip)]
+    pub credentials: CredentialSettings,
 }
 
 impl Default for Server {
@@ -58,18 +86,26 @@ impl Default for Server {
             exclude_tools: Vec::new(),
             timeout: 10.0,
             oauth: None,
+            credentials: CredentialSettings::default(),
         }
     }
 }
 
 impl Server {
-    pub fn uses_oauth(&self) -> bool {
-        !self.url.is_empty()
-            && !matches!(self.oauth, Some(OAuth::Enabled(false)))
-            && !self
+    pub fn oauth(&self) -> Option<OAuthSettings> {
+        if self.url.is_empty()
+            || self
                 .headers
                 .keys()
                 .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            return None;
+        }
+        match &self.oauth {
+            Some(OAuth::Enabled(false)) => None,
+            Some(OAuth::Settings(settings)) => Some(settings.clone()),
+            _ => Some(OAuthSettings::default()),
+        }
     }
 
     pub fn transport(&self) -> &'static str {
@@ -113,7 +149,10 @@ pub(super) fn read(explicit: Option<&Path>) -> io::Result<BTreeMap<String, (Serv
         .mcp
         .servers
         .into_iter()
-        .map(|(name, server)| (name, (server, path.clone())))
+        .map(|(name, mut server)| {
+            server.credentials = settings.mcp.credentials.clone();
+            (name, (server, path.clone()))
+        })
         .collect())
 }
 

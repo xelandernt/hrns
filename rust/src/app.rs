@@ -27,6 +27,8 @@ use crate::acp::{
 use crate::attachments::{Attachment, MAX_PROMPT_BYTES, Prompt};
 use crate::composer::Composer;
 use crate::elicitation::FormState;
+#[cfg(not(target_family = "wasm"))]
+use crate::mcp_types::AuthAction;
 use crate::mcp_types::{ConsentDecision, Health};
 use crate::options;
 use crate::preferences::{ApprovalKey, ApprovalMode, Preferences};
@@ -247,7 +249,8 @@ pub struct App {
     mcp_consent: VecDeque<PendingMcpConsent>,
     mcp_grants: HashSet<String>,
     mcp_health: Vec<Health>,
-    mcp_signing_in: Option<String>,
+    #[cfg(not(target_family = "wasm"))]
+    mcp_authentication: Option<(String, AuthAction)>,
     local_effect: Option<LocalEffect>,
     options: Vec<SessionConfigOption>,
     commands: Vec<(String, String)>,
@@ -331,7 +334,8 @@ impl App {
             mcp_consent: VecDeque::new(),
             mcp_grants: HashSet::new(),
             mcp_health: Vec::new(),
-            mcp_signing_in: None,
+            #[cfg(not(target_family = "wasm"))]
+            mcp_authentication: None,
             local_effect: None,
             options: Vec::new(),
             commands: Vec::new(),
@@ -639,7 +643,10 @@ impl App {
                 self.commands.clear();
                 self.skills.clear();
                 self.mcp_health.clear();
-                self.mcp_signing_in = None;
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    self.mcp_authentication = None;
+                }
                 self.load_supported = false;
                 self.close_supported = false;
                 self.delete_supported = false;
@@ -654,7 +661,10 @@ impl App {
                 self.refresh_completion();
             }
             Event::Connecting => {
-                self.mcp_signing_in = None;
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    self.mcp_authentication = None;
+                }
                 self.approval_mode = ApprovalMode::Ask;
                 self.approval_preference = None;
                 self.model_change_pending = false;
@@ -719,7 +729,13 @@ impl App {
                 self.mcp_health = health;
             }
             #[cfg(not(target_family = "wasm"))]
-            Event::McpSignIn { name, result } => self.mcp_sign_in_result(name, result),
+            Event::McpAuthenticated {
+                name,
+                action,
+                result,
+            } => {
+                self.mcp_authentication_result(name, action, result);
+            }
             #[cfg(not(target_family = "wasm"))]
             Event::McpTools { name, result } => self.mcp_tools_result(&name, result),
             Event::Permission(request) => self.request_permission(request),
