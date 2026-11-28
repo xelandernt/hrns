@@ -18,7 +18,7 @@ completions, progress, and input-required results. For configuration and example
 
 ## Request flow
 
-1. The client obtains consent for an enabled server with `export = true`.
+1. The client obtains consent for an enabled server.
 2. The client starts its upstream connection, registers an opaque `serverId`, and includes
    the declaration in the session request.
 3. The agent creates an attachment toolset backed by `AcpMcpClientTransport`.

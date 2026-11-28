@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 
 Authenticator: TypeAlias = Callable[[HTTPConnection], Awaitable[PrincipalT | None]]
 
+# A 9 MiB prompt can expand up to sixfold when JSON escapes control characters.
+_ACP_MESSAGE_LIMIT = 64 * 1024 * 1024
+
+
+class _AcpMessageTooLarge(Exception):
+    """An ACP message exceeded the WebSocket bridge's byte limit."""
+
 
 @asynccontextmanager
 async def _acp_streams(
@@ -32,7 +39,7 @@ async def _acp_streams(
     local, remote = socket.socketpair()
     local.setblocking(False)
     remote.setblocking(False)
-    local_reader, local_writer = await asyncio.open_connection(sock=local)
+    local_reader, local_writer = await asyncio.open_connection(sock=local, limit=_ACP_MESSAGE_LIMIT)
     remote_reader, remote_writer = await asyncio.open_connection(sock=remote)
 
     task = asyncio.create_task(
@@ -69,15 +76,21 @@ async def _pump_acp(
         try:
             while True:
                 text = await websocket.receive_text()
-                writer.write(text.encode("utf-8") + b"\n")
+                payload = text.encode("utf-8")
+                if len(payload) > _ACP_MESSAGE_LIMIT:
+                    raise _AcpMessageTooLarge
+                writer.write(payload + b"\n")
                 await writer.drain()
         except WebSocketDisconnect:
             return
 
     async def agent_to_client() -> None:
         while True:
-            line = await reader.readline()
-            if not line:
+            try:
+                line = await reader.readuntil(b"\n")
+            except asyncio.LimitOverrunError as exc:
+                raise _AcpMessageTooLarge from exc
+            except asyncio.IncompleteReadError:
                 return
             await websocket.send_text(line.decode("utf-8").rstrip("\n"))
 
@@ -92,7 +105,7 @@ async def _pump_acp(
         with suppress(asyncio.CancelledError):
             await task
     for task in done:
-        with suppress(Exception):
+        with suppress(WebSocketDisconnect, OSError):
             task.result()
 
 
@@ -101,10 +114,18 @@ async def _serve_acp(
     adapter: acp.Agent,
 ) -> None:
     await websocket.accept()
-    async with _acp_streams(adapter) as (reader, writer):
-        await _pump_acp(websocket, reader, writer)
-    with suppress(Exception):
-        await websocket.close()
+    code, reason = 1000, ""
+    try:
+        async with _acp_streams(adapter) as (reader, writer):
+            await _pump_acp(websocket, reader, writer)
+    except _AcpMessageTooLarge:
+        code, reason = 1009, "ACP message exceeds the 64 MiB limit"
+    except Exception:
+        code, reason = 1011, "ACP WebSocket bridge failed"
+        raise
+    finally:
+        with suppress(OSError, RuntimeError, WebSocketDisconnect):
+            await websocket.close(code=code, reason=reason)
 
 
 def mount_acp_routes(

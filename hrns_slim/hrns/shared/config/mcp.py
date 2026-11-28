@@ -19,7 +19,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 __all__ = [
     "MCP_NAME_PATTERN",
     "McpOAuthConfig",
-    "McpServerConfig",
     "McpServerSettings",
     "McpSettings",
     "build_client",
@@ -66,13 +65,6 @@ class McpServerSettings(BaseModel):
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
-    export: bool = False
-    """Offer this server to ACP agents over MCP-over-ACP.
-
-    This is the client-side provider switch. ``False`` keeps the server
-    configured for the built-in agent only; ``True`` makes the client register it
-    on a connection that advertises ``mcpCapabilities.acp``.
-    """
     always_allow: bool = False
     """Skip the client-side consent prompt when exporting over ACP.
 
@@ -81,10 +73,7 @@ class McpServerSettings(BaseModel):
     denied; set this to ``True`` to export it from ``hrns run`` or another
     headless client.
     """
-    defer_loading: bool = False
-    description: str = Field(
-        default="", description="Describe when the model should load this MCP server."
-    )
+    description: str = Field(default="", description="Describe this MCP server.")
     include_tools: list[str] = Field(default_factory=list)
     exclude_tools: list[str] = Field(default_factory=list)
     timeout: float = Field(default=10.0, gt=0)
@@ -123,13 +112,6 @@ class McpServerSettings(BaseModel):
         if self.oauth is True:
             return McpOAuthConfig()
         return self.oauth
-
-
-class McpServerConfig(McpServerSettings):
-    """The runtime view of one server, including where its OAuth tokens live."""
-
-    token_store: Literal["file", "keyring"] = "file"
-    token_store_path: str = ""
 
 
 class McpSettings(BaseModel):
@@ -201,7 +183,7 @@ def build_token_store(
 
         return KeyringStore(service_name="hrns.mcp")
 
-    from key_value.aio.stores.filetree import FileTreeStore
+    from key_value.aio.stores.filetree import FileTreeStore, FileTreeV1KeySanitizationStrategy
 
     directory = Path(path).expanduser() if path else default_token_store_path()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -209,7 +191,11 @@ def build_token_store(
         directory.chmod(0o700)
     except OSError:  # pragma: no cover - best effort on exotic filesystems
         pass
-    return FileTreeStore(data_directory=directory)
+    # FastMCP uses the server URL as part of each OAuth storage key.
+    return FileTreeStore(
+        data_directory=directory,
+        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(directory),
+    )
 
 
 def _oauth(server: McpServerSettings, store: Any, *, interactive: bool) -> Any:
@@ -282,10 +268,13 @@ def build_client(
     from fastmcp import Client
 
     transport = build_transport(server, store=store, interactive=interactive)
+    # The browser callback has its own five-minute deadline. The discovery
+    # request stays open while the user completes it.
+    timeout = server.timeout + 300 if interactive else server.timeout
     return Client(
         transport,
-        timeout=server.timeout,
-        init_timeout=server.timeout,
+        timeout=timeout,
+        init_timeout=timeout,
         # Best-effort upstream: probe the modern revision, then fall back to the
         # handshake era rather than rejecting a server outright.
         mode="auto",

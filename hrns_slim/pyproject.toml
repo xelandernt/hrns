@@ -16,14 +16,17 @@ dependencies = [
     "pydantic-settings>=2.10,<3",
     "cyclopts>=3,<6",
     "platformdirs>=4",
+    "psutil>=7,<8",
     "tomli-w>=1.2,<2",
     "keyring>=25",
 ]
 
 [tool.hatch.metadata.hooks.uv-dynamic-versioning.optional-dependencies]
+# Release builds add the version-matched native wheel to this extra.
 client = [
+]
+headless = [
     "agent-client-protocol>=1.0.0,<2",
-    "textual>=8.2,<9",
     "websockets>=13,<16",
     "PyYAML>=6,<7",
     "fastmcp-slim[client]>=3.3,<5",
@@ -33,8 +36,8 @@ server = [
     "agent-client-protocol>=1.0.0,<2",
     "fastmcp-slim[client]>=3.3,<5",
     "mcp>=2.3,<3",
-    "pydantic-ai-slim[mcp,openai,anthropic]>=2.57.0,<3",
-    "pydantic-ai-harness[coder]>=0.57.0,<2",
+    "pydantic-ai-slim[mcp,openai,anthropic,bedrock]>=2.74.0,<3",
+    "pydantic-ai-harness[coder]>=0.74.0,<2",
     "fastapi>=0.156,<1",
     "starlette>=0.47,<2",
     "uvicorn>=0.35",
@@ -43,7 +46,7 @@ server = [
 ]
 
 ag-ui = [
-    "pydantic-ai-slim[ag-ui]>=2.57.0,<3",
+    "pydantic-ai-slim[ag-ui]>=2.74.0,<3",
 ]
 
 [project.scripts]

@@ -175,7 +175,7 @@ class Skills(SkillsCapability[AgentDepsT]):
 
         Explicit ``paths`` come first so they win a name collision; the project library
         comes next; the user-wide library last. A configured path that does not exist is
-        an error: a typo in ``hrns.toml`` should not look like an empty skill set.
+        an error: a typo in ``config.toml`` should not look like an empty skill set.
         """
         if not settings.enabled:
             return None

@@ -22,6 +22,75 @@ jobs:
       - run: just install
       - run: just check
 
+  rust-preview:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+      - run: cargo +stable fmt --check
+      - run: cargo +stable clippy --locked -- -D warnings
+      - run: cargo +stable build --locked
+      - run: cargo +stable build --locked --target wasm32-unknown-unknown
+
+  rust-wheels:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_17"
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --locked --out dist
+          working-directory: rust
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: rust/dist/*.whl
+          if-no-files-found: error
+
+  web-bundle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci --prefix npm
+      - run: trunk build --locked --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-bundle
+          path: rust/dist/
+          if-no-files-found: error
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+      - run: npm run build && npm pack --dry-run
+        working-directory: rust/npm
+
   docs:
     runs-on: ubuntu-latest
     steps:

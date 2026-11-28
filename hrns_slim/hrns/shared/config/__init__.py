@@ -11,7 +11,7 @@ from .credentials import (
     stored_api_key_ref,
     stored_secret,
 )
-from .mcp import McpOAuthConfig, McpServerConfig, McpServerSettings, McpSettings
+from .mcp import McpOAuthConfig, McpServerSettings, McpSettings
 from .settings import (
     BUILTIN_CONNECTION,
     CONFIG_ENV_VAR,
@@ -19,7 +19,6 @@ from .settings import (
     EFFORT_DEFAULT,
     EFFORT_OFF,
     PERMISSION_MODES,
-    PROJECT_CONFIG_NAME,
     THINKING_LEVELS,
     ClientIoMode,
     EffortLevel,
@@ -32,10 +31,8 @@ from .settings import (
     ThinkingSettings,
     TuiSettings,
     check_provider_name,
-    config_files,
     default_config_path,
     is_builtin_hrns,
-    project_config_path,
 )
 
 __all__ = [
@@ -47,13 +44,11 @@ __all__ = [
     "KEYRING_SERVICE",
     "BUILTIN_CONNECTION",
     "PERMISSION_MODES",
-    "PROJECT_CONFIG_NAME",
     "THINKING_LEVELS",
     "ClientIoMode",
     "EffortLevel",
     "HrnsConfig",
     "McpOAuthConfig",
-    "McpServerConfig",
     "McpServerSettings",
     "McpSettings",
     "PermissionMode",
@@ -64,12 +59,10 @@ __all__ = [
     "ThinkingSettings",
     "TuiSettings",
     "check_provider_name",
-    "config_files",
     "default_config_path",
     "delete_secret",
     "is_builtin_hrns",
     "keyring_account",
-    "project_config_path",
     "secret_ref",
     "store_api_key",
     "store_secret",

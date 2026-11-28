@@ -1,0 +1,7 @@
+[watch]
+ignore = ["npm/dist", "npm/node_modules", "npm/wasm"]
+
+[[hooks]]
+stage = "pre_build"
+command = "npm"
+command_arguments = ["--prefix", "npm", "run", "build:wrapper"]

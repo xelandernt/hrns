@@ -36,7 +36,6 @@ class ConnectionTarget:
     kind: str  # "local" | "remote"
     profile: Profile
     cwd: str
-    local_setup: bool = False
     profile_name: str | None = None
 
     def location(self) -> dict[str, str]:

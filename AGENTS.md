@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## Guidelines
+
+!Very important!
+Whenever doing any work and there is a decision to be made, ASK THE USER! In particular when you are deciding
+on user experience, changes in the runtime, acp extensions.
+
+## Rust
+
+Always load and apply the `$rust-best-practices` skill when writing or editing Rust code.
+
 ## Typing
 
 To the best of the ability:
@@ -31,3 +41,8 @@ These documentations should be consulted if relevant:
 ## Architecture
 
 Store architecture and decision in `ARCHITECTURE.md`.
+
+## Release maintenance
+
+Follow the checklist in [MAINTENANCE.md](MAINTENANCE.md)
+before each release and when upgrading Pydantic AI or its provider SDKs.

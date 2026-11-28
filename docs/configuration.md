@@ -9,13 +9,10 @@ report the file and field that need correction.
 | Location | Path |
 | --- | --- |
 | User document | `config.toml` in the platform config directory (macOS: `~/Library/Application Support/hrns/config.toml`, Linux: `~/.config/hrns/config.toml`, Windows: `%LOCALAPPDATA%\hrns\config.toml`) |
-| Project document | `hrns.toml` in the working directory |
 | Explicit document | `--config PATH` or `HRNS_CONFIG_FILE=PATH` |
 
-The user document is the one `hrns` writes. A project document only overrides the keys it
-names, so a repository can add a profile or provider to the user configuration.
-`--config` reads exactly that file and disables the merge; it is what `hrns agent --config`
-receives when a profile must pin one file.
+Harness reads and writes the user document by default. An explicit path selects
+the document for both operations.
 
 `hrns profiles path` prints the file in effect.
 
@@ -25,13 +22,8 @@ Highest first:
 
 1. Command-line options (`--model`, `--server`, `--stdio`, …).
 2. `HRNS_*` environment variables.
-3. The project document (`./hrns.toml`).
-4. The user document (`config.toml`).
-5. Built-in defaults.
-
-Files merge key by key: setting `provider = "local-gw"` in a project document keeps the
-user document's other providers. Sections merge the same way,
-so a project file can add `[profile.repo]` next to the user's `[profile.team]`.
+3. The selected configuration file.
+4. Built-in defaults.
 
 ## A complete example
 
@@ -74,12 +66,8 @@ args = ["-y", "@playwright/mcp@latest"]
 enabled = true
 
 [tui]
-theme = "hrns"
-auto_expand_tools = false
-show_thoughts = false
-permission_mode = "all"                # ask | reads | all
+theme = "dark"
 client_io = "all"                      # off | read | all
-sidebar_width = 76
 last_connection = "builtin"
 
 [profile.team]
@@ -103,17 +91,29 @@ notes = "scratch agent"
 
 ### `[tui]`
 
-Terminal preferences. The client reads and writes terminal preferences here.
+Terminal defaults and the last connection. `theme` and `client_io`
+seed the native client when it has no stored value; the client keeps later changes in its
+own state file.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `theme` | string | `"hrns"` | `hrns`, `textual-dark`, `textual-light`, `ansi-dark`, or `ansi-light` |
-| `auto_expand_tools` | bool | `false` | Render every tool result expanded |
-| `show_thoughts` | bool | `false` | Render the agent's reasoning |
-| `permission_mode` | `ask` \| `reads` \| `all` | `"ask"` | `ask` surfaces every approval; `reads` auto-answers read-only tools; `all` auto-approves any call the agent offered an allow option for (executes with the workspace permissions) |
-| `client_io` | `off` \| `read` \| `all` | `"all"` | What this terminal offers the agent: nothing, filesystem reads, or reads plus writes and terminal commands |
-| `sidebar_width` | int | `52` | Side panel width in columns, clamped to 32–76 |
+| `theme` | `dark` \| `light` | `"dark"` | Terminal color theme |
+| `client_io` | `off` \| `read` \| `all` | `"all"` | Local and stdio default for filesystem and terminal access |
 | `last_connection` | string | `""` | `builtin` or a profile name: the connection a bare `hrns` reopens. Written automatically on connect |
+
+New sessions start in Ask. Use `/permissions ask`, `/permissions reads` (auto-approve
+read-only tools), or `/permissions all` (auto-approve eligible tool calls) in the
+session. `/yolo` sets the approval mode to `all` and turns off transcript details
+for the current session. When you reopen the session, the TUI restores the
+approval mode saved on this device.
+
+Transcript details are on by default. Run `/details` to choose a visibility
+option. With details off, the transcript shows a running action count, elapsed
+time, and the latest two actions while the agent works. When a message starts
+or the turn ends, the action block collapses into a row you can click to expand. Use
+`/details on` or `/details off` for the current session. Session switches and
+restarts use the saved default, which you can change with `/details always-on`
+or `/details always-off`.
 
 `client_io` advertises ACP client capabilities; it does not by itself give the agent
 tools. The agent must install `acp_filesystem` / `acp_terminal` through
@@ -123,11 +123,11 @@ that installs the toolsets, such as `examples/fastapi_app.py`, exposes `read_fil
 `write_file`, and `run_command` when the client uses `"all"`. With `"read"`, writes
 fall back to the server's own filesystem instead of the client's.
 
-On a `server` profile, `remote_cwd` is the workspace path sent to the agent. The
-current `client_io` implementation also uses that string as its local root, so a
-remote path that does not exist on the client makes `fs/*` requests fail. Until the
-root is decoupled from `remote_cwd`, omit it or set it to a path that also exists
-locally.
+Remote connections default to `client_io = "off"`. To opt in for a trusted
+endpoint, set `client_io` in its server profile or launch with `--client-io`.
+An in-app `/connect` to a different remote endpoint uses `off`.
+With remote client I/O enabled, the session workspace path must also exist on
+the client machine because it supplies the local filesystem root.
 
 ### `[profile.<name>]`
 
@@ -145,7 +145,7 @@ A saved connection. The table key is the profile's name.
 | `token` | string | `""` | Bearer token or secret reference (server) |
 | `remote_cwd` | string | `""` | Workspace path passed directly to a remote agent |
 | `auth_method` | string | `""` | Agent-advertised auth method id to try automatically |
-| `client_io` | `off` \| `read` \| `all` | unset | Overrides `[tui].client_io` for this connection |
+| `client_io` | `off` \| `read` \| `all` | unset | Sets this profile's client I/O mode. The CLI flag takes precedence |
 | `default` | bool | `false` | Candidate for a launch that names no profile |
 | `notes` | string | `""` | Free-form text carried with the profile |
 
@@ -164,7 +164,7 @@ that builds the model) reads these.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `type` | string | entry name | Provider type (`openai`, `anthropic`, `deepseek`, `gateway/openai`, …). Empty reuses the entry name |
+| `type` | string | entry name | Provider type (`openai-compatible`, `openai`, `anthropic`, `deepseek`, …). Empty reuses the entry name |
 | `base_url` | string | `""` | `http(s)` endpoint for an OpenAI-compatible server. Credentials, query strings and fragments are rejected |
 | `api_key_env` | string | `""` | Environment variable holding this entry's key |
 | `copilot_client_id` | string | `""` | GitHub OAuth app for the Copilot device login; empty uses GitHub's public client |
@@ -194,29 +194,33 @@ connection. Use the model ID advertised over ACP. The built-in agent uses
 "openai:gpt-5.2" = "low"
 ```
 
-The terminal restores an available saved choice in new sessions and after a model
-switch. A loaded session retains its own ACP choices.
+The terminal restores a saved choice in new sessions and after a model switch when
+the server still offers it. A loaded session uses its stored ACP choice if available.
 
 ### `[thinking]`
 
-The reasoning-effort policy `hrns agent` advertises to ACP clients. The built-in
-agent intersects this allowlist with the model profile. Advertised levels are supported
-by both the policy and the model. Values outside the policy receive a validation error.
+The reasoning-effort policy controls which verified levels `hrns agent` advertises to
+ACP clients. The model and its provider route determine the supported levels. A route
+without verified effort levels uses the provider default. Explicit unsupported choices
+receive a validation error with the valid values.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `levels` | list | all five levels | Values the `effort` option offers, in display order |
+| `levels` | list | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | Allowed effort levels, in display order |
 | `allow_off` | bool | `true` | Offer `off` on models whose reasoning can be disabled |
 
-`default` is always offered and lets the provider choose the effort. An empty `levels`
-removes the effort option entirely. Listing a value that is not one of `minimal`, `low`,
-`medium`, `high`, `xhigh` is a configuration error.
+Whenever the effort option is available, `default` lets the provider choose the
+effort. An empty `levels` disables the effort option.
 
 ```toml
 [thinking]
 levels = ["low", "medium", "high"]
 allow_off = false
 ```
+
+`[model_settings].thinking` can set a server default effort. It accepts the same
+values as the ACP option, including `default` and `off`. The server validates the
+effective choice for the session's model before inference.
 
 ### `[mcp]`
 
@@ -237,19 +241,23 @@ Each server is a `[mcp.servers.<name>]` table. Exactly one of `command` (stdio) 
 | `url` | string | `""` | `http(s)` endpoint (HTTP only) |
 | `headers` | table of strings | `{}` | Request headers; `{env:NAME}` is expanded |
 | `enabled` | bool | `true` | Whether the server is loaded for new sessions |
-| `export` | bool | `false` | Offer this server to an ACP agent over MCP-over-ACP |
 | `always_allow` | bool | `false` | Skip the client consent prompt when exporting over ACP |
-| `defer_loading` | bool | `false` | Advertise the server's tools only after the model asks for them |
-| `description` | string | `""` | When the model should load a deferred server |
+| `description` | string | `""` | Description of this server |
 | `include_tools` | list of strings | `[]` | Only these tools (mutually exclusive with `exclude_tools`) |
 | `exclude_tools` | list of strings | `[]` | All tools except these |
 | `timeout` | float | `10.0` | Seconds before a request to the server fails |
 | `oauth` | bool or table | `true` | `true` uses OAuth with dynamic registration; `false` disables OAuth; a table sets `client_id`, `client_secret`, `scopes`, and `callback_port` |
 
-`export = true` makes the client offer an enabled server to an agent that advertises
-`mcpCapabilities.acp`: it launches the stdio command or connects to the URL, then proxies
-the server over the ACP connection. Default `false` keeps the server configured for the
-built-in agent only.
+The client offers enabled servers to local and remote agents that advertise
+`mcpCapabilities.acp`. Native sessions use stdio or Streamable HTTP upstreams
+that support MCP 2026-07-28. Configure HTTP credentials in `headers`.
+The Rust terminal and Python client honor the token store and OAuth fields.
+With the file store, native credentials live in the `native/` subdirectory
+of the token store. With the keyring store, the native service is
+`hrns.mcp.native`. The Linux keyring backend uses Secret Service. On Windows,
+entries larger than 2,560 bytes require the file backend. For a
+pre-registered native client, register the loopback redirect URI
+`http://127.0.0.1:<callback_port>/callback` with the OAuth provider.
 
 Exporting is still gated by the client's user. At session start an interactive client
 asks whether the agent may use the server: allow once, allow for this connection, always
@@ -281,17 +289,37 @@ Libraries are read in this order, highest precedence first: `paths` as written,
 library's skill and bundled files. `enabled = false` removes the capability and the ACP
 catalog entirely.
 
+## Local provider setup
+
+1. Open `/providers` and press **a** to add an entry. `/provider add` opens the same form.
+2. Enter a name and provider type. Supply a base URL and custom model IDs for a
+   custom endpoint. For Bedrock, set an AWS profile and region if you need to
+   override boto3's defaults.
+3. Save, highlight the entry, and press **Enter** to select it. Run `/login` and
+   choose a sign-in method. With no selection, `/login` opens `/providers`.
+4. Use `/models` to choose a model for the session.
+
+| Provider type | Sign-in method |
+| --- | --- |
+| `bedrock` | Discover credentials through boto3 or start an AWS SSO session with AWS CLI v2. AWS manages the SSO cache. |
+| `github-copilot` | Open the GitHub device verification URL and enter the code. |
+| `openai-codex` | Open the browser authorization URL. The browser returns to Harness through localhost port 1455. |
+| `deepseek` | Enter a DeepSeek API key. |
+| `openai-compatible` | Enter an API key for the endpoint's Chat Completions API. |
+
+In the provider list, press **e** to edit or **d** to delete the highlighted entry.
+A Bedrock model ID can include a colon, such as `amazon.nova-pro-v1:0`.
+The built-in local agent supports editing and sign-in. Remote agents can expose
+routes through ACP's optional provider-routing capability.
+
 ## Secrets
 
-Store credentials in the environment or OS keyring and use a reference:
+`/login` stores API keys and account tokens in the OS keyring. The keyring
+account is scoped to the provider entry, type, and configured base URL.
+For environment-based setup, `api_key_env` names the variable the entry reads.
 
-- `env:NAME` — read the process environment.
-- `keyring:service/user` — read the OS keyring; `hrns login` stores account tokens under
-  `hrns/<entry>`.
-- Anything else is a literal, which is only appropriate for non-secrets such as `PATH`.
-
-`api_key_env` names the variable a provider entry reads; the keyring wins over pasted keys
-for the same entry. Account tokens use the `hrns/<entry>` service.
+Connection profiles can resolve credentials from `env:NAME` or
+`keyring:service/user`. Use literal values for non-secret settings such as `PATH`.
 
 ## Environment variables
 
@@ -315,13 +343,13 @@ terminal, the built-in agent, and `hrns serve`.
 - The document is validated on every load; an unknown key, a wrong type, or a bad value
   (an invalid `base_url`, a model id containing `:`) stops both programs with the file and
   field named.
-- `hrns` saves what changes: a profile edit, a new provider, a TUI preference, or the
-  remembered connection. Values equal to their defaults are omitted, so the file stays
+- `hrns` saves what changes: a profile edit, a new provider, the remembered connection,
+  or an MCP `always_allow` consent. Values equal to their defaults are omitted, so the file stays
   close to what a person would write.
 - Saving goes to the user document unless `--config` selected another file. A project
   document supplies read-only overrides.
 - The client passes the same document to the built-in agent it spawns, so a model selected
-  in the TUI is the one `hrns agent` runs.
+  in the terminal is the one `hrns agent` runs.
 
 ## Managing the file from the CLI
 
@@ -334,16 +362,21 @@ hrns config keys                 # keyring accounts and environment sources
 hrns profiles list               # saved connections from the document
 hrns profiles add team --server wss://host/acp --token env:TEAM_TOKEN
 hrns profiles remove team
-hrns mcp add playwright --export -- npx -y @playwright/mcp@latest
-hrns mcp add playwright --export --always-allow -- npx -y @playwright/mcp@latest
+hrns mcp add project-tools -- project-tools
+hrns mcp add project-tools --always-allow -- project-tools
 hrns mcp list
 hrns login github-copilot
 ```
 
-`hrns config show` prints the merged document as TOML and marks each source as `project`,
-`user`, `selected`, or `environment`. `--json` prints the same data as JSON, `--all`
+`hrns config show` prints the effective settings and identifies the document.
+`--json` prints the same data as JSON, `--all`
 includes defaults, and `--reveal` prints literal secrets that are otherwise shown as
 `***`. `hrns config keys` lists each provider's keyring service/account and environment
 variable name, plus whether a value is present.
 
 `hrns clean --config` removes the document; `hrns clean` removes session history.
+The local server exits after five seconds with no connected clients and no unfinished runs.
+Use `hrns stop` to request a graceful shutdown, disconnect clients, and cancel unfinished runs.
+Use `hrns stop --force` to terminate the local daemon immediately, even if it is unresponsive.
+Force stopping skips graceful cleanup and can interrupt unfinished runs.
+Use `hrns stop --config PATH` to select the session store from a specific configuration file.

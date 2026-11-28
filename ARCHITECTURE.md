@@ -3,9 +3,9 @@
 ## Distribution packages
 
 `hrns` is the default distribution: a metadata-only wrapper depending on the same
-version of `hrns-slim[client,server]`. Its `ag-ui` extra forwards to `hrns-slim[ag-ui]`.
+version of `hrns-slim[client,headless,server]`. Its `ag-ui` extra forwards to `hrns-slim[ag-ui]`.
 `hrns-slim`, defined in `hrns_slim/pyproject.toml`, owns all code in `hrns_slim/hrns` and retains
-the `client`, `server`, and `ag-ui` extras. Both distributions expose the `hrns` command;
+the `client`, `headless`, `server`, and `ag-ui` extras. Both distributions expose the `hrns` command;
 Python imports remain `hrns`. Runtime version reporting reads `hrns-slim` metadata.
 
 Both packages use Hatchling with the `uv-dynamic-versioning` version source and
@@ -43,6 +43,415 @@ unchanged.
 for its command implementations, so the codebase has no `argparse` dependency at
 all.
 
+## Rust terminal preview
+
+The preview in `rust/` shares its composer, transcript and ACP v1 client across
+native Ratatui and Ratzilla. The protocol uses the official Rust ACP SDK. Native
+launches external stdio agents using the SDK and connects to local and remote
+Harness servers with Tungstenite. The browser uses its WebSocket API through
+`ws_stream_wasm`.
+Both WebSocket adapters send one SDK JSON-RPC frame per text message through
+the Python ACP mount. Host arguments and browser services stay outside the
+shared application state. ACP work is driven on a native worker thread or
+a browser task so the composer renders independently of connection setup.
+
+Build the terminal with `cargo build --locked --manifest-path rust/Cargo.toml`
+and the browser from `rust/` with `npm ci --prefix npm` followed by
+`trunk build --locked --release` with `wasm32-unknown-unknown` installed.
+The browser renders through Ratzilla's
+canvas backend. The DOM backend stayed above 20 seconds for a 500-line stream;
+canvas completed the same stream in 1.5 seconds, and synthetic keydown-to-next-
+frame p95 was 13.5 ms for typing and 12.9 ms for scrolling. Canvas has no text
+selection; `/copy` remains the clipboard path. The preview expects a remote ACP mount at
+the same origin under `/acp/agent`. For local development, set the `endpoint`
+and `cwd` page query parameters to a WebSocket URL and remote workspace.
+Put any deployment authentication upstream of the browser connection. The
+browser advertises no client filesystem, terminal or MCP capability and serves
+no workspace callback; only its own file chooser and clipboard act on user
+input. Deployments that need those capabilities use the native client.
+
+Native clipboard actions, including provider sign-in, use the system pasteboard
+on local macOS sessions. SSH sessions and other native platforms send OSC 52
+to the terminal.
+
+The shared `/attach` command stages an embedded ACP resource when the runtime
+advertises embedded context. The native frontend reads the supplied path away
+from the event loop. The browser opens its file chooser, and the prompt carries
+the chosen content rather than a path to the browser device.
+
+Native advertises `clientCapabilities` from one mode: `off` offers nothing,
+`read` serves `fs/read_text_file`, and `all` also serves writes and the
+`terminal/*` lifecycle. Elicitation form support is always advertised on both
+targets. Reads and writes are confined to the session workspace; version
+control, `.hrns`, `.env`, secret and key paths are read-only. A terminal retains
+the latest output within its byte limit and runs in its own process group on
+Unix. Native client I/O holds one workspace root for the active ACP session.
+Switching or dropping the connection releases its terminals. Exit waits run
+alongside other requests and honor request cancellation. Both targets treat
+unsupported client requests as `method_not_found`, and the browser's absent
+capabilities are never advertised.
+
+The Python dispatcher always launches the installed native wheel; the release
+installs it with the Python client. A source checkout without the wheel reports an
+install hint instead of opening a Python terminal. The dispatcher resolves the target
+and existing credential references before replacing the Python process on POSIX.
+The CLI flag takes precedence over the profile's `client_io`. Local and stdio
+launches fall back to `[tui].client_io`, and remote launches fall back to `off`.
+The native client uses `off` when changing to a remote endpoint other than its
+launch target. The client advertises and enforces the same mode for each connection.
+The native process
+inherits the terminal and owns terminal restoration and the ACP connection.
+The Rust state file is authoritative only for values the user changes in the
+native UI; unchanged values keep following the Python document. The default uv
+development group resolves `hrns-tui` from `rust/`. Maturin builds the local
+wheel. uv tracks the Cargo manifests and Rust sources when deciding whether to
+rebuild it. The local binary reports the crate's preview version.
+
+The published `hrns-slim[client]` extra declares `hrns-tui==<version>`. The wrapper
+uses `hrns-slim[client,headless,server]`. Requests for the native client need a
+compatible wheel from the release matrix. The `headless` extra owns the Python
+ACP and MCP stack for `hrns run`, and the `server` extra owns the Python runtime.
+The publish workflow sets the pin in the slim metadata after `just check` and
+verifies the resulting wheels and source
+distributions. The development workspace resolves the local Rust crate.
+See [the release guide](docs/release.md#version-matched-native-dependency).
+
+The release also ships `@xelandernt/hrns-tui` as compiled ES modules with
+generated TypeScript declarations and prebuilt browser Wasm.
+`mountTerminal` embeds Ratzilla's canvas in the
+host element and returns a handle for focus and disposal. Resizing recreates the
+canvas while keeping the terminal session. Disposal stops drawing, removes input
+listeners, and ends the ACP connection. Both builds share the Rust browser
+client and the TypeScript wrapper for the DOM lifecycle. Trunk compiles the
+wrapper before copying its JavaScript into the standalone bundle. The npm build
+compiles the package entry point against the generated Wasm bindings.
+
+The approval panel takes the composer's place while a tool approval is in
+focus. It shows the tool kind and a scrollable preview above numbered choices.
+Up and Down move the selection, Enter confirms it, and `1`–`9` select by
+position. Page Up and Page Down scroll details. `Esc` cancels the request. Modes `ask`,
+`reads` and `all` auto-approve nothing, read/search/think calls, or any request
+that offers an allow option; the decision uses the kind reported by the agent,
+never a tool name. Pending approvals and forms are cleared when their turn ends
+or the connection drops, so a request resolves exactly once.
+
+The transcript marks a pending manual approval with `◈` in the approval
+panel's warning color. A solid diamond marks approval and a hollow diamond
+marks rejection. Expanded calls show the approval state in words. Automatic
+approvals and cancelled requests carry no diamond.
+
+### Native MCP export
+
+The native TUI owns the `[mcp.servers.*]` configuration, consent, and upstream
+connections for local and remote agents. It opens configured stdio and
+Streamable HTTP servers with the Rust MCP SDK. HTTP headers and subprocess
+environment values resolve on the client. Approved servers are registered
+before `session/new` or `session/load` and declared as `type: "acp"`. Agents
+must advertise `mcpCapabilities.acp`. They use standard `mcp/message` on the
+existing ACP connection. The Rust provider uses ACP's cancellation marker,
+correlates progress with the originating request, and reports startup and
+protocol errors through the MCP health view. A server that fails to start is
+omitted from the ACP declarations while the other servers and session continue.
+The native client drains subprocess stderr through a pipe and retains a bounded
+startup diagnostic. On failure the transcript shows a short reason and `/mcp`
+opens a searchable server picker with wrapped diagnostics or the selected
+server's filtered tool list.
+
+The native client uses the Rust MCP SDK to probe for MCP 2026-07-28 and fall
+back to `initialize` with handshake-era upstream servers. For a legacy
+upstream, the provider builds ACP-facing discovery from the negotiated
+capabilities and translates supported operations to MCP 2026-07-28. It
+omits reverse requests, subscriptions, and multi-round-trip interactions
+for legacy servers. The negotiated upstream revision appears in `/mcp`.
+Review the adapter as part of [release maintenance](MAINTENANCE.md#mcp-protocol-compatibility).
+
+Configured HTTP authorization headers take precedence. When an upstream requires
+OAuth, the native client uses the Rust MCP SDK for authorization server discovery,
+registration, PKCE, and token refresh. The
+`/mcp` menu opens an authorization page in the browser and receives the callback
+over loopback. Native credentials use the configured file or OS keyring backend
+under a dedicated namespace. The file backend publishes token updates atomically,
+and the store coordinates refreshes between terminal processes. A credential
+write or delete retains the lock through its blocking operation. Signing out
+in `/mcp` clears the native credentials even when the server is offline and
+drops any active upstream from the session.
+The Python MCP commands and headless sessions use the Python credential namespace.
+
+A later session setup, including reopening a saved session, can attach the
+newly authorized server. The native client asks before starting an enabled
+server unless its configuration already grants consent. `always allow`
+updates the local TOML file. Local and remote Harness servers consume the same
+declarations. Browser sessions omit client MCP capabilities.
+
+Agent forms (`elicitation/create`) render as a dock above the composer. A form
+walks its fields in order: typing edits text and number fields, `1`-`6` choose,
+toggle or advance a choice field, `y`/`n` answer booleans, `Enter` moves on and
+submits the last field, and `Esc` declines. Multi-select fields toggle without
+advancing. Required fields that are unanswered block submission with an inline
+error. A form the client cannot render is declined rather than ignored, so the
+agent receives a result instead of waiting forever.
+
+Both frontends keep one action queue for the process lifetime and can retry the
+transport after a disconnect. `Ctrl-R`, or the `/reconnect` command, starts
+another attempt with the same transport options and connection identity.
+Both frontends remember the session ID and workspace from the Ready event when
+the agent supports session loading.
+`Ctrl-R` edits nothing, so the draft survives; `/reconnect` is an ordinary
+command and therefore consumes the current draft line. The transcript and
+queued prompts survive a reconnect to the same session. The next `Ready`
+refreshes the session, workspace and agent capabilities after the client
+discards connection-scoped state, approvals and in-flight turns. The client
+sends queued prompts once the session is idle. Submitted prompts are tracked
+by the server.
+
+The same supervisor replaces a live connection when the composer asks for a new
+or saved session. `/new` uses the current workspace and `/new <path>` selects
+another workspace on a Harness server. `/load <id>` resolves the workspace
+through paginated `session/list` when no workspace is supplied. `/close` and `/delete`
+use the capabilities advertised at initialize; closing or deleting the current
+session starts a new one, while acting on another session leaves the current
+one attached. A switch opens a replay window: the client keeps the old
+transcript until the new connection's `Ready`, then drops the old prefix so
+restored history is not duplicated. The native supervisor returns to the prior
+session when a switch on a persistent server fails. Each session's draft, staged
+attachments, and unsent local queue stay in the TUI until it exits.
+
+Transcript entries keep their plain text for search and copy. Agent and thought
+entries render a small Markdown subset at draw time: fenced code, inline code,
+emphasis, links, headings and GitHub Flavored Markdown tables. Table cells wrap
+within aligned columns and use labeled rows when the viewport is too narrow.
+User entries and system notices stay literal. The `System` heading and body
+align with the `User` and `Agent` entries. The heading, gutter border, and
+highlighted slash commands share the theme's system, warning, or error color
+according to severity. The rest of the body uses the normal text color.
+
+ACP tool calls are keyed by `tool_call_id`, merged from start and progress updates, and
+shown as compact rows with status markers and disclosure arrows. Click a tool
+header to expand or collapse its output. `Ctrl-O` toggles details in bulk for
+the current transcript. New tool calls start collapsed. Shell, read, list,
+search, and failed calls show up to two output rows and an indicator when
+more is available. Expanding shows all details received from the agent.
+The transcript tracks
+the visible entry and byte offset through streaming, resize and expansion.
+The wheel scrolls by rows, Page Up and Page Down move by the viewport height,
+and scrolling down to the latest output resumes follow mode. A one-column
+scrollbar sits in the composer's right-border column when rows overflow; its
+thumb shows the visible share, lights up under the pointer, and a press or drag
+on it moves the viewport, as OpenCode's scrollbar does. While the reader is
+away from the tail, a centred, clickable `↓ Back to bottom` label takes a
+reserved row above the composer, as in Codex. It reverses under the pointer,
+names new activity, disappears once the transcript follows the tail again, and
+`Esc` returns there when no turn is running.
+
+The transcript and optional sidebar sit above a rounded, full-width composer
+and a single-row status bar. Prompt and reply text share the composer's typing
+column, including wrapped lines. The `User` and `Agent` labels share that
+column. User prompts use the theme's surface background, and tool calls and
+reasoning are indented within the transcript.
+`Alt+Up` and `Alt+Down` select earlier and later user prompts without
+moving the composer cursor. Incoming output stays below the selected prompt
+or scrolled viewport and shows a footer notice until the reader returns to the
+bottom or presses `Ctrl+End`.
+
+Composer completion reads the draft. A slash in the first character starts a
+command. Recognized names use the theme accent. Partial and unknown names stay
+in the composer on Enter, including when used as the first token after
+`/queue`. Slashes elsewhere in a message are literal. The first token offers
+local command completions, while a `$token` offers user-invocable skills from the agent's
+`hrns/skills` metadata. Suggestion labels pad to the widest row so descriptions
+start on one column. `Tab` accepts the selected row, Up and Down move the
+selection while it is open, and Escape dismisses it before cancelling a turn.
+On local native connections, `@` at the start of the token under the cursor
+starts a file search in the active session workspace. A background walk indexes
+regular files, respects ignore rules, and skips hidden entries and symlinks.
+Up and Down browse the ranked paths. Tab or Enter replaces the active token
+with an `@` reference to a workspace-relative path, quoting the path when
+needed. The composer uses separate theme colors for recognized commands,
+exact file matches, and user-invocable skill mentions.
+The reference travels as ordinary prompt text so the agent can read the file on
+demand. Remote sessions accept manually entered paths.
+`/skills` uses the shared picker to browse the user-invocable catalog with Up and
+Down. The detail area shows the selected skill's description and the directory
+from its ACP `path` on local connections. Remote connections show a remote
+source label. Enter inserts the `$id` mention into the composer for the next prompt.
+Submitting a draft that names a catalog skill attaches the skill id and mention
+span to the first text block's `_meta`, leaving the typed text unchanged for
+the agent to expand. Paste, draft history and attachment staging stay shared;
+native reads paths while the browser opens its file chooser.
+
+The main composer collapses plain-text pastes over 1,000 characters into inline
+`[Pasted Content N chars]` placeholders. Each placeholder is a single editing
+unit with a byte range and its own payload stored in the draft and input
+history. Send and `/queue` expand the placeholders in place before building the
+ACP prompt. Command recognition uses the visible draft so a collapsed paste at
+the start of a prompt stays literal.
+
+`Ctrl-B` opens a sidebar with the connection identity, client I/O mode,
+session title, model, mode, permission mode, usage, cost, local queue,
+skills and recent activity. `Ctrl-O` expands tool details and the sidebar
+records tool transitions and turn outcomes. Both frontends persist sidebar,
+width, reasoning visibility, theme and permission mode without
+touching connection configuration: native writes JSON under
+`$XDG_STATE_HOME/hrns/tui.json` (or `$HRNS_TUI_STATE`) and the browser uses
+local storage. The activity sidebar is suppressed below 96 columns. The status
+bar shows the connection and contextual keyboard hints. When space allows it
+also shows the session, model, context usage, cost, effort and approvals.
+Routine slash-command feedback appears in the status bar until the next
+submission. Warnings, errors and command output can appear in the transcript.
+`/theme`, `/settings`, and the `theme` page parameter expose theme settings.
+Approval mode starts in Ask for each new session. `/permissions` and `/yolo`
+change the current session only. When the agent advertises a `permissions`
+select option in ACP `configOptions` (category `mode`), the server owns and
+persists the mode per session (`StoredSession.permission_mode`) and enforces
+`reads` (`read`, `search`, `think`) and `all` before requesting client
+permission — so detached background sessions keep running unattended and only
+enter `waiting` (`Needs input` in Agents view) while actually blocked on a
+client permission request or `ask_user_question` elicitation. Changes via
+`session/set_config_option` take effect starting from the next tool call. For
+agents that do not advertise `permissions`, the TUI falls back to client-side
+auto-approval and saves the mode on the device under a key derived from the
+connection identity and session ID (native writes each entry atomically
+alongside the TUI state, and the browser uses local storage in its current
+origin; local daemon identity uses the session store instead of the daemon's
+transient port). The built-in themes are `dark` and `light`.
+
+The Ratatui transcript groups tool calls and reasoning between user and agent
+messages. With details off, the active block shows its action count, an
+animated indicator and a preview of its latest two actions. For live turns
+initiated by the client, the elapsed time runs from the first action until the
+next message or the end of the turn. The clickable summary retains the final
+count and elapsed time.
+Pending approvals and transcript notices stay visible. The transcript retains
+the actions for expansion and search. `/details on`, `/details off` and `/yolo`
+change visibility for the current session. `/details always-on` and
+`/details always-off` save the client default in the TUI state. The initial
+default is on. Bare `/details` opens a picker for the four visibility options.
+
+ACP plan snapshots populate the Todos panel with completion counts, item
+status and priority. The first nonempty snapshot for a session opens Todos.
+`/todo` focuses it for scrolling, and narrow layouts render it as a drawer.
+
+Form elicitation uses a question dock with a tab per field and a confirmation
+view for multiple questions. Harness choice fields and their `_text` companions
+share a tab and submit an ordinary ACP form response.
+
+The native client opens its local provider editor with `/providers` or
+`/provider`. The popup owns add, edit, delete, and selection. `/login` uses the
+explicit provider selection when present, then the active model's provider ID
+from its ACP metadata. The picker is the fallback when neither resolves to a
+local provider. Models and effort are ACP session
+config options. The browser client and remote connections use ACP session
+options to present the agent's available models. Agents that advertise the ACP
+provider-routing capability expose their routes through `providers/list`,
+`providers/set`, and `providers/disable`.
+
+### ACP SDK pin and extension surface
+
+The Rust client pins `agent-client-protocol = 5.4.0` (schema 1.19.0) and uses
+the stable v1 types plus the unstable `session.compaction` client capability. It sends
+`clientCapabilities` (including `session.compaction`) and reads the agent's
+`loadSession`, prompt, MCP and session capabilities at initialize. It handles
+`session/update` for user, agent and thought chunks (including non-text blocks
+as labels), tool calls and updates, plans, session titles, current mode, config
+options, available commands, compaction updates (`compaction_update` and
+`compaction_summary_chunk`) and usage with cost. It reads `_hrns/session/state`
+as a notification and from the `session/new` or `session/load` `_meta`, along
+with `hrns/skills`. It sends `hrns/skills` mentions on the first prompt text
+block. It answers `session/request_permission`, `elicitation/create`, `fs/*` and
+`terminal/*` through the active session stream, which is where the SDK routes
+session-scoped requests. Provider methods and extension requests use the SDK's
+untyped message type because the stable schema does not expose them.
+
+The built-in server supplies session titles through `session_info_update` and
+advertises capability-declared slash commands through `available_commands_update`.
+In the TUI, non-colliding agent-advertised commands are invocable and completed
+directly as `/<name>` with a dedicated `agent_command` theme color and `[agent]`
+marker; local TUI commands always win on name collision, and `/agent <name>` lists
+and invokes any advertised agent command (including overlaps).
+The built-in `hrns` agent replaces `PruneToolResults` with the reusable `Compaction`
+capability (automatic `TieredCompaction` during turns plus manual `/compact [focus]`
+via `SummarizingCompaction` / `compact_now`). Compaction emits ACP `compaction_update`
+and `compaction_summary_chunk` updates (falling back to agent text for clients that do
+not advertise `session.compaction`), refreshes the context usage gauge, and renders as
+an expandable transcript banner with live spinner, token delta, and summary.
+The built-in server omits `session/resume`.
+`session/delete` returning `-32002` is treated as success. Listing defaults to
+the current workspace.
+
+### Terminal command workflows
+
+`/connect` switches the active ACP transport. Native accepts a WebSocket URL
+or `local` and an optional workspace. The browser accepts a WebSocket URL.
+WebSocket connections use TLS outside loopback. Native startup bearer
+credentials stay scoped to the startup endpoint. Switching creates a session
+and clears local prompts queued for the previous session.
+
+`/agents`, `/sessions`, and Ctrl+G open the full-screen Agents view. The view
+shows a session list and details for the selection. Escape or Ctrl+G returns to
+the chat. The list groups sessions by workspace, ordered by each workspace's
+latest session activity. Search filters paged ACP summaries by title, ID, and workspace.
+Tab switches between the current
+workspace and all accessible workspaces. On a Harness server the view refreshes
+while open, showing running, waiting for input, and attached-elsewhere states.
+Selecting a session loads it and releases the previous attachment. Native
+WebSocket and browser clients reattach the previous session if the switch fails
+and the server supports loading that session. Background
+status is visible in this view. Ctrl+N creates a session in the current
+workspace or opens an editable workspace path in the all-workspaces view.
+Path completion matches local directories on local connections and known
+workspace paths on remote connections. Delete confirms the selected session's
+name and workspace before requesting deletion. Deleting the current session
+opens a fresh session in its workspace. When quitting with only the current session active,
+the native TUI offers to detach, close that session and quit, or stay. Quitting deletes the
+current session when it never received a prompt, then sweeps its workspace for untitled sessions
+that no client holds or runs.
+Before switching or checking whether to quit, the terminal uses
+`_hrns/session/flush` to let earlier prompt requests finish admission to the
+server queue. The call returns before the prompts finish running.
+
+The built-in terminal starts or joins one local server per configured SQLite
+store. A detached Python process holds a per-store lock, binds a random loopback
+port, and writes its endpoint and bearer token into a private runtime directory.
+The launcher reads the normal configuration, checks the authenticated endpoint
+before reuse, and starts the runtime in a separate process on a cold launch.
+Endpoint discovery uses only the base Python package. The server owns
+the runs independently of terminal connections. The local daemon shuts down
+after five seconds without ACP clients or active or queued runs. `hrns stop`
+requests shutdown over authenticated loopback HTTP. Shutdown disconnects
+clients, cancels unfinished runs through the ACP server lifecycle, and releases
+the store lock. The daemon publishes its PID and creation time while holding
+the store lock. `hrns stop --force` verifies that process identity and terminates
+it directly, bypassing HTTP and graceful cleanup. The CLI removes stale daemon
+metadata once it acquires the store lock. `hrns clean` takes the same lock before
+removing session files.
+The packaged WebSocket servers accept ACP messages up to 64 MiB on the wire
+and report oversized messages with WebSocket close code 1009. The packaged `hrns serve`
+command accepts session workspaces within its configured `--cwd` root.
+
+`/models` searches the advertised model choices and marks the current model.
+In the built-in terminal session, submitting a draft before model setup opens
+the provider picker. The composer restores the draft after provider editing,
+and Enter submits it once a model is ready. The ACP prompt endpoint rejects
+missing setup and reports credential errors to clients.
+The reasoning picker opens after model selection when the agent advertises
+effort choices. The composer completes `/model` and `/effort` arguments from
+the current ACP config options, and offers built-in options for `/theme`,
+`/permissions` and `/provider`. The status bar's model field shows the active
+model or the selected provider ID while its model is unavailable or switching.
+The status bar also shows the session's reasoning effort and the client's
+current approval mode.
+
+Tool entries use ACP kind, location and arguments to summarize each operation.
+The built-in tools show the primary input in their collapsed headers and
+render arguments as labeled fields, file previews, or lists on expansion.
+Approval prompts use the same input formatting. Ctrl+O reveals formatted
+arguments, results, diffs, and terminal references. Shell entries show the command and expose
+multiline output on expansion. The shell's exit record supplies the failure
+status when available. Reasoning headers are always visible. Click a header to
+expand or collapse its text. `/thoughts` controls whether new reasoning streams
+expanded; switching it off collapses existing reasoning blocks. The transcript
+uses titled panels for command output such as `/help` and `/settings`.
+
 ## ACP dependency
 
 Both the client and server extras require the stable 1.x `agent-client-protocol`
@@ -66,6 +475,22 @@ ACP's own `fs/*` and `terminal/*` are the same kind of opt-in: the client's
 `acp_terminal` through `attachment_config` to expose `read_file`, `write_file`, and
 `run_command`. `examples/fastapi_app.py` wires both; the default `hrns agent` does
 not, so its `Coder` works on the server workspace instead of the client's.
+
+## Built-in coding agent
+
+`build_agent()` uses `Coder(sub_agents=False)` by default. The ACP prompt
+runtime handles deferred tool approvals for the parent run, and the delegated
+run has no way to request those approvals. Callers can supply a custom
+`Coder` when they manage delegation and approvals themselves.
+
+The built-in agent saves tool results that reach the upstream 10,000-character
+threshold under `.pydantic-ai-harness/tool-output` in its workspace. The spill
+hook runs before `Coder` truncates results. The model receives a preview and can
+search or page through the saved result with `grep_tool_result` and
+`read_tool_result`, including byte-range reads. `prune_tool_result` lets the
+model replace a result from the previous step with a shorter summary in its
+history. These tools run without an approval prompt. `Coder` continues to
+clear older results when estimated context usage reaches its threshold.
 
 ## Server-owned sessions
 
@@ -109,17 +534,21 @@ Messages left unconsumed at turn completion become separate follow-ups ahead of
 explicitly queued work. Idle steering starts a normal turn. ACP wire types and
 methods are unchanged.
 
-Cancelling an awaiter never cancels execution. Cancel and runtime errors pause
-remaining work; Python inspection/resume/clear manage separate queued turns.
+Cancelling an awaiter never cancels execution. Cancellation waits for the active
+turn to settle, and the worker starts pending turns after cancellation or an
+error. Python provides inspection and clearing for separate queued turns.
 Accepted prompts survive disconnect, their JSON-RPC associations do not, and no
 reconnect resubmits them. The TUI sends concurrent prompts without cancelling
 earlier request workers. `/queue <message>` holds a follow-up and staged attachments
-in the TUI until idle; the command and queue controls are entirely client-side.
+in the TUI until idle. A bounded preview above the composer shows queued
+message text in order until each prompt is submitted. `/edit-queue` or
+`Shift+Left` from an empty composer moves the last pending message and its
+attachments into a `/queue` draft for editing.
 
 `RegisteredAgent.cancel_session(session_id)` resolves a session through `get_session`
 and delegates to `Session.cancel()`. It shares lookup/restoration and unknown-ID
-errors with `get_session`, cancels the active turn, and pauses queued work without
-closing the session or clearing pending prompts.
+errors with `get_session` and cancels the active turn. Any pending prompt can
+start in the same session as soon as the active turn settles.
 
 `RegisteredAgent.close_session(session_id)` resolves through `get_session` and
 delegates to `Session.close()`, sharing its lookup/restoration and unknown-ID errors.
@@ -141,6 +570,13 @@ last outcome, and last usage. The existing client uses them for server-started t
 and suppresses duplicate lifecycle events from its own prompt response. They do not
 expose queue management. Successful close/delete clears that session's client revision
 and active-turn caches, so restoring its saved state can begin a new revision sequence.
+
+Listable registrations advertise `_meta["hrns/session/activity"]`. Every result
+in `session/list` carries the same key in its own metadata with `status`
+(`idle`, `running`, or `waiting`) and `attachedElsewhere` relative to the caller.
+The adapter combines live state only with sessions returned by the principal's
+store query. The native TUI consults the same metadata when deciding whether
+quitting requires a choice.
 
 ## Read-only AG-UI
 
@@ -198,11 +634,14 @@ joins receive messages and state within a short observation-only `RUN_STARTED` /
 `RUN_FINISHED` envelope with a fresh run ID. Idle state updates use the same envelopes;
 these protocol runs hydrate observers and never execute an agent.
 
-History conversion uses
-`AGUIAdapter.dump_messages`; observer-only response-order/tool-call identity tables
-reconcile live IDs with dumped messages. Completed display history is cached. Native
-cancellation snapshots preserve partial display without committing it to model
-history or persistence. No custom partial-delta reducer is implemented.
+History conversion uses `AGUIAdapter.dump_messages`. Observer-only response-order
+and tool-call identity tables reconcile live IDs with dumped messages. Display
+history includes cancelled turns. On cancellation, the ACP runtime commits the
+available model messages and transcript before the next turn starts. Pydantic AI
+repairs dangling tool calls with interrupted outcomes, and a runtime notice tells
+the next model that the preceding turn was interrupted. The transcript
+replays the output streamed up to cancellation and closes outstanding calls using
+the ACP `failed` status with an explanation.
 
 The current native-run encoded prefix grows with event volume and is released at
 completion. Subscriber queues hold 256 events; overflow closes the subscription for
@@ -210,8 +649,9 @@ snapshot/replay reconnect instead of dropping deltas or blocking execution. ACP 
 Server/session shutdown closes subscribers and pending deliveries.
 
 Deployment is one process/worker per runtime. Stores may recover committed state
-after restart; live tasks, queues, pending decisions, partial display history, and
-subscriptions are not durable. Cross-worker ownership/fan-out is outside this API.
+after restart. Live tasks, queues, pending decisions, live updates from turns
+that have yet to settle, and subscriptions are process-local. Cross-worker
+ownership/fan-out is outside this API.
 
 ## MCP over ACP
 
@@ -241,8 +681,8 @@ SDK's `MessageRouter` and sends raw stateless frames through the same
 connection. It is isolated so it can be removed when the Python SDK catches up
 with the RFD.
 
-On the client, `ClientMcpProvider` reads the `[mcp]` servers with
-`export = true`, launches the stdio command or connects to the HTTP/SSE URL,
+The Python headless client's `ClientMcpProvider` reads enabled `[mcp]` servers,
+launches the stdio command or connects to the HTTP/SSE URL,
 and serves the upstream session through `from_mcp_server`; the client includes
 the resulting declarations in `session/new`. On the agent, `acp_mcp_toolsets`
 turns every client declaration into an ordinary `MCPToolset`: standard
@@ -261,15 +701,13 @@ the negotiated revision is logged (legacy with a warning). Reverse requests
 bridged: they are not advertised, and the MCP SDK answers them with
 `INVALID_REQUEST` because MCP 2026-07-28 replaced them with MRTR.
 
-Export is also gated by the client's user, not only by configuration.
-`export = true` makes a server eligible; at session start the client asks whether
-the agent may use it (allow once, allow for the connection, always allow, deny)
-before the declaration goes into `session/new`, `session/load`, or
-`session/resume`. A denied server is left out of the declaration, and an
-unapproved server is never started. `always_allow = true` skips the prompt and
-is the only way a non-interactive client (`hrns run`) exports, because it cannot
-ask and therefore denies. The TUI renders the prompt through `ChoiceDialog`; the
-CLI leaves the consent handler unset.
+The client asks for consent before starting a server and including its declaration
+in session setup. The native TUI shows allow once, allow for the connection,
+always allow, and deny in a vertical list. Up and Down move the highlight,
+Enter confirms the highlighted choice, and Escape denies. The first choice is
+allow once. The headless client (`hrns run`) uses only servers configured with
+`always_allow = true`.
+
 
 Binding internals and subscription requirements are documented in
 `docs/mcp-over-acp-analysis.md`; remaining work is tracked in `TODO.md`.
@@ -295,21 +733,50 @@ provider config is what builds it, leaving `list_models` and `build_model` to th
 ids from `settings.model_targets()`, and raises `ProviderDisabled` instead of silently
 falling back to a configured endpoint.
 
-ACP's provider payload reports routing endpoints, not the models behind them, so the
-model→provider link travels separately: each `ModelChoice.provider_id` becomes
-`_meta.providerId` on the model option. `hrns agent` derives it from the `entry:model` id;
-the client's `/providers` table groups the option's values by that tag, and `/models`
-appends it to any model name that does not already read `provider:model`.
+ACP model options carry `_meta.providerId` when the resolver supplies a provider
+association. The model picker uses that metadata as context for the advertised
+display name and value.
 
-The terminal can open Local mode before a provider and model are selected. It launches
-the built-in ACP runtime in setup mode with a model-free, in-memory session. The chat
-composer accepts `/provider` (also `/providers`) and `/models` to configure the agent.
-Selecting a model saves the configuration and starts the configured runtime with a new
-session. Headless prompts still require a configured model.
+The built-in agent advertises `hrns/providers/manage`. The native
+client enables it for the local Harness server. The private
+`_hrns/providers/*` requests list and edit local TOML entries and manage one
+active sign-in per runtime. A completed attempt releases the runtime for the next
+sign-in or edit. Its result is available to the connection that started it.
+Saving provider settings and authenticating are separate operations.
+Edits and successful sign-ins refresh ACP model options for open sessions.
+The built-in agent fetches the Copilot account's catalog on startup and after
+sign-in. It keeps each model's Chat Completions or Responses endpoint in memory
+for its provider entry. The same refresh points fetch the Codex subscription's
+catalog through the authenticated Pydantic AI provider. The resolver keeps the
+selectable Codex model IDs in catalog priority order alongside configured custom
+IDs. The model picker uses ACP model option metadata to group
+models by provider and switches tabs with Tab and Shift+Tab.
+The ACP runtime reports the latest provider-supplied reasoning token count at
+model-response boundaries, including when the model's context window is unknown.
+The built-in agent remembers explicit model selections in its local session
+database, scoped to the active configuration file and provider entry. Fresh sessions
+prefer the most recent explicit selection when it is available. Saved sessions
+restore their own model, and environment model overrides govern startup. For each
+provider entry, ACP advertises the last available explicit selection, the configured
+model for that entry, or the first catalog choice, in that order of preference.
+The TUI activates the preferred model for the session when selecting a provider and after sign-in,
+using `session/set_config_option` with `hrns/model/automatic` metadata to preserve
+explicit preferences. The TUI keeps drafts and queued prompts from sending while a
+model switch is pending or the selected provider has no usable active model.
 
-The local and ACP model pickers bound the dialog to the terminal height and give
-the option list the remaining rows. The list owns vertical scrolling so the
-header, local filter, and keyboard hints stay visible with long model catalogs.
+The built-in agent uses Pydantic AI's `RetryOnModelErrors` for connection
+failures. The capability defaults to three attempts per model request and retries
+a streamed request only before output reaches the client.
+When a prompt ends with Pydantic AI's `ModelConnectionError`, the session saves
+the captured history, including completed tool results, and the visible transcript.
+The next prompt is added as a new user message to that history. The ACP adapter
+returns a short provider connection message and logs the exception with the session ID.
+
+API keys and Copilot tokens are stored in the OS keyring. The Codex provider
+loads and saves its rotating credentials through the same keyring. Accounts
+are scoped to the provider entry, type, and base URL. A login attempt runs in
+the runtime and exposes progress and public browser or device instructions to
+the client. Bedrock uses boto3's credential chain and the AWS CLI's SSO cache.
 
 ## Session settings
 
@@ -320,7 +787,8 @@ for a model — the shipped effort ladder is a `thought_level` select built by
 selections into a `ModelSettings` **delta**. The adapter merges that delta over
 `ResolvedModel.settings` and the agent's own settings on every model request: passing a
 callable `model_settings` is what lets `session/set_config_option` land on the next request
-of a running turn, not only on the next turn. The delta shape also keeps the client out of
+of a running turn. A model change or a route change that alters the available options takes
+effect with the next model resolution. The delta shape also keeps the client out of
 credential-bearing keys such as `extra_headers`, which routing uses.
 
 Selections live in `SessionState.setting_selections`, are persisted in `StoredSession`, and
@@ -330,10 +798,16 @@ snapshot the options before mutating resolver state and send `config_option_upda
 resident session whose list changed, because nothing else tells such a client its choices
 shrank.
 
-`hrns agent` reads the policy from `[thinking]` (`levels`, `allow_off`) and intersects it
-with the model's profile via `infer_model_profile`, so a model that cannot reason gets no
-option and an always-on model does not offer `off`. The built-in runtime uses the
-provider's default effort until the session selects a level.
+`hrns agent` intersects its `[thinking]` policy with verified effort settings for the
+effective provider route and model. Copilot supplies its effort levels through
+`capabilities.supports.reasoning_effort` on the authenticated model catalog. Both
+context tiers use the catalog entry for their shared model ID. Native routes use
+provider-specific levels and Pydantic AI settings so the selected effort reaches the
+provider with its intended value. Pydantic AI's unified thinking setting can map
+different input levels to the same provider value. Routes without verified levels use the provider
+default. The same allowed values drive advertisement and validation. An explicit
+session choice takes precedence over `[model_settings].thinking`, and the adapter
+validates the effective setting before inference.
 
 The terminal saves the selected effort in `[local_model_effort]` for Local mode and
 `[profile.<name>.model_effort]` for named connections. Each key is the model id advertised
@@ -342,32 +816,48 @@ restores a saved value through ACP after creating a session or switching models 
 agent still offers that value. A built-in model switch without an applicable preference
 uses the provider default. Loaded sessions retain their stored ACP selections, and
 external agents supply the session's effort when there is no applicable saved preference.
+The Python launcher supplies the resolved profile and its configuration file to the
+native client. Rust updates the profile's TOML table after a successful ACP option
+response. An in-app switch to a different transport has no saved profile.
 
 ## Usage reporting
 
 Two channels carry usage, and they answer different questions. `PromptResponse.usage`
 is per-turn token totals — the protocol has no field there for a context percentage or a
 price, because `acp.schema.Usage` is tokens only. The context gauge is
-`session/update` `usage_update`, whose `used`/`size`/`cost` the client renders as
-"ctx 12k/200k (6%)" and the session's spend. An agent that sends only `PromptResponse`
-leaves the client's status band blank, which is why the adapter emits the gauge at the
-end of every prompt.
+`session/update` `usage_update`, whose `used` and `size` the native client renders
+as `ctx 12000/200000` alongside the estimated session cost, when available.
 
 It also emits it as the turn progresses. A request that ends in a tool call has already
 produced its tokens, so the adapter sends the gauge when the tool call starts: the readout
 follows the work instead of appearing only when the prompt returns, which for a long
 tool-using turn is minutes after the person started watching it. `used` is that request's
-tokens, and `cost` is the committed session total plus the run so far, so the spend moves
-while the turn runs and is corrected to the exact total when it commits. A gauge identical
+tokens, and `cost` is the committed session estimate plus the run so far. A gauge identical
 to the one already sent is dropped rather than repeated for every parallel tool call.
 
-`used` is the last request's input, cache-read, cache-write, and output tokens: cache
-tokens are part of the prompt, and the response becomes context for the next request.
-`size` comes from the resolved model's profile `context_window`; when the profile has
-none (arbitrary OpenAI-compatible endpoints usually do not), no gauge is sent rather than
-a bogus percentage, and the client falls back to the turn's token totals. `cost` is
-session-cumulative and priced by `genai-prices` through `RunUsage.cost`, so it is USD and
-absent for models pricing data does not know.
+`used` is the last request's normalized input plus output tokens. Input already
+includes cached prompt tokens. `size` comes from the resolved model's profile
+`context_window`, which for locally configured Copilot models can come from the
+authenticated catalog. With no known size, the client shows the turn's token total,
+and the adapter can send the cost separately in `session_info_update` metadata
+under `hrns/usage/cost_without_context`.
+
+The local Copilot resolver reads prompt limits from the versioned catalog's
+default and long-context tiers. When both limits are available and differ, it
+advertises two model config values with a shared `hrns/model/context_group`
+and per-value `hrns/model/context_size`. The native picker groups the values
+into one row with left and right tier selection. The session and startup model
+selection persist the selected value. Both values use the same Copilot model
+ID for inference. Hosted Copilot requests select the API version for their tier, and
+the resolved profile uses the tier's prompt limit plus its output allowance,
+capped by the catalog's full window. The picker follows Copilot's size labels
+for Carbon by showing the default prompt limit and the extended full window.
+
+The estimated cost sums priced requests in USD through `RunUsage.cost`. The
+official Copilot endpoint uses GitHub's published Gemini 4 Carbon rates, including
+the UTC December 1, 2026 transition from promotional to standard rates. Other
+available token rates come from Pydantic AI's pricing integration. The adapter
+labels the estimate via `hrns/usage/estimated_cost` on standard usage updates.
 
 The gauge is sent straight to the connection rather than recorded in the session
 transcript: replaying a stale percentage into a loaded session would describe context
@@ -419,53 +909,54 @@ client's, `provider`/`model`/`[providers.<name>]`/`[model_settings]`/`[mcp]`/`st
 the runtime's. Neither side reads the other's sections, but both parse them, because a
 model with unknown keys is a typo detector.
 
-Precedence is expressed as pydantic-settings source order — init, environment, project
-document, user document, defaults — which deep-merges each source over the next, so a
-project `hrns.toml` overrides exactly the keys it names and leaves the rest of the user
-document intact. `--config PATH` (or `HRNS_CONFIG_FILE`) collapses that to a single
-file and is a contract: a selected file that does not exist is an error, not a silent fall
-back to defaults. The environment prefix is `HRNS_`; `HRNS_MODEL` and `HRNS_STORE`
+Configuration precedence is constructor settings, environment, one TOML file, and
+defaults. Harness uses the user document by default. `--config PATH` or
+`HRNS_CONFIG_FILE` selects another file, which must exist. The environment prefix is
+`HRNS_`. `HRNS_MODEL` and `HRNS_STORE`
 are read by every entry point, so the same variable means the same thing in the
 terminal, the built-in agent, and the HTTP server.
 
 `Profile` and `TuiSettings` are plain models inside the same document, so `hrns` needs no
-facade: `HrnsConfig.profile` is the map the picker lists, `HrnsConfig.tui` is what the
-settings dialog edits, and `HrnsConfig.save()` writes the whole effective document to the
-user file (defaults omitted). Project documents are read, never written.
+facade: `HrnsConfig.profile` is the profile map the dispatcher resolves, `HrnsConfig.tui`
+seeds the terminal's theme, permission mode and client I/O, and `HrnsConfig.save()` writes
+the whole effective document to the user file (defaults omitted). The native client keeps
+changes it makes in its own state file; MCP `always_allow` consent is written through
+`HrnsConfig.save()`.
 
-## Reopening the last connection
+## Launching the terminal
 
-The terminal renders a focused composer before resolving the initial connection.
-After the first frame, a Textual worker resolves the target and imports the ACP
-client and chat screen off the UI thread, then opens the connection and session
-asynchronously. Enter keeps the draft while startup is in progress. The draft
-moves into the chat composer when the session opens. If auto-connect fails, the
-picker shows the error and the draft is retained for the next successful
-connection. The local model catalog warms after chat or the picker is shown.
+Bare `hrns`, `hrns connect` and the connection flags enter the Python dispatcher. It
+resolves the target and existing credential reference, records the connection identity,
+and replaces itself with the installed `hrns-tui` executable on POSIX. The native process
+owns the terminal, the composer, the ACP connection and terminal restoration. A missing
+wheel is an install error: there is no Python terminal fallback. Platforms without a
+native wheel keep every non-interactive command but cannot open the full-screen client.
+
+The native client draws an editable composer immediately and connects on its worker
+thread. The draft stays in place while startup is in progress and moves into the session
+when it opens. A failed auto-connect leaves the draft and the disconnected state visible;
+`Ctrl-R` retries with the same target. The browser runs the same shared state against an
+authenticated remote mount.
 
 A bare `hrns` reconnects to the connection this terminal used last instead of always
 defaulting to the built-in model. The identity is one string in the document's `[tui]`
-section, written by the same `HrnsConfig.save()` that persists theme and permission
-mode: `builtin` for the built-in runtime, a profile name for a saved stdio or remote target.
-An ad-hoc `--server`/`--stdio` command line is not remembered, because it belongs to no
-file and there would be nothing to reopen. The identity never carries a working directory:
-a reopened connection starts where the new launch stands, or where its profile says.
+section, written by the Python dispatcher through `HrnsConfig.save()`: `builtin` for the
+built-in runtime, a profile name for a saved stdio or remote target. An ad-hoc
+`--server`/`--stdio` command line is not remembered, because it belongs to no file and
+there would be nothing to reopen. The identity never carries a working directory: a
+reopened connection starts where the new launch stands, or where its profile says.
 
-Remembering happens once a session exists, so a connection that fails at `session/new`
-does not become the next launch's default. A missing remembered profile or an
-unreachable endpoint opens the picker with the reason in its status line. A
-profile deleted from disk is forgotten. When the remembered entry still exists,
-the picker selects it so Enter can retry the connection.
+A missing remembered profile or an unreachable endpoint opens the native client with the
+reason in the transcript. A profile deleted from disk is forgotten. `_remembered_target()`
+in `cli.py` owns the identity→target mapping and only the interactive command uses it;
+`hrns run` takes its target from its own arguments every time.
 
-`_remembered_target()` in `cli.py` owns the identity→target mapping and only the terminal
-uses it: `hrns run` takes its target from its own arguments every time.
-
-When `hrns connect --session ID` opens a remote session without `--cwd`, the terminal
+When `hrns connect --session ID` opens a local or remote Harness session without `--cwd`, the native client
 finds the session's stored cwd through unfiltered, paginated `session/list` before
 loading its history. This cwd also becomes the connection's displayed workspace.
 An explicit `--cwd` goes directly to `session/load`, where the server validates it
 against the stored cwd. If listing is unavailable or the session is absent from
-the listing, the terminal asks for `--cwd`. New sessions retain profile and local
+the listing, the client asks for `--cwd`. New sessions retain profile and local
 cwd defaults.
 
 ## Todos
@@ -492,14 +983,14 @@ Writes emit a typed `TodoUpdated` capability event through `RunContext.emit`.
 Consumers of `agent.run_stream_events()` can inspect `event.items` without ACP.
 The ACP adapter translates these events into standard `AgentPlanUpdate` full
 snapshots through its existing transcript/update path. The client already maps
-these notifications to `PlanChanged` and renders them in the Todos panel.
+these notifications to `PlanChanged` and renders them in the sidebar Plan section.
 
 The adapter binds a session-owned `TodoStore` during each run using task-local
 context, without mutating the shared agent. That binding takes precedence over
 an explicitly supplied standalone store. Nested runs use separate state. Each
 session retains todos across prompts; `StoredSession.todos` preserves them across
-load/reconnect when a session store is configured. Published changes from an
-interrupted turn are saved without committing its incomplete model history.
+load/reconnect when a session store is configured. Cancelling a turn saves
+published todo changes alongside its captured history and transcript.
 Durability across process restarts depends on the chosen session-store backend;
 the example's `InMemorySessionStore` is process-local.
 

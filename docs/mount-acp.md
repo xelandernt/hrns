@@ -37,10 +37,12 @@ and output types flow through its session and turn handles.
 | `factory` | Required | Sync or async callable receiving `SessionContext` and returning a fresh `AbstractAgent` per live session |
 | `deps` | `None` | Default agent dependencies |
 | `session_store` | Separate `InMemorySessionStore` | Persistence scoped to this registration |
+| `workspace_root` | `None` | Root directory allowed for session workspaces |
 | `model_resolver` | `None` | Model choices, provider routing, and session settings |
 | `session_config` | `None` | Per-session dependencies, capabilities, toolsets, and workspace |
 | `attachment_config` | `None` | Client toolsets (MCP, filesystem, terminal) configured on each ACP attachment |
 | `permission_policy` | `None` | Permission choices for deferred approvals |
+| `permission_modes` | `("ask", "reads", "all")` | Allowed values for the `permissions` session config option (`()` disables it; non-empty must include `"ask"`) |
 | `usage_limits` | `None` | Limits applied to agent runs |
 | `tool_presenter` | `None` | Tool-call presentation for ACP updates |
 | `mcp_capabilities` | `None` | Advertised client MCP transports; requires `attachment_config` |
@@ -148,7 +150,6 @@ await session.cancel()
 # Cancel by ID through the agent registration:
 await coder.cancel_session(session.session_id)
 queued = await session.pending_prompts()
-await session.resume_queue()
 await session.clear_queue()
 
 # Close by ID through the agent registration:
@@ -161,7 +162,7 @@ revisioned running/waiting/idle state and the last outcome.
 
 `cancel_session(session_id)` uses the same lookup as `get_session`: it reuses the live
 session or restores saved state, and raises `KeyError` for an unknown ID. It cancels
-the active turn and pauses queued prompts, keeping the session available for reuse.
+the active turn and starts the next queued prompt when one is available.
 
 `close_session(session_id)` uses the same lookup and unknown-ID errors. It cancels
 the active turn, clears queued prompts, detaches the client, and releases the live
@@ -192,16 +193,19 @@ the existing request and response types. Each request waits for the turn that co
 its message. Follow-ups enter history only when started; steering enters history when
 injected through Pydantic AI's native `RunContext.enqueue()`.
 
-Cancellation and errors pause remaining work. New submissions stay queued while paused.
-`pending_prompts`, `resume_queue`, and `clear_queue` manage separate queued turns through
-Python. Clear resolves pending handles as cancelled. Consumed steering shares the active
-turn's cancellation or error; unconsumed messages stay queued for resume.
+After cancellation or an error, the next queued turn starts automatically.
+`pending_prompts` and `clear_queue` manage separate queued turns through Python.
+Clear resolves pending handles as cancelled. Consumed steering shares the active
+turn's cancellation or error, and unconsumed messages become follow-up turns.
 
 The terminal sends messages immediately, with existing prompt-capability checks.
 `/queue <message>` holds a follow-up and any staged attachments locally until execution
-is idle. Edit, Remove, and Resume operate on that client-side queue; `/queue` is never sent to the
-agent. Cancellation, errors, and disconnect pause the local queue. Accepted server
-work survives disconnect and is inspected through session reload.
+is idle, including after Escape cancels a turn. Use `Shift+Left` in an empty
+composer or run `/edit-queue` to bring the last queued message back with its
+attachments. Edit the draft and press Enter to queue it again. `/clear-queue` discards local
+follow-ups. Local follow-ups wait for the connection to the same session and are
+cleared when switching sessions. Accepted server work survives disconnect and is
+inspected through session reload.
 
 ## ACP attachment and lifecycle
 
@@ -210,6 +214,9 @@ One ACP client may attach to a session. `session/new` creates and attaches;
 before responding. The current owner may reload the same session on its connection.
 Loading must use the session's stored cwd. Another attached client
 receives an attachment conflict.
+
+Supply `workspace_root` when registering an agent to restrict session directories
+to that root. The packaged `hrns serve --cwd` command sets this restriction.
 
 Disconnect removes attachment resources while accepted turns and queued work remain
 alive. Reconnecting clients load the session to inspect accepted work. `session/close`
@@ -324,6 +331,12 @@ session too. A turn already in flight keeps the endpoint it started with.
 Reasoning effort is the motivating case: the adapter needs the values a client may pick
 and a way to turn a pick into `ModelSettings`. Those are `list_options` and
 `resolve_settings` on the same resolver.
+
+WebSocket clients get their effort choices from the resolver registered with
+`add_agent(model_resolver=...)`. The built-in `hrns agent` command supplies
+`RuntimeModelResolver` automatically. A mounted deployment can register that resolver
+or provide its own. When using the built-in resolver with Copilot, load its authenticated
+catalog with `await resolver.load_copilot_catalogs()` during application startup.
 
 ```python
 from collections.abc import Mapping, Sequence

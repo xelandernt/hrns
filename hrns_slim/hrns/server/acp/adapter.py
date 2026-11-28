@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from pathlib import Path
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable, Generator, Sequence
+from contextlib import contextmanager, nullcontext
 from typing import Generic, Literal
 
 import acp
 from acp import schema
 from acp.interfaces import Client
+from pydantic_ai.exceptions import ModelConnectionError, ModelHTTPError
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 
@@ -18,9 +21,28 @@ from .._types import PrincipalT
 from .content import PromptContentBlock
 from .host import RegisteredAgent, Session
 from .models import ModelChoice
-from .runtime import ConfigOptions
+from .runtime import _MODEL_CONFIG_ID, ConfigOptions
 from .session import McpServers
-from .store import DeletableSessionStore, ListableSessionStore, SessionAccess, StoredSession
+from .store import (
+    DeletableSessionStore,
+    ListableSessionStore,
+    SessionAccess,
+    SessionStoreError,
+    SessionSummary,
+    StoredSession,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _store_errors() -> Generator[None]:
+    try:
+        yield
+    except PermissionError as exc:
+        raise acp.RequestError(-32003, "Not authorized") from exc
+    except SessionStoreError as exc:
+        raise acp.RequestError(-32010, str(exc)) from exc
 
 
 class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]):
@@ -30,6 +52,12 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         *,
         principal: PrincipalT | None = None,
     ) -> None:
+        self._provider_management_lock = asyncio.Lock()
+        self._prompt_admission = asyncio.Lock()
+        self._remember_model: Callable[[str], Awaitable[None]] | None = None
+        self._provider_editor: (
+            Callable[[str, dict[str, object]], Awaitable[dict[str, object]]] | None
+        ) = None
         self._principal = principal
         self._registration = registration
         self._session_store = registration.store
@@ -55,12 +83,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self._sessions.clear()
 
     async def _load(self, session_id: str, operation: SessionAccess) -> StoredSession:
-        try:
+        with _store_errors():
             stored = await self._session_store.load(
                 session_id, principal=self._principal, operation=operation
             )
-        except PermissionError as exc:
-            raise acp.RequestError(-32003, "Not authorized") from exc
         if stored is None:
             raise acp.RequestError.invalid_params({"session_id": session_id})
         return stored
@@ -94,9 +120,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         **kwargs: object,
     ) -> schema.NewSessionResponse:
         try:
-            session = await self._registration.new_session(cwd=cwd, principal=self._principal)
-        except PermissionError as exc:
-            raise acp.RequestError(-32003, "Not authorized") from exc
+            with _store_errors():
+                session = await self._registration.new_session(cwd=cwd, principal=self._principal)
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
         runtime = session._runtime
         try:
             config_options = runtime._config_options(runtime.state)
@@ -120,12 +147,19 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         **kwargs: object,
     ) -> schema.LoadSessionResponse:
         try:
-            session = await self._registration.get_session(session_id, principal=self._principal)
+            with _store_errors():
+                session = await self._registration.get_session(
+                    session_id, principal=self._principal
+                )
         except KeyError as exc:
             raise acp.RequestError.invalid_params({"session_id": session_id}) from exc
-        except PermissionError as exc:
-            raise acp.RequestError(-32003, "Not authorized") from exc
-        if str(Path(cwd).resolve()) != session.cwd:
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+        try:
+            workspace = self._registration.workspace_path(cwd)
+        except ValueError as exc:
+            raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+        if workspace != session.cwd:
             raise acp.RequestError.invalid_params({"reason": "session cwd does not match"})
         runtime = session._runtime
         config_options = runtime._config_options(runtime.state)
@@ -139,9 +173,24 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
     async def prompt(
         self, session_id: str, prompt: list[PromptContentBlock], **kwargs: object
     ) -> schema.PromptResponse:
-        session = await self._session(session_id, "session/prompt")
-        handle = await session._accept(prompt, self._conn, steer=True)
-        result = await handle.result()
+        async with self._prompt_admission:
+            session = await self._session(session_id, "session/prompt")
+            session._runtime.check_prompt_setup()
+            handle = await session._accept(prompt, self._conn, steer=True)
+        try:
+            result = await handle.result()
+        except ModelConnectionError as exc:
+            _logger.warning(
+                "Model provider connection failed for session %s", session_id, exc_info=True
+            )
+            raise acp.RequestError(-32603, "Connection to the model provider failed.") from exc
+        except ModelHTTPError as exc:
+            if self._provider_editor is not None and exc.status_code in {401, 403}:
+                raise acp.RequestError(
+                    -32000,
+                    "The provider rejected authentication. Check its credentials in /providers.",
+                ) from exc
+            raise
         return schema.PromptResponse(stop_reason=result.stop_reason, usage=result.usage)
 
     async def cancel(self, session_id: str, **kwargs: object) -> None:
@@ -172,10 +221,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
                 self._registration._sessions.pop(session_id, None)
                 self._registration._views.pop(session_id, None)
                 self._sessions.pop(session_id, None)
-            try:
+            with _store_errors():
                 await store.delete(session_id, principal=self._principal)
-            except PermissionError as exc:
-                raise acp.RequestError(-32003, "Not authorized") from exc
         return schema.DeleteSessionResponse()
 
     def _options_snapshot(self) -> dict[str, ConfigOptions | None]:
@@ -234,7 +281,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
                 session_capabilities=session_capabilities,
             ),
             agent_info=schema.Implementation(name=self._name, version=self._version),
-            field_meta={"hrns/session/state": True},
+            field_meta={
+                "hrns/session/state": True,
+                "hrns/session/activity": self._listable_store is not None,
+                "hrns/providers/manage": self._provider_editor is not None,
+            },
         )
 
     async def list_sessions(
@@ -248,26 +299,32 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         if store is None:
             raise acp.RequestError.method_not_found("session/list")
         try:
-            summaries, next_cursor = await store.list_sessions(
-                principal=self._principal, cwd=cwd, cursor=cursor
-            )
+            with _store_errors():
+                summaries, next_cursor = await store.list_sessions(
+                    principal=self._principal, cwd=cwd, cursor=cursor
+                )
         except ValueError as exc:
             raise acp.RequestError.invalid_params({"cursor": cursor, "reason": str(exc)}) from exc
-        except PermissionError as exc:
-            raise acp.RequestError(-32003, "Not authorized") from exc
         return schema.ListSessionsResponse(
-            sessions=[
-                schema.SessionInfo(
-                    session_id=summary.session_id,
-                    cwd=summary.cwd,
-                    title=summary.title,
-                    updated_at=(
-                        summary.updated_at.isoformat() if summary.updated_at is not None else None
-                    ),
-                )
-                for summary in summaries
-            ],
+            sessions=[self._session_info(summary) for summary in summaries],
             next_cursor=next_cursor,
+        )
+
+    def _session_info(self, summary: SessionSummary) -> schema.SessionInfo:
+        session = self._registration._sessions.get(summary.session_id)
+        runtime = session._runtime if session is not None else None
+        owner = runtime._conn if runtime is not None else None
+        return schema.SessionInfo(
+            session_id=summary.session_id,
+            cwd=summary.cwd,
+            title=(runtime._title if runtime is not None else None) or summary.title,
+            updated_at=summary.updated_at.isoformat() if summary.updated_at is not None else None,
+            field_meta={
+                "hrns/session/activity": {
+                    "status": session.execution_status() if session is not None else "idle",
+                    "attachedElsewhere": owner is not None and owner is not self._conn,
+                }
+            },
         )
 
     async def set_session_mode(
@@ -280,9 +337,17 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         self, config_id: str, session_id: str, value: str | bool, **kwargs: object
     ) -> schema.SetSessionConfigOptionResponse | None:
         session = await self._session(session_id, "session/set_config_option")
-        return await session._runtime.set_config_option(
-            config_id=config_id, session_id=session_id, value=value, **kwargs
-        )
+        is_model = config_id == _MODEL_CONFIG_ID
+        automatic = self._provider_editor is not None and kwargs.get("hrns/model/automatic") is True
+        remember_model = self._remember_model if is_model and not automatic else None
+        async with self._provider_management_lock if is_model else nullcontext():
+            with _store_errors():
+                return await session._runtime.set_config_option(
+                    config_id=config_id,
+                    session_id=session_id,
+                    value=value,
+                    remember_model=remember_model,
+                )
 
     async def fork_session(
         self,
@@ -503,8 +568,34 @@ class PydanticAIACPAgent(acp.Agent, Generic[PrincipalT, AgentDepsT, OutputDataT]
         return None
 
     async def ext_method(self, method: str, params: dict[str, object]) -> dict[str, object]:
-        """This adapter exposes no extension methods."""
-        raise acp.RequestError.method_not_found(method)
+        """Dispatch Harness session and provider extension requests."""
+        if method == "hrns/session/flush":
+            async with self._prompt_admission:
+                return {}
+        editor = self._provider_editor
+        if editor is None or method not in {
+            "hrns/providers/list",
+            "hrns/providers/save",
+            "hrns/providers/remove",
+            "hrns/providers/login",
+            "hrns/providers/login-status",
+            "hrns/providers/login-cancel",
+        }:
+            raise acp.RequestError.method_not_found(method)
+        async with self._provider_management_lock:
+            editing = method in {"hrns/providers/save", "hrns/providers/remove"}
+            before = self._options_snapshot() if editing else {}
+            try:
+                result = await editor(method, params)
+            except ValueError as exc:
+                raise acp.RequestError.invalid_params({"reason": str(exc)}) from exc
+            except OSError as exc:
+                raise acp.RequestError.internal_error(
+                    {"reason": "The local provider operation failed"}
+                ) from exc
+            if editing or result.get("done") is True:
+                await self._push_option_changes(before)
+            return result
 
     async def ext_notification(self, method: str, params: dict[str, object]) -> None:
         """This adapter exposes no extension notifications."""

@@ -1,14 +1,15 @@
 """Provider secrets in the OS keyring, shared by the client and the runtime.
 
-One account per provider entry: the entry's ``api_key_env`` name when it has one, so a
-pasted key and an account login for that entry resolve to the same secret. Entries that
-name no variable are keyed by their own name, which is why two entries of the same
-provider type (``openai-work``, ``openai-home``) can hold different keys.
+Provider logins bind each account to the entry, provider type, and configured endpoint.
 """
 
 from __future__ import annotations
 
+import os
 import threading
+from hashlib import sha256
+
+from ..errors import SecretMissing
 
 #: Keyring service that holds provider credentials.
 KEYRING_SERVICE = "hrns"
@@ -30,12 +31,20 @@ def keyring_account(provider: str, api_key_env: str = "") -> str:
     return api_key_env or provider or "default"
 
 
+def provider_credential_account(name: str, provider_type: str, base_url: str = "") -> str:
+    """Scope a saved credential to the entry, provider type and configured endpoint."""
+    account = f"provider/{provider_type}/{name}"
+    if base_url:
+        account += "/" + sha256(base_url.encode()).hexdigest()
+    return account
+
+
 def secret_ref(account: str) -> str:
     """Reference the client resolves before launching the runtime."""
     return f"keyring:{KEYRING_SERVICE}/{account}"
 
 
-def keyring_secret(service: str, account: str) -> str | None:
+def keyring_secret(service: str, account: str, *, fresh: bool = False) -> str | None:
     """Read one secret, reusing a successful lookup for the life of the process.
 
     Missing entries are not cached: a login or pasted key that lands after the first
@@ -45,14 +54,45 @@ def keyring_secret(service: str, account: str) -> str | None:
     key = (service, account)
     with _LOOKUPS_LOCK:
         cached = _LOOKUPS.get(key)
-        if cached is not None:
+        if cached is not None and not fresh:
             return cached
         import keyring
 
         value = keyring.get_password(service, account)
         if value is not None:
             _LOOKUPS[key] = value
+        elif fresh:
+            _LOOKUPS.pop(key, None)
         return value
+
+
+def secret_value(reference: str, *, env: dict[str, str] | None = None) -> str | None:
+    """Resolve ``env:`` and ``keyring:`` references; literals pass through unchanged."""
+    if not reference:
+        return None
+    if reference.startswith("env:"):
+        name = reference[4:]
+        if not name:
+            raise SecretMissing(reference, "no environment variable named")
+        value = (env if env is not None else os.environ).get(name)
+        if value is None:
+            raise SecretMissing(reference, f"environment variable '{name}' is not set")
+        return value
+    if reference.startswith("keyring:"):
+        remainder = reference[len("keyring:") :]
+        if not remainder:
+            raise SecretMissing(reference, "no service named")
+        service, _, username = remainder.partition("/")
+        if username == "":
+            username = "default"
+        try:
+            value = keyring_secret(service, username)
+        except Exception as exc:
+            raise SecretMissing(reference, f"keyring lookup failed ({exc})") from exc
+        if value is None:
+            raise SecretMissing(reference, f"keyring has no entry '{service}' for '{username}'")
+        return value
+    return reference
 
 
 def _forget_lookup(service: str, account: str) -> None:

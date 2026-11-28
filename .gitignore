@@ -14,3 +14,4 @@ benchmark-results/
 .env
 .idea
 var
+.playwright-mcp

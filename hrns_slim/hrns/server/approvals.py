@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from pydantic_ai import RunContext
+from pydantic_ai import RunContext, ToolKind
 from pydantic_ai.capabilities import PrepareTools
 from pydantic_ai.tools import ToolDefinition
+from pydantic_ai_harness.tool_output_limits import GREP_TOOL_RESULT_KIND, READ_TOOL_RESULT_KIND
 
 __all__ = ["READ_ONLY_TOOLS", "require_approval"]
 
@@ -29,13 +30,25 @@ READ_ONLY_TOOLS = frozenset(
     }
 )
 
+# These operations read spill files or update the current run's own context.
+_TOOL_RESULT_KINDS = frozenset(
+    {
+        READ_TOOL_RESULT_KIND.id,
+        GREP_TOOL_RESULT_KIND.id,
+        ToolKind("compaction", "prune_tool_result").id,
+    }
+)
+
 
 def require_approval(read_only: frozenset[str] = READ_ONLY_TOOLS) -> PrepareTools[None]:
-    """Mark every non-read-only function tool as requiring approval."""
+    """Require approval for tools outside the read-only and context-management policy."""
 
     async def prepare(_ctx: RunContext[None], tools: list[ToolDefinition]) -> list[ToolDefinition]:
         return [
-            tool if tool.name in read_only else replace(tool, kind="unapproved") for tool in tools
+            tool
+            if tool.name in read_only or tool.tool_kind in _TOOL_RESULT_KINDS
+            else replace(tool, kind="unapproved")
+            for tool in tools
         ]
 
     return PrepareTools(prepare, id="hrns.approval")

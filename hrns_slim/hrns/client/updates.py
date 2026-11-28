@@ -14,6 +14,8 @@ from acp.schema import (
     ConfigOptionUpdate,
     CurrentModeUpdate,
     SessionInfoUpdate,
+    SessionUpdateCompactionSummaryChunk,
+    SessionUpdateCompactionUpdate,
     ToolCallProgress,
     ToolCallStart,
     UsageUpdate,
@@ -24,6 +26,8 @@ from .bus import EventBus
 from .events import (
     AgentTextChunk,
     CommandsUpdated,
+    CompactionEvent,
+    CompactionSummaryChunk,
     ConfigOptionsUpdated,
     ModesUpdated,
     PlanChanged,
@@ -158,6 +162,31 @@ def dispatch_update(bus: EventBus, session_id: str, update: Any) -> None:
             for option in update.config_options
         )
         bus.publish(ConfigOptionsUpdated(session_id=session_id, options=options))
+        return
+    if isinstance(update, SessionUpdateCompactionUpdate):
+        summary_parts = [text_of(block) or "" for block in (update.summary or ())]
+        summary_text = "".join(summary_parts) or None
+        bus.publish(
+            CompactionEvent(
+                session_id=session_id,
+                compaction_id=update.compaction_id,
+                status=update.status,
+                summary=summary_text,
+                error=update.error,
+                meta=raw_meta,
+            )
+        )
+        return
+    if isinstance(update, SessionUpdateCompactionSummaryChunk):
+        text = text_of(update.content) or ""
+        if text:
+            bus.publish(
+                CompactionSummaryChunk(
+                    session_id=session_id,
+                    compaction_id=update.compaction_id,
+                    text=text,
+                )
+            )
         return
     if isinstance(update, SessionInfoUpdate):
         bus.publish(SessionInfoChanged(session_id=session_id, title=update.title))

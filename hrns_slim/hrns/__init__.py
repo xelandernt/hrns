@@ -2,7 +2,7 @@
 
 The distribution exposes three subpackages:
 
-- ``hrns.client``: the Textual terminal, standard ACP client, and built-in agent launcher.
+- ``hrns.client``: the native terminal, standard ACP client, and built-in agent launcher.
 - ``hrns.server``: the agent composition and the ACP/FastAPI adapters.
 - ``hrns.shared``: configuration, credentials, MCP-over-ACP, errors, and URL helpers.
 

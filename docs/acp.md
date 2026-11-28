@@ -49,12 +49,12 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `providers/list` | request | **Conditional** | Requires `model_resolver` |
 | `providers/set` | request | **Conditional** | Requires `model_resolver`; a `ValueError` from the resolver becomes `invalid_params` |
 | `providers/disable` | request | **Conditional** | Same; a `required` provider cannot be disabled |
-| `session/new` | request | **Yes** | First advertised model is the session default; returns the `model` and setting config options when a resolver is present |
+| `session/new` | request | **Yes** | First advertised model is the session default; returns `model`, resolver setting options, and `permissions` (when enabled) |
 | `session/load` | request | **Conditional** | Requires a `session_store`; attaches to live execution or restores saved state, then replays before responding |
 | `session/set_mode` | request | **No** | Returns `method_not_found` |
-| `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
+| `session/set_config_option` | request | **Conditional** | `model`, any advertised resolver setting id, and `permissions` (when enabled); the value must be one of the advertised values |
 | `session/prompt` | request | **Yes** | Steers the active turn at its next model request, or starts a turn while idle; late messages become follow-ups. Streams `session/update` and returns the consuming turn's outcome |
-| `session/cancel` | notification | **Yes** | Cancels the in-flight turn and pauses pending work; the prompt returns `cancelled` |
+| `session/cancel` | notification | **Yes** | Cancels the in-flight turn and saves its progress. The prompt returns `cancelled` and the next queued turn starts |
 | `mcp/message` | request | **Conditional** | The stateless binding routes registered provider requests; client-provided servers are consumed through `McpOverAcpCaller` |
 | `session/list` | request | **Conditional** | Requires a `ListableSessionStore`; supports `cwd` filter and cursor paging |
 | `session/delete` | request | **Conditional** | Requires a `DeletableSessionStore`; closes live state first |
@@ -85,13 +85,22 @@ The adapter calls these methods on the connected client:
 
 | Method | Sent when |
 | --- | --- |
-| `session/update` | Always, once per streamed event: agent text, thought text, tool call start/update/completion, plan updates (from `Todo`), and a `UsageUpdate` gauge with context tokens and session cost |
+| `session/update` | Always, once per streamed event: agent text, thought text, tool call start/update/completion, plan updates (from `Todo`), `available_commands_update` (from capabilities implementing `SupportsSlashCommands`), `compaction_update` / `compaction_summary_chunk` (when the client advertises `session.compaction`, with an agent text fallback otherwise), and a `UsageUpdate` gauge with context tokens and session cost |
 | `session/request_permission` | A tool call that is `unapproved` (see [approval](capabilities.md#approval)) needs a decision; one request per batch for `apply_changes` |
 | `fs/read_text_file` | Only when the agent uses `AcpFileSystemToolset` / `acp_filesystem`, and the client advertises `fs.readTextFile` |
 | `fs/write_text_file` | Same, when the client also advertises `fs.writeTextFile`; otherwise writes fall back to a local `FileSystem` bounded by the session `cwd` |
 | `terminal/create`, `terminal/wait_for_exit`, `terminal/output`, `terminal/kill`, `terminal/release` | Only when the agent uses `AcpTerminalToolset` / `acp_terminal`, and the client advertises terminal support |
 | `mcp/message` | When the adapter uses a client-provided (`type: "acp"`) server; the caller sends requests and receives request-scoped notifications |
 | `elicitation/create` | When the model calls `ask_user_question` and the client advertised `elicitation.form`; one form per call, session-scoped to the tool call |
+
+The native Ratatui client implements these client methods directly. It advertises
+`fs` and `terminal` according to `--client-io` (`off`, `read` or `all`), always
+advertises form elicitation, and keeps reads and writes inside the session workspace.
+When a local or remote agent advertises `mcpCapabilities.acp`, the client declares
+approved `[mcp]` servers and serves `mcp/message` directly. See
+[MCP over ACP](mcp.md). The browser client advertises form elicitation only and answers
+no filesystem, terminal or MCP request. Both show approvals with the tool kind and
+options and render agent forms inline.
 
 The ACP-backed filesystem and terminal are opt-in through `attachment_config` on
 `server.add_agent`; the default `build_agent` runs file and shell tools on the server.
@@ -107,9 +116,10 @@ it ignores `client_io` and edits its own workspace instead.
 session's caller. The adapter advertises `mcpCapabilities` only when an `attachment_config` is
 present.
 
-In the terminal, `/mcp` opens the MCP side panel: it shows each configured server's
-transport, export state, target, negotiated protocol, and failure reason. Startup and
-authentication failures also appear as transcript notices and a status hint.
+In the terminal, `/mcp` opens the server picker. Select a server to see its
+transport, target, negotiated protocol, and available tools or startup error.
+Startup failures also appear in the transcript. The client applies saved OAuth
+credentials at the next session setup.
 
 ## Session config: the `model` and setting options
 
@@ -134,6 +144,29 @@ The adapter advertises them when a
   on the next request of that same turn. A request already in flight keeps its settings.
 - `providers/set` and `providers/disable` can change which settings a model offers. When
   they do, resident sessions receive a `config_option_update` with the complete new state.
+- When `permission_modes` is non-empty (default `("ask", "reads", "all")`), `configOptions`
+  also includes a `permissions` select (`category: "mode"`). New sessions start in `ask`,
+  changes persist with the session and take effect from the next tool call, and the server
+  enforces `reads` (`read`, `search`, `think`) and `all` directly so detached sessions only
+  enter `waiting` when an interaction actually requires a client response. Pass
+  `permission_modes=()` to disable the option or pass a subset containing `"ask"` to restrict
+  it.
+
+## Capability slash commands and compaction
+
+Capabilities attached to an agent (or to per-session `AcpSessionConfig.capabilities`)
+can implement `SupportsSlashCommands` (or use `SlashCommands`) to advertise ACP slash
+commands via `available_commands_update`. When a `session/prompt` begins with `/<name>`,
+the runtime dispatches to the matching command handler before invoking the agent: the
+handler can complete the turn directly (`CommandHandled`), rewrite it into a prompt
+(`CommandPrompt`), or fall through.
+
+The built-in `hrns` agent includes the reusable `Compaction` capability, which runs
+automatic `TieredCompaction` during turns and advertises `/compact [focus]` for
+unconditional `SummarizingCompaction`. When the client advertises
+`clientCapabilities.session.compaction`, compaction streams `compaction_update` and
+`compaction_summary_chunk` updates and updates the `UsageUpdate` context gauge; clients
+without `session.compaction` receive a plain-text agent message fallback.
 
 ## Skills in `_meta`
 

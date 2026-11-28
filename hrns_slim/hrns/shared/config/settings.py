@@ -1,17 +1,14 @@
 """The one configuration document shared by the client and server.
 
 Both programs read the same file. Sections name their owner: ``[profile.<name>]`` and
-``[tui]`` belong to the client, while ``provider``/``model``, ``[providers.<name>]``,
-``[model_settings]``, ``[mcp]`` and ``store`` belong to the runtime.
+``[tui]``, and ``[mcp]`` belong to the client, while ``provider``/``model``, ``[providers.<name>]``,
+``[model_settings]`` and ``store`` belong to the runtime.
 A single pydantic-settings model parses the whole document, so a typo in any section
 fails the same way wherever it is read.
 
 Precedence, highest first: constructor arguments, ``HRNS_*`` environment
-variables, the project file ``./hrns.toml``, the user file ``config.toml`` in the
-platform config directory, then defaults. Files merge key by key: a project file only
-overrides the entries and values it names, so a repository can add one profile or
-provider without copying the user's document. ``--config PATH`` (or
-``HRNS_CONFIG_FILE``) selects a single file and disables that merge.
+variables, the user file ``config.toml`` in the platform config directory, then
+defaults. ``--config PATH`` (or ``HRNS_CONFIG_FILE``) selects a different file.
 
 Providers are named entries: ``[providers.<name>]`` holds how to reach one provider, and
 ``provider``/``model`` at the top level say which entry and model are active. Two entries
@@ -27,7 +24,7 @@ import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from urllib.parse import urlsplit
 
 import tomli_w
@@ -37,11 +34,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettin
 
 from .mcp import McpSettings
 
-#: Unified pydantic-ai thinking levels, weakest first.
-EffortLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
+#: Selectable reasoning efforts, weakest first.
+EffortLevel = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 
-#: The unified pydantic-ai thinking levels accepted by ``ModelSettings.thinking``.
-THINKING_LEVELS: tuple[EffortLevel, ...] = ("minimal", "low", "medium", "high", "xhigh")
+THINKING_LEVELS: tuple[EffortLevel, ...] = get_args(EffortLevel)
 
 #: TUI/ACP spelling for "do not set thinking; use the provider default".
 EFFORT_DEFAULT = "default"
@@ -58,10 +54,7 @@ PROVIDER_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 #: The user document, in the platform config directory.
 CONFIG_FILE_NAME = "config.toml"
 
-#: The optional project document, read from the working directory.
-PROJECT_CONFIG_NAME = "hrns.toml"
-
-#: Environment variable that selects one document instead of the merge.
+#: Environment variable that selects the configuration document.
 CONFIG_ENV_VAR = "HRNS_CONFIG_FILE"
 
 #: What this terminal offers the agent: filesystem reads, writes, and commands.
@@ -86,14 +79,19 @@ def default_config_path() -> Path:
     return user_config_path("hrns") / CONFIG_FILE_NAME
 
 
-def project_config_path() -> Path:
-    """The document a working directory may add, overriding the user's key by key."""
-    return Path.cwd() / PROJECT_CONFIG_NAME
-
-
-def config_files() -> tuple[Path, ...]:
-    """The documents a default load reads, highest priority first."""
-    return tuple(path for path in (project_config_path(), default_config_path()) if path.is_file())
+def write_config_document(target: Path, payload: Mapping[str, object]) -> None:
+    """Replace a TOML document atomically."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = tomli_w.dumps(payload)
+    tomllib.loads(text)
+    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(text.encode())
+            stream.close()
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def check_provider_name(name: str) -> str:
@@ -151,17 +149,16 @@ class Profile(BaseModel):
         return f"{command}{where}"
 
 
+ThemeName = Literal["dark", "light"]
+
+
 class TuiSettings(BaseModel):
     """Terminal preferences; the client owns this section and saves it as it changes."""
 
     model_config = ConfigDict(extra="forbid")
 
-    theme: str = "hrns"
-    auto_expand_tools: bool = False
-    show_thoughts: bool = False
-    permission_mode: PermissionMode = "ask"
+    theme: ThemeName = "dark"
     client_io: ClientIoMode = "all"
-    sidebar_width: int = Field(default=52, ge=32, le=76)
     last_connection: str = ""
 
 
@@ -169,7 +166,7 @@ class ThinkingSettings(BaseModel):
     """The reasoning efforts this deployment offers, and whether ``off`` is one.
 
     This is a policy, not a capability probe: the built-in agent intersects it with the
-    model's profile, so a level the model cannot use is not advertised even when listed
+    model's provider capabilities, so a level the model cannot use is not advertised even when listed
     here. An empty ``levels`` removes the reasoning-effort option entirely.
     """
 
@@ -299,8 +296,6 @@ class ProviderEntry(BaseModel):
             model = item.strip()
             if not model:
                 continue
-            if ":" in model:
-                raise ValueError("A custom model id must not contain ':'")
             cleaned.append(model)
         return list(dict.fromkeys(cleaned))
 
@@ -364,12 +359,6 @@ class HrnsConfig(BaseSettings):
     )
     store: Path = Field(default_factory=lambda: user_data_path("hrns") / "local-sessions.db")
 
-    @field_validator("model_settings")
-    @classmethod
-    def remove_global_thinking(cls, value: dict[str, Any]) -> dict[str, Any]:
-        """Reasoning effort is selected for a model through ACP."""
-        return {key: setting for key, setting in value.items() if key != "thinking"}
-
     @field_validator("providers")
     @classmethod
     def validate_provider_names(cls, value: dict[str, ProviderEntry]) -> dict[str, ProviderEntry]:
@@ -398,8 +387,6 @@ class HrnsConfig(BaseSettings):
         """
         if self.provider and self.provider not in self.providers:
             self.providers = {**self.providers, self.provider: ProviderEntry()}
-        if self.model and ":" in self.model:
-            raise ValueError("model is a bare model id; the provider lives in provider.")
         return self
 
     # ------------------------------------------------------------- loading
@@ -423,27 +410,22 @@ class HrnsConfig(BaseSettings):
             path = Path(explicit).expanduser()
             if not path.is_file():
                 raise ValueError(f"Configuration file does not exist: {path}")
-            paths = [path]
         else:
-            # Later sources are read first; both files deep-merge, project over user.
-            paths = [project_config_path(), default_config_path()]
-        sources: list[TomlConfigSettingsSource] = []
-        for path in paths:
+            path = default_config_path()
             if not path.is_file():
-                continue
-            source = TomlConfigSettingsSource(settings_cls, path)
-            payload = source()
-            if "config_file" in payload:
-                raise ValueError(
-                    f"{path}: select the document with --config or {CONFIG_ENV_VAR}, "
-                    "not with a config_file key."
-                )
-            if "api_key" in payload:
-                raise ValueError(
-                    f"{path}: use api_key_env in the document, or HRNS_API_KEY in the environment."
-                )
-            sources.append(source)
-        return (init_settings, env_settings, *sources)
+                return init_settings, env_settings
+        source = TomlConfigSettingsSource(settings_cls, path)
+        payload = source()
+        if "config_file" in payload:
+            raise ValueError(
+                f"{path}: select the document with --config or {CONFIG_ENV_VAR}, "
+                "not with a config_file key."
+            )
+        if "api_key" in payload:
+            raise ValueError(
+                f"{path}: use api_key_env in the document, or HRNS_API_KEY in the environment."
+            )
+        return init_settings, env_settings, source
 
     # ------------------------------------------------------------- saving
 
@@ -460,22 +442,12 @@ class HrnsConfig(BaseSettings):
         written by hand and a future default change reaches existing files.
         """
         target = path.expanduser().absolute() if path is not None else self.path
-        target.parent.mkdir(parents=True, exist_ok=True)
         payload = self.model_dump(
             mode="json",
             exclude={"config_file", "api_key"},
             exclude_defaults=True,
         )
-        text = tomli_w.dumps(payload)
-        tomllib.loads(text)
-        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
-            temporary = Path(stream.name)
-            try:
-                stream.write(text.encode())
-                stream.close()
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
+        write_config_document(target, payload)
         return target
 
     # ---------------------------------------------------------- providers

@@ -10,10 +10,8 @@ fine while the ACP side is MCP 2026-07-28.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from enum import StrEnum
 
 from acp.schema import AcpMcpServer
 from fastmcp import Client
@@ -32,6 +30,7 @@ from mcp_types import (
     ListToolsResult,
     ReadResourceRequestParams,
     ReadResourceResult,
+    TextContent,
 )
 from mcp_types import (
     CallToolResult as McpCallToolResult,
@@ -56,7 +55,7 @@ from hrns.shared.config.mcp import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ClientMcpProvider", "ConsentDecision", "McpServerHealth"]
+__all__ = ["ClientMcpProvider", "McpServerHealth"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -66,7 +65,6 @@ class McpServerHealth:
     name: str
     transport: str
     target: str
-    export: bool
     state: str
     detail: str = ""
     protocol: str = ""
@@ -78,67 +76,28 @@ class _Offering:
     stack: AsyncExitStack
 
 
-class ConsentDecision(StrEnum):
-    """What the client's user decided about exporting one server."""
-
-    ALLOW_ONCE = "once"
-    """Declare it for this session only."""
-    ALLOW_SESSION = "session"
-    """Declare it for every session until this connection closes."""
-    ALWAYS_ALLOW = "always"
-    """Declare it now and persist ``always_allow = true`` in the config."""
-    DENY = "deny"
-    """Do not declare it for this session."""
-
-
-ConsentHandler = Callable[[str, McpServerSettings], Awaitable[ConsentDecision]]
-"""Ask the client's user whether an exported server may be offered to the agent."""
-
-
 @dataclass
 class ClientMcpProvider:
     """Serve configured ``[mcp]`` servers to an ACP agent over ``mcp/message``."""
 
     settings: McpSettings
-    consent: ConsentHandler | None = None
-    """Session-start consent prompt; ``None`` denies servers not pre-approved."""
-
-    persist: Callable[[], object] | None = None
-    """Write the config document after an ``always allow`` decision."""
 
     _provider: McpOverAcpProvider = field(default_factory=McpOverAcpProvider)
     _channel: AcpChannel | None = None
     _exported: dict[str, McpServerSettings] = field(default_factory=dict)
     _offerings: list[_Offering] = field(default_factory=list)
     _started: dict[str, McpServerRegistration] = field(default_factory=dict)
-    _granted: set[str] = field(default_factory=set)
-    _denied: set[str] = field(default_factory=set)
-    _prepared: tuple[AcpMcpServer, ...] | None = None
     _failures: dict[str, str] = field(default_factory=dict)
     _protocols: dict[str, str] = field(default_factory=dict)
     _active: bool = False
     _agent_ready: bool = False
     _token_store: object | None = None
 
-    async def prepare(self) -> None:
-        """Resolve consent for the next session before it is timed out.
-
-        The TUI calls this before ``session/new`` so the user's thinking time is
-        not charged against the connection timeout.
-        """
-        self._prepared = await self._resolve()
-
     async def declarations(self) -> tuple[AcpMcpServer, ...]:
-        """The ACP declarations for one session, asking consent for each server."""
-        prepared, self._prepared = self._prepared, None
-        if prepared is not None:
-            return prepared
-        return await self._resolve()
-
-    async def _resolve(self) -> tuple[AcpMcpServer, ...]:
+        """Return the pre-approved servers for ACP session setup."""
         declarations: list[AcpMcpServer] = []
         for name, server in self._exported.items():
-            if not await self._approve(name, server):
+            if not server.always_allow:
                 continue
             registration = self._started.get(name)
             if registration is None:
@@ -157,9 +116,7 @@ class ClientMcpProvider:
         if not self._agent_ready:
             return
         self._exported = {
-            name: server
-            for name, server in self.settings.servers.items()
-            if server.enabled and server.export
+            name: server for name, server in self.settings.servers.items() if server.enabled
         }
         if not self._exported:
             return
@@ -181,9 +138,6 @@ class ClientMcpProvider:
                 logger.debug("closing MCP upstream failed", exc_info=True)
         self._offerings.clear()
         self._started.clear()
-        self._granted.clear()
-        self._denied.clear()
-        self._prepared = None
         self._exported.clear()
         self._failures.clear()
         self._protocols.clear()
@@ -202,8 +156,6 @@ class ClientMcpProvider:
         for name, server in sorted(self.settings.servers.items()):
             if not server.enabled:
                 state, detail = "disabled", f"enable it with `hrns mcp enable {name}`"
-            elif not server.export:
-                state, detail = "local only", "set export = true to offer it over ACP"
             elif not self._active:
                 state, detail = "not started", "connect to an agent to start it"
             elif not self._agent_ready:
@@ -215,19 +167,13 @@ class ClientMcpProvider:
                 state, detail = "failed", self._failures[name]
             elif name in self._started:
                 state, detail = "running", ""
-            elif name in self._denied:
-                state, detail = (
-                    "denied",
-                    "consent was denied; approve it on the next session or set always_allow = true",
-                )
             else:
-                state, detail = "waiting for approval", "approve it before the session starts"
+                state, detail = "denied", "set always_allow = true for headless use"
             items.append(
                 McpServerHealth(
                     name=name,
                     transport=server.transport,
                     target=server_target(server),
-                    export=server.export,
                     state=state,
                     detail=detail,
                     protocol=self._protocols.get(name, ""),
@@ -238,39 +184,6 @@ class ClientMcpProvider:
     def failures(self) -> tuple[McpServerHealth, ...]:
         """Servers that failed to start or authenticate."""
         return tuple(item for item in self.health() if item.state == "failed")
-
-    async def _approve(self, name: str, server: McpServerSettings) -> bool:
-        if server.always_allow or name in self._granted:
-            return True
-        if name in self._denied:
-            return False
-        if self.consent is None:
-            logger.warning(
-                "MCP server %r is exported but not approved; set "
-                "[mcp.servers.%s] always_allow = true to export it without a prompt",
-                name,
-                name,
-            )
-            self._denied.add(name)
-            return False
-        decision = await self.consent(name, server)
-        if decision is ConsentDecision.DENY:
-            logger.info("MCP server %r not exported: consent denied", name)
-            self._denied.add(name)
-            return False
-        if decision is ConsentDecision.ALLOW_SESSION:
-            self._granted.add(name)
-        elif decision is ConsentDecision.ALWAYS_ALLOW:
-            self._granted.add(name)
-            server.always_allow = True
-            if self.persist is not None:
-                try:
-                    self.persist()
-                except Exception:
-                    logger.warning(
-                        "could not save always_allow for MCP server %r", name, exc_info=True
-                    )
-        return True
 
     async def _offer(self, name: str, server: McpServerSettings) -> None:
         self._failures.pop(name, None)
@@ -291,7 +204,7 @@ class ClientMcpProvider:
             await stack.enter_async_context(upstream)
             _log_era(name, upstream)
             self._protocols[name] = upstream.protocol_version or ""
-            adapter = from_mcp_server(lambda: _proxy_server(upstream, name))
+            adapter = from_mcp_server(lambda: _proxy_server(upstream, name, server))
             assert self._channel is not None
             registration = self._provider.register_server(
                 self._channel,
@@ -342,7 +255,7 @@ def _log_era(name: str, upstream: Client) -> None:
     )
 
 
-def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
+def _proxy_server(upstream: Client, name: str, server: McpServerSettings) -> LowLevelServer:
     """Proxy the upstream, advertising only the capabilities it actually has."""
     capabilities = upstream.server_capabilities
     if capabilities is None:
@@ -356,11 +269,22 @@ def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
     async def on_list_tools(
         _ctx: ServerRequestContext[object, object], _params: object
     ) -> ListToolsResult:
-        return ListToolsResult(tools=await upstream.list_tools())
+        tools = await upstream.list_tools()
+        return ListToolsResult(tools=[tool for tool in tools if tool_allowed(server, tool.name)])
 
     async def on_call_tool(
         ctx: ServerRequestContext[object, object], params: CallToolRequestParams
     ) -> McpCallToolResult:
+        if not tool_allowed(server, params.name):
+            return McpCallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"Tool {params.name!r} is not exported from {name!r}",
+                    )
+                ],
+                is_error=True,
+            )
         result = await upstream.call_tool(
             params.name,
             params.arguments,
@@ -421,6 +345,13 @@ def _proxy_server(upstream: Client, name: str) -> LowLevelServer:
         on_get_prompt=on_get_prompt if has_prompts else None,
         on_completion=on_completion if has_completions else None,
     )
+
+
+def tool_allowed(server: McpServerSettings, tool: str) -> bool:
+    """Apply the same include/exclude lists the built-in agent uses."""
+    if server.include_tools:
+        return tool in server.include_tools
+    return tool not in server.exclude_tools
 
 
 def _progress_handler(ctx: ServerRequestContext[object, object]) -> ProgressFnT | None:

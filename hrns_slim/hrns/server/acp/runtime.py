@@ -6,12 +6,10 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from inspect import isawaitable
-from typing import Generic, Protocol, TypeAlias, TypeVar
+from typing import Generic
 from uuid import uuid4
 
 import acp
@@ -22,18 +20,19 @@ from pydantic_ai import (
     DeferredToolRequests,
     DeferredToolResults,
     RunCancelled,
-    ToolDenied,
     UsageLimitExceeded,
     capture_run_messages,
 )
 from pydantic_ai.agent import AbstractAgent, ModelRequestNode
 from pydantic_ai.capabilities import AgentNode, Hooks
+from pydantic_ai.exceptions import ModelConnectionError
 from pydantic_ai.messages import (
+    INTERRUPTED_TOOL_RETURN_CONTENT,
     AgentStreamEvent,
-    FinishReason,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
+    ModelRequest,
     ModelResponse,
     OutputToolCallEvent,
     PartDeltaEvent,
@@ -46,64 +45,85 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
     UserContent,
+    UserPromptPart,
+    repair_messages,
 )
-from pydantic_ai.models import Model
 from pydantic_ai.output import OutputDataT, OutputSpec
-from pydantic_ai.run import AgentRunResult, AgentRunResultEvent
-from pydantic_ai.settings import ModelSettings, merge_model_settings
+from pydantic_ai.run import AgentRunResultEvent
+from pydantic_ai.settings import merge_model_settings
 from pydantic_ai.tools import AgentDepsT, RunContext
-from pydantic_ai.toolsets import (
-    AbstractToolset,
-    AgentToolset,
-    CombinedToolset,
-    DynamicToolset,
-    FunctionToolset,
-)
+from pydantic_ai.toolsets import AbstractToolset, CombinedToolset, DynamicToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
-from pydantic_ai_harness.ask_user import AskUserRequest as HarnessAskUserRequest
+from pydantic_ai_harness.compaction import resolve_context_window
 
 from hrns.server.capabilities import (
-    SkillInfo,
+    CommandContext,
+    CommandHandled,
+    CommandPrompt,
+    CompactionCompleted,
+    CompactionFailed,
+    CompactionStarted,
+    CompactionSummaryChunkEvent,
+    SlashCommand,
     TodoStore,
     TodoUpdated,
     bind_invoked_skills,
     find_skills,
+    find_slash_commands,
+    parse_slash_command,
 )
+from hrns.server.capabilities.commands import run_command_handler
+from hrns.server.capabilities.compaction import COMPACTION_META_KEY, _compaction_meta
 from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
+from hrns.shared.config import PermissionMode
 
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
-from .elicitation import (
-    ASK_USER_UNAVAILABLE,
-    ask_user_message,
-    ask_user_response,
-    ask_user_tool_result,
-    build_ask_user_schema,
-)
 from .interactions import Interactions
-from .models import ModelChoice, ModelResolver, ResolvedModel, SettingOption
-from .permission import PermissionPolicy, ToolCallPermission, default_permission_scope
+from .models import ModelResolver
+from .permission import (
+    DEFAULT_PERMISSION_MODES,
+    PermissionPolicy,
+    default_permission_scope,
+    validate_permission_modes,
+)
 from .presentation import (
-    ToolCallContent,
     ToolCallPresentation,
     ToolCallPresenter,
     absolutize,
     default_coding_presenter,
 )
-from .providers import ProviderDisabled
-from .serialize import bounded_jsonable, chunk_text, jsonable
+from .runtime_approvals import _SessionApprovalsMixin
+from .runtime_config import _SessionConfigMixin
+from .runtime_types import (
+    _MODEL_CONFIG_ID,
+    SKILLS_META_KEY,
+    ConfigOptions,
+    RunObserver,
+    SteeringPrompt,
+    _committable_history,
+    _context_tokens,
+    _context_window,
+    _finish_reason_to_stop_reason,
+    _last_response,
+    _LiveUsage,
+    _to_acp_usage,
+    _ToolCallFields,
+    _TurnCancelled,
+    _TurnState,
+    _usage_limit_stop_reason,
+)
+from .serialize import bounded_jsonable, bounded_shell_output, chunk_text, jsonable
 from .session import (
     AcpSession,
     AcpSessionConfig,
     AttachmentConfigFunc,
-    DocumentState,
     McpServers,
     SessionConfigFunc,
     SessionContext,
     SessionState,
     SessionUpdate,
-    apply_content_changes,
 )
 from .store import (
     SessionPersistence,
@@ -112,205 +132,23 @@ from .store import (
 )
 from .toolsets import AttachmentToolset
 
-_logger = logging.getLogger(__name__)
-_MODEL_CONFIG_ID = "model"
-_ASK_USER_TOOL = "ask_user_question"
-
-#: The ``session/new`` and ``session/load`` response ``_meta`` key carrying the skill catalog.
-SKILLS_META_KEY = "hrns/skills"
-
-#: Tool-call id prefix for the transcript marker of a skill the person invoked.
-_SKILL_TOOL_PREFIX = "hrns-skill:"
-
-#: One complete ACP config-option list, as ``session/new`` and ``session/set_config_option`` return it.
-ConfigOptions: TypeAlias = list[
-    schema.SessionConfigOptionSelect | schema.SessionConfigOptionBoolean
+__all__ = [
+    "_MODEL_CONFIG_ID",
+    "ConfigOptions",
+    "RunObserver",
+    "SKILLS_META_KEY",
+    "SessionRuntime",
+    "SteeringPrompt",
 ]
 
-
-def _skill_references(prompt: Sequence[PromptContentBlock]) -> tuple[str, ...]:
-    """Skill ids a client attached to the prompt blocks, in first-seen order.
-
-    A person's ``$skill`` reference travels in the text block's ``_meta`` under
-    :data:`SKILLS_META_KEY`: a list of ``{"id": ..., "mention": {...}}`` objects. The
-    mention is display information for the client; the server acts on the id and does
-    not read the prompt text.
-    """
-    ids: list[str] = []
-    for block in prompt:
-        meta = block.field_meta
-        if not meta:
-            continue
-        payload = meta.get(SKILLS_META_KEY)
-        if not isinstance(payload, list):
-            continue
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            skill_id = entry.get("id")
-            if isinstance(skill_id, str) and skill_id and skill_id not in ids:
-                ids.append(skill_id)
-    return tuple(ids)
+_logger = logging.getLogger(__name__)
 
 
-def _finish_reason_to_stop_reason(finish_reason: FinishReason | None) -> schema.StopReason:
-    if finish_reason == "length":
-        return "max_tokens"
-    if finish_reason == "content_filter":
-        return "refusal"
-    return "end_turn"
-
-
-_USAGE_LIMIT_STOP_REASONS: dict[str, schema.StopReason] = {
-    "request_limit": "max_turn_requests",
-    "tool_calls_limit": "max_turn_requests",
-    "input_tokens_limit": "max_tokens",
-    "output_tokens_limit": "max_tokens",
-    "total_tokens_limit": "max_tokens",
-    "per_request_input_tokens_limit": "max_tokens",
-    "cost_limit": "max_turn_requests",
-}
-
-_USAGE_LIMIT_NAME = re.compile(rf"\b({'|'.join(_USAGE_LIMIT_STOP_REASONS)})\b")
-
-
-def _usage_limit_stop_reason(exc: UsageLimitExceeded) -> schema.StopReason:
-    match = _USAGE_LIMIT_NAME.search(str(exc))
-    return _USAGE_LIMIT_STOP_REASONS[match.group(1)] if match else "max_turn_requests"
-
-
-def _committable_history(messages: list[ModelMessage], ran_calls: set[str]) -> list[ModelMessage]:
-    committed = list(messages)
-    while committed:
-        last = committed[-1]
-        if isinstance(last, ModelResponse):
-            if last.tool_calls and not any(
-                call.tool_call_id in ran_calls for call in last.tool_calls
-            ):
-                committed.pop()
-                continue
-            break
-        if any(
-            isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_name
-            for part in last.parts
-        ):
-            break
-        previous = committed[-2] if len(committed) > 1 else None
-        if (
-            last.state == "interrupted"
-            and isinstance(previous, ModelResponse)
-            and any(call.tool_call_id in ran_calls for call in previous.tool_calls)
-        ):
-            break
-        committed.pop()
-    return committed
-
-
-def _to_acp_usage(usage: RunUsage) -> schema.Usage:
-    return schema.Usage(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.total_tokens,
-        cached_read_tokens=usage.cache_read_tokens,
-        cached_write_tokens=usage.cache_write_tokens,
-    )
-
-
-def _context_window(model: Model | str | None) -> int | None:
-    """The model's context window, when its profile knows one."""
-    if isinstance(model, Model):
-        window = model.profile.get("context_window")
-        return window if window else None
-    return None
-
-
-def _last_response(messages: Sequence[ModelMessage]) -> ModelResponse | None:
-    """The newest model response among a run's messages."""
-    return next(
-        (message for message in reversed(messages) if isinstance(message, ModelResponse)), None
-    )
-
-
-def _context_tokens(response: ModelResponse) -> int:
-    """Tokens the last request left in the context window.
-
-    Cache reads and writes are part of the prompt, and the response itself becomes
-    context for the next request, so all four counts belong in the gauge.
-    """
-    usage = response.usage
-    return (
-        usage.input_tokens
-        + usage.cache_read_tokens
-        + usage.cache_write_tokens
-        + usage.output_tokens
-    )
-
-
-ObservedOutputT = TypeVar("ObservedOutputT")
-
-
-class RunObserver(Protocol):
-    async def consume(
-        self,
-        stream: AsyncIterator[AgentStreamEvent | AgentRunResultEvent[ObservedOutputT]],
-        history: list[ModelMessage],
-        user_content: list[UserContent] | None,
-        emit: Callable[[AgentStreamEvent], Awaitable[None]],
-        run_id: str,
-    ) -> AgentRunResult[ObservedOutputT]: ...
-
-    def state_changed(self, state: dict[str, object]) -> None: ...
-
-    def close(self) -> None: ...
-
-    def interrupted(self, messages: list[ModelMessage]) -> None: ...
-
-
-class _LiveUsage(Protocol):
-    """A run handle's usage and messages while it is still streaming."""
-
-    @property
-    def usage(self) -> RunUsage: ...
-
-    def all_messages(self) -> list[ModelMessage]: ...
-
-
-class _TurnCancelled(Exception):
-    """Raised internally to unwind a turn the client cancelled mid-flight."""
-
-
-@dataclass(kw_only=True)
-class _TurnState:
-    """Per-turn state shared by the stream handlers."""
-
-    session_id: str
-    cwd: str
-    approval_names: frozenset[str]
-    known_non_approval_names: frozenset[str] = frozenset()
-    started: set[str] = field(default_factory=set[str])
-    denied: set[str] = field(default_factory=set[str])
-    resulted: set[str] = field(default_factory=set[str])
-    announced_status: dict[str, schema.ToolCallStatus] = field(
-        default_factory=dict[str, schema.ToolCallStatus]
-    )
-    updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
-
-
-@dataclass(frozen=True, kw_only=True)
-class _ToolCallFields:
-    title: str
-    kind: schema.ToolKind | None
-    content: list[ToolCallContent] | None
-    locations: list[schema.ToolCallLocation] | None
-
-
-@dataclass(frozen=True)
-class SteeringPrompt:
-    prompt: tuple[PromptContentBlock, ...]
-    origin: Client | None
-
-
-class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
+class SessionRuntime(
+    _SessionConfigMixin[AgentDepsT, OutputDataT],
+    _SessionApprovalsMixin[AgentDepsT, OutputDataT],
+    Generic[AgentDepsT, OutputDataT],
+):
     """Execute one conversation independently of transport request tasks."""
 
     def __init__(
@@ -322,6 +160,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None = None,
         agent_id: str = "agent",
         permission_policy: PermissionPolicy | None = None,
+        permission_modes: Sequence[PermissionMode] | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         session_store: SessionPersistence,
         model_resolver: ModelResolver | None = None,
@@ -345,6 +184,11 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         self.prompt_origin: Client | None = None
         self.attachment_toolsets: Sequence[AbstractToolset[AgentDepsT]] = ()
         self._permission_policy = permission_policy or default_permission_scope
+        self._permission_modes = (
+            DEFAULT_PERMISSION_MODES
+            if permission_modes is None
+            else validate_permission_modes(permission_modes)
+        )
         self._tool_presenter = tool_presenter or default_coding_presenter
         self._session_store = session_store
         self._persist_lock = asyncio.Lock()
@@ -361,80 +205,57 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         #: The session title the attached client has been told, derived from the transcript.
         self._title: str | None = None
         #: The last usage gauge sent, so a turn that changes nothing does not repeat it.
-        self._usage_update: schema.UsageUpdate | None = None
+        self._usage_update: schema.UsageUpdate | schema.SessionInfoUpdate | None = None
+        self._reasoning_tokens: int | None = None
 
-    def _model_choices(self) -> Sequence[ModelChoice]:
-        """The models advertised in the ``model`` config option, in priority order."""
-        resolver = self._model_resolver
-        return resolver.list_models() if resolver is not None else ()
+    def _supports_compaction_updates(self) -> bool:
+        caps = self._client_capabilities
+        return caps is not None and caps.session is not None and caps.session.compaction is not None
 
-    async def _skills_meta(self) -> dict[str, object] | None:
-        """The ``session/new``/``session/load`` ``_meta`` carrying the skill catalog."""
-        skills = self._skills
-        if skills is None:
+    def _slash_commands(self) -> tuple[SlashCommand[AgentDepsT], ...]:
+        extra = (
+            self._state.config.capabilities
+            if self._state is not None and self._state.config.capabilities
+            else ()
+        )
+        return find_slash_commands(self._agent, extra)
+
+    def _replayable_update(self, update: SessionUpdate) -> SessionUpdate | None:
+        """Translate persisted compaction updates for clients without compaction support."""
+        if self._supports_compaction_updates():
+            return update
+        if isinstance(update, schema.SessionUpdateCompactionSummaryChunk):
             return None
-        entries = [info.to_meta() for info in await skills.metadata()]
-        return {SKILLS_META_KEY: entries} if entries else None
-
-    async def _resolve_skills(self, prompt: Sequence[PromptContentBlock]) -> tuple[SkillInfo, ...]:
-        """Validate the skill references a prompt carries, or reject the prompt."""
-        ids = _skill_references(prompt)
-        if not ids:
-            return ()
-        skills = self._skills
-        if skills is None:
-            raise acp.RequestError.invalid_params({"reason": "this deployment exposes no skills"})
-        catalog = await skills.metadata()
-        by_id = {info.id: info for info in catalog}
-        resolved: list[SkillInfo] = []
-        for skill_id in ids:
-            info = by_id.get(skill_id)
-            if info is None:
-                available = ", ".join(by_id) or "none"
-                raise acp.RequestError.invalid_params(
-                    {
-                        "skill": skill_id,
-                        "reason": f"unknown skill; available: {available}",
-                    }
+        if isinstance(update, schema.SessionUpdateCompactionUpdate):
+            if update.status == "failed":
+                error = update.error or "unknown error"
+                return updates.update_agent_message_text(f"[Compaction failed: {error}]")
+            if update.status != "completed":
+                return None
+            meta = (update.field_meta or {}).get(COMPACTION_META_KEY)
+            meta_dict = meta if isinstance(meta, dict) else {}
+            mode = "auto" if meta_dict.get("mode") == "auto" else "manual"
+            tokens_before = meta_dict.get("tokens_before")
+            tokens_after = meta_dict.get("tokens_after")
+            summary_parts = [
+                block.text
+                for block in (update.summary or ())
+                if isinstance(block, schema.TextContentBlock) and block.text
+            ]
+            summary = "".join(summary_parts) or None
+            if isinstance(tokens_before, int) and isinstance(tokens_after, int):
+                text = updates.compaction_fallback_notice(
+                    mode=mode,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_after,
+                    summary=summary,
                 )
-            if not info.user_invocable:
-                raise acp.RequestError.invalid_params(
-                    {"skill": skill_id, "reason": "this skill is not user-invocable"}
-                )
-            resolved.append(info)
-        return tuple(resolved)
-
-    async def _with_skill_instructions(
-        self,
-        state: SessionState[AgentDepsT],
-        content: list[UserContent],
-        skills: Sequence[SkillInfo],
-    ) -> list[UserContent]:
-        capability = self._skills
-        if not skills or capability is None:
-            return content
-        state.invoked_skills.update(info.id for info in skills)
-        injected = [
-            f'<skill_content name="{info.id}">\n'
-            f"{await capability.instructions(info.id)}\n"
-            "</skill_content>"
-            for info in skills
-        ]
-        return [*injected, *content]
-
-    async def _announce_skills(self, turn: _TurnState, skills: Sequence[SkillInfo]) -> None:
-        """Show one completed tool call per skill the person invoked, as a transcript marker."""
-        for info in skills:
-            await self._send_update(
-                turn,
-                updates.start_tool_call(
-                    tool_call_id=f"{_SKILL_TOOL_PREFIX}{info.id}",
-                    title=f"Loaded skill: {info.name}",
-                    kind="other",
-                    status="completed",
-                    raw_input={"id": info.id},
-                ),
-            )
+            elif summary:
+                text = f"[Context compacted]\n\n{summary}"
+            else:
+                text = "[Context compacted]"
+            return updates.update_agent_message_text(text)
+        return update
 
     async def create(self, session_id: str, cwd: str) -> None:
         config = await self._build_config(session_id, cwd)
@@ -457,11 +278,15 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             transcript=list(stored.updates),
             model=stored.model,
             setting_selections=dict(stored.setting_selections),
+            permission_mode=stored.permission_mode,
             todos=TodoStore(items=stored.todos),
             invoked_skills=set(stored.skills),
         )
         self._title = title_from_updates(self.state.transcript)
-        if self._reconcile_setting_selections(self.state):
+        model_changed = self._reconcile_model(self.state)
+        settings_changed = self._reconcile_setting_selections(self.state)
+        permissions_changed = self._reconcile_permission_mode(self.state)
+        if model_changed or settings_changed or permissions_changed:
             await self._persist(self.state)
 
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
@@ -476,6 +301,7 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                         updates=list(state.transcript),
                         model=state.model,
                         setting_selections=dict(state.setting_selections),
+                        permission_mode=state.permission_mode,
                         todos=state.todos.items,
                         skills=tuple(sorted(state.invoked_skills)),
                     ),
@@ -485,138 +311,6 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                     "failed to persist ACP session %s; durable state is now behind",
                     state.session_id,
                 )
-
-    def _model_option(
-        self, current_model_id: str | None
-    ) -> schema.SessionConfigOptionSelect | None:
-        choices = self._model_choices()
-        if current_model_id is None or not choices:
-            return None
-        return schema.SessionConfigOptionSelect(
-            id=_MODEL_CONFIG_ID,
-            name="Model",
-            type="select",
-            current_value=current_model_id,
-            options=[
-                schema.SessionConfigSelectOption(
-                    value=choice.model_id,
-                    name=choice.name or choice.model_id,
-                    field_meta={"providerId": choice.provider_id},
-                )
-                for choice in choices
-            ],
-        )
-
-    def _config_options(self, state: SessionState[AgentDepsT]) -> ConfigOptions | None:
-        """The complete config-option state ACP returns after every change.
-
-        The model option comes first, then the resolver's setting options, so clients that
-        prioritize by array order surface the model selection most prominently.
-        """
-        options: ConfigOptions = []
-        model = self._model_option(state.model)
-        if model is not None:
-            options.append(model)
-        options.extend(self._setting_options(state))
-        return options or None
-
-    def _setting_options(
-        self, state: SessionState[AgentDepsT]
-    ) -> list[schema.SessionConfigOptionSelect]:
-        """The resolver's options for this session's model, with setting selections applied."""
-        resolver = self._model_resolver
-        if resolver is None or state.model is None:
-            return []
-        rendered: list[schema.SessionConfigOptionSelect] = []
-        for option in resolver.list_options(state.model):
-            values = {choice.value for choice in option.choices}
-            current = state.setting_selections.get(option.id, option.default)
-            if current not in values:
-                current = option.default
-            rendered.append(
-                schema.SessionConfigOptionSelect(
-                    id=option.id,
-                    name=option.name,
-                    description=option.description,
-                    category=option.category,
-                    current_value=current,
-                    options=[
-                        schema.SessionConfigSelectOption(
-                            value=choice.value,
-                            name=choice.name,
-                            description=choice.description,
-                            field_meta=dict(choice.meta) or None,
-                        )
-                        for choice in option.choices
-                    ],
-                    field_meta=dict(option.meta) or None,
-                )
-            )
-        return rendered
-
-    def _setting_option(
-        self, state: SessionState[AgentDepsT], config_id: str
-    ) -> SettingOption | None:
-        """The resolver option with this id, if the current model advertises it."""
-        resolver = self._model_resolver
-        if resolver is None or state.model is None:
-            return None
-        return next(
-            (option for option in resolver.list_options(state.model) if option.id == config_id),
-            None,
-        )
-
-    def _reconcile_setting_selections(self, state: SessionState[AgentDepsT]) -> bool:
-        """Drop setting selections the session's current model no longer offers.
-
-        A model switch or a provider reroute can remove a value. Dropping it makes the
-        option fall back to its default instead of sending a setting the resolver refuses.
-        """
-        resolver = self._model_resolver
-        if resolver is None or state.model is None:
-            return False
-        advertised = {
-            option.id: {choice.value for choice in option.choices}
-            for option in resolver.list_options(state.model)
-        }
-        changed = False
-        for config_id in list(state.setting_selections):
-            if state.setting_selections[config_id] not in advertised.get(config_id, set[str]()):
-                del state.setting_selections[config_id]
-                changed = True
-        return changed
-
-    def _resolver_settings(self, state: SessionState[AgentDepsT]) -> ModelSettings:
-        """The settings delta the session's setting selections currently imply."""
-        resolver = self._model_resolver
-        if resolver is None or state.model is None:
-            return ModelSettings()
-        return resolver.resolve_settings(state.model, dict(state.setting_selections))
-
-    def _run_settings(
-        self, state: SessionState[AgentDepsT], resolved: ResolvedModel | None
-    ) -> Callable[[RunContext[AgentDepsT]], ModelSettings]:
-        """Model settings resolved before every request, so a change lands mid-turn.
-
-        Pydantic AI resolves a callable ``model_settings`` layer once per model request.
-        Reading the session's live setting selections here is what makes ``session/set_config_option``
-        apply to the next request of a running turn instead of only the next turn; the
-        model's routing settings stay the base, so the client cannot drop them.
-        """
-        base = resolved.settings if resolved is not None else None
-
-        def settings(_run_context: RunContext[AgentDepsT]) -> ModelSettings:
-            return merge_model_settings(base, self._resolver_settings(state)) or ModelSettings()
-
-        return settings
-
-    async def _push_option_changes(self, before: ConfigOptions | None) -> None:
-        state = self.state
-        if self._reconcile_setting_selections(state):
-            await self._persist(state)
-        after = self._config_options(state)
-        if after is not None and after != before:
-            await self._deliver_update(schema.ConfigOptionUpdate(config_options=after))
 
     async def _build_config(self, session_id: str, cwd: str) -> AcpSessionConfig[AgentDepsT]:
         if self._session_config is None:
@@ -656,6 +350,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         reconnect = self._conn is None
         if reconnect:
             self._attachment_generation += 1
+            self._reasoning_tokens = None
+            self._usage_update = None
         self._conn = conn
         self._mcp_caller = caller
         self._mcp_channel = channel
@@ -709,7 +405,19 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         async def deliver() -> None:
             try:
                 for update in replay:
-                    await conn.session_update(session_id=self.state.session_id, update=update)
+                    translated = self._replayable_update(update)
+                    if translated is not None:
+                        await conn.session_update(
+                            session_id=self.state.session_id, update=translated
+                        )
+                commands = self._slash_commands()
+                if commands:
+                    await conn.session_update(
+                        session_id=self.state.session_id,
+                        update=updates.update_available_commands(
+                            [command.to_acp() for command in commands]
+                        ),
+                    )
                 if self._title is not None:
                     await conn.session_update(
                         session_id=self.state.session_id,
@@ -766,12 +474,140 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
     def _client_toolset(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         return CombinedToolset(list(self.attachment_toolsets)) if self.attachment_toolsets else None
 
-    async def execute(self, prompt: list[PromptContentBlock]) -> schema.PromptResponse:
-        skills = await self._resolve_skills(prompt)
-        try:
-            return await self._run_turn(
-                self.state, prompt, prompt_blocks_to_user_content(prompt), skills
+    def _find_slash_command(
+        self, prompt: Sequence[PromptContentBlock]
+    ) -> tuple[SlashCommand[AgentDepsT], str] | None:
+        if len(prompt) != 1 or not isinstance(prompt[0], schema.TextContentBlock):
+            return None
+        parsed = parse_slash_command(prompt[0].text)
+        if parsed is None:
+            return None
+        name, arguments = parsed
+        key = name.lower()
+        for command in self._slash_commands():
+            if command.name.lower() == key:
+                return command, arguments
+        return None
+
+    async def _emit_context_usage_estimate(
+        self,
+        state: SessionState[AgentDepsT],
+        *,
+        used_tokens: int,
+        spent: Decimal | None = None,
+    ) -> None:
+        """Publish an estimated context-usage gauge immediately after compaction."""
+        resolved = self._resolve_run_model(state.model)
+        model = resolved.model if resolved is not None else self._agent.model
+        size = _context_window(model)
+        if size is None and model is not None:
+            size = resolve_context_window(model)
+        total = state.cost if spent is None else spent
+        amount = float(total) if total is not None else None
+        if size is None:
+            return
+        update = schema.UsageUpdate(
+            used=max(used_tokens, 0),
+            size=size,
+            cost=schema.Cost(amount=amount, currency="USD") if amount is not None else None,
+            field_meta={"hrns/usage/estimated_cost": True} if amount is not None else None,
+        )
+        if update == self._usage_update:
+            return
+        self._usage_update = update
+        await self._deliver_update(update)
+
+    async def _record_user_blocks(
+        self, turn: _TurnState, prompt: Sequence[PromptContentBlock]
+    ) -> None:
+        for block in prompt:
+            update = updates.update_user_message(block)
+            if self._conn is self.prompt_origin and self.prompt_origin is not None:
+                turn.updates.append(update)
+            else:
+                await self._send_update(turn, update)
+
+    async def _dispatch_slash_command(
+        self,
+        state: SessionState[AgentDepsT],
+        turn: _TurnState,
+        command: SlashCommand[AgentDepsT],
+        arguments: str,
+    ) -> tuple[schema.PromptResponse | None, str | None]:
+        """Run a matched capability slash command.
+
+        Returns ``(prompt_response, rewritten_text)``: a non-``None`` response completes the
+        turn immediately; otherwise the caller continues into the normal agent loop (with
+        ``rewritten_text`` replacing the prompt when provided).
+        """
+        config = state.config
+        resolved_model = self._resolve_run_model(state.model)
+        effective_model = resolved_model.model if resolved_model is not None else self._agent.model
+        effective_settings = self._resolver_settings(state)
+        if resolved_model is not None and resolved_model.settings is not None:
+            effective_settings = (
+                merge_model_settings(resolved_model.settings, effective_settings)
+                or effective_settings
             )
+
+        new_history: list[ModelMessage] | None = None
+
+        def replace_history(messages: list[ModelMessage]) -> None:
+            nonlocal new_history
+            new_history = list(messages)
+
+        async def emit_update(update: SessionUpdate) -> None:
+            await self._send_update(turn, update)
+
+        async def emit_text(text: str) -> None:
+            await self._emit_text(turn, text, thought=False)
+
+        async def emit_context_usage(used_tokens: int, delta_cost: Decimal | None) -> None:
+            spent = state.cost
+            if delta_cost is not None:
+                spent = (spent or Decimal(0)) + delta_cost
+            await self._emit_context_usage_estimate(state, used_tokens=used_tokens, spent=spent)
+
+        command_ctx = CommandContext[AgentDepsT](
+            session_id=state.session_id,
+            cwd=state.cwd,
+            command=command.name,
+            arguments=arguments,
+            history=list(state.history),
+            deps=config.deps,
+            model=effective_model,
+            model_settings=effective_settings,
+            emit_update=emit_update,
+            emit_text=emit_text,
+            emit_context_usage=emit_context_usage,
+            replace_history=replace_history,
+        )
+        result = await run_command_handler(command, command_ctx)
+        if isinstance(result, CommandHandled):
+            if result.message:
+                await self._emit_text(turn, result.message, thought=False)
+            if new_history is not None:
+                state.history = new_history
+            if result.cost is not None:
+                state.cost = (state.cost or Decimal(0)) + result.cost
+            try:
+                await self._commit_turn(state, turn)
+            except asyncio.CancelledError:
+                return schema.PromptResponse(stop_reason="cancelled"), None
+            return (
+                schema.PromptResponse(
+                    stop_reason=result.stop_reason,
+                    usage=_to_acp_usage(result.usage) if result.usage is not None else None,
+                ),
+                None,
+            )
+        if isinstance(result, CommandPrompt):
+            return None, result.text
+        return None, None
+
+    async def execute(self, prompt: list[PromptContentBlock]) -> schema.PromptResponse:
+        try:
+            return await self._run_turn(self.state, prompt, prompt_blocks_to_user_content(prompt))
         except _TurnCancelled:
             return schema.PromptResponse(stop_reason="cancelled")
         finally:
@@ -782,10 +618,17 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         state: SessionState[AgentDepsT],
         prompt: list[PromptContentBlock],
         user_content: list[UserContent],
-        skills: Sequence[SkillInfo] = (),
     ) -> schema.PromptResponse:
-        history = state.history
         config = state.config
+        turn = _TurnState(
+            session_id=state.session_id,
+            cwd=state.cwd,
+            approval_names=self._approval_tool_names(config),
+            known_non_approval_names=self._known_non_approval_names(config),
+        )
+        self.live_updates = turn.updates
+
+        history = state.history
         usage = RunUsage()
         stop_reason: schema.StopReason = "end_turn"
         deferred_results: DeferredToolResults | None = None
@@ -794,24 +637,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             self._agent.output_type,
             DeferredToolRequests,
         ]
-        turn = _TurnState(
-            session_id=state.session_id,
-            cwd=state.cwd,
-            approval_names=self._approval_tool_names(config),
-            known_non_approval_names=self._known_non_approval_names(config),
-        )
-        self.live_updates = turn.updates
-        for block in prompt:
-            update = updates.update_user_message(block)
-            if self._conn is self.prompt_origin and self.prompt_origin is not None:
-                turn.updates.append(update)
-            else:
-                await self._send_update(turn, update)
-        run_input = await self._with_skill_instructions(state, user_content, skills)
-        await self._announce_skills(turn, skills)
-
         captured: list[ModelMessage] = []
         last_response: ModelResponse | None = None
+        connection_error: ModelConnectionError | None = None
 
         async def inject_steering(
             ctx: RunContext[AgentDepsT], *, node: AgentNode[AgentDepsT]
@@ -837,6 +665,20 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
         steering = Hooks[AgentDepsT](before_node_run=inject_steering)
         try:
+            skills = await self._resolve_skills(prompt)
+            await self._record_user_blocks(turn, prompt)
+            matched_command = self._find_slash_command(prompt)
+            if matched_command is not None and matched_command[0].handler is not None:
+                command, arguments = matched_command
+                handled_response, rewritten_text = await self._dispatch_slash_command(
+                    state, turn, command, arguments
+                )
+                if handled_response is not None:
+                    return handled_response
+                if rewritten_text is not None:
+                    user_content = [rewritten_text]
+            run_input = await self._with_skill_instructions(state, user_content, skills)
+            await self._announce_skills(turn, skills)
             while True:
                 result = None
                 native_run_id = uuid4().hex
@@ -891,14 +733,8 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 if isinstance(output, DeferredToolRequests):
                     if not output.approvals and not output.calls:  # pragma: no cover
                         break
-                    self.interactions.waiting = True
-                    self.on_state()
-                    try:
-                        deferred_results = await self._resolve_approvals(turn, state, output)
-                    finally:
-                        self.interactions.waiting = False
-                        self.on_state()
                     run_input = None
+                    deferred_results = await self._resolve_approvals(turn, state, output)
                     continue
                 if output is not None and not isinstance(output, str):
                     await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)
@@ -906,26 +742,70 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 stop_reason = _finish_reason_to_stop_reason(result.response.finish_reason)
                 break
         except (asyncio.CancelledError, _TurnCancelled) as exc:
+            interrupted = RunCancelled.from_cancellation(exc)
+            partial_history = (
+                (interrupted.all_messages() if interrupted is not None else [])
+                or captured
+                or history
+            )
+            if run_input is not None and partial_history == history:
+                # Cancellation can arrive before the run records its first request.
+                partial_history = [*history, ModelRequest(parts=[UserPromptPart(run_input)])]
+            if partial_history and isinstance(tail := partial_history[-1], ModelResponse):
+                if tail.state == "interrupted" and not tail.parts:
+                    partial_history = partial_history[:-1]
+            history = repair_messages(partial_history)
+            # Providers don't receive the lifecycle state of a partial response.
+            history.append(
+                ModelRequest(parts=[UserPromptPart("[hrns] The preceding turn was interrupted.")])
+            )
             if self.observer is not None:
-                interrupted = RunCancelled.from_cancellation(exc)
-                self.observer.interrupted(
-                    interrupted.all_messages() if interrupted is not None else captured
-                )
+                self.observer.interrupted(history)
             with anyio.CancelScope(shield=True):
-                await self._fail_outstanding_tool_calls(turn)
-                await self._persist_interrupted_todos(state, turn)
+                if not turn.updates:
+                    await self._record_user_blocks(turn, prompt)
+                # A result may have been captured before its stream event was delivered.
+                new_messages = interrupted.new_messages() if interrupted is not None else ()
+                for message in new_messages:
+                    if not isinstance(message, ModelRequest):
+                        continue
+                    for part in message.parts:
+                        if (
+                            isinstance(part, ToolReturnPart)
+                            and part.tool_call_id in turn.started
+                            and part.tool_call_id not in turn.resulted
+                        ):
+                            await self._emit_event(turn, FunctionToolResultEvent(part))
+                await self._fail_outstanding_tool_calls(
+                    turn, record=True, raw_output=INTERRUPTED_TOOL_RETURN_CONTENT
+                )
+                state.history = history
+                await self._commit_turn(state, turn)
             raise
-        except UsageLimitExceeded as exc:
-            if self.observer is not None:
-                self.observer.interrupted(captured)
+        except (ModelConnectionError, UsageLimitExceeded) as exc:
             await self._fail_outstanding_tool_calls(turn, record=True)
             if captured:
                 earlier_runs = {message.run_id for message in history}
                 for message in captured:
                     if isinstance(message, ModelResponse) and message.run_id not in earlier_runs:
                         usage.incr(message.usage)
-                history = _committable_history(captured, turn.started)
-            stop_reason = _usage_limit_stop_reason(exc)
+            if isinstance(exc, ModelConnectionError):
+                connection_error = exc
+                history = captured or history
+                # A connection failure can leave an empty response in the capture.
+                if history and isinstance(tail := history[-1], ModelResponse):
+                    if tail.state == "interrupted" and not tail.parts:
+                        history = history[:-1]
+                history = repair_messages(history)
+                last_response = _last_response(history)
+                if self.observer is not None:
+                    self.observer.interrupted(history)
+            else:
+                if self.observer is not None:
+                    self.observer.interrupted(captured)
+                if captured:
+                    history = _committable_history(captured, turn.started)
+                stop_reason = _usage_limit_stop_reason(exc)
         except Exception:
             if self.observer is not None:
                 self.observer.interrupted(captured)
@@ -938,18 +818,22 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         await self._emit_usage(state, response=last_response)
 
         state.history = history
+        await self._commit_turn(state, turn)
+        if connection_error is not None:
+            raise connection_error
+        return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
+
+    async def _commit_turn(self, state: SessionState[AgentDepsT], turn: _TurnState) -> None:
         state.transcript.extend(turn.updates)
         self.live_updates = []
         await self._announce_title(state)
+        save = asyncio.create_task(self._persist(state))
         try:
-            await self._persist(state)
+            await asyncio.shield(save)
         except asyncio.CancelledError:
-            _logger.warning(
-                "persisting ACP session %s was cancelled; durable state is now behind",
-                state.session_id,
-            )
-            stop_reason = "cancelled"
-        return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
+            # A cancellation during the save must settle before the next turn starts.
+            await save
+            raise
 
     async def _announce_title(self, state: SessionState[AgentDepsT]) -> None:
         """Name the session from its first user text, the same way ``session/list`` does.
@@ -975,9 +859,13 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
             self.live_updates = []
             await self._persist(state)
 
-    async def _fail_outstanding_tool_calls(self, turn: _TurnState, *, record: bool = False) -> None:
+    async def _fail_outstanding_tool_calls(
+        self, turn: _TurnState, *, record: bool = False, raw_output: str | None = None
+    ) -> None:
         for tool_call_id in turn.started - turn.resulted:
-            update = updates.update_tool_call(tool_call_id=tool_call_id, status="failed")
+            update = updates.update_tool_call(
+                tool_call_id=tool_call_id, status="failed", raw_output=raw_output
+            )
             if record:
                 turn.updates.append(update)
             with contextlib.suppress(Exception):
@@ -985,7 +873,9 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None:
         turn.updates.append(update)
-        await self._deliver_update(update)
+        translated = self._replayable_update(update)
+        if translated is not None:
+            await self._deliver_update(translated)
 
     async def _emit_usage(
         self,
@@ -994,29 +884,44 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         response: ModelResponse | None,
         spent: Decimal | None = None,
     ) -> None:
-        """Publish the usage gauge clients render as context percentage and session cost.
+        """Publish context usage and estimated session cost when available.
 
-        ``PromptResponse.usage`` carries only per-turn token totals and has no room for
-        either figure, so an agent that stays silent here leaves the client's readout
-        blank. The gauge is deliberately not recorded in the transcript: replaying a
-        stale percentage into a freshly loaded session would be wrong. ``spent`` is the
-        session total to report, defaulting to the committed one; a caller following a
-        running turn passes the committed total plus the run so far. Repeating a gauge
-        the client already has tells it nothing, so an unchanged one is dropped.
+        ACP usage updates require a context size. A session info update carries
+        the estimate when the model has no known context window. During a turn,
+        ``spent`` includes the committed session cost and completed requests in the run.
         """
         if response is None:
             return
+        reported_reasoning = response.usage.details.get("reasoning_tokens")
+        reasoning_tokens = (
+            reported_reasoning if reported_reasoning and reported_reasoning > 0 else None
+        )
+        if reasoning_tokens != self._reasoning_tokens:
+            self._reasoning_tokens = reasoning_tokens
+            await self._deliver_update(
+                schema.SessionInfoUpdate(
+                    field_meta={"hrns/usage/reasoning_tokens": reasoning_tokens}
+                )
+            )
         resolved = self._resolve_run_model(state.model)
         size = _context_window(resolved.model if resolved is not None else self._agent.model)
         used = _context_tokens(response)
-        if size is None or used <= 0:
-            return
         total = state.cost if spent is None else spent
-        update = schema.UsageUpdate(
-            used=used,
-            size=size,
-            cost=(schema.Cost(amount=float(total), currency="USD") if total is not None else None),
-        )
+        amount = float(total) if total is not None else None
+        update: schema.UsageUpdate | schema.SessionInfoUpdate
+        if size is not None and used > 0:
+            update = schema.UsageUpdate(
+                used=used,
+                size=size,
+                cost=schema.Cost(amount=amount, currency="USD") if amount is not None else None,
+                field_meta={"hrns/usage/estimated_cost": True} if amount is not None else None,
+            )
+        else:
+            if amount is None and self._usage_update is None:
+                return
+            update = schema.SessionInfoUpdate(
+                field_meta={"hrns/usage/cost_without_context": amount}
+            )
         if update == self._usage_update:
             return
         self._usage_update = update
@@ -1064,7 +969,54 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
         )
 
     async def _emit_event(self, turn: _TurnState, event: AgentStreamEvent) -> None:
-        if isinstance(event, TodoUpdated):
+        if isinstance(event, CompactionStarted):
+            await self._send_update(
+                turn,
+                updates.update_compaction(
+                    event.compaction_id,
+                    "in_progress",
+                    meta=_compaction_meta(
+                        mode=event.mode,
+                        tokens_before=event.tokens_before,
+                        messages_before=event.messages_before,
+                        focus=event.focus,
+                    ),
+                ),
+            )
+        elif isinstance(event, CompactionSummaryChunkEvent):
+            await self._send_update(
+                turn,
+                updates.update_compaction_summary_chunk(event.compaction_id, event.delta),
+            )
+        elif isinstance(event, CompactionCompleted):
+            await self._send_update(
+                turn,
+                updates.update_compaction(
+                    event.compaction_id,
+                    "completed",
+                    summary=event.summary,
+                    meta=_compaction_meta(
+                        mode=event.mode,
+                        tokens_before=event.tokens_before,
+                        tokens_after=event.tokens_after,
+                        messages_before=event.messages_before,
+                        messages_after=event.messages_after,
+                        focus=event.focus,
+                    ),
+                ),
+            )
+            await self._emit_context_usage_estimate(self.state, used_tokens=event.tokens_after)
+        elif isinstance(event, CompactionFailed):
+            await self._send_update(
+                turn,
+                updates.update_compaction(
+                    event.compaction_id,
+                    "failed",
+                    error=event.error,
+                    meta=_compaction_meta(mode=event.mode),
+                ),
+            )
+        elif isinstance(event, TodoUpdated):
             await self._send_update(
                 turn,
                 schema.AgentPlanUpdate(
@@ -1125,316 +1077,10 @@ class SessionRuntime(Generic[AgentDepsT, OutputDataT]):
                 updates.update_tool_call(
                     tool_call_id=part.tool_call_id,
                     status=status,
-                    raw_output=bounded_jsonable(raw_output),
+                    raw_output=(
+                        bounded_shell_output(raw_output)
+                        if part.tool_name == "shell" and isinstance(raw_output, str)
+                        else bounded_jsonable(raw_output)
+                    ),
                 ),
             )
-
-    async def _resolve_approvals(
-        self, turn: _TurnState, state: SessionState[AgentDepsT], requests: DeferredToolRequests
-    ) -> DeferredToolResults:
-        results = DeferredToolResults()
-        if requests.calls:
-            results.calls.update(await self._resolve_calls(turn, requests.calls))
-        for call in requests.approvals:
-            if (
-                turn.announced_status.get(call.tool_call_id) == "in_progress"
-                and call.tool_name not in turn.known_non_approval_names
-            ):
-                await self._update_status(turn, call.tool_call_id, "pending")
-            scope = self._permission_policy(
-                ToolCallPermission(
-                    tool_name=call.tool_name,
-                    tool_call_id=call.tool_call_id,
-                    args=call.args_as_dict(),
-                )
-            )
-            if scope in state.always_allow:
-                results.approvals[call.tool_call_id] = True
-                await self._update_status(turn, call.tool_call_id, "in_progress")
-                continue
-            if scope in state.always_reject:
-                results.approvals[call.tool_call_id] = ToolDenied("Rejected by the client.")
-                turn.denied.add(call.tool_call_id)
-                continue
-            decision = await self._request_permission(turn, state, call, scope)
-            results.approvals[call.tool_call_id] = decision
-            if isinstance(decision, ToolDenied):
-                turn.denied.add(call.tool_call_id)
-            else:
-                await self._update_status(turn, call.tool_call_id, "in_progress")
-        return results
-
-    async def _update_status(
-        self, turn: _TurnState, tool_call_id: str, status: schema.ToolCallStatus
-    ) -> None:
-        await self._send_update(
-            turn, updates.update_tool_call(tool_call_id=tool_call_id, status=status)
-        )
-
-    def _static_toolsets(
-        self, config: AcpSessionConfig[AgentDepsT]
-    ) -> list[AbstractToolset[AgentDepsT]]:
-        toolsets: list[AbstractToolset[AgentDepsT]] = [
-            *self._agent.toolsets,
-            *(config.toolsets or []),
-        ]
-        for capability in config.capabilities or ():
-            contributed: AgentToolset[AgentDepsT] | None = capability.get_toolset()
-            if isinstance(contributed, AbstractToolset):
-                toolsets.append(contributed)
-        return toolsets
-
-    def _approval_tool_names(self, config: AcpSessionConfig[AgentDepsT]) -> frozenset[str]:
-        names: set[str] = set()
-        for toolset in self._static_toolsets(config):
-            if isinstance(toolset, FunctionToolset):
-                names.update(name for name, tool in toolset.tools.items() if tool.requires_approval)
-        return frozenset(names)
-
-    def _known_non_approval_names(self, config: AcpSessionConfig[AgentDepsT]) -> frozenset[str]:
-        names: set[str] = set()
-        for toolset in self._static_toolsets(config):
-            if isinstance(toolset, FunctionToolset):
-                names.update(
-                    name for name, tool in toolset.tools.items() if not tool.requires_approval
-                )
-        return frozenset(names)
-
-    def _supports_form_elicitation(self) -> bool:
-        capabilities = self._client_capabilities
-        elicitation = capabilities.elicitation if capabilities is not None else None
-        return elicitation is not None and elicitation.form is not None
-
-    async def _resolve_calls(
-        self, turn: _TurnState, calls: Sequence[ToolCallPart]
-    ) -> dict[str, object]:
-        """Answer deferred tool calls the adapter knows how to service."""
-        resolved: dict[str, object] = {}
-        for call in calls:
-            if call.tool_name != _ASK_USER_TOOL:
-                raise acp.RequestError.internal_error(
-                    {
-                        "reason": "external tool execution is not supported by the ACP adapter",
-                        "tools": sorted({call.tool_name for call in calls}),
-                    }
-                )
-            resolved[call.tool_call_id] = await self._ask_user(turn, call)
-        return resolved
-
-    async def _ask_user(self, turn: _TurnState, call: ToolCallPart) -> object:
-        """Put one ``ask_user_question`` call to the client as a form elicitation."""
-        request = HarnessAskUserRequest.from_tool_call(call)
-
-        await self._update_status(turn, call.tool_call_id, "pending")
-        try:
-
-            async def ask(conn: Client) -> schema.CreateElicitationResponse:
-                if not self._supports_form_elicitation():
-                    raise acp.RequestError.method_not_found("elicitation/create")
-                return await conn.create_elicitation(
-                    message=ask_user_message(request.questions),
-                    mode=schema.ElicitationFormSessionMode(
-                        session_id=turn.session_id,
-                        tool_call_id=call.tool_call_id,
-                        requested_schema=build_ask_user_schema(request.questions),
-                    ),
-                )
-
-            response = await self.interactions.request(ask)
-        except acp.RequestError as exc:
-            _logger.info("client rejected an ask-user elicitation: %s", exc)
-            await self._update_status(turn, call.tool_call_id, "in_progress")
-            return ASK_USER_UNAVAILABLE
-        return ask_user_tool_result(request, ask_user_response(response, request))
-
-    async def _request_permission(
-        self, turn: _TurnState, state: SessionState[AgentDepsT], call: ToolCallPart, scope: Hashable
-    ) -> bool | ToolDenied:
-        fields = self._tool_call_fields(call, turn.cwd, default_kind="execute")
-
-        async def ask(conn: Client) -> schema.RequestPermissionResponse:
-            return await conn.request_permission(
-                session_id=turn.session_id,
-                tool_call=schema.ToolCallUpdate(
-                    tool_call_id=call.tool_call_id,
-                    title=fields.title,
-                    kind=fields.kind,
-                    status="pending",
-                    content=fields.content,
-                    locations=fields.locations,
-                    raw_input=bounded_jsonable(call.args),
-                ),
-                options=[
-                    schema.PermissionOption(
-                        kind="allow_once", name="Allow", option_id="allow_once"
-                    ),
-                    schema.PermissionOption(
-                        kind="allow_always", name="Always allow", option_id="allow_always"
-                    ),
-                    schema.PermissionOption(
-                        kind="reject_once", name="Reject", option_id="reject_once"
-                    ),
-                    schema.PermissionOption(
-                        kind="reject_always", name="Always reject", option_id="reject_always"
-                    ),
-                ],
-            )
-
-        response = await self.interactions.request(ask)
-        outcome = response.outcome
-        if isinstance(outcome, schema.DeniedOutcome):
-            raise _TurnCancelled
-        if outcome.option_id == "allow_always":
-            state.always_allow.add(scope)
-        elif outcome.option_id == "reject_always":
-            state.always_reject.add(scope)
-        if outcome.option_id in ("allow_once", "allow_always"):
-            return True
-        return ToolDenied("Rejected by the client.")
-
-    def _resolve_run_model(self, model_id: str | None) -> ResolvedModel | None:
-        if model_id is None:
-            return None
-        resolver = self._model_resolver
-        if resolver is None:
-            return ResolvedModel(model=model_id)
-        try:
-            return resolver.resolve(model_id)
-        except ProviderDisabled as exc:
-            raise acp.RequestError.invalid_params(
-                {"model_id": model_id, "reason": str(exc)}
-            ) from exc
-
-    async def set_config_option(
-        self, config_id: str, session_id: str, value: str | bool, **kwargs: object
-    ) -> schema.SetSessionConfigOptionResponse | None:
-        """Change the session's model or one of the resolver's settings.
-
-        The advertised options are the contract: a value outside them is rejected rather
-        than clamped. The response carries the complete option state because a model switch
-        can change which settings exist and which values they offer.
-        """
-        state = self.state if session_id == self.state.session_id else None
-        if state is None:
-            raise acp.RequestError.invalid_params({"session_id": session_id})
-        if not isinstance(value, str):
-            raise acp.RequestError.invalid_params(
-                {"config_id": config_id, "reason": "only select options are supported"}
-            )
-        if config_id == _MODEL_CONFIG_ID:
-            if value not in {choice.model_id for choice in self._model_choices()}:
-                raise acp.RequestError.invalid_params(
-                    {"model_id": value, "reason": "not an advertised model"}
-                )
-            state.model = value
-            self._reconcile_setting_selections(state)
-        else:
-            option = self._setting_option(state, config_id)
-            model = state.model
-            if option is None or model is None:
-                raise acp.RequestError.invalid_params(
-                    {"config_id": config_id, "reason": "unknown config option"}
-                )
-            if value not in {choice.value for choice in option.choices}:
-                raise acp.RequestError.invalid_params(
-                    {"config_id": config_id, "reason": "not an advertised value"}
-                )
-            candidate = {**state.setting_selections, config_id: value}
-            resolver = self._model_resolver
-            assert resolver is not None  # _setting_option only returns options from it
-            try:
-                # Validate the whole selection map, not just this value: a resolver may
-                # reject a combination even when each value is individually advertised.
-                resolver.resolve_settings(model, candidate)
-            except ValueError as exc:
-                raise acp.RequestError.invalid_params(
-                    {"config_id": config_id, "reason": str(exc)}
-                ) from exc
-            state.setting_selections = candidate
-        await self._persist(state)
-        options = self._config_options(state)
-        return schema.SetSessionConfigOptionResponse(config_options=options or [])
-
-    # --- Document synchronization (unstable ACP) -------------------------------------
-    # The state is tracked per session so a future NES implementation has a correct view
-    # of the client's open documents. Nothing else consumes it yet.
-
-    async def did_open(
-        self,
-        session_id: str,
-        uri: str,
-        language_id: str,
-        version: int,
-        text: str,
-        **kwargs: object,
-    ) -> None:
-        """Record a document the client opened."""
-        state = self.state if session_id == self.state.session_id else None
-        if state is None:
-            return
-        state.documents[uri] = DocumentState(
-            uri=uri, language_id=language_id, version=version, text=text
-        )
-
-    async def did_change(
-        self,
-        session_id: str,
-        uri: str,
-        version: int,
-        content_changes: list[schema.TextDocumentContentChangeEvent],
-        **kwargs: object,
-    ) -> None:
-        """Apply the client's document edits to the tracked text."""
-        state = self.state if session_id == self.state.session_id else None
-        if state is None:
-            return
-        document = state.documents.get(uri)
-        if document is None:
-            return
-        document.text = apply_content_changes(document.text, content_changes)
-        document.version = version
-        document.saved = False
-
-    async def did_close(self, session_id: str, uri: str, **kwargs: object) -> None:
-        """Forget a document the client closed."""
-        state = self.state if session_id == self.state.session_id else None
-        if state is not None:
-            state.documents.pop(uri, None)
-
-    async def did_save(self, session_id: str, uri: str, **kwargs: object) -> None:
-        """Mark a tracked document as saved."""
-        state = self.state if session_id == self.state.session_id else None
-        if state is None:
-            return
-        document = state.documents.get(uri)
-        if document is not None:
-            document.saved = True
-
-    async def did_focus(
-        self,
-        session_id: str,
-        uri: str,
-        version: int,
-        position: schema.Position,
-        visible_range: schema.Range,
-        **kwargs: object,
-    ) -> None:
-        """Record where the client's cursor and viewport are."""
-        state = self.state if session_id == self.state.session_id else None
-        if state is None:
-            return
-        document = state.documents.get(uri)
-        if document is None:
-            return
-        document.version = version
-        document.focus = position
-        document.visible_range = visible_range
-
-    # --- Provider configuration (unstable ACP) --------------------------------------
-    # The adapter translates the protocol and validates nothing itself: the model
-    # resolver owns the state and the rules. A model is resolved per turn, so a new
-    # route applies from the next turn; the session's model id does not change.
-
-    # --- Explicitly unsupported ACP 1.x features ------------------------------------
-    # These capabilities are not advertised in ``initialize``. The SDK router still
-    # dispatches the methods, so answer with the rejection that matches the advertisement.

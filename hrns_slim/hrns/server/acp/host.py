@@ -6,10 +6,10 @@ import asyncio
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import isawaitable
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic
+from typing import TYPE_CHECKING, Generic, Literal
 from uuid import uuid4
 
 import acp
@@ -21,10 +21,12 @@ from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
+from hrns.shared.config import PermissionMode
+
 from .._types import PrincipalT
 from .content import PromptContentBlock
 from .models import ModelResolver
-from .permission import PermissionPolicy
+from .permission import DEFAULT_PERMISSION_MODES, PermissionPolicy, validate_permission_modes
 from .presentation import ToolCallPresenter
 from .runtime import RunObserver, SessionRuntime, SteeringPrompt
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
@@ -84,7 +86,6 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._worker: asyncio.Task[None] | None = None
         self._active: TurnHandle[OutputDataT] | None = None
         self._execution: asyncio.Task[schema.PromptResponse] | None = None
-        self._paused = False
         self._closed = False
         self._revision = 0
         self._last_outcome: str | None = None
@@ -96,13 +97,16 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         return {
             "sessionId": self.session_id,
             "revision": self._revision,
-            "status": ("waiting" if self._runtime.interactions.waiting else "running")
-            if self._active is not None
-            else "idle",
+            "status": self.execution_status(),
             "activeTurnId": self._active.turn_id if self._active else None,
             "lastOutcome": self._last_outcome,
             "lastUsage": self._last_usage,
         }
+
+    def execution_status(self) -> Literal["idle", "running", "waiting"]:
+        if self._active is None:
+            return "running" if self._queue else "idle"
+        return "waiting" if self._runtime.interactions.waiting else "running"
 
     def _publish(self) -> None:
         self._revision += 1
@@ -119,7 +123,7 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         """Join the active turn at its next model request, or queue a follow-up.
 
         A consumed message shares the active turn's result. Messages left unconsumed
-        when it ends become separate turns. Cancellation and errors pause that work.
+        when it ends become separate turns.
         """
         return await self._accept(prompt, steer=True)
 
@@ -142,7 +146,7 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         # Consume unobserved failures without changing what result() raises.
         handle._future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
         queued = _QueuedTurn(handle, origin)
-        if steer and self._active is not None and not self._paused:
+        if steer and self._active is not None:
             self._steering.append(queued)
         else:
             self._queue.append(queued)
@@ -156,12 +160,12 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         return tuple(SteeringPrompt(queued.handle.prompt, queued.origin) for queued in pending)
 
     def _start_worker(self) -> None:
-        if not self._paused and self._queue and self._worker is None:
+        if self._queue and self._worker is None:
             self._worker = asyncio.create_task(self._drain())
 
     async def _drain(self) -> None:
         try:
-            while self._queue and not self._paused and not self._closed:
+            while self._queue and not self._closed:
                 queued = self._queue.popleft()
                 handle = queued.handle
                 self._active = handle
@@ -178,8 +182,6 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                         if response.usage
                         else None
                     )
-                    if response.stop_reason == "cancelled":
-                        self._paused = True
                     result = TurnResult[OutputDataT](
                         response.stop_reason, self._runtime.last_output, response.usage
                     )
@@ -188,13 +190,11 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                 except asyncio.CancelledError:
                     self._last_outcome = "cancelled"
                     self._last_usage = None
-                    self._paused = True
                     for accepted in (handle, *self._joined):
                         accepted._future.set_result(TurnResult("cancelled"))
                 except Exception as exc:
                     self._last_outcome = "error"
                     self._last_usage = None
-                    self._paused = True
                     for accepted in (handle, *self._joined):
                         accepted._future.set_exception(exc)
                 finally:
@@ -206,26 +206,22 @@ class Session(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                     self._active = None
                     self._execution = None
                     self._runtime.prompt_origin = None
-                    self._publish()
+                    # An idle update would let clients send local follow-ups ahead of queued work.
+                    if self._closed or not self._queue:
+                        self._publish()
         finally:
             self._worker = None
 
     async def cancel(self) -> None:
-        self._paused = True
-        if self._execution is not None:
-            self._execution.cancel()
-            if self._worker is not None:
-                await asyncio.shield(self._worker)
+        """Cancel and await the active turn while the worker handles pending turns."""
+        execution, active = self._execution, self._active
+        if execution is not None and active is not None:
+            if not execution.cancelling():
+                execution.cancel()
+            await asyncio.gather(active.result(), return_exceptions=True)
 
     async def pending_prompts(self) -> tuple[TurnHandle[OutputDataT], ...]:
         return tuple(queued.handle for queued in self._queue)
-
-    async def resume_queue(self) -> None:
-        self._registration._server._require_running()
-        if self._closed:
-            raise RuntimeError("session is closed")
-        self._paused = False
-        self._start_worker()
 
     async def clear_queue(self) -> None:
         while self._queue:
@@ -278,19 +274,29 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         session_config: SessionConfigFunc[AgentDepsT] | None,
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None,
         permission_policy: PermissionPolicy | None,
+        permission_modes: Sequence[PermissionMode] | None,
         usage_limits: UsageLimits | None,
         tool_presenter: ToolCallPresenter | None,
         mcp_capabilities: schema.McpCapabilities | None,
+        workspace_root: Path | None,
     ) -> None:
         self._server = server
         self.agent_id = agent_id
         self._factory = factory
         self._deps = deps
         self.store = session_store
+        self._workspace_root = workspace_root.resolve(strict=True) if workspace_root else None
+        if self._workspace_root is not None and not self._workspace_root.is_dir():
+            raise ValueError("The workspace root must be a directory")
         self.resolver = model_resolver
         self._session_config = session_config
         self._attachment_config = attachment_config
         self._permission_policy = permission_policy
+        self._permission_modes = (
+            DEFAULT_PERMISSION_MODES
+            if permission_modes is None
+            else validate_permission_modes(permission_modes)
+        )
         self._usage_limits = usage_limits
         self._tool_presenter = tool_presenter
         self.mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
@@ -312,6 +318,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
             session_config=self._session_config,
             attachment_config=self._attachment_config,
             permission_policy=self._permission_policy,
+            permission_modes=self._permission_modes,
             usage_limits=self._usage_limits,
             tool_presenter=self._tool_presenter,
         )
@@ -334,12 +341,26 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
     ) -> Session[PrincipalT, AgentDepsT, OutputDataT]:
         self._server._require_running()
         context = SessionContext(
-            agent_id=self.agent_id, session_id=uuid4().hex, cwd=str(Path(cwd).resolve())
+            agent_id=self.agent_id, session_id=uuid4().hex, cwd=self.workspace_path(cwd)
         )
         await self.store.create(context.session_id, cwd=context.cwd, principal=principal)
         runtime = await self._make_runtime(context)
         await runtime.create(context.session_id, context.cwd)
         return self._remember(runtime)
+
+    def workspace_path(self, cwd: str) -> str:
+        path = Path(cwd)
+        if not path.is_absolute():
+            raise ValueError("Enter an absolute workspace path on the server")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ValueError("The workspace directory is unavailable") from error
+        if not resolved.is_dir():
+            raise ValueError("The workspace path must be a directory")
+        if self._workspace_root is not None and not resolved.is_relative_to(self._workspace_root):
+            raise ValueError(f"Choose a workspace under {self._workspace_root}")
+        return str(resolved)
 
     async def get_session(
         self, session_id: str, *, principal: PrincipalT | None = None
@@ -354,14 +375,15 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
                 raise KeyError(session_id)
             if session_id in self._sessions:
                 return self._sessions[session_id]
+            cwd = self.workspace_path(stored.cwd)
             runtime = await self._make_runtime(
-                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=stored.cwd)
+                SessionContext(agent_id=self.agent_id, session_id=session_id, cwd=cwd)
             )
-            await runtime.restore(session_id, stored)
+            await runtime.restore(session_id, replace(stored, cwd=cwd))
             return self._remember(runtime)
 
     async def cancel_session(self, session_id: str) -> None:
-        """Cancel the active turn and pause queued prompts; raise KeyError if unknown."""
+        """Cancel the active turn; raise KeyError if the session is unknown."""
         session = await self.get_session(session_id)
         await session.cancel()
 
@@ -379,6 +401,9 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
 
     async def close(self) -> None:
         await asyncio.gather(*(session.close() for session in tuple(self._sessions.values())))
+
+    def _has_pending_runs(self) -> bool:
+        return any(session.execution_status() != "idle" for session in self._sessions.values())
 
 
 class AcpServer(Generic[PrincipalT]):
@@ -406,9 +431,11 @@ class AcpServer(Generic[PrincipalT]):
         session_config: SessionConfigFunc[AgentDepsT] | None = None,
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None = None,
         permission_policy: PermissionPolicy | None = None,
+        permission_modes: Sequence[PermissionMode] | None = None,
         usage_limits: UsageLimits | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         mcp_capabilities: schema.McpCapabilities | None = None,
+        workspace_root: Path | None = None,
     ) -> RegisteredAgent[PrincipalT, AgentDepsT, OutputDataT]:
         if self._started:
             raise RuntimeError("register agents before starting the server")
@@ -433,9 +460,11 @@ class AcpServer(Generic[PrincipalT]):
             session_config=session_config,
             attachment_config=attachment_config,
             permission_policy=permission_policy,
+            permission_modes=permission_modes,
             usage_limits=usage_limits,
             tool_presenter=tool_presenter,
             mcp_capabilities=mcp_capabilities,
+            workspace_root=workspace_root,
         )
         self._registrations[agent_id] = _RegistrationEntry(
             registration.connection, registration.close, registration._views, registration.store

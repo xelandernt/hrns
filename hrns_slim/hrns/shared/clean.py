@@ -12,6 +12,7 @@ import os
 import sqlite3
 import sys
 import tomllib
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -42,8 +43,8 @@ class ConfigArtifact:
 
     label: str
     path: Path
-    #: ``(entry name, api_key_env)`` for every ``[providers.<name>]`` in the file.
-    entries: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    #: Entry name and credential accounts for every provider in the file.
+    entries: tuple[tuple[str, tuple[str, ...]], ...] = field(default_factory=tuple)
 
 
 def _client_store_path() -> Path:
@@ -90,16 +91,13 @@ def session_artifacts() -> list[SessionArtifact]:
 
 
 def _config_candidates() -> list[tuple[str, Path]]:
-    """The project file and the user file, in the order the runtime reads them."""
-    from hrns.shared.config import default_config_path, project_config_path
+    """The default user configuration file."""
+    from hrns.shared.config import default_config_path
 
-    return [
-        ("project config", project_config_path()),
-        ("user config", default_config_path()),
-    ]
+    return [("user config", default_config_path())]
 
 
-def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
+def _declared_entries(path: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Provider entries in a config file, read without validating the hrns schema.
 
     A file written for an older hrns must still be deletable, so this reads the TOML
@@ -113,12 +111,25 @@ def _declared_entries(path: Path) -> tuple[tuple[str, str], ...]:
     providers = payload.get("providers")
     if not isinstance(providers, dict):
         return ()
-    entries: list[tuple[str, str]] = []
+    from hrns.shared.config.credentials import keyring_account, provider_credential_account
+
+    entries: list[tuple[str, tuple[str, ...]]] = []
     for name, entry in providers.items():
         if not isinstance(name, str):
             continue
-        api_key_env = entry.get("api_key_env") if isinstance(entry, dict) else None
-        entries.append((name, api_key_env if isinstance(api_key_env, str) else ""))
+        values = entry if isinstance(entry, dict) else {}
+        api_key_env = values.get("api_key_env")
+        provider_type = values.get("type")
+        base_url = values.get("base_url")
+        accounts = (
+            keyring_account(name, api_key_env if isinstance(api_key_env, str) else ""),
+            provider_credential_account(
+                name,
+                provider_type.strip() or name if isinstance(provider_type, str) else name,
+                base_url if isinstance(base_url, str) else "",
+            ),
+        )
+        entries.append((name, accounts))
     return tuple(entries)
 
 
@@ -137,16 +148,10 @@ def config_artifacts() -> list[ConfigArtifact]:
 
 def _stored_accounts(artifact: ConfigArtifact) -> list[str]:
     """Keyring accounts of this file's entries that currently hold a secret."""
-    from hrns.shared.config.credentials import keyring_account, stored_secret
+    from hrns.shared.config.credentials import stored_secret
 
-    accounts: list[str] = []
-    for name, api_key_env in artifact.entries:
-        account = keyring_account(name, api_key_env)
-        if account in accounts:
-            continue
-        if stored_secret(account) is not None:
-            accounts.append(account)
-    return accounts
+    candidates = dict.fromkeys(account for _, accounts in artifact.entries for account in accounts)
+    return [account for account in candidates if stored_secret(account) is not None]
 
 
 def _sidecars(path: Path) -> list[Path]:
@@ -299,10 +304,19 @@ def clean(
     removed = 0
     failures: list[str] = []
     if remove_sessions:
-        for artifact in sessions:
-            count, problems = _remove(_files_for(artifact))
-            removed += count
-            failures.extend(problems)
+        from ..local_server import try_store_lock
+
+        with ExitStack() as locks:
+            for artifact in sessions:
+                if not locks.enter_context(try_store_lock(artifact.path)):
+                    raise HrnsClientError(
+                        f"The local Harness server is using {_display_path(artifact.path)}. "
+                        "Run `hrns stop` before cleaning its session history."
+                    )
+            for artifact in sessions:
+                count, problems = _remove(_files_for(artifact))
+                removed += count
+                failures.extend(problems)
         print(f"Removed session history ({removed} file{'s' if removed != 1 else ''}).")
     if remove_config:
         deleted = 0

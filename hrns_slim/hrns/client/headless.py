@@ -28,6 +28,8 @@ from .constants import CLIENT_VERSION
 from .events import (
     AgentTextChunk,
     CommandsUpdated,
+    CompactionEvent,
+    CompactionSummaryChunk,
     ConfigOptionsUpdated,
     PlanChanged,
     ToolEvent,
@@ -55,6 +57,7 @@ class RunOutcome:
     duration_ms: int = 0
     interactions: list[dict[str, Any]] = field(default_factory=list)
     attachments: list[dict[str, Any]] = field(default_factory=list)
+    compactions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -77,6 +80,8 @@ class RunOutcome:
             payload["interactions"] = self.interactions
         if self.attachments:
             payload["attachments"] = self.attachments
+        if self.compactions:
+            payload["compactions"] = self.compactions
         return payload
 
 
@@ -101,6 +106,7 @@ class HeadlessRun:
         self._text_parts: list[str] = []
         self._thought_parts: list[str] = []
         self._tools: dict[str, dict[str, Any]] = {}
+        self._compactions: dict[str, dict[str, Any]] = {}
         self._started = time.monotonic()
         self._subscribers: list[Callable[[], None]] = []
         self._interaction_detected = False
@@ -163,7 +169,48 @@ class HeadlessRun:
             if event.entries and self.stream:
                 self._status("plan: " + " · ".join(entry[0] for entry in event.entries))
             return
-        if isinstance(event, ConfigOptionsUpdated) or isinstance(event, CommandsUpdated):
+        if isinstance(event, CompactionEvent):
+            entry = self._compactions.setdefault(
+                event.compaction_id,
+                {"compactionId": event.compaction_id, "status": event.status},
+            )
+            entry["status"] = event.status
+            if event.summary is not None:
+                entry["summary"] = event.summary
+            if event.error is not None:
+                entry["error"] = event.error
+            if event.meta:
+                entry["meta"] = event.meta
+            if self.stream:
+                if event.status == "in_progress":
+                    self._status("compaction: compacting context…")
+                elif event.status == "completed":
+                    info = (
+                        event.meta.get("hrns/compaction") if isinstance(event.meta, dict) else None
+                    )
+                    if (
+                        isinstance(info, dict)
+                        and isinstance(info.get("tokens_before"), int)
+                        and isinstance(info.get("tokens_after"), int)
+                    ):
+                        self._status(
+                            f"compaction: completed (~{info['tokens_before']:,} -> ~{info['tokens_after']:,} tokens)"
+                        )
+                    else:
+                        self._status("compaction: completed")
+                elif event.status == "failed":
+                    self._status(f"compaction: failed ({event.error or 'unknown error'})")
+                elif event.status == "cancelled":
+                    self._status("compaction: cancelled")
+            return
+        if isinstance(event, CompactionSummaryChunk):
+            entry = self._compactions.setdefault(
+                event.compaction_id,
+                {"compactionId": event.compaction_id, "status": "in_progress"},
+            )
+            entry["summary"] = str(entry.get("summary") or "") + event.text
+            return
+        if isinstance(event, (ConfigOptionsUpdated, CommandsUpdated)):
             return
 
     def note_interaction(self, exc: InteractionRequired) -> None:
@@ -185,6 +232,7 @@ class HeadlessRun:
         self.outcome.text = "".join(self._text_parts)
         self.outcome.thoughts = "".join(self._thought_parts)
         self.outcome.tools = list(self._tools.values())
+        self.outcome.compactions = list(self._compactions.values())
         if error is not None:
             self.outcome.ok = False
             self.outcome.error = {

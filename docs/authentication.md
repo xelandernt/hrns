@@ -50,6 +50,33 @@ If a mount omits `authenticate`, it admits callers with principal `None`. Your s
 still receives that value and decides whether anonymous access is allowed. Returning
 `None` from a configured authentication callback rejects admission.
 
+
+## Serve the Ratzilla client with ACP authentication
+
+Install Node.js and the Rust `wasm32-unknown-unknown` target. From `rust/`, run
+`npm ci --prefix npm` followed by `trunk build --locked --release`. Serve `rust/dist/` over HTTPS
+on the same origin as the authenticated ACP endpoint. The app defaults to
+`/acp/agent`. Set the `endpoint` query parameter to select a different WebSocket
+URL and `cwd` to select the remote workspace. An optional `session` parameter
+opens a saved session. When `cwd` is omitted for a saved session, the runtime must
+support session listing so the client can look up its workspace.
+
+For a private deployment, reuse the site's login flow. Let the deployment issue
+a short-lived `Secure`, `HttpOnly` session cookie and validate it on the ACP
+WebSocket upgrade with the existing `authenticate` callback. The callback should
+also compare the browser's `Origin` header with the configured HTTPS site origin
+before admitting the connection. Return the same principal that authorizes
+ordinary ACP operations. Native clients can continue to use bearer headers
+through the same callback. Keep the WebSocket endpoint and its credentials in
+separate configuration.
+
+The browser build advertises no client filesystem, terminal or MCP capability
+and never launches a local agent, so the deployment needs no host-side client
+bridge. Query parameters select presentation only: `theme` accepts `dark` or `light`, and `permission`
+accepts `ask`, `reads` or `all`. They never carry secrets. A rejected upgrade,
+expired cookie or dropped socket leaves the draft and transcript on screen and
+shows the disconnected state; `Ctrl-R` retries with the same endpoint.
+
 ## Implement a principal-aware store
 
 Pass your store through `server.add_agent(..., session_store=...)`. Each registration
@@ -114,7 +141,7 @@ the same data again.
 | --- | --- |
 | `session/load` | Before returning a resident session or restoring a stored one. |
 | `session/prompt` | Before accepting the prompt into the session queue. |
-| `session/cancel` | Before cancelling the active turn and pausing queued work. |
+| `session/cancel` | Before cancelling the active turn. |
 | `session/close` | Before closing the live session and removing its resident view. |
 | `session/delete` | Before closing any resident session and invoking `delete`. |
 | `session/set_config_option` | Before changing the model or session settings. |

@@ -1,14 +1,8 @@
 # MCP over ACP
 
-This repository uses MCP in two directions:
-
-- the built-in agent loads the `[mcp.servers.*]` entries from `config.toml`;
-- a connected **client** can offer its own MCP servers to a remote ACP agent over the
-  stateless `mcp/message` binding.
-
-The first direction is ordinary MCP configuration and is documented in
-[Configuration](configuration.md#mcp). This page covers the second direction: what the
-binding, export consent, and request handling.
+Configure MCP servers on the [client](configuration.md#mcp). The client starts or
+connects to each approved server and offers it to a local or remote ACP agent
+through the stateless MCP-over-ACP binding.
 
 ## The binding
 
@@ -51,35 +45,35 @@ outer codes:
 `hrns agent` advertises `mcpCapabilities.acp`, `http`, and `sse`. A client exports servers
 only when the agent advertises `acp`; otherwise the declarations are omitted entirely.
 
-The provider terminates both MCP sessions and translates at the method level. The upstream
-and downstream sessions are independent, so the upstream may speak an older revision while
-the ACP side stays on 2026-07-28. The proxy translates individual methods between them.
+The native Ratatui client hosts the provider in Rust. Over stdio or Streamable
+HTTP, it probes for MCP 2026-07-28 and falls back to the MCP `initialize`
+handshake for older servers. ACP still carries MCP 2026-07-28. The negotiated
+upstream revision appears in the server's `/mcp` details. The headless runner
+hosts its provider in the Python client. Browser sessions have no client-hosted
+provider.
 
-## Configuring an export
+Older servers that reject discovery fall back immediately. If an upstream
+silently ignores discovery, the Rust SDK waits 10 seconds before trying
+`initialize`, and the configured startup timeout still applies.
 
-Export is opt-in per server. The server must also be `enabled = true`:
+## Configure a server
+
+Add a stdio or HTTP server to the client configuration:
 
 ```toml
-[mcp.servers.playwright]
-command = "npx"
-args = ["-y", "@playwright/mcp@latest"]
-export = true
+[mcp.servers.project-tools]
+command = "project-tools"
 ```
-
-For an HTTP server, set `url` instead of `command`; headers, environment expansion, OAuth,
-and token storage behave exactly as they do for local use.
 
 The CLI writes the same fields:
 
 ```sh
-hrns mcp add playwright --export -- npx -y @playwright/mcp@latest
-hrns mcp add docs --url https://example.com/mcp --export --always-allow
-hrns mcp get playwright
+hrns mcp add project-tools -- project-tools
+hrns mcp add docs --url https://example.com/mcp --always-allow
+hrns mcp get project-tools
 ```
 
-`hrns mcp list` shows the export state in its `ACP` column: `-` when export is off,
-`export` when the client asks at session start, and `always` when the grant is pre-approved.
-`--always-allow` is only valid together with `--export`.
+`hrns mcp list` shows whether each server asks for consent or is pre-approved.
 
 ### Consent
 
@@ -94,18 +88,19 @@ Approval gates upstream startup and session declarations. A non-interactive clie
 (`hrns run`) exports servers with `always_allow = true`.
 
 The client owns export consent. Once exported, the server exposes its tools to the agent.
+`include_tools` and `exclude_tools` also apply to the exported view: a hidden tool is
+absent from `tools/list`, and calling it returns an MCP error.
 
 ## Health
 
-The terminal's `/mcp` command opens the MCP side panel. It lists every configured server
-with its state (`running`, `failed`, `disabled`, `local only`, `not started`,
-`waiting for approval`, `denied`, or `agent cannot use ACP`), transport, target, and
-negotiated upstream revision.
-`r` refreshes the view; it also refreshes after a connection or session change.
+In the terminal, `/mcp` opens a searchable list of configured servers and their
+status. Press Enter to see the server's connection details, available tools, or
+startup error. The `Ctrl-B` sidebar summarizes server health.
 
-A server that fails to start, authenticate, or negotiate appears
-in the panel with the reason, and the chat screen shows a transcript notice plus a status
-hint. The session continues with the servers that started successfully.
+For an HTTP server marked **Sign-in required**, press Space to open browser
+sign-in. Harness saves the OAuth credentials for the next session setup. Start
+a new session or reopen a saved session to use the server. If a server fails at
+startup, the session continues with the servers that connected successfully.
 
 ## What is served
 
@@ -113,15 +108,15 @@ The provider mirrors the upstream's advertised capabilities and exposes:
 
 | Method | Behaviour |
 | --- | --- |
-| `server/discover` | Reports the proxied server's capabilities |
-| `ping` | Answered directly |
+| `server/discover` | Reports the supported capabilities, using the handshake response for older servers |
+| `ping` | Checks that the upstream is reachable |
 | `tools/list`, `tools/call` | Proxied; upstream `isError` results are preserved |
 | `resources/list`, `resources/read`, `resources/templates/list` | Proxied when the upstream has resources |
 | `prompts/list`, `prompts/get` | Proxied when the upstream has prompts |
 | `completion/complete` | Proxied when the upstream has completions |
 | `notifications/progress` | Forwarded as request-scoped ACP notifications |
 | `input_required` results | Passed through opaquely (see [MRTR](#input-required-results)) |
-| `$/cancel_request` | Cancels the handler; cleanup runs shielded and the outer request returns `-32800` |
+| `$/cancel_request` | Cancels the operation and returns `-32800` |
 
 Resources, prompts, and completions are advertised only when the upstream advertises them.
 The client owns upstream authentication.
@@ -136,8 +131,8 @@ declaration into a toolset:
 - `AcpMcpServer` becomes an `AcpMcpClientTransport` over the session's caller and channel,
   wrapped in `MCPToolset(..., id=server_name)`.
 
-Servers are connected during session setup, before the session id is returned, and disposed
-when the session closes. `session/load` and, when the agent advertises it, `session/resume`
+The client registers servers before session setup and releases their upstream connections
+when the ACP connection closes. `session/load` and, when the agent advertises it, `session/resume`
 declare and reconnect the same way as `session/new`. `hrns agent` itself supports
 `session/load` for restoration.
 
@@ -146,13 +141,21 @@ declare and reconnect the same way as `session/new`. `hrns agent` itself support
 | Upstream | Configuration | Notes |
 | --- | --- | --- |
 | stdio | `command`, `args`, `env`, `cwd` | The client owns the child process |
-| Streamable HTTP | `url` | Headers and OAuth apply |
-| SSE | `url` | Selected from the URL; headers and OAuth apply |
+| Streamable HTTP | `url`, `headers` | Pass credentials in client-side headers |
+| Legacy HTTP+SSE | `url` | Supported by the Python headless client |
 
-Headers and environment values support `{env:NAME}` expansion. OAuth tokens live in the
-configured token store; `hrns mcp auth <name>` performs an interactive login and
-`hrns mcp logout <name>` clears it. Complete interactive authentication before exporting.
-Authentication failures are logged and the affected server is skipped for that session.
+Headers and environment values support `{env:NAME}` expansion.
+
+- In the Rust terminal, open `/mcp` and press Space on a server marked **Sign-in
+  required**. Complete the browser login, then start a new session to use the
+  server. Open the server’s details and press **Shift+L** to clear its stored
+  credentials, including when the server is offline.
+- For Python sessions, run `hrns mcp auth <name>` to sign in and
+  `hrns mcp logout <name>` to clear the Python credentials. These commands are
+  available with the `headless` or `server` extra.
+
+Each client stores its own credentials using the backend configured in `[mcp]`.
+Authentication failures appear in the server’s health status.
 
 ## Request scope
 

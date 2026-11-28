@@ -18,36 +18,162 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
-          # uv-dynamic-versioning derives the version from git tags, so history must be complete.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: '3.12'
       - uses: extractions/setup-just@v4
+      - name: Set the Python release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(python scripts/release_rust_version.py --python-version "$RELEASE_TAG")
+          echo "UV_DYNAMIC_VERSIONING_BYPASS=$version" >> "$GITHUB_ENV"
       - run: just install
       - run: just check
-      - name: Verify the tag matches the built version
+      - name: Verify the Python release version
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          expected="${TAG#v}"
+          expected="$UV_DYNAMIC_VERSIONING_BYPASS"
           actual="$(uv run python -c 'from importlib.metadata import version; full = version("hrns"); assert full == version("hrns-slim"), "Package versions differ"; print(full)')"
           echo "tag=$expected built=$actual"
           if [ "$expected" != "$actual" ]; then
-            echo "::error::Tag $TAG does not match the built version $actual. Tag the release with the version uv-dynamic-versioning should produce (for example 0.1.0)."
+            echo "::error::Tag $TAG expects Python version $expected, but the built version is $actual."
             exit 1
           fi
+      # Add the published slim client's version-matched requirement and rebuild dist/.
+      # Use the unpatched development metadata for uv sync, uv run and just check.
+      - name: Add the version-matched native dependency
+        run: python scripts/release_native_dependency.py
+      - name: Rebuild the distributions with release metadata
+        run: just build
       - name: Validate distribution metadata
-        run: uvx twine check dist/*
+        run: |
+          set -euo pipefail
+          python scripts/release_native_dependency.py --verify dist
+          uvx twine check dist/*
       - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
           if-no-files-found: error
 
+  rust-wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_17"
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+      - name: Match the crate version to the tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/release_rust_version.py "$RELEASE_TAG"
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          working-directory: rust
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: rust/dist/*.whl
+          if-no-files-found: error
+
+  web-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Match the crate version to the tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/release_rust_version.py "$RELEASE_TAG"
+      - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci --prefix rust/npm
+      - run: trunk build --locked --release
+        working-directory: rust
+      - name: Package the browser bundle
+        run: |
+          cd rust
+          zip -r hrns-web.zip dist
+      - name: Attach the browser bundle to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rust/hrns-web.zip
+
+  publish-npm:
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: rust/npm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.21.3
+      - run: npm ci
+      - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.130
+      - name: Build and pack the browser client
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          python ../../scripts/release_rust_version.py "$RELEASE_TAG"
+          npm version --no-git-tag-version "${RELEASE_TAG#v}"
+          npm run build
+          npm pack
+      - name: Publish the browser client with npm trusted publishing
+        env:
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          tag=latest
+          if [[ "$PRERELEASE" == "true" ]]; then tag=next; fi
+          npm publish ./*.tgz --tag "$tag"
+
   publish:
-    needs: build
+    needs: [build, rust-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -60,6 +186,29 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+      - name: Check that every artifact reports the same version
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+
+          versions = {}
+          for path in pathlib.Path("dist").iterdir():
+              stem = path.name.removesuffix(".tar.gz").removesuffix(".zip").removesuffix(".whl")
+              parts = stem.split("-")
+              if len(parts) < 2:
+                  raise SystemExit(f"unexpected artifact name: {path.name}")
+              versions[path.name] = parts[1]
+          distinct = sorted(set(versions.values()))
+          if len(distinct) != 1:
+              raise SystemExit(f"artifact versions differ: {versions}")
+          print(f"all {len(versions)} artifacts report {distinct[0]}")
+          PY
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/

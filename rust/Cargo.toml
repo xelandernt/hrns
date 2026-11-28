@@ -1,0 +1,68 @@
+[package]
+name = "hrns-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+license = "MIT"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+agent-client-protocol = { version = "=5.4.0", features = ["unstable_llm_providers"] }
+base64 = "0.22"
+futures = "0.3"
+mime_guess = "2"
+percent-encoding = "2"
+pulldown-cmark = { version = "0.13", default-features = false }
+ratatui = { version = "0.30", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+web-time = "1"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+agent-client-protocol = { version = "=5.4.0", features = ["process", "stdio", "unstable_mcp_over_acp"] }
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "query", "tokio"] }
+open = "5"
+crossterm = { version = "0.29", features = ["osc52"] }
+ignore = "0.4"
+libc = "0.2"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "net", "time", "process", "io-util", "sync", "macros"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+directories = "6"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rmcp = { version = "=3.11.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+toml_edit = { version = "0.23", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+strip-ansi-escapes = "0.2.1"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+agent-client-protocol = { version = "=5.4.0", features = ["wasm_js"] }
+js-sys = "0.3"
+ratzilla = "0.3.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Blob", "Event", "File", "FileList", "HtmlInputElement", "Clipboard", "ClipboardEvent", "DataTransfer", "Document", "Element", "EventTarget", "HtmlElement", "KeyboardEvent", "Location", "Navigator", "Storage", "Url", "UrlSearchParams", "WheelEvent", "Window"] }
+ws_stream_wasm = "0.7"
+
+[profile.dev]
+debug = 0
+
+[target.'cfg(not(any(target_family = "wasm", target_os = "macos", target_os = "windows", target_os = "linux")))'.dependencies]
+keyring = "3.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["async-secret-service", "async-io", "crypto-rust"] }

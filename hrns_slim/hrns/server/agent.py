@@ -6,11 +6,14 @@ import os
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.capabilities import LocalWorkspace, RetryOnModelErrors
+from pydantic_ai.exceptions import ModelConnectionError
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceOverflowStore
 
-from hrns.server.capabilities import AskUser, Coder, Skills, Todo
+from hrns.server.capabilities import AskUser, Coder, Compaction, Skills, Todo
 from hrns.shared.config.settings import SkillsSettings
 
 from .approvals import require_approval
@@ -26,6 +29,7 @@ def build_agent(
     skills: SkillsSettings | None = None,
     model_settings: ModelSettings | None = None,
     approval: bool = True,
+    _allow_unconfigured: bool = False,
 ) -> Agent[None, str]:
     """Build the default coding agent.
 
@@ -39,24 +43,35 @@ def build_agent(
     :class:`~hrns.shared.config.SkillsSettings` to add libraries, narrow the selection,
     or turn the capability off.
 
-    Approval is a capability, not an adapter concern. By default every tool
-    outside :data:`hrns.server.approvals.READ_ONLY_TOOLS` is marked ``unapproved``,
-    so ACP can turn it into a permission request. Pass ``approval=False`` to
-    disable that policy.
+    Large tool results are saved to the workspace for bounded retrieval. Context is
+    managed by :class:`~hrns.server.capabilities.Compaction` (automatic tiered compaction
+    plus the ``/compact`` ACP slash command).
+
+    Approval is a capability. ACP turns tools marked ``unapproved`` into
+    permission requests. Pass ``approval=False`` to disable that policy.
     """
-    selected = model or os.environ.get("HRNS_MODEL")
-    if selected is None:
+    selected = model if _allow_unconfigured else model or os.environ.get("HRNS_MODEL")
+    if selected is None and not _allow_unconfigured:
         raise ValueError("Pass model= or set HRNS_MODEL to a Pydantic AI model id.")
 
     resolved_skills = Skills.from_settings(skills or SkillsSettings(), cwd=cwd)
+    workspace = LocalWorkspace[None](cwd)
     return Agent[None, str](
         selected,
         deps_type=type(None),
         name="hrns",
         model_settings=model_settings,
         capabilities=[
-            LocalWorkspace(cwd),
-            coder or Coder(),
+            RetryOnModelErrors[None](retry_on=(ModelConnectionError,)),
+            workspace,
+            coder or Coder(sub_agents=False),
+            # Post-execution hooks run in reverse order, so spills see the
+            # result before Coder's truncation. An explicit workspace keeps
+            # the dedicated result readers available alongside read_file.
+            ToolOutputLimits(
+                store=WorkspaceOverflowStore(workspace=LocalWorkspaceBackend(workspace.working_dir))
+            ),
+            Compaction(),
             Todo(),
             AskUser(),
             *([resolved_skills] if resolved_skills is not None else []),

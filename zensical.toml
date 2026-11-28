@@ -16,6 +16,7 @@ nav = [
     { "MCP over ACP" = "mcp.md" },
     { "Agent servers" = "mount-acp.md" },
     { "Authentication" = "authentication.md" },
+    { "Client release" = "release.md" },
     { "AG-UI observation" = "ag_ui.md" },
 ]
 
@@ -52,4 +53,4 @@ full_output = "llms-full.txt"
 [project.plugins.llmstxt.sections]
 "Getting started" = ["index.md", "configuration.md"]
 "Agent capabilities" = ["capabilities.md", "skills.md"]
-"Servers and protocols" = ["acp.md", "mcp.md", "mount-acp.md", "authentication.md", "ag_ui.md"]
+"Servers and protocols" = ["acp.md", "mcp.md", "mount-acp.md", "authentication.md", "ag_ui.md", "release.md"]
