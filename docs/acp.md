@@ -49,10 +49,10 @@ Every method in `acp.AGENT_METHODS`, in wire order.
 | `providers/list` | request | **Conditional** | Requires `model_resolver` |
 | `providers/set` | request | **Conditional** | Requires `model_resolver`; a `ValueError` from the resolver becomes `invalid_params` |
 | `providers/disable` | request | **Conditional** | Same; a `required` provider cannot be disabled |
-| `session/new` | request | **Yes** | First advertised model is the session default; returns the `model` and setting config options when a resolver is present |
+| `session/new` | request | **Yes** | First advertised model is the session default; returns `model`, resolver setting options, and `permissions` (when enabled) |
 | `session/load` | request | **Conditional** | Requires a `session_store`; attaches to live execution or restores saved state, then replays before responding |
 | `session/set_mode` | request | **No** | Returns `method_not_found` |
-| `session/set_config_option` | request | **Conditional** | `model`, plus any setting option the current model advertises; the value must be one of the advertised values |
+| `session/set_config_option` | request | **Conditional** | `model`, any advertised resolver setting id, and `permissions` (when enabled); the value must be one of the advertised values |
 | `session/prompt` | request | **Yes** | Steers the active turn at its next model request, or starts a turn while idle; late messages become follow-ups. Streams `session/update` and returns the consuming turn's outcome |
 | `session/cancel` | notification | **Yes** | Cancels the in-flight turn and saves its progress. The prompt returns `cancelled` and the next queued turn starts |
 | `mcp/message` | request | **Conditional** | The stateless binding routes registered provider requests; client-provided servers are consumed through `McpOverAcpCaller` |
@@ -144,6 +144,13 @@ The adapter advertises them when a
   on the next request of that same turn. A request already in flight keeps its settings.
 - `providers/set` and `providers/disable` can change which settings a model offers. When
   they do, resident sessions receive a `config_option_update` with the complete new state.
+- When `permission_modes` is non-empty (default `("ask", "reads", "all")`), `configOptions`
+  also includes a `permissions` select (`category: "mode"`). New sessions start in `ask`,
+  changes persist with the session and take effect from the next tool call, and the server
+  enforces `reads` (`read`, `search`, `think`) and `all` directly so detached sessions only
+  enter `waiting` when an interaction actually requires a client response. Pass
+  `permission_modes=()` to disable the option or pass a subset containing `"ask"` to restrict
+  it.
 
 ## Capability slash commands and compaction
 

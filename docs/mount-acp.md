@@ -42,6 +42,7 @@ and output types flow through its session and turn handles.
 | `session_config` | `None` | Per-session dependencies, capabilities, toolsets, and workspace |
 | `attachment_config` | `None` | Client toolsets (MCP, filesystem, terminal) configured on each ACP attachment |
 | `permission_policy` | `None` | Permission choices for deferred approvals |
+| `permission_modes` | `("ask", "reads", "all")` | Allowed values for the `permissions` session config option (`()` disables it; non-empty must include `"ask"`) |
 | `usage_limits` | `None` | Limits applied to agent runs |
 | `tool_presenter` | `None` | Tool-call presentation for ACP updates |
 | `mcp_capabilities` | `None` | Advertised client MCP transports; requires `attachment_config` |

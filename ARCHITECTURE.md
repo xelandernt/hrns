@@ -300,11 +300,20 @@ Routine slash-command feedback appears in the status bar until the next
 submission. Warnings, errors and command output can appear in the transcript.
 `/theme`, `/settings`, and the `theme` page parameter expose theme settings.
 Approval mode starts in Ask for each new session. `/permissions` and `/yolo`
-change the current session only. The TUI saves the mode on the device under a
-key derived from the connection identity and session ID. Native writes each
-entry atomically alongside the TUI state, and the browser uses local storage
-in its current origin. Local daemon identity uses the session store instead
-of the daemon's transient port. The built-in themes are `dark` and `light`.
+change the current session only. When the agent advertises a `permissions`
+select option in ACP `configOptions` (category `mode`), the server owns and
+persists the mode per session (`StoredSession.permission_mode`) and enforces
+`reads` (`read`, `search`, `think`) and `all` before requesting client
+permission — so detached background sessions keep running unattended and only
+enter `waiting` (`Needs input` in Agents view) while actually blocked on a
+client permission request or `ask_user_question` elicitation. Changes via
+`session/set_config_option` take effect starting from the next tool call. For
+agents that do not advertise `permissions`, the TUI falls back to client-side
+auto-approval and saves the mode on the device under a key derived from the
+connection identity and session ID (native writes each entry atomically
+alongside the TUI state, and the browser uses local storage in its current
+origin; local daemon identity uses the session store instead of the daemon's
+transient port). The built-in themes are `dark` and `light`.
 
 The Ratatui transcript groups tool calls and reasoning between user and agent
 messages. With details off, the active block shows its action count, an
