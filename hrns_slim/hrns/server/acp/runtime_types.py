@@ -28,6 +28,7 @@ from .presentation import ToolCallContent
 from .session import SessionUpdate
 
 _MODEL_CONFIG_ID = "model"
+_PERMISSIONS_CONFIG_ID = "permissions"
 _ASK_USER_TOOL = "ask_user_question"
 
 #: The ``session/new`` and ``session/load`` response ``_meta`` key carrying the skill catalog.

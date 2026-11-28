@@ -13,6 +13,7 @@ from pydantic_ai.settings import ModelSettings, merge_model_settings
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from hrns.server.capabilities import SkillInfo, Skills
+from hrns.shared.config import PermissionMode
 
 from . import updates
 from .content import PromptContentBlock
@@ -20,6 +21,7 @@ from .models import ModelChoice, ModelResolver, ModelSetupError, ResolvedModel, 
 from .providers import ProviderDisabled
 from .runtime_types import (
     _MODEL_CONFIG_ID,
+    _PERMISSIONS_CONFIG_ID,
     _SKILL_TOOL_PREFIX,
     SKILLS_META_KEY,
     ConfigOptions,
@@ -37,9 +39,17 @@ if TYPE_CHECKING:
     from pydantic_ai.agent import AbstractAgent
 
 
+_PERMISSION_MODE_COPY: dict[PermissionMode, tuple[str, str]] = {
+    "ask": ("Ask", "Ask before approving tools."),
+    "reads": ("Reads", "Approve read-only tools automatically."),
+    "all": ("All", "Approve all tools automatically."),
+}
+
+
 class _SessionConfigMixin(Generic[AgentDepsT, OutputDataT]):
     _agent: AbstractAgent[AgentDepsT, OutputDataT]
     _model_resolver: ModelResolver | None
+    _permission_modes: tuple[PermissionMode, ...]
     _state: SessionState[AgentDepsT] | None
     _skills: Skills[AgentDepsT] | None
     _remember_model: Callable[[str], Awaitable[None]] | None
@@ -185,17 +195,54 @@ class _SessionConfigMixin(Generic[AgentDepsT, OutputDataT]):
         except ValueError as exc:
             raise acp.RequestError(-32602, str(exc)) from exc
 
+    def _permissions_option(
+        self, state: SessionState[AgentDepsT]
+    ) -> schema.SessionConfigOptionSelect | None:
+        if not self._permission_modes:
+            return None
+        current: PermissionMode = (
+            state.permission_mode if state.permission_mode in self._permission_modes else "ask"
+        )
+        return schema.SessionConfigOptionSelect(
+            id=_PERMISSIONS_CONFIG_ID,
+            name="Permissions",
+            description="Which tools run without asking for approval.",
+            category="mode",
+            current_value=current,
+            options=[
+                schema.SessionConfigSelectOption(
+                    value=mode,
+                    name=_PERMISSION_MODE_COPY[mode][0],
+                    description=_PERMISSION_MODE_COPY[mode][1],
+                )
+                for mode in self._permission_modes
+            ],
+        )
+
+    def _reconcile_permission_mode(self, state: SessionState[AgentDepsT]) -> bool:
+        """Reset a stored permission mode if this server does not allow it."""
+        if state.permission_mode in self._permission_modes:
+            return False
+        if state.permission_mode == "ask":
+            return False
+        state.permission_mode = "ask"
+        return True
+
     def _config_options(self, state: SessionState[AgentDepsT]) -> ConfigOptions | None:
         """The complete config-option state ACP returns after every change.
 
-        The model option comes first, then the resolver's setting options, so clients that
-        prioritize by array order surface the model selection most prominently.
+        The model option comes first, then the resolver's setting options, then the
+        server-owned permissions mode option when enabled, so clients that prioritize
+        by array order surface the model selection most prominently.
         """
         options: ConfigOptions = []
         model = self._model_option(state.model)
         if model is not None:
             options.append(model)
         options.extend(self._setting_options(state))
+        permissions = self._permissions_option(state)
+        if permissions is not None:
+            options.append(permissions)
         return options or None
 
     def _setting_options(
@@ -369,6 +416,20 @@ class _SessionConfigMixin(Generic[AgentDepsT, OutputDataT]):
                 await remember_model(value)
             state.model = value
             self._reconcile_setting_selections(state)
+        elif config_id == _PERMISSIONS_CONFIG_ID:
+            if not self._permission_modes:
+                raise acp.RequestError(
+                    -32602,
+                    "Config option 'permissions' is not available on this server.",
+                )
+            matched = next((mode for mode in self._permission_modes if mode == value), None)
+            if matched is None:
+                choices = ", ".join(self._permission_modes)
+                raise acp.RequestError(
+                    -32602,
+                    f"Permissions {value!r} is unsupported. Choose {choices}.",
+                )
+            state.permission_mode = matched
         else:
             option = self._setting_option(state, config_id)
             model = state.model

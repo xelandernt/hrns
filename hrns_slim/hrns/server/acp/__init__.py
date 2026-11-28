@@ -1,5 +1,7 @@
 """Agent Client Protocol transport, registered sessions, and configuration types."""
 
+from hrns.shared.config import PERMISSION_MODES, PermissionMode
+
 from . import updates
 from .adapter import PydanticAIACPAgent
 from .content import PromptContentBlock, prompt_blocks_to_user_content
@@ -14,6 +16,7 @@ from .models import (
     SettingOption,
 )
 from .permission import (
+    DEFAULT_PERMISSION_MODES,
     PermissionPolicy,
     ToolCallPermission,
     default_permission_scope,
@@ -71,6 +74,7 @@ __all__ = [
     "AcpSession",
     "AcpSessionConfig",
     "AcpTerminalToolset",
+    "DEFAULT_PERMISSION_MODES",
     "DeletableSessionStore",
     "DocumentState",
     "InMemoryProviderRegistry",
@@ -80,6 +84,8 @@ __all__ = [
     "McpServers",
     "ModelChoice",
     "ModelResolver",
+    "PERMISSION_MODES",
+    "PermissionMode",
     "PermissionPolicy",
     "PromptContentBlock",
     "ProviderConfig",

@@ -16,6 +16,7 @@ from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 from hrns.server.capabilities import TodoStore
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
+from hrns.shared.config import PermissionMode
 
 # A single MCP server configuration, in any of the transports ACP carries.
 McpServer: TypeAlias = (
@@ -167,6 +168,8 @@ class SessionState(Generic[AgentDepsT]):
     # The client's setting selections, keyed by option id. Applied as a per-request delta,
     # so a change lands on the next model request in the same turn.
     setting_selections: dict[str, str] = field(default_factory=dict[str, str])
+    # Server-owned session permission mode, changed via the ``permissions`` config option.
+    permission_mode: PermissionMode = "ask"
     todos: TodoStore = field(default_factory=TodoStore)
     # Skills a person invoked with ``$name`` in this session. Kept for the session's
     # lifetime so the instructions stay in force and the bundled-file gate stays open.

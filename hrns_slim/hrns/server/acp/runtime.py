@@ -76,12 +76,18 @@ from hrns.server.capabilities.commands import run_command_handler
 from hrns.server.capabilities.compaction import COMPACTION_META_KEY, _compaction_meta
 from hrns.server.capabilities.todo import _bind_todo_store
 from hrns.shared.acp_mcp import AcpChannel, McpOverAcpCaller
+from hrns.shared.config import PermissionMode
 
 from . import updates
 from .content import PromptContentBlock, prompt_blocks_to_user_content
 from .interactions import Interactions
 from .models import ModelResolver
-from .permission import PermissionPolicy, default_permission_scope
+from .permission import (
+    DEFAULT_PERMISSION_MODES,
+    PermissionPolicy,
+    default_permission_scope,
+    validate_permission_modes,
+)
 from .presentation import (
     ToolCallPresentation,
     ToolCallPresenter,
@@ -154,6 +160,7 @@ class SessionRuntime(
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None = None,
         agent_id: str = "agent",
         permission_policy: PermissionPolicy | None = None,
+        permission_modes: Sequence[PermissionMode] | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         session_store: SessionPersistence,
         model_resolver: ModelResolver | None = None,
@@ -177,6 +184,11 @@ class SessionRuntime(
         self.prompt_origin: Client | None = None
         self.attachment_toolsets: Sequence[AbstractToolset[AgentDepsT]] = ()
         self._permission_policy = permission_policy or default_permission_scope
+        self._permission_modes = (
+            DEFAULT_PERMISSION_MODES
+            if permission_modes is None
+            else validate_permission_modes(permission_modes)
+        )
         self._tool_presenter = tool_presenter or default_coding_presenter
         self._session_store = session_store
         self._persist_lock = asyncio.Lock()
@@ -266,13 +278,15 @@ class SessionRuntime(
             transcript=list(stored.updates),
             model=stored.model,
             setting_selections=dict(stored.setting_selections),
+            permission_mode=stored.permission_mode,
             todos=TodoStore(items=stored.todos),
             invoked_skills=set(stored.skills),
         )
         self._title = title_from_updates(self.state.transcript)
         model_changed = self._reconcile_model(self.state)
         settings_changed = self._reconcile_setting_selections(self.state)
-        if model_changed or settings_changed:
+        permissions_changed = self._reconcile_permission_mode(self.state)
+        if model_changed or settings_changed or permissions_changed:
             await self._persist(self.state)
 
     async def _persist(self, state: SessionState[AgentDepsT]) -> None:
@@ -287,6 +301,7 @@ class SessionRuntime(
                         updates=list(state.transcript),
                         model=state.model,
                         setting_selections=dict(state.setting_selections),
+                        permission_mode=state.permission_mode,
                         todos=state.todos.items,
                         skills=tuple(sorted(state.invoked_skills)),
                     ),
@@ -718,14 +733,8 @@ class SessionRuntime(
                 if isinstance(output, DeferredToolRequests):
                     if not output.approvals and not output.calls:  # pragma: no cover
                         break
-                    self.interactions.waiting = True
-                    self.on_state()
                     run_input = None
-                    try:
-                        deferred_results = await self._resolve_approvals(turn, state, output)
-                    finally:
-                        self.interactions.waiting = False
-                        self.on_state()
+                    deferred_results = await self._resolve_approvals(turn, state, output)
                     continue
                 if output is not None and not isinstance(output, str):
                     await self._emit_text(turn, json.dumps(jsonable(output)), thought=False)

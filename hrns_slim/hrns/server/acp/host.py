@@ -21,10 +21,12 @@ from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.usage import UsageLimits
 
+from hrns.shared.config import PermissionMode
+
 from .._types import PrincipalT
 from .content import PromptContentBlock
 from .models import ModelResolver
-from .permission import PermissionPolicy
+from .permission import DEFAULT_PERMISSION_MODES, PermissionPolicy, validate_permission_modes
 from .presentation import ToolCallPresenter
 from .runtime import RunObserver, SessionRuntime, SteeringPrompt
 from .session import AttachmentConfigFunc, SessionConfigFunc, SessionContext
@@ -272,6 +274,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         session_config: SessionConfigFunc[AgentDepsT] | None,
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None,
         permission_policy: PermissionPolicy | None,
+        permission_modes: Sequence[PermissionMode] | None,
         usage_limits: UsageLimits | None,
         tool_presenter: ToolCallPresenter | None,
         mcp_capabilities: schema.McpCapabilities | None,
@@ -289,6 +292,11 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
         self._session_config = session_config
         self._attachment_config = attachment_config
         self._permission_policy = permission_policy
+        self._permission_modes = (
+            DEFAULT_PERMISSION_MODES
+            if permission_modes is None
+            else validate_permission_modes(permission_modes)
+        )
         self._usage_limits = usage_limits
         self._tool_presenter = tool_presenter
         self.mcp_capabilities = mcp_capabilities or schema.McpCapabilities()
@@ -310,6 +318,7 @@ class RegisteredAgent(Generic[PrincipalT, AgentDepsT, OutputDataT]):
             session_config=self._session_config,
             attachment_config=self._attachment_config,
             permission_policy=self._permission_policy,
+            permission_modes=self._permission_modes,
             usage_limits=self._usage_limits,
             tool_presenter=self._tool_presenter,
         )
@@ -422,6 +431,7 @@ class AcpServer(Generic[PrincipalT]):
         session_config: SessionConfigFunc[AgentDepsT] | None = None,
         attachment_config: AttachmentConfigFunc[AgentDepsT] | None = None,
         permission_policy: PermissionPolicy | None = None,
+        permission_modes: Sequence[PermissionMode] | None = None,
         usage_limits: UsageLimits | None = None,
         tool_presenter: ToolCallPresenter | None = None,
         mcp_capabilities: schema.McpCapabilities | None = None,
@@ -450,6 +460,7 @@ class AcpServer(Generic[PrincipalT]):
             session_config=session_config,
             attachment_config=attachment_config,
             permission_policy=permission_policy,
+            permission_modes=permission_modes,
             usage_limits=usage_limits,
             tool_presenter=tool_presenter,
             mcp_capabilities=mcp_capabilities,

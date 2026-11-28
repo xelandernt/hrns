@@ -12,6 +12,7 @@ from pydantic_ai.messages import ModelMessage
 
 from hrns.server._types import PrincipalT
 from hrns.server.capabilities import TodoItem
+from hrns.shared.config import PermissionMode
 
 from .session import SessionUpdate
 
@@ -45,6 +46,8 @@ class StoredSession:
     model: str | None = None
     #: The session's setting selections; revalidated against the live options on load.
     setting_selections: dict[str, str] = field(default_factory=dict[str, str])
+    #: Server-owned permission mode; revalidated against the live allowed modes on load.
+    permission_mode: PermissionMode = "ask"
     todos: tuple[TodoItem, ...] = ()
     #: Skill ids a person invoked in this session, so ``session/load`` restores them.
     skills: tuple[str, ...] = ()

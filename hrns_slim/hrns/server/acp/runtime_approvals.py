@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Hashable, Sequence
-from typing import TYPE_CHECKING, Generic
+from collections.abc import Awaitable, Callable, Hashable, Sequence
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 import acp
 from acp import schema
@@ -29,7 +29,7 @@ from .elicitation import (
     build_ask_user_schema,
 )
 from .interactions import Interactions
-from .permission import PermissionPolicy, ToolCallPermission
+from .permission import READ_ONLY_TOOL_KINDS, PermissionPolicy, ToolCallPermission
 from .presentation import ToolCallPresenter
 from .runtime_types import _ASK_USER_TOOL, _ToolCallFields, _TurnCancelled, _TurnState
 from .serialize import bounded_jsonable
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from pydantic_ai.agent import AbstractAgent
 
 _logger = logging.getLogger(__name__)
+_InteractionT = TypeVar("_InteractionT")
 
 
 class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
@@ -46,6 +47,7 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
     _tool_presenter: ToolCallPresenter
     _permission_policy: PermissionPolicy
     interactions: Interactions
+    on_state: Callable[[], None]
     _conn: Client | None
     _client_capabilities: schema.ClientCapabilities | None
     attachment_toolsets: Sequence[AbstractToolset[AgentDepsT]]
@@ -59,6 +61,27 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
 
     async def _send_update(self, turn: _TurnState, update: SessionUpdate) -> None: ...
 
+    async def _await_interaction(
+        self, operation: Callable[[Client], Awaitable[_InteractionT]]
+    ) -> _InteractionT:
+        """Mark the session as waiting only while blocked on a human client response."""
+        self.interactions.waiting = True
+        self.on_state()
+        try:
+            return await self.interactions.request(operation)
+        finally:
+            self.interactions.waiting = False
+            self.on_state()
+
+    def _auto_approved_by_mode(
+        self, state: SessionState[AgentDepsT], fields: _ToolCallFields
+    ) -> bool:
+        if state.permission_mode == "all":
+            return True
+        if state.permission_mode == "reads":
+            return fields.kind in READ_ONLY_TOOL_KINDS
+        return False
+
     async def _resolve_approvals(
         self, turn: _TurnState, state: SessionState[AgentDepsT], requests: DeferredToolRequests
     ) -> DeferredToolResults:
@@ -66,11 +89,6 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
         if requests.calls:
             results.calls.update(await self._resolve_calls(turn, requests.calls))
         for call in requests.approvals:
-            if (
-                turn.announced_status.get(call.tool_call_id) == "in_progress"
-                and call.tool_name not in turn.known_non_approval_names
-            ):
-                await self._update_status(turn, call.tool_call_id, "pending")
             scope = self._permission_policy(
                 ToolCallPermission(
                     tool_name=call.tool_name,
@@ -80,13 +98,25 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
             )
             if scope in state.always_allow:
                 results.approvals[call.tool_call_id] = True
-                await self._update_status(turn, call.tool_call_id, "in_progress")
+                if turn.announced_status.get(call.tool_call_id) != "in_progress":
+                    await self._update_status(turn, call.tool_call_id, "in_progress")
                 continue
             if scope in state.always_reject:
                 results.approvals[call.tool_call_id] = ToolDenied("Rejected by the client.")
                 turn.denied.add(call.tool_call_id)
                 continue
-            decision = await self._request_permission(turn, state, call, scope)
+            fields = self._tool_call_fields(call, turn.cwd, default_kind="execute")
+            if self._auto_approved_by_mode(state, fields):
+                results.approvals[call.tool_call_id] = True
+                if turn.announced_status.get(call.tool_call_id) != "in_progress":
+                    await self._update_status(turn, call.tool_call_id, "in_progress")
+                continue
+            if (
+                turn.announced_status.get(call.tool_call_id) == "in_progress"
+                and call.tool_name not in turn.known_non_approval_names
+            ):
+                await self._update_status(turn, call.tool_call_id, "pending")
+            decision = await self._request_permission(turn, state, call, scope, fields)
             results.approvals[call.tool_call_id] = decision
             if isinstance(decision, ToolDenied):
                 turn.denied.add(call.tool_call_id)
@@ -170,7 +200,7 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
                     ),
                 )
 
-            response = await self.interactions.request(ask)
+            response = await self._await_interaction(ask)
         except acp.RequestError as exc:
             _logger.info("client rejected an ask-user elicitation: %s", exc)
             await self._update_status(turn, call.tool_call_id, "in_progress")
@@ -178,10 +208,13 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
         return ask_user_tool_result(request, ask_user_response(response, request))
 
     async def _request_permission(
-        self, turn: _TurnState, state: SessionState[AgentDepsT], call: ToolCallPart, scope: Hashable
+        self,
+        turn: _TurnState,
+        state: SessionState[AgentDepsT],
+        call: ToolCallPart,
+        scope: Hashable,
+        fields: _ToolCallFields,
     ) -> bool | ToolDenied:
-        fields = self._tool_call_fields(call, turn.cwd, default_kind="execute")
-
         async def ask(conn: Client) -> schema.RequestPermissionResponse:
             return await conn.request_permission(
                 session_id=turn.session_id,
@@ -210,7 +243,7 @@ class _SessionApprovalsMixin(Generic[AgentDepsT, OutputDataT]):
                 ],
             )
 
-        response = await self.interactions.request(ask)
+        response = await self._await_interaction(ask)
         outcome = response.outcome
         if isinstance(outcome, schema.DeniedOutcome):
             raise _TurnCancelled
