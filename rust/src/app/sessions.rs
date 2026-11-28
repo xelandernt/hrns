@@ -306,7 +306,48 @@ impl App {
     }
 
     pub fn set_approval_mode(&mut self, mode: ApprovalMode) -> bool {
-        let Some(key) = self.approval_preference.as_ref().filter(|_| self.ready) else {
+        if !self.ready {
+            self.transcript.push(
+                Role::Warning,
+                "Open a session before changing its approval mode".into(),
+            );
+            return false;
+        }
+        if let Some(option) = options::permissions_option(&self.options) {
+            let Some(value) = options::value(option, mode.label()) else {
+                let choices = options::choices(option)
+                    .into_iter()
+                    .map(|choice| choice.value.0.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                self.transcript.push(
+                    Role::Warning,
+                    format!(
+                        "Approval mode {} is not enabled on this server (available: {choices})",
+                        mode.label()
+                    ),
+                );
+                return false;
+            };
+            let action = Action::SetOption {
+                id: option.id.clone(),
+                value,
+                category: option
+                    .category
+                    .clone()
+                    .unwrap_or(SessionConfigOptionCategory::Mode),
+                model_change: None,
+            };
+            if self.actions.unbounded_send(action).is_ok() {
+                self.approval_mode = mode;
+                self.command_status = Some(format!("Session approval mode · {}", mode.label()));
+                return true;
+            }
+            self.transcript
+                .push(Role::Warning, "The agent disconnected.".into());
+            return false;
+        }
+        let Some(key) = self.approval_preference.as_ref() else {
             self.transcript.push(
                 Role::Warning,
                 "Open a session before changing its approval mode".into(),
@@ -394,6 +435,9 @@ impl App {
         {
             self.usage = None;
             self.last_usage_tokens = None;
+        }
+        if let Some(mode) = options::permissions_value(&options).and_then(ApprovalMode::parse) {
+            self.approval_mode = mode;
         }
         self.options = options;
         self.refresh_completion();

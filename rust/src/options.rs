@@ -54,6 +54,20 @@ pub fn matches_category(
     }
 }
 
+pub fn permissions_option(options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
+    options.iter().find(|option| {
+        option.id.0.as_ref() == "permissions" && matches!(option.kind, SessionConfigKind::Select(_))
+    })
+}
+
+pub fn permissions_value(options: &[SessionConfigOption]) -> Option<&str> {
+    let option = permissions_option(options)?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    Some(select.current_value.0.as_ref())
+}
+
 pub fn selected_model(options: &[SessionConfigOption]) -> Option<&SessionConfigSelectOption> {
     let option = options
         .iter()

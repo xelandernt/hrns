@@ -54,14 +54,31 @@ impl App {
                 .iter()
                 .map(|name| (name.to_string(), "Terminal theme".into()))
                 .collect(),
-            "/permissions" => [
-                ("ask", "Ask before approving tools"),
-                ("reads", "Approve read-only tools"),
-                ("all", "Approve all tools"),
-            ]
-            .into_iter()
-            .map(|(value, description)| (value.into(), description.into()))
-            .collect(),
+            "/permissions" => {
+                if let Some(option) = crate::options::permissions_option(&self.options) {
+                    crate::options::choices(option)
+                        .into_iter()
+                        .map(|choice| {
+                            (
+                                choice.value.to_string(),
+                                choice
+                                    .description
+                                    .clone()
+                                    .unwrap_or_else(|| choice.name.clone()),
+                            )
+                        })
+                        .collect()
+                } else {
+                    [
+                        ("ask", "Ask before approving tools"),
+                        ("reads", "Approve read-only tools"),
+                        ("all", "Approve all tools"),
+                    ]
+                    .into_iter()
+                    .map(|(value, description)| (value.into(), description.into()))
+                    .collect()
+                }
+            }
             "/details" => DETAILS_CHOICES
                 .into_iter()
                 .map(|(value, label)| (value.into(), label.into()))

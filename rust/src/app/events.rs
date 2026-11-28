@@ -40,7 +40,11 @@ impl App {
                 execution,
             } => {
                 let key = ApprovalKey::new(&approval_scope, &session);
-                self.approval_mode = if loaded {
+                self.approval_mode = if let Some(mode) =
+                    crate::options::permissions_value(&self.options).and_then(ApprovalMode::parse)
+                {
+                    mode
+                } else if loaded {
                     key.load()
                 } else {
                     ApprovalMode::Ask
@@ -416,6 +420,7 @@ impl App {
 
     fn request_permission(&mut self, request: PermissionRequest) {
         if self.ready
+            && crate::options::permissions_option(&self.options).is_none()
             && let Some(answer) = self.auto_permission(&request)
         {
             let _ = request.respond.send(answer);

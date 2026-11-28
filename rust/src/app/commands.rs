@@ -199,10 +199,19 @@ impl App {
             }
             "/permissions" => {
                 self.draft.submit();
+                let choices = options::permissions_option(&self.options)
+                    .map(|option| {
+                        options::choices(option)
+                            .into_iter()
+                            .map(|choice| choice.value.0.as_ref())
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    })
+                    .unwrap_or_else(|| "ask · reads · all".into());
                 self.transcript.push(
                     Role::Note,
                     format!(
-                        "Session approval mode · {}\n/permissions ask · reads · all",
+                        "Session approval mode · {}\n/permissions {choices}",
                         self.approval_mode.label()
                     ),
                 );
